@@ -1,0 +1,9 @@
+{
+  "name": "@earendil-works/pi-coding-agent",
+  "version": "0.0.0-octet-facade",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs", "./package.json": "./package.json" },
+  "bin": { "pi": "dist/cli.js" }
+}

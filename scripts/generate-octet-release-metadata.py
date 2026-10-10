@@ -4,8 +4,8 @@
 The caller supplies every identity field explicitly.  This command never reads
 Cargo.toml or a release API; it validates the already-created checksum asset and
 its local release files before atomically writing the metadata document.  The
-published three-target set is the default; the Windows target is available only
-through the explicit ``--include-windows-candidate`` opt-in.
+published three-target set is the default; optional Windows targets require
+explicit opt-in flags.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ PUBLISHED_TARGETS = (
     "x86_64-unknown-linux-gnu",
 )
 WINDOWS_CANDIDATE_TARGET = "x86_64-pc-windows-gnu"
+WINDOWS_MSVC_TARGET = "x86_64-pc-windows-msvc"
 # Keep the historical name for callers that inspect the published contract.
 TARGETS = PUBLISHED_TARGETS
 CHECKSUM_PATTERN = re.compile(r"^([0-9a-f]{64})  \.\/([A-Za-z0-9_.-]+)$")
@@ -60,16 +61,22 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def release_targets(include_windows_candidate: bool = False) -> tuple[str, ...]:
+def release_targets(
+    include_windows_candidate: bool = False, include_windows_msvc: bool = False,
+) -> tuple[str, ...]:
+    targets = list(PUBLISHED_TARGETS)
     if include_windows_candidate:
-        return (*PUBLISHED_TARGETS, WINDOWS_CANDIDATE_TARGET)
-    return PUBLISHED_TARGETS
+        targets.append(WINDOWS_CANDIDATE_TARGET)
+    if include_windows_msvc:
+        targets.append(WINDOWS_MSVC_TARGET)
+    return tuple(targets)
 
 
 def parse_checksums(
     path: pathlib.Path,
     version: str,
     include_windows_candidate: bool = False,
+    include_windows_msvc: bool = False,
 ) -> Mapping[str, str]:
     regular_file(path, "checksum manifest")
     try:
@@ -78,9 +85,11 @@ def parse_checksums(
         fail(f"checksum manifest is not ASCII text: {path}: {error}")
     expected = {
         "install-octet.sh",
+        *({"install-octet.ps1"} if include_windows_msvc else set()),
         *(
-            f"octet-{version}-{target}.tar.gz"
-            for target in release_targets(include_windows_candidate)
+            f"octet-{version}-{target}.zip" if target == WINDOWS_MSVC_TARGET
+            else f"octet-{version}-{target}.tar.gz"
+            for target in release_targets(include_windows_candidate, include_windows_msvc)
         ),
     }
     entries: dict[str, str] = {}
@@ -148,19 +157,24 @@ def build_metadata(
     repository: str,
     checksums_path: pathlib.Path,
     include_windows_candidate: bool = False,
+    include_windows_msvc: bool = False,
 ) -> dict[str, Any]:
     validate_identity(version, tag, source_commit, workflow_commit, workflow_ref, repository)
-    entries = parse_checksums(checksums_path, version, include_windows_candidate)
+    entries = parse_checksums(
+        checksums_path, version, include_windows_candidate, include_windows_msvc
+    )
     assets: list[dict[str, str]] = []
     for name, kind, target in [
         ("install-octet.sh", "installer", None),
+        *([("install-octet.ps1", "installer", None)] if include_windows_msvc else []),
         *[
             (
-                f"octet-{version}-{target}.tar.gz",
+                f"octet-{version}-{target}.zip" if target == WINDOWS_MSVC_TARGET
+                else f"octet-{version}-{target}.tar.gz",
                 "binary",
                 target,
             )
-            for target in release_targets(include_windows_candidate)
+            for target in release_targets(include_windows_candidate, include_windows_msvc)
         ],
     ]:
         asset_path = checksums_path.parent / name
@@ -211,6 +225,11 @@ def main(argv: Sequence[str]) -> int:
             "the default remains the three published Unix targets"
         ),
     )
+    parser.add_argument(
+        "--include-windows-msvc",
+        action="store_true",
+        help="include the x86_64-pc-windows-msvc ZIP and PowerShell installer",
+    )
     args = parser.parse_args(argv)
     metadata = build_metadata(
         args.version,
@@ -221,6 +240,7 @@ def main(argv: Sequence[str]) -> int:
         args.repository,
         args.checksums,
         args.include_windows_candidate,
+        args.include_windows_msvc,
     )
     payload = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode("utf-8")
     write_atomic(args.output, payload)

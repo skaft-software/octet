@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
-//! OpenAI device authorization, token exchange/refresh, and JWT claim
-//! validation. The flow mirrors Pi's TypeScript OpenAI Codex OAuth provider.
+//! OpenAI browser/device authorization, token exchange/refresh, and JWT claim
+//! validation.
 
 use std::fmt;
 
@@ -219,6 +219,17 @@ async fn exchange_code_with_redirect(
     .await
 }
 
+/// Exchange a browser authorization code against the registered loopback redirect.
+pub(crate) async fn exchange_browser_code_with_url(
+    client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<Tokens> {
+    exchange_code_with_redirect(client, token_url, code, verifier, redirect_uri).await
+}
+
 /// Exchange a completed device authorization for tokens.
 pub async fn exchange_device_code(
     client: &reqwest::Client,
@@ -387,6 +398,17 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     }
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Whether OpenAI marked this access token localhost-only. Such tokens are
+/// routed to a reduced model pool, so octet never stores them.
+pub(crate) fn is_localhost_only(access: &str) -> bool {
+    decode_jwt_claims(access)
+        .as_ref()
+        .and_then(|claims| claims.get(JWT_AUTH_CLAIM))
+        .and_then(|auth| auth.get("localhost"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Decode and validate the account-routing and plan claims from a ChatGPT

@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Exact-version 0.8.1 release tooling. Published assets must match this version.
+# Exact-version 0.9.0 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.8.1"
+version="0.9.0"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -356,9 +356,9 @@ manifest_path, bundle_path, cosign_path = sys.argv[1:4]
 identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.sh",
-    "octet-0.8.1-aarch64-apple-darwin.tar.gz",
-    "octet-0.8.1-x86_64-apple-darwin.tar.gz",
-    "octet-0.8.1-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.9.0-aarch64-apple-darwin.tar.gz",
+    "octet-0.9.0-x86_64-apple-darwin.tar.gz",
+    "octet-0.9.0-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -478,19 +478,36 @@ crates/sexy-tui-rs/README.md
 crates/sexy-tui-rs/VENDORED.md
 crates/sexy-tui-rs/docs/octet-integration.md
 crates/sexy-tui-rs/docs/rich-rendering.md
-crates/sexy-tui-rs/upstream/pi-tui-0.84.4.json
+crates/sexy-tui-rs/upstream/pi-tui-1.0.2.json
 evaluation/harbor/README.md
 evaluation/harbor/config.py
 evaluation/harbor/requirements.txt
-extensions/octet-browse/README.md
-extensions/octet-browse/REFERENCE.md
-extensions/octet-browse/CONNECTORS.md
-extensions/octet-browse/QUALIFICATION.md
+extensions/octet-codemode/README.md
+extensions/octet-codemode/bench/results.json
+extensions/octet-pi-compat/README.md
+extensions/octet-pi-compat/LICENSE.pi
+extensions/octet-pi-compat/test/pi-v1.0.2/README.md
+scripts/bench-startup-resume.py
+extensions/octet-codemode/THIRD_PARTY_NOTICES.md
+extensions/octet-codemode/LICENSE
+extensions/octet-codemode/vendor/PROVENANCE.json
+extensions/octet-codemode/vendor/pi-codemode/LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/ada-LICENSE-MIT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/llvm-LICENSE.TXT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/mbedtls-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/quickjs-ng-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-APACHE-LLVM
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-LICENSE-MIT
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-fts-musl-fts-COPYING
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-bottom-half-cloudlibc-LICENSE
+extensions/octet-codemode/vendor/quickjs-wasi/licenses/wasi-libc-libc-top-half-musl-COPYRIGHT
 extensions/octet-computer-use/README.md
 extensions/octet-mcp/README.md
 extensions/octet-mcp/REFERENCE.md
 extensions/octet-mcp/fixtures/tls/README.md
-extensions/octet-serve/README.md
 extensions/octet-snap-compact/README.md
 extensions/octet-subagents/README.md
 extensions/octet-subagents/REFERENCE.md
@@ -1142,8 +1159,8 @@ else
 fi
 if ! command -v rg >/dev/null 2>&1; then
     printf '%s\n' \
-        "Note: octet also requires ripgrep (rg)." \
-        "Install it with 'brew install ripgrep' on macOS or your Linux package manager." >&2
+        "Note: ripgrep (rg) is optional; content search uses grep when rg is unavailable." \
+        "For preferred search performance, install ripgrep with Homebrew on macOS or your Linux package manager." >&2
 fi
 if [ "$path_present" = false ]; then
     printf 'Restart your shell, or run:\n  export PATH="%s:$PATH"\n' "$install_directory" >&2

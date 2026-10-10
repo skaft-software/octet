@@ -42,8 +42,9 @@ explicit `CatalogConfig` or provider-specific override supplies rates. This is
 fail-closed for subagent cost ceilings: unknown pricing cannot silently be
 borrowed from another provider. Refresh the pricing snapshot only as a reviewed
 maintainer operation with
-`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`
-or runtime.
+`scripts/refresh-models-dev-pricing.py`; do not add network access to `build.rs`.
+At runtime the snapshot is the baseline for the checked live records described
+under [Live metadata](#live-metadata-v082).
 
 - Protocol request/response capabilities are constrained by the repository API docs under `docs/research/apidocs/`.
 - `gpt-4o-mini` text pricing uses $0.15/M input, $0.60/M output, and $0.075/M cached input, represented as 150,000 / 600,000 / 75,000 microdollars per million tokens.
@@ -63,6 +64,334 @@ provider/model keys never borrow names or prices by leaf ID. Configured catalogs
 and custom metadata keep precedence; Codex account inventory never inherits this
 supplement. A model name does not select a protocol or reasoning encoding, and
 native Messages/budget contracts are not inferred from a generic reasoning boolean.
+
+## Live metadata (v0.8.2)
+
+An interactive session refreshes these records from
+`https://models.dev/api.json` in the background, off the startup path, at most
+every six hours. The request revalidates with the cached ETag, has a 10-second
+deadline, follows no redirects and accepts at most 16 MiB. Like the startup
+update check, it sends no credentials and ignores environment proxies, so
+behind a mandatory proxy the snapshot stays in use. `--offline`
+(`OCTET_OFFLINE=true`) skips it. Other modes use a cache an interactive session
+wrote, but never fetch.
+
+The refresh applies the same extraction as
+`scripts/refresh-models-dev-pricing.py`: its provider table, exclusions,
+allowlists, text-only corrections and unverified-pricing providers, mirrored in
+`src/model_metadata/live.rs`. The script's own outputs for a shared fixture,
+`tests/fixtures/models-dev/`, are checked in, and a Rust parity test must
+reproduce them, so the two extractions cannot drift apart.
+
+Each record is then checked against the compiled snapshot. A record that fails
+keeps the built-in data for that model only, and the cache lists it under
+`rejected` with the reason:
+
+- a rate above $100,000 per million tokens, or a limit above 100M tokens, is
+  malformed;
+- a positive input, output, cache-read or cache-write price the snapshot
+  publishes may not become zero or fall more than tenfold; effective reasoning
+  rates receive the same check, including their output-price fallback. A cache
+  bucket already published as zero stays valid, so this does not invent charges
+  for free or unpublished cache rates;
+- a route the snapshot does not price needs non-zero input and output rates;
+  and
+- a catalog that is not an object, or that yields no usable record, is ignored
+  altogether.
+
+Accepted records are cached with private permissions at
+`~/.octet/cache/models-dev/metadata.json`, with the fetch time, ETag and source
+SHA-256. Each launch installs that cache before building its first model
+catalog, and a refresh installs its result for later catalog builds. A cache
+written by another octet version is ignored, because its records were checked
+against a different snapshot. Lookups consult live records first and fall back
+to this snapshot per model, so a route that disappears upstream keeps its
+built-in data. Live records are consumed exactly like snapshot records: the
+precedence rules above are unchanged, and a failed refresh leaves the metadata
+in use as it was.
+
+## Reviewed metadata refresh (v0.8.2)
+
+The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
+`404d33ff898888b1e4a1074770f207c87210e050e32151687fae255dd4dda6b6`.
+That closeout's review below describes the `404d33...` snapshot, not the newer
+combined RC snapshot. At RC source `10c53b7154b9339200b23415a8f686e4af3f6545`,
+`models-dev-source.json` instead records SHA-256
+`25c0f9abe330fff43d8829e8dc9dd1fc352692908680b7b0c335996059c99b00`, with 916
+pricing routes, 406 names, and 939 capability routes. Compared with the
+`404d33...` committed outputs, the key-level projection deltas are:
+
+| Snapshot | Current records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 916 | 2 | 7 | 21 |
+| Canonical names | 406 | 6 | 2 | 0 |
+| Capability routes | 939 | 3 | 7 | 10 |
+
+These counts are computed from the committed JSON projections. The matching raw
+`api.json` for `25c0f9...` is not retained in this checkout, so these diffs do
+not explain or independently validate the changed upstream values. This audit
+did not run the live `--check`. The candidate verification manifest records a
+metadata-freshness pass with source tree `a78080e...` (the same product tree as
+RC assembly commit `0c5b86a...`) and names a log SHA, but that log is not included
+in this checkout for independent inspection. Treat that as inherited reported
+evidence, not a fresh run here; rerun the gate at the settled integration SHA.
+If refreshing, retain and review the complete source matching its digest and
+update all three projections plus the receipt together. Do not describe the older
+review examples as a review of this newer snapshot.
+
+### 2026-10-03 finish-gate refresh
+
+The current outputs pin public `https://models.dev/api.json` SHA-256
+`de67b09d75ca4597d687ae12eae7ea3f845e7e9c03f18cbc6a9868d2f41d02be`.
+The complete 5,312,470-byte response is retained locally with the finish-gate
+receipts at `octet-rc/finish-20261003.VGvsCj/models-dev-api.json`; it is not a
+published release artifact. All four outputs were regenerated together with the
+existing generator and reproduced with `--source ... --check`.
+
+Relative to the preceding `25c0f9...` outputs, route membership and names are
+unchanged: 916 pricing routes, 406 names and 939 capability routes. Thirteen
+OpenRouter price records change. For example, `~deepseek/deepseek-flash-latest`
+now quotes $0.003/$2.40/$0.003 per million input/output/cache-read tokens, and
+`moonshotai/kimi-k3` quotes $0.499/$13/$0.49. These are exact aggregator quotes,
+not direct-provider tariffs or availability evidence.
+
+Two OpenRouter output limits change to 943,718 tokens within their unchanged
+1,048,576-token contexts: `z-ai/glm-5.3` (previously 131,072) and
+`deepseek/deepseek-v4-pro-0813` (previously 393,216). Modalities, reasoning,
+tool and structured-output assertions are unchanged. Endpoint precedence,
+extraction exclusions and direct DeepSeek's unverified pricing remain intact.
+Seven offline metadata-tooling tests and 13 release-gate tests passed for this
+refresh; final live freshness must still be rerun when the release source is
+frozen.
+
+### 2026-10-05 bot-triage refresh
+
+The PR #480 CI freshness failure was reproduced and all four outputs refreshed
+from the public catalog together. The reviewed source SHA-256 is
+`1019cb8d207c2b6a5842ea6f1b6f9a5c02501f818eee0f178c4a04d47ef43d33`;
+the matching raw response is retained locally in
+`/tmp/octet-480-models-dev-api.json`, not bundled or published.
+
+Compared with the preceding finish-gate outputs, there are 914 priced routes,
+406 names and 937 capability routes. Two OpenRouter routes disappear
+(`qwen/qwen3.8-27b:free` and `stealth/space-bunny-alpha`); no routes or names
+are added. Eighteen OpenRouter price records and six capability records change.
+For example, Kimi K3 now quotes $1.39/$14/$0.46 per million
+input/output/cache-read tokens, and DeepSeek V4 Flash quotes $0.03/$1.28/$0.03.
+These remain exact aggregator quotes, not direct-provider tariffs.
+
+Five output limits change: DeepSeek V3.1 Terminus to 65,536; V4 Flash to
+943,718; Nemotron 3.5 Lightning to 32,768; Qwen3.6 27B to 262,140; and GLM-5.2
+to 131,072. Mistral Small 3.1's source structured-output flag becomes true;
+this still grants no runtime capability or override of endpoint assertions.
+Modalities, names, extraction exclusions and unverified direct DeepSeek pricing
+are unchanged. Saved-source reproduction, seven offline tooling tests and
+13 release-gate tests passed. The live source may change independently before
+CI runs; changed supported projections still require a reviewed refresh, not a waiver.
+
+A subsequent raw response changed only the unsupported `nano-gpt` provider;
+all three generated projections were identical. Live `--check` now compares
+pricing, names and capabilities byte-for-byte and validates the pinned receipt's
+schema, fixed source URL, SHA-256 format and unverified-pricing exclusion policy.
+It does not require today's whole-catalog digest to equal the reviewed digest:
+unsupported provider data is outside this freshness boundary. This establishes
+projection equality, not raw origin equality or a new provenance claim. The
+receipt continues to identify the retained reviewed response above, and
+`--source FILE --check` still requires exact digest and all-output equality for
+saved-source reproducibility. Neither check writes. Provider mappings, route
+exclusions, allowlists, corrections and unverified direct DeepSeek pricing are
+unchanged.
+
+The following historical closeout details apply only to the `404d33...` source.
+Relative to its preceding PR head, those outputs contain:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 921 | 6 | 0 | 22 |
+| Canonical names | 402 | 3 | 0 | 0 |
+| Capability routes | 943 | 6 | 0 | 10 |
+
+The 22 changed prices cover 20 OpenRouter routes and two Fireworks routes.
+OpenRouter DeepSeek V4 Pro now quotes $0.2088/$0.4176/$0.0174 per million
+input/output/cache-read tokens; its exact integer-rate regression follows that
+quote. Fireworks V4.1 Flash and its latest router now quote $0.30/$1.20/$0.006.
+Kimi K2 Thinking loses its published cache-read quote, while Qwen3.8 27B's
+OpenRouter input quote increases from $0.0249 to $0.42. These are reviewed
+aggregator-route records, never direct-provider tariffs or availability claims.
+
+Capability review includes lower OpenRouter output limits for DeepSeek V4 Flash
+(131,072) and Qwen3.8 27B (131,072), higher limits for Kimi K2 Thinking (235,929)
+and Nemotron 3.5 Lightning (131,072), removal of Inkling's audio input and
+MiniMax-M2.7's structured-output assertion, and removal of Kimi K3's toggle
+assertion. Existing endpoint precedence, subscription allowlists and extraction
+exclusions remain unchanged. Direct DeepSeek schedule pricing stays unverified
+and excluded. The live pre-release comparison passed after this refresh; it must
+be rerun before freezing a later source revision.
+
+### 2026-10-07 Mistral Large 4 refresh
+
+The four outputs were refreshed together from the public catalog so a newly
+released route is priced and named where octet already serves it. The reviewed
+source SHA-256 is
+`71acc84622ae4a65ffa12551de0668cca0d24c00260679c36730f520d0efc4fc`
+(5,340,018 bytes); the matching raw response is retained locally in
+`/tmp/u30-modelsdev-api.json`, not bundled or published. Reproduce or validate
+with `python3 scripts/refresh-models-dev-pricing.py --source /tmp/u30-modelsdev-api.json`
+and the same command with `--check`.
+
+Compared with the preceding bot-triage outputs, there are 917 priced routes,
+414 names and 940 capability routes:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 917 | 4 | 1 | 24 |
+| Canonical names | 414 | 8 | 0 | 0 |
+| Capability routes | 940 | 4 | 1 | 10 |
+
+The added routes include the model this refresh exists for: OpenRouter
+`mistralai/mistral-large-4-0` and OpenCode `mistral-large-4`, both quoting
+$0.68 input / $2.09 output / $0.07 cache read per million tokens with a
+524,288-token context, a 262,144-token output ceiling, text and image input, and
+`reasoning_options` effort `none`/`high`. The canonical-name projection adds
+`mistral/mistral-large-4` as **Mistral Large 4** together with seven other
+Mistral-owned names (Codestral 25.08, GLM-5.2, Leanstral 1.5, Ministral 3 14B/
+8B/3B and Voxtral Small). Direct Mistral is not one of this script's pricing
+sources, so its rates stay octet-owned metadata sourced from Mistral's own model
+card, not from this projection.
+
+The other additions are `opencode/exo-free` and
+`openrouter/google/gemini-nano-banana-2.1`; `openrouter/kwaipilot/kat-coder-pro-v2.5`
+disappears upstream and is removed from all three projections. The 24 changed
+quotes cover 23 OpenRouter routes and `minimax/minimax-m2.5-highspeed`'s cache
+read. Examples: OpenRouter DeepSeek V4 Pro 0813 now quotes
+$0.66/$1.98/$0.022 per million input/output/cache-read tokens (formerly
+$0.40/$5.00/$0.36), Kimi K2.6 quotes $0.465/$2.45/$0.0975, and GLM-5.2 quotes
+$0.171/$7.20/$0.162. These remain exact aggregator-route records, not
+direct-provider tariffs, and direct DeepSeek schedule pricing stays excluded and
+unverified.
+
+The 10 capability changes are OpenRouter limit corrections (for example Qwen3.5
+397B A17B's output falls from 235,929 to 81,920 within its unchanged context,
+and DeepSeek V4 Pro 0813's output falls from 943,718 to 393,216). Modalities,
+names, extraction exclusions, allowlists, corrections and the unverified-pricing
+policy are otherwise unchanged. Tools, structured output and reasoning still
+come from endpoint assertions and declaration-owned wire profiles, never from
+this snapshot: the refreshed records only supply missing display metadata,
+prices, input modalities and limits for actual inventory-returned routes. Seven
+offline metadata-tooling tests and 13 release-gate tests passed for this
+refresh; the live source may change independently before CI runs.
+
+### 2026-10-08 release-preparation refresh
+
+The four outputs were refreshed together from a retained public response with
+SHA-256 `4670fd67eb8581450409388cd4c16f3eeeb20b20b084c5b671fd0fe8d3ac9a7b`
+(5,359,633 bytes). The response remains private local release evidence, not a
+bundled artifact. Reproduce with the existing generator's `--source FILE` and
+validate with `--source FILE --check` using a response matching that digest.
+
+Relative to the preceding Mistral refresh:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 920 | 3 | 0 | 27 |
+| Canonical names | 415 | 1 | 0 | 0 |
+| Capability routes | 943 | 3 | 0 | 10 |
+
+Saved-source reproduction, 11 offline metadata-tooling tests and 13 release-gate
+tests passed. The generator, provider mappings, extraction exclusions and runtime
+precedence rules are unchanged; direct DeepSeek pricing remains unverified and
+excluded. These are catalog projections, not live model or capability acceptance.
+The live freshness gate must still pass on the final release source.
+
+### 2026-10-09 exact-head CI freshness refresh
+
+PR #540's quality lane detected supported projection changes after the preceding
+review. All four outputs were regenerated together from a retained public
+response with SHA-256
+`63fe28d226713ba2ad6254be9200f8cf055163f49f53d9ee9e4385f5e5de086c`
+(5,369,510 bytes). The matching response remains private local release evidence,
+not a bundled artifact; reproduce with `--source FILE` and check with
+`--source FILE --check` using that digest.
+
+Relative to the preceding release-preparation outputs:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 921 | 3 | 2 | 20 |
+| Canonical names | 415 | 0 | 0 | 0 |
+| Capability routes | 944 | 3 | 2 | 10 |
+
+The additions are OpenCode `step-5-preview-free` and OpenRouter
+`stepfun/step-5-preview` and `inclusionai/ling-3.0-flash-sante`. OpenRouter
+`baidu/ernie-4.5-vl-424b-a47b` and `inclusionai/ling-3.0-flash-sante:free`
+disappear. All 20 changed prices are OpenRouter quotes: for example, DeepSeek
+V4 Pro now quotes $0.287274/$0.574548/$0.02394 per million
+input/output/cache-read tokens, and Kimi K3 quotes $0.82/$13.50/$0.55. These are
+exact aggregator-route quotes, not direct-provider tariffs.
+
+Capability changes include seven limit records, a Baseten display name, an
+ordering-only modality change and OpenRouter `sao10k/l3.1-euryale-70b`'s source
+tool flag becoming false. OpenRouter Mistral Large 4's context becomes 1,048,576
+with its 262,144 output ceiling unchanged; Qwen3.5 397B A17B's output becomes
+235,929 and GLM-5.2's output becomes 943,718. These source assertions do not
+grant runtime tool, reasoning or structured-output support, override endpoint
+assertions or prove live route availability. Generator policy and runtime
+precedence are unchanged; direct DeepSeek pricing remains unverified and
+excluded. Saved-source reproduction, 11 offline metadata-tooling tests, 13
+release-gate tests and the live freshness check passed after this review.
+Exact-head hosted CI and later final-source freshness remain required.
+
+### 2026-10-10 v0.9.0 qualification refresh
+
+The release freshness gate detected changed supported projections. All four
+outputs were regenerated together from the retained 5,375,265-byte public
+response with SHA-256
+`13e828596291ac5f47fcc009c698e791a0bf7998e3e7424aefee4498f68f1871`.
+The matching response and complete projection diff remain local qualification
+evidence, not bundled artifacts. Saved-source reproduction and live projection
+freshness passed, together with 11 offline metadata-tooling tests and 13
+release-gate tests. Final-source hosted CI remains required.
+
+Relative to the preceding exact-head refresh:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 913 | 3 | 11 | 29 |
+| Canonical names | 415 | 0 | 0 | 0 |
+| Capability routes | 936 | 3 | 11 | 17 |
+
+The additions are Hugging Face MiniMax M1 80K, Qwen3 VL 30B A3B Instruct and
+AutoGLM Phone 9B Multilingual metadata. Eleven OpenRouter Qwen routes disappear
+from the source. All 29 changed quotes are OpenRouter records: for example,
+DeepSeek V4 Pro now quotes $0.9483/$1.8966/$0.079025 per million
+input/output/cache-read tokens, and GLM-5.2 quotes $0.06/$7/$0.059. These are
+exact aggregator quotes, not direct-provider tariffs or route availability.
+
+Capability changes include 14 limit records, two display names and Ling 3.0
+Flash Fin's source structured-output flag becoming false. Qwen3 14B's context
+falls to 40,960 with a 36,864 output ceiling; Kimi K2 Thinking's output falls to
+98,304. No generator policy, endpoint precedence, reasoning/tool grant or
+provider inventory changed. Direct DeepSeek schedule pricing remains unverified
+and excluded. These are reviewed metadata projections, not live inference or
+provider certification; future supported projection changes require review again.
+
+The following pre-push live check found four further OpenRouter quote changes,
+not new routes or capability/name changes. All outputs were regenerated from
+another retained 5,375,257-byte response, SHA-256
+`b423b29eb9e95b4dd5edb0e7d1ded9533008fb62858bee99f4963e049f1bf7e8`.
+Record counts and the DeepSeek exclusion remain unchanged. The exact new
+input/output/cache-read rates, in microdollars per million tokens, are:
+
+| OpenRouter model | Input | Output | Cache read |
+| --- | ---: | ---: | ---: |
+| `deepseek/deepseek-v4-flash` | 9,900 | 1,280,000 | 9,900 |
+| `deepseek/deepseek-v4-flash-0731` | 6,000 | 1,280,000 | 6,000 |
+| `~deepseek/deepseek-v4-flash-latest` | 6,000 | 1,280,000 | 6,000 |
+| `~moonshotai/kimi-latest` | 550,000 | 15,000,000 | 300,000 |
+
+Cache-write rates remain zero in the source and reasoning rates remain absent.
+The earlier Pro golden assertions do not change. A live quote can change again;
+this review does not bypass the next release freshness gate.
 
 ## GPT-6 contract review (2026-09-23)
 
@@ -96,6 +425,40 @@ observed OAuth effort choices do not include public API `none`. Async tools and
 native steering are not enabled on Codex solely by GPT-6 names. See the
 [provider guide](../../../docs/providers.md) and
 [wire foundations](../docs/responses-controls.md).
+
+## GPT-6.1 Sol contract review (2026-09-29)
+
+The public [GPT-6.1 Sol model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+qualifies the exact direct OpenAI ID `gpt-6.1-sol`: Responses is required for
+**tools** (Chat Completions is tool-free only), text/image input, 1,050,000
+context, 128,000 max output, and a 2026-04-30 knowledge cutoff. Its exact
+reasoning choices are `low`, `medium` (default), `high`, `xhigh`, `max`: unlike
+6-Sol, neither `none` nor `minimal` is supported.
+
+Public standard input/output/cache-read/cache-write rates are $2/$10/$0.10/$2.50
+per million tokens (2,000,000/10,000,000/100,000/2,500,000 microdollars per
+million). **Above 272K input** the whole request uses $4/$15/$0.20/$5 (4,000,000/
+15,000,000/200,000/5,000,000 microdollars per million), not just tokens over the
+threshold. In particular 6-Sol's $0.20 base cache read is not 6.1 Sol's $0.10.
+These are public API prices, **not** subscription prices; Codex 6.1 Sol remains
+unpriced until a reviewed subscription quote exists.
+
+The bundled [Codex model catalog at rust-v0.159.1](https://github.com/openai/codex/blob/rust-v0.159.1/codex-rs/models-manager/models.json)
+lists slug `gpt-6.1-sol`, display name `GPT-6.1-Sol`, and priority 1 (the
+Codex default). It advertises a 272K default / 872K maximum window, low default
+reasoning with `low`/`medium`/`high`/`xhigh`/`max`/`ultra`, Responses Lite,
+V2 multi-agent delegation with `xhigh` delegation effort, parallel tool calls,
+WebSocket preference, text/image input, and minimum client 0.153.0. The live
+backend nevertheless withheld 6.1 Sol from compatibility version 0.156.1, while
+Codex 0.159.2 listed it for the same account (manual QA, 2026-09-30). octet
+therefore sends 0.159.2, and cache schema 10 refreshes inventories fetched as
+0.156.1. As for Astra, **online account inventory** establishes Lite/V2;
+Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
+or unreachable inventory keeps the conservative low-through-max fallback. The
+working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
+The model-only test fixture
+`crates/octet-coding-agent/fixtures/providers/gpt-6.1-sol.json` is a
+bundled-catalog projection, not a live OAuth inference result.
 
 ## Reasoning contract supplement (2026-09-05)
 
@@ -191,8 +554,8 @@ policy; no flat direct DeepSeek quote or schedule accounting is inferred.
 
 Six offline metadata-tooling tests and 13 release-gate tests passed. Reproduce
 or validate using the saved-source commands below with a response matching the
-new digest. Normal builds and runtime consume checked-in metadata without
-fetching models.dev. This is reviewed public metadata, not live inference
+new digest. Normal builds consume checked-in metadata without fetching
+models.dev. This is reviewed public metadata, not live inference
 acceptance; endpoint assertions and explicit configured pricing retain precedence.
 
 ## Rich metadata refresh (v0.7.6)
@@ -217,6 +580,9 @@ without credentials or environment proxies, rejects redirects and responses abov
 16 MiB, and uses a 30-second socket timeout. Automated callers must also impose a
 total command deadline. Failed source validation and `--check` do not write outputs.
 The pinned digest identifies reviewed evidence, not a live availability promise.
+Without `--source`, `--check` verifies exact live projection contents and pinned
+receipt schema/URL/exclusion policy, not whole-catalog digest equality. With
+`--source`, it verifies all four outputs, including the exact saved-source digest.
 
 A sparse direct DeepSeek `deepseek-flash` entry receives the display name
 **DeepSeek V4.1 Flash**, the snapshot's 1,000,000 context / 384,000 output,

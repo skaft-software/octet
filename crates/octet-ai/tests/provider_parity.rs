@@ -237,6 +237,87 @@ async fn grammar_custom_calls_decode_and_replay_on_real_http_for_both_openai_cod
     }
 }
 
+/// A request whose only tool is an ordinary function tool with a schema.
+fn edit_request() -> Request {
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        async_execution: false,
+        name: "edit".into(),
+        description: "replace text in a file".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}},
+            "required": ["path", "old_text"],
+            "additionalProperties": false
+        }),
+        constrained_sampling: None,
+    }];
+    req.tool_choice = ToolChoice::Named("edit".into());
+    req
+}
+
+/// Pi parses streamed tool arguments leniently: arguments that survive no
+/// conservative repair still reach the assembler, the call fails its own
+/// validation, and the model is handed an error result it can correct. One
+/// malformed streamed call must therefore never fail the whole request.
+#[tokio::test]
+async fn malformed_streamed_tool_arguments_keep_the_call_envelope() {
+    let server = MockServer::start().await;
+    // A missing comma between members; no conservative repair invents it.
+    let malformed = r#"{"path": "lib/slugify.js" "old_text": 1}"#;
+    let split = r#"{"path": "lib/"#.len();
+    let (head, tail) = malformed.split_at(split);
+    serve(
+        &server,
+        sse(&[
+            json!({"id":"chat","choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"call_bad","type":"function",
+                "function":{"name":"edit","arguments":head}}]}}]}),
+            json!({"id":"chat","choices":[{"delta":{"tool_calls":[{
+                "index":0,"function":{"arguments":tail}}]}}]}),
+            json!({"id":"chat","choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]) + "data: [DONE]\n\n",
+    )
+    .await;
+    let client = AiClient::with_http_client(reqwest::Client::builder().no_proxy().build().unwrap());
+    let mut stream = client
+        .stream(&model(&server.uri(), Protocol::OpenAiChat), edit_request())
+        .await
+        .unwrap();
+    let mut response = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(StreamEvent::Finished(value)) => response = Some(value),
+            Ok(_) => {}
+            Err(error) => panic!("a malformed tool call must not fail the stream: {error:?}"),
+        }
+    }
+    let response = response.expect("the stream must finish");
+    assert_eq!(response.stop_reason, StopReason::ToolUse);
+    assert!(
+        response
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "malformed_tool_arguments"),
+        "{:?}",
+        response.diagnostics
+    );
+    let call = response
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("the malformed call keeps its envelope");
+    assert_eq!(call.id.0, "call_bad");
+    assert_eq!(call.name, "edit");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
+    assert!(!call.arguments_json.contains("slugify"));
+}
+
 #[tokio::test]
 async fn grammar_terminal_only_input_is_backfilled_but_changed_input_fails_closed() {
     for (delta, terminal, succeeds) in [("", "\"雪\n", true), ("abc", "abd", false)] {

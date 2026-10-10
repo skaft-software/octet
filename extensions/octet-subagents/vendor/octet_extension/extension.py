@@ -17,6 +17,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from .cache_warming import (
+    CacheWarmingDecisionHandler,
+    CacheWarmingDecisionPayload,
+    CacheWarmingDecisionResult,
+    cache_warming_decision,
+)
 from .protocol import (
     DEFAULT_API_VERSION,
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -62,6 +68,7 @@ API_V02_FEATURES = (
     "approvals",
     "secrets",
     "compaction_strategy",
+    "cache_warming_decision",
 )
 LIFECYCLE_METHODS = (
     "session/started",
@@ -229,7 +236,7 @@ def post_mutation_rescan(resource_ids: Sequence[str]) -> dict[str, Any]:
 
 
 def text_content(text: Any) -> dict[str, Any]:
-    """Build a text content part for an API 0.2 tool result."""
+    """Build a text content part for a tool result."""
 
     return {"type": "text", "text": str(text)}
 
@@ -267,6 +274,7 @@ def tool_result(
     structured_content: Any = _MISSING,
     is_error: bool = False,
     metadata: Optional[Mapping[str, Any]] = None,
+    diagnostics: Optional[Sequence[Any]] = None,
 ) -> dict[str, Any]:
     """Build an API 0.2 structured tool-result envelope."""
 
@@ -277,6 +285,9 @@ def tool_result(
     }
     if structured_content is not _MISSING:
         result["structured_content"] = structured_content
+    if diagnostics is not None:
+        from .diagnostics import with_diagnostics
+        result = with_diagnostics(result, diagnostics)
     return result
 
 
@@ -295,6 +306,7 @@ class _Tool:
     parameters: dict[str, Any]
     output_schema: Optional[dict[str, Any]]
     handler: Handler
+    operation: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -330,6 +342,26 @@ class _WriteItem:
 @dataclass(frozen=True)
 class _InboundError:
     error: RpcError
+
+
+def _protocol_stream(stream: Any) -> Any:
+    """Configure a process text stream for exact UTF-8, LF-delimited frames.
+
+    Windows text streams otherwise use the ANSI code page when redirected and
+    translate LF to CRLF on output. The stream object itself is kept (rather
+    than its binary buffer) so a reader thread blocked at interpreter shutdown
+    still owns the object that finalization would close.
+    """
+
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", newline="\n")
+        except (OSError, ValueError):
+            # Input that extension code already started reading cannot change
+            # encoding; keep the stream as it was rather than fail to start.
+            pass
+    return stream
 
 
 class _SerializedWriter:
@@ -475,6 +507,7 @@ class Extension:
         self._commands: dict[str, _Command] = {}
         self._hooks: dict[str, Handler] = {}
         self._context_handler: Optional[Handler] = None
+        self._menu_handler: Optional[Handler] = None
         self._status_handlers: dict[str, Handler] = {}
         self._renderer_handlers: dict[str, Handler] = {}
         self._lifecycle_handlers: dict[str, Handler] = {}
@@ -491,6 +524,8 @@ class Extension:
         self._initialization: Optional[dict[str, Any]] = None
         self._declared: dict[str, Any] = {}
         self._features: frozenset[str] = frozenset()
+        self._resources = None  # Allocated only by explicit native-type declarations.
+        self._bulk = None  # BlobRef annotations or explicit enable_bulk() opt in.
         self._negotiated_concurrency = 1
         self._active: dict[tuple[type, Any], CancellationToken] = {}
         self._pending: dict[tuple[type, Any], _PendingResponse] = {}
@@ -592,6 +627,91 @@ class Extension:
 
         return decorate
 
+    def typed_tool(
+        self,
+        *,
+        name: str,
+        description: str,
+        summary: Optional[Callable[[Any], str]] = None,
+        operation_id: Optional[str] = None,
+        receiver: Optional[str] = None,
+    ) -> Callable[[Handler], Handler]:
+        """Derive input/output contracts from a synchronous dataclass handler.
+
+        Return an annotated value with ``summary=`` or ``TypedResult[T]`` with
+        its own explicit bounded summary. The lower-level ``tool`` API is unchanged.
+        """
+        from .typed import typed_handler
+
+        if self.api_version not in ("0.2", "0.4"):
+            raise ValueError("typed_tool requires extension API 0.2 or 0.4")
+
+        def decorate(handler: Handler) -> Handler:
+            parameters, output_schema, invoke, operation, features = typed_handler(
+                handler, summary, resources=self._resources, operation_id=operation_id,
+                receiver=receiver, name=name,
+            )
+            if operation is not None:
+                if self.api_version != "0.4":
+                    raise ValueError("operation descriptors require extension API 0.4")
+                if any(t.operation is not None and t.operation["id"] == operation["id"] for t in self._tools.values()):
+                    raise ValueError("duplicate operation id")
+            if "bulk_objects_v1" in features:
+                self.enable_bulk()
+            self.tool(name=name, description=description, parameters=parameters,
+                      output_schema=output_schema)(invoke)
+            self._tools[name].operation = operation
+            if operation is not None:
+                self._supported_features = tuple(dict.fromkeys((*self._supported_features, "operation_descriptors_v1")))
+            return handler
+
+        return decorate
+
+    def enable_bulk(self):
+        """Opt explicit dictionary tools into API 0.4 bulk; BlobRef does it for typed tools."""
+        from .bulk import Bulk
+
+        if self.api_version != "0.4" or self._initialized:
+            raise ValueError("bulk must be enabled before API 0.4 initialization")
+        if self._bulk is None:
+            self._bulk = Bulk(self)
+            self._supported_features = tuple(dict.fromkeys((*self._supported_features, "bulk_objects_v1")))
+        return self._bulk
+
+    @property
+    def bulk(self):
+        """Bounded bulk helpers, enabled by typed BlobRef or enable_bulk()."""
+        if self._bulk is None:
+            raise ValueError("declare typed BlobRef or call enable_bulk() before initialization")
+        return self._bulk
+
+    def resource_type(self, name: str, *, dispose: Optional[Callable] = None) -> Callable:
+        """Declare one nominal native class, optionally with explicit cleanup."""
+        from .resources import _Resources, nominal
+
+        if self.api_version != "0.4" or self._initialized:
+            raise ValueError("resource types must be declared before API 0.4 initialization")
+        nominal(name)
+        if self._resources is None:
+            self._resources = _Resources(self)
+
+        def decorate(native_type):
+            result = self._resources.declare(native_type, name, dispose)
+            self._supported_features = tuple(dict.fromkeys((*self._supported_features, "resource_refs_v1")))
+            return result
+
+        return decorate
+
+    def export(self, value):
+        """Register native state provisionally under the active tool parent.
+
+        Ownership transfers only on successful registration. If this raises, the
+        author still owns cleanup. Successful registration is not host publication.
+        """
+        if self._resources is None:
+            raise TypeError("declare the native class with @ext.resource_type first")
+        return self._resources.export(value)
+
     def command(
         self,
         *,
@@ -615,8 +735,8 @@ class Extension:
 
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
-        if name == "compaction_strategy" and self.api_version != "0.4":
-            raise ValueError("compaction_strategy requires API 0.4")
+        if name in ("compaction_strategy", "cache_warming_decision") and self.api_version != "0.4":
+            raise ValueError(f"{name} requires API 0.4")
         if name in _TYPED_MUTATION_HOOKS and self.api_version not in ("0.2", "0.4"):
             raise ValueError(f"{name} requires extension API 0.2")
 
@@ -627,6 +747,24 @@ class Extension:
             return handler
 
         return decorate
+
+    def cache_warming_decision(
+        self, handler: CacheWarmingDecisionHandler
+    ) -> CacheWarmingDecisionHandler:
+        """Register API 0.4 advice returning warm, stop, or None.
+
+        Handlers receive the typed payload and optionally the ordinary owner-
+        fenced execution context. The host orders extensions, uses the last
+        returned action, and retains all refresh budgets and deadlines.
+        """
+
+        def advise(
+            payload: CacheWarmingDecisionPayload, context: dict[str, Any]
+        ) -> CacheWarmingDecisionResult:
+            return cache_warming_decision(self._invoke(handler, payload, context))
+
+        self.hook("cache_warming_decision")(advise)
+        return handler
 
     def context(self, handler: Optional[Handler] = None) -> Any:
         def decorate(callback: Handler) -> Handler:
@@ -646,6 +784,24 @@ class Extension:
             return self._register_status(surface, handler)
 
         return decorate
+
+    def menu(self, handler: Optional[Handler] = None) -> Any:
+        """Serve this extension's ``/extensions`` options menu.
+
+        The handler receives ``(request, context)`` and returns the complete
+        menu: ``{"title", "status", "detail", "items": [...]}``. Each item is an
+        action (``command`` naming one of this extension's declared commands,
+        with literal ``arguments``) or a submenu (``items``). The manifest must
+        declare ``menu = true``; the host validates and renders it.
+        """
+
+        def decorate(callback: Handler) -> Handler:
+            if self._menu_handler is not None:
+                raise ValueError("duplicate menu handler")
+            self._menu_handler = callback
+            return callback
+
+        return decorate(handler) if handler is not None else decorate
 
     def renderer(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("renderer", name)
@@ -1397,15 +1553,15 @@ class Extension:
             isinstance(tools, (str, bytes, bytearray))
             or not isinstance(tools, Sequence)
             or not tools
-            or len(tools) > 5
+            or len(tools) > 4
             or any(not isinstance(tool, str) for tool in tools)
             or len(set(tools)) != len(tools)
             or any(
-                tool not in {"read", "search", "edit", "write", "bash"} for tool in tools
+                tool not in {"read", "edit", "write", "bash"} for tool in tools
             )
         ):
             raise ValueError(
-                "agent tools must be a duplicate-free subset of read, search, edit, write, and bash"
+                "agent tools must be a duplicate-free subset of read, edit, write, and bash"
             )
         integer_limits = {
             "max_depth": (max_depth, 1, 1),
@@ -1639,11 +1795,11 @@ class Extension:
         if reader is None:
             import sys
 
-            reader = sys.stdin
+            reader = _protocol_stream(sys.stdin)
         if writer is None:
             import sys
 
-            writer = sys.stdout
+            writer = _protocol_stream(sys.stdout)
         self._reset_runtime_state()
         self._transport = JsonRpcTransport(
             reader,
@@ -1773,7 +1929,7 @@ class Extension:
             if request_id is not _MISSING:
                 self._send_error(request_id, RpcError(-32600, "initialize must be the first request"))
             return
-        if self._draining:
+        if self._draining and method != "resource/dispose":
             if request_id is not _MISSING:
                 self._send_error(request_id, RpcError(-32000, "extension is draining"))
             return
@@ -1886,6 +2042,8 @@ class Extension:
             self.logger.error("lifecycle handler failed", event=method, error=str(error))
 
     def _dispatch(self, method: str, params: Any) -> Any:
+        if method == "resource/dispose" and self._resources is not None:
+            return self._resources.dispose(params)
         if method == "tool/call":
             return self._call_tool(params)
         if method == "command/execute":
@@ -1896,6 +2054,8 @@ class Extension:
             return self._collect_context(params)
         if method == "status/collect":
             return self._collect_status(params)
+        if method == "menu/collect":
+            return self._collect_menu(params)
         if method == "tool/render":
             return self._render_tool(params)
         raise RpcError(-32601, f"unknown method: {method}")
@@ -1935,6 +2095,8 @@ class Extension:
                 )
             features = list(dict.fromkeys(required + optional))
             features = [feature for feature in features if feature in self._supported_features]
+            if self.api_version != "0.4":
+                features = [feature for feature in features if feature != "cache_warming_decision"]
             if not self._lifecycle_handlers:
                 features = [feature for feature in features if feature != "lifecycle_events"]
             limits = protocol.get("limits", {})
@@ -1946,6 +2108,23 @@ class Extension:
                     -32602,
                     "protocol.limits.max_concurrent_requests must be a positive integer",
                 )
+            needed = set()
+            if self._resources is not None and self._resources.types:
+                needed.add("resource_refs_v1")
+            if any(tool.operation is not None for tool in self._tools.values()):
+                needed.add("operation_descriptors_v1")
+            if self._bulk is not None:
+                needed.add("bulk_objects_v1")
+            if needed - set(features):
+                raise RpcError(-32000, "host does not offer required resource/operation/bulk features")
+            if "bulk_objects_v1" in features:
+                self._bulk._configure(protocol.get("bulk_objects_v1"))
+            if "resource_refs_v1" in features:
+                from .resources import RESOURCE_LIMITS
+                resource_limits = limits.get("resource_refs_v1")
+                if (self.api_version != "0.4" or resource_limits != RESOURCE_LIMITS or
+                        any(type(value) is not int for value in resource_limits.values())):
+                    raise RpcError(-32000, "unsupported resource registry limits")
             self._features = frozenset(features)
             self._negotiated_concurrency = min(requested, self.max_concurrent_requests)
             if "dynamic_tools" in self._features:
@@ -1956,6 +2135,8 @@ class Extension:
                 "features": features,
                 "limits": {"max_concurrent_requests": self._negotiated_concurrency},
             }
+            if "resource_refs_v1" in features:
+                protocol_response["limits"]["resource_refs_v1"] = dict(RESOURCE_LIMITS)
             if "lifecycle_events" in self._features:
                 protocol_response["lifecycle_events"] = sorted(self._lifecycle_handlers)
         else:
@@ -1985,8 +2166,20 @@ class Extension:
         return result
 
     def _validate_declarations(self) -> None:
+        if (
+            "cache_warming_decision" in self._declared.get("hooks", [])
+            and self.api_version != "0.4"
+        ):
+            raise RpcError(-32602, "cache_warming_decision requires API 0.4")
         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
+        # A host that declares contributions must declare the menu it serves.
+        if (
+            self._menu_handler is not None
+            and self._declared
+            and self._declared.get("menu") is not True
+        ):
+            raise RpcError(-32602, "a menu handler requires contributes.menu = true")
 
     def _declared_names(self, key: str) -> list[str]:
         value = self._declared.get(key, _MISSING)
@@ -2086,6 +2279,10 @@ class Extension:
         if not isinstance(name, str) or not name:
             raise RpcError(-32602, "hook must be a string")
         self._require_declared_name("hooks", name)
+        if name == "cache_warming_decision" and (
+            self.api_version != "0.4" or name not in self._features
+        ):
+            raise RpcError(-32601, "cache_warming_decision was not negotiated")
         handler = self._hooks.get(name)
         if handler is None:
             return {"disposition": {"action": "continue"}, "context": [], "notifications": []}
@@ -2094,7 +2291,10 @@ class Extension:
         except (CancelledError, RpcError):
             raise
         except Exception as error:
-            self.logger.error("hook handler failed", hook=name, error=str(error))
+            if name == "cache_warming_decision":
+                self.logger.error("cache warming decision handler failed")
+            else:
+                self.logger.error("hook handler failed", hook=name, error=str(error))
             raise RpcError(-32603, "internal error") from error
         return self._hook_result(name, value)
 
@@ -2122,6 +2322,17 @@ class Extension:
             return None
         return self._status_result(self._invoke(handler, request, self._context_from(request)))
 
+    def _collect_menu(self, params: Any) -> dict[str, Any]:
+        request = self._object_params(params, "menu/collect")
+        if self._declared.get("menu") is not True:
+            raise RpcError(-32601, "menu/collect requires contributes.menu = true")
+        if self._menu_handler is None:
+            raise RpcError(-32601, "this extension registered no menu handler")
+        value = self._invoke(self._menu_handler, request, self._context_from(request))
+        if not isinstance(value, Mapping) or not isinstance(value.get("items", []), list):
+            raise RpcError(-32603, "menu handler must return an object with an items array")
+        return dict(value)
+
     def _render_tool(self, params: Any) -> dict[str, Any]:
         request = self._object_params(params, "tool/render")
         name = request.get("name")
@@ -2146,27 +2357,31 @@ class Extension:
 
         if not isinstance(value, Mapping):
             value = {"content": [] if value is None else [text_content(value)]}
+        # The 0.4 envelope retains the 0.2 wire's field names, so name the API
+        # the author declared and mention the retained framing only as context.
+        api = f"API {self.api_version}"
+        wire = "" if self.api_version == "0.2" else " (0.2-retained wire)"
         unknown = set(value) - {"content", "is_error", "metadata", "structured_content"}
         if unknown:
             raise RpcError(
                 -32603,
-                f"unknown API 0.2 tool result fields: {sorted(map(str, unknown))}",
+                f"unknown {api} tool result fields{wire}: {sorted(map(str, unknown))}",
             )
         content = value.get("content", [])
         if isinstance(content, str):
             content = [text_content(content)]
         if not isinstance(content, list):
-            raise RpcError(-32603, "API 0.2 tool content must be an array")
+            raise RpcError(-32603, f"{api} tool content must be an array{wire}")
         if not content:
-            raise RpcError(-32603, "API 0.2 tool content must not be empty")
+            raise RpcError(-32603, f"{api} tool content must not be empty{wire}")
         if len(content) > MAX_TOOL_CONTENT_PARTS:
             raise RpcError(
                 -32603,
-                f"API 0.2 tool content exceeds {MAX_TOOL_CONTENT_PARTS} parts",
+                f"{api} tool content exceeds {MAX_TOOL_CONTENT_PARTS} parts{wire}",
             )
         parts = [self._validate_content_part(part) for part in content]
         if not any(part["type"] == "text" for part in parts):
-            raise RpcError(-32603, "API 0.2 tool content requires an explicit text part")
+            raise RpcError(-32603, f"{api} tool content requires an explicit text part{wire}")
         if any(part["type"] in {"image", "audio"} for part in parts):
             if "artifacts" not in self._features:
                 raise RpcError(-32603, "media tool content requires artifacts negotiation")
@@ -2176,6 +2391,17 @@ class Extension:
         metadata = value.get("metadata", {})
         if metadata is not None and not isinstance(metadata, Mapping):
             raise RpcError(-32603, "tool metadata must be an object or null")
+        if metadata is not None and "octet_diagnostics_v1" in metadata:
+            from .diagnostics import diagnostic_summary
+            try:
+                summary = diagnostic_summary(metadata["octet_diagnostics_v1"])
+            except (TypeError, ValueError) as error:
+                raise RpcError(-32603, "invalid octet_diagnostics_v1 metadata") from error
+            part = text_content(summary)
+            if summary and part not in parts:
+                parts.append(part)
+            if len(parts) > MAX_TOOL_CONTENT_PARTS:
+                raise RpcError(-32603, "diagnostic summary exceeds content part bound")
         has_structured_content = "structured_content" in value
         if tool.output_schema is None and has_structured_content:
             raise RpcError(-32603, "structured_content requires a declared output_schema")
@@ -2232,6 +2458,8 @@ class Extension:
         }
         if tool.output_schema is not None:
             definition["output_schema"] = tool.output_schema
+        if tool.operation is not None:
+            definition["operation"] = tool.operation
         return definition
 
     def _validate_catalog_update(
@@ -2319,6 +2547,14 @@ class Extension:
             result["post_mutation"] = self._validate_post_mutation_disposition(
                 value["post_mutation"]
             )
+        elif hook == "cache_warming_decision":
+            if self.api_version != "0.4" or hook not in self._features:
+                raise RpcError(-32603, "cache_warming_decision was not negotiated")
+            action = value.get("cache_warming_decision")
+            if action is not None and action not in ("warm", "stop"):
+                raise RpcError(-32603, "invalid cache_warming_decision action")
+            if "cache_warming_decision" in value:
+                result["cache_warming_decision"] = action
         elif hook == "compaction_strategy":
             if "compaction_strategy" not in self._features:
                 raise RpcError(-32603, "compaction_strategy was not negotiated")
@@ -2677,6 +2913,8 @@ class Extension:
         return handler
 
     def _reset_runtime_state(self) -> None:
+        if self._resources is not None and self._resources.records:
+            raise RuntimeError("create a fresh Extension for a new native-resource generation")
         self._initialized = False
         self._running = False
         self._closed = False

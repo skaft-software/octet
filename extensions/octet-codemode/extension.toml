@@ -1,0 +1,26 @@
+name = "octet-codemode"
+version = "0.9.0"
+api_version = "0.4"
+requires_octet = "=0.9.0"
+description = "No-Node QuickJS/WASM JavaScript sandbox for bounded host-brokered tool composition"
+
+[entrypoint]
+command = "bin/codemode"
+args = ["serve"]
+
+[capabilities]
+# The Rust extension is a trusted launcher: it reads its own bundle and writes
+# only host-owned private scratch. Guest JavaScript has no filesystem,
+# process or network authority and never sees a runtime interpreter.
+filesystem = "unrestricted"
+process = false
+network = false
+
+[contributes]
+tools = ["codemode"]
+commands = ["codemode"]
+menu = true
+flags = [
+  { name = "codemode-mode", type = "string", default = "on", description = "Tool presentation: on or only" },
+  { name = "codemode-inline-budget", type = "integer", default = 3000, description = "Estimated token budget for inline tool declarations (0..16000)" },
+]

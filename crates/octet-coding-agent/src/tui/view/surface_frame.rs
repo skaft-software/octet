@@ -119,7 +119,13 @@ fn render_surface_content_line(
     _collapsed_reasoning: bool,
     marker: Option<&str>,
 ) -> String {
-    let (content_role, border_role, _) = surface_roles(plan.kind);
+    // Event breathing/promotion rows are host spacing, not rail/card cushions.
+    // In particular a reserved Working row must remain byte-visibly blank.
+    if plan.event_spacing && line.is_empty() {
+        return String::new();
+    }
+    let (_, border_role, _) = surface_roles(plan.kind);
+    let content_role = plan.content_role;
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
@@ -283,6 +289,16 @@ pub(super) fn event_margin_marker(
     )
 }
 
+pub(super) fn spinner_glyph(unicode: bool, frame: usize) -> &'static str {
+    const BRAILLE: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const ASCII: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
+    if unicode {
+        BRAILLE[frame % BRAILLE.len()]
+    } else {
+        ASCII[frame % ASCII.len()]
+    }
+}
+
 pub(super) fn event_margin_marker_with_frame(
     block: &TranscriptBlock,
     theme: &OctetTheme,
@@ -301,7 +317,7 @@ pub(super) fn event_margin_marker_with_frame(
     let quiet_transcript = theme
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false);
-    let active_dot_visible = spinner_frame % 2 == 0;
+    let active_dot_visible = spinner_frame.is_multiple_of(2);
     let active_phase_dot = || {
         if active_dot_visible {
             theme.fg("foreground", event_dot)
@@ -310,23 +326,22 @@ pub(super) fn event_margin_marker_with_frame(
         }
     };
     match block {
-        TranscriptBlock::Reasoning(_) if collapsed_reasoning && thinking_spinner => {
-            const BRAILLE_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            const ASCII_FRAMES: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
-            let spinner = if theme.unicode() {
-                BRAILLE_FRAMES[spinner_frame % BRAILLE_FRAMES.len()]
-            } else {
-                ASCII_FRAMES[spinner_frame % ASCII_FRAMES.len()]
-            };
-            Some(theme.fg("accent", spinner))
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning && thinking_spinner && !reasoning.finished =>
+        {
+            Some(theme.fg("accent", spinner_glyph(theme.unicode(), spinner_frame)))
         }
         TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && markers_enabled => {
             Some(status_shimmer_frame.map_or_else(
                 || theme.model_fg(reasoning.model_lab, event_dot),
-                |_| {
+                |shimmer_frame| {
                     if reasoning.is_working_activity() && reasoning.retry_activity.is_none() {
-                        // Only the word Working shimmers; its marker stays at rest.
-                        activity_shimmer_marker(theme, reasoning, 0, 0, event_dot)
+                        // Only the word Working shimmers, and the sweep enters
+                        // before its margin dot: sharing the status frame lets
+                        // the band cross the dot first, so the dot blinks with
+                        // the other activity markers and still holds its rest
+                        // colour on the parked frames.
+                        activity_shimmer_marker(theme, reasoning, shimmer_frame, 0, event_dot)
                     } else {
                         theme.model_fg(reasoning.model_lab, event_dot)
                     }
@@ -467,7 +482,10 @@ pub(super) fn decorate_surface_with_frame(
                 fit_line(&line, outer_width)
             } else {
                 let frame_left = usize::from(plan.frame_left);
-                let prefix = if marker_pending {
+                let prefix = if marker_pending
+                    && (!plan.event_spacing
+                        || row >= plan.geometry.transition_rows + plan.geometry.leading_rows)
+                {
                     marker_pending = false;
                     match marker {
                         Some(marker) if frame_left >= 2 => {

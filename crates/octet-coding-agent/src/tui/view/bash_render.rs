@@ -2,7 +2,7 @@
 
 use sexy_tui_rs::{visible_width, RichRenderer};
 
-use super::output_window::bounded_tail_rows;
+use super::output_window::bounded_head_tail_rows;
 use super::terminal_text::{normalize_carriage_return_progress, sanitize_for_terminal};
 use super::tool_render::tool_value_indent_width;
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS};
@@ -276,7 +276,7 @@ pub(super) fn render_compact_bash_output(
     }
 
     let force_metadata = !loss_details.is_empty();
-    bounded_tail_rows(
+    bounded_head_tail_rows(
         output_rows,
         COMPACT_EXEC_OUTPUT_ROWS,
         force_metadata,
@@ -287,7 +287,7 @@ pub(super) fn render_compact_bash_output(
                 details.push(if theme.is_compiled_default() {
                     format!("{hidden_rows} output {unit} collapsed")
                 } else {
-                    format!("{hidden_rows} earlier visual {unit} hidden")
+                    format!("{hidden_rows} middle visual {unit} hidden")
                 });
             }
             let detail = format!("{ellipsis} {}", details.join(" · "));
@@ -299,15 +299,12 @@ pub(super) fn render_compact_bash_output(
     )
 }
 
-/// Maximum command-content rows in terse mode, independent of the output tail.
-const COMPACT_BASH_INPUT_ROWS: usize = 2;
-
 pub(super) fn render_bash_row(
     command: &str,
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
-    expanded: bool,
+    _expanded: bool,
 ) -> Vec<String> {
     let action = "Bash";
     let action_gap = tool_value_indent_width(action).saturating_sub(visible_width(action));
@@ -320,67 +317,20 @@ pub(super) fn render_bash_row(
     let content_width = width
         .saturating_sub(u16::try_from(visible_width(&prefix)).unwrap_or(u16::MAX))
         .max(1);
-    // Count after terminal sanitization and literal syntax wrapping so newlines,
-    // wide graphemes, tabs, and long single-line commands share one visual budget.
-    // Only this display projection is shortened; the retained command is intact.
-    let command = if theme.is_compiled_default() {
-        renderer.render_inline_syntax_wrapped(command, "bash", content_width)
-    } else {
-        renderer.render_inline_syntax(command, "bash", content_width)
-    };
-    let preview_rows = if theme.is_compiled_default() {
-        COMPACT_BASH_INPUT_ROWS
-    } else {
-        3
-    };
-    let hidden_rows = if expanded {
-        0
-    } else {
-        command.lines.len().saturating_sub(preview_rows)
-    };
-    let visible_rows = command.lines.len() - hidden_rows;
+    // Commands are intent, not output: retain every sanitized, wrapped row in
+    // both disclosure modes, including custom themes and multiline scripts.
+    let command = renderer.render_inline_syntax_wrapped(command, "bash", content_width);
     let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
-    let mut rows: Vec<String> = command
+    command
         .lines
         .into_iter()
-        .take(visible_rows)
         .enumerate()
         .map(|(index, line)| {
             let prefix = if index == 0 { &prefix } else { &continuation };
             let content = if use_plain { line.plain } else { line.styled };
             fit_line(&format!("{prefix}{content}"), width)
         })
-        .collect();
-    if hidden_rows > 0 {
-        let ellipsis = if theme.unicode() { "…" } else { "..." };
-        let unit = if hidden_rows == 1 { "line" } else { "lines" };
-        let hint = format!("{ellipsis} {hidden_rows} more {unit} hidden (ctrl+o to expand)");
-        if theme.is_compiled_default() {
-            let available = usize::from(width).saturating_sub(visible_width(&continuation));
-            let short = format!("{ellipsis}+{hidden_rows}");
-            let with_key = format!("{short} Ctrl+O");
-            let cue = if visible_width(&hint) <= available {
-                &hint
-            } else if visible_width(&with_key) <= available {
-                &with_key
-            } else {
-                &short
-            };
-            rows.push(fit_line(
-                &format!("{continuation}{}", subdued_text(theme, cue)),
-                width,
-            ));
-        } else {
-            // Custom themes keep their existing expanded hint geometry.
-            rows.extend(wrap_hanging(
-                &subdued_text(theme, &hint),
-                &continuation,
-                &continuation,
-                width,
-            ));
-        }
-    }
-    rows
+        .collect()
 }
 
 #[cfg(test)]
@@ -437,40 +387,10 @@ mod tests {
         let renderer = theme.rich_renderer();
         let collapsed = render_bash_row(command, &renderer, theme, width, false);
         let expanded = render_bash_row(command, &renderer, theme, width, true);
-        let preview_rows = if theme.is_compiled_default() {
-            COMPACT_BASH_INPUT_ROWS
-        } else {
-            3
-        };
-        let retained = expanded.len().min(preview_rows);
-        assert_eq!(&collapsed[..retained], &expanded[..retained]);
-        if expanded.len() <= preview_rows {
-            assert_eq!(collapsed, expanded);
-        } else {
-            let hidden = expanded.len() - preview_rows;
-            let unit = if hidden == 1 { "line" } else { "lines" };
-            let ellipsis = if theme.unicode() { "…" } else { "..." };
-            let hint = plain_rows(&collapsed[preview_rows..])
-                .iter()
-                .map(|row| row.trim())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let full = format!("{ellipsis} {hidden} more {unit} hidden (ctrl+o to expand)");
-            if theme.is_compiled_default() {
-                assert_eq!(
-                    collapsed.len(),
-                    preview_rows + 1,
-                    "width {width}: {collapsed:?}"
-                );
-                let short = format!("{ellipsis}+{hidden}");
-                assert!(
-                    [&full, &format!("{short} Ctrl+O"), &short].contains(&&hint),
-                    "width {width}: {collapsed:?}"
-                );
-            } else {
-                assert_eq!(hint, full, "width {width}: {collapsed:?}");
-            }
-        }
+        assert_eq!(
+            collapsed, expanded,
+            "commands must remain complete in terse mode"
+        );
         for rows in [&collapsed, &expanded] {
             assert!(rows
                 .iter()
@@ -511,7 +431,7 @@ mod tests {
         let theme = test_theme();
         for command in ["", "printf one", "one\ntwo"] {
             let (collapsed, expanded) = assert_input_window(command, &theme, 80);
-            assert!(collapsed.len() <= COMPACT_BASH_INPUT_ROWS);
+            assert!(collapsed.len() <= 2);
             assert_eq!(collapsed, expanded);
             assert!(strip_terminal_sequences(&collapsed[0]).starts_with("Bash  "));
         }
@@ -523,7 +443,7 @@ mod tests {
         let command = "cat <<'EOF'\nfirst\n\n    fourth\nEOF\nprintf done";
         let (collapsed, expanded) = assert_input_window(command, &theme, 100);
         assert_eq!(expanded.len(), 6);
-        assert_eq!(collapsed.len(), 3);
+        assert_eq!(collapsed.len(), 6);
         assert_eq!(
             plain_rows(&collapsed)[..2],
             ["Bash  cat <<'EOF'", "      first"]
@@ -534,9 +454,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(full_command, command);
-        assert!(!collapsed.join("\n").contains("fourth"));
-        let (singular, _) = assert_input_window("one\ntwo\nthree\nfour", &theme, 100);
-        assert!(strip_terminal_sequences(&singular[2]).contains("2 more lines hidden"));
+        assert!(collapsed.join("\n").contains("fourth"));
+        let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", &theme, 100);
+        assert_eq!(multiline.len(), 4);
     }
 
     #[test]
@@ -563,7 +483,7 @@ mod tests {
                     .copy_text,
                 command,
             );
-            assert_eq!(collapsed.len(), COMPACT_BASH_INPUT_ROWS + 1);
+            assert_eq!(collapsed.len(), expanded.len());
         }
     }
 
@@ -635,11 +555,13 @@ mod tests {
                 100,
                 expanded,
             );
-            assert_eq!(input.len(), if expanded { 5 } else { 3 });
+            assert_eq!(input.len(), 5);
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);
-            assert_eq!(plain_rows(&tail)[1..], ["5", "6", "7", "8"]);
-            assert!(strip_terminal_sequences(&tail[0]).contains("4 output rows collapsed"));
+            let plain = plain_rows(&tail);
+            assert_eq!(&plain[..2], ["1", "2"]);
+            assert_eq!(&plain[3..], ["7", "8"]);
+            assert!(plain[2].contains("4 output rows collapsed"));
             assert_eq!(
                 render_compact_bash_output(&panel, &theme, 100, true, "").len(),
                 8

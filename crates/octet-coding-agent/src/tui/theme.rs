@@ -1,21 +1,22 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
 use octet_ai::{Model, ModelSpec};
-use sexy_tui_rs::theme::{capability::CapabilityTier, Theme as SexyTheme};
+#[cfg(test)]
+use sexy_tui_rs::theme::capability::CapabilityTier;
+use sexy_tui_rs::theme::Theme as SexyTheme;
 use sexy_tui_rs::{
-    CapabilityOverrides, CodeOverflow, Color, RenderOptions, RichRenderer, SupportLevel, TextRole,
-    TextStyle, UnorderedListMarker,
+    CodeOverflow, Color, RenderOptions, RichRenderer, TextRole, TextStyle, UnorderedListMarker,
 };
 
 use crate::config::{ColorMode, Config};
-use crate::resource_resolver::{ResourceKind, ResourceResolver};
+use crate::resource_resolver::ResourceResolver;
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 #[cfg(test)]
 use crate::tui::theme_reload::{
@@ -23,6 +24,46 @@ use crate::tui::theme_reload::{
     ThemePathError, ThemeReloadEngine, ThemeReloadMode, ThemeWatch,
 };
 use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
+
+mod discovery;
+mod pi;
+mod terminal_colors;
+use crate::tui::terminal::TerminalThemeColors;
+use pi::{pi_theme_for, pi_theme_with_colors};
+
+pub use discovery::compiled_file_theme_names;
+pub(crate) use discovery::{
+    compiled_file_theme_name, is_compiled_file_theme_name, is_reserved_theme_name,
+};
+// The suite pins theme resolution against a real resource root, so these two
+// stay reachable through this module's glob.
+use discovery::{
+    cards_theme_for, compiled_file_theme_for, discover_themes, read_theme_file_bounded,
+    resolved_theme_resource, still_theme_for,
+};
+// Only the test-only `available_themes` names it here.
+#[cfg(test)]
+use discovery::theme_file_name;
+#[cfg(test)]
+pub use discovery::{theme_discovery_diagnostics, theme_path};
+
+use terminal_colors::{
+    apply_standard_technical_palette, balance_background, balance_foreground, balance_to_luminance,
+    blend, named_color, nearest_ansi16_code, nearest_ansi256, parse_hex_color, rich_capabilities,
+    sexy_tier, standard_surface, terminal_background, BALANCED_FOREGROUNDS, CONTEXT_COLOR_DEFAULTS,
+    DEFAULT_ACCENT, DEFAULT_BACKGROUNDS, VERBATIM_FOREGROUNDS,
+};
+// The suite pins the approximation tables and the background probes directly,
+// so they stay reachable through this module's glob. Gating the import keeps
+// them out of the library build's reach, so it stays warning-free.
+#[cfg(test)]
+use terminal_colors::{
+    ansi256_rgb, background_from_colorfgbg, background_from_override, relative_luminance, ANSI16,
+    STANDARD_SYNTAX_COLORS,
+};
+// `modes::interactive` reaches this through the theme module, so the re-export
+// is the public path; the type itself moved to `terminal_colors`.
+pub(crate) use terminal_colors::background_from_terminal_rgb;
 
 #[allow(unused_imports)]
 pub use crate::tui::theme_schema::{
@@ -32,6 +73,9 @@ pub use crate::tui::theme_schema::{
 
 /// Stable name for octet's compiled-in default theme and legacy selectors.
 pub const DEFAULT_THEME_NAME: &str = "default";
+
+/// Pi 1.0's terminal-adaptive default, implemented natively without the bridge.
+pub const PI_THEME_NAME: &str = "pi";
 
 /// Stable selector for the compiled-in `Cards` theme. The file is embedded at
 /// build time from `examples/themes/Cards.toml` and validated by
@@ -62,6 +106,7 @@ type CompiledFileTheme = fn(TerminalCapabilities, TerminalBackground) -> anyhow:
 const COMPILED_FILE_THEMES: &[(&str, CompiledFileTheme)] = &[
     (CARDS_THEME_NAME, cards_theme_for),
     (STILL_THEME_NAME, still_theme_for),
+    (PI_THEME_NAME, pi_theme_for),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +116,8 @@ pub enum ThemeSource {
     CompiledCards,
     /// The compiled-in `Still` theme, embedded from `examples/themes/Still.toml`.
     CompiledStill,
+    /// Pi 1.0's generated system palette, independent of extension enablement.
+    CompiledPi,
     File(PathBuf),
 }
 
@@ -309,11 +356,39 @@ struct Rgb {
     blue: u8,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // Resolved theme constructions and clones, isolated from parallel tests.
+    static THEME_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_theme_work() -> (usize, usize) {
+    THEME_WORK.with(|work| work.replace((0, 0)))
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ThemeCloneWork;
+
+#[cfg(test)]
+impl Clone for ThemeCloneWork {
+    fn clone(&self) -> Self {
+        THEME_WORK.with(|work| {
+            let (constructions, clones) = work.get();
+            work.set((constructions, clones + 1));
+        });
+        Self
+    }
+}
+
 /// octet-side styling boundary around sexy-tui's semantic token store. octet owns
 /// model-family palette selection and contrast balancing; sexy-tui owns rich
 /// text layout, sanitization, syntax highlighting, and semantic encoding.
 #[derive(Clone, Debug)]
 pub struct OctetTheme {
+    #[cfg(test)]
+    _clone_work: ThemeCloneWork,
     inner: SexyTheme,
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
@@ -325,6 +400,11 @@ pub struct OctetTheme {
     layout: ThemeLayout,
     metadata: ThemeMetadata,
     source: ThemeSource,
+    // Already validated, bounded source; native palettes resolve both variants
+    // from the same snapshot, without rereading a changed file during paint.
+    native_source: Option<std::sync::Arc<str>>,
+    // Owned by the shared input stream; retained across selection and reload.
+    terminal_colors: TerminalThemeColors,
 }
 
 /// Semantic roles rendered as thinking prose. Code, diff, and syntax roles
@@ -551,6 +631,11 @@ impl OctetTheme {
         capabilities: TerminalCapabilities,
         background: TerminalBackground,
     ) -> Self {
+        #[cfg(test)]
+        THEME_WORK.with(|work| {
+            let (constructions, clones) = work.get();
+            work.set((constructions + 1, clones));
+        });
         inner.set_capabilities(rich_capabilities(capabilities));
         for &(token, source) in CONTEXT_COLOR_DEFAULTS {
             let value = if source.starts_with('#') {
@@ -561,6 +646,8 @@ impl OctetTheme {
             inner.override_token(token, &value);
         }
         Self {
+            #[cfg(test)]
+            _clone_work: ThemeCloneWork,
             inner,
             capabilities,
             background,
@@ -577,7 +664,30 @@ impl OctetTheme {
                 ..ThemeMetadata::default()
             },
             source: ThemeSource::CompiledDefault,
+            native_source: None,
+            terminal_colors: TerminalThemeColors::default(),
         }
+    }
+
+    pub(crate) fn terminal_colors(&self) -> TerminalThemeColors {
+        self.terminal_colors
+    }
+
+    /// Carry terminal observations through previews, selection and reload. Only
+    /// Pi's generated theme consumes them; other themes retain their own colors.
+    pub(crate) fn with_terminal_colors(mut self, colors: TerminalThemeColors) -> Self {
+        if matches!(self.source, ThemeSource::CompiledPi) && colors != self.terminal_colors {
+            self = pi_theme_with_colors(
+                self.capabilities,
+                self.background,
+                colors.foreground,
+                colors.background,
+                colors.palette,
+            )
+            .expect("compiled Pi recipe must remain valid");
+        }
+        self.terminal_colors = colors;
+        self
     }
 
     pub fn capabilities(&self) -> TerminalCapabilities {
@@ -597,6 +707,11 @@ impl OctetTheme {
         matches!(self.source, ThemeSource::CompiledDefault)
     }
 
+    /// The shared JSON projection retains this role in files and snapshots too.
+    pub(crate) fn is_pi_theme(&self) -> bool {
+        self.semantic_styles.contains_key("extension.pi.accent")
+    }
+
     #[allow(dead_code)]
     pub fn source(&self) -> &ThemeSource {
         &self.source
@@ -608,7 +723,8 @@ impl OctetTheme {
             ThemeSource::File(path) => Some(path),
             ThemeSource::CompiledDefault
             | ThemeSource::CompiledCards
-            | ThemeSource::CompiledStill => None,
+            | ThemeSource::CompiledStill
+            | ThemeSource::CompiledPi => None,
         }
     }
 
@@ -655,7 +771,7 @@ impl OctetTheme {
             .unwrap_or_else(|| unicode_glyph(name))
     }
 
-    #[allow(dead_code)] // used only with the `serve` extension feature
+    #[allow(dead_code)]
     pub fn semantic_role_names(&self) -> impl Iterator<Item = &str> {
         self.semantic_styles.keys().map(String::as_str)
     }
@@ -675,6 +791,9 @@ impl OctetTheme {
     /// stable role names and never need access to octet's private application
     /// state or raw terminal escape sequences.
     pub fn apply_semantic_role(&self, role: &str, text: &str) -> String {
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
         self.inner.apply_style(self.semantic_style(role), text)
     }
 
@@ -738,13 +857,62 @@ impl OctetTheme {
             }
             ThemeSource::CompiledCards => cards_theme_for(self.capabilities, self.background),
             ThemeSource::CompiledStill => still_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledPi => pi_theme_for(self.capabilities, self.background)
+                .map(|theme| theme.with_terminal_colors(self.terminal_colors)),
             ThemeSource::File(path) => {
                 load_theme_path_for(path, self.capabilities, self.background)
             }
         }
     }
 
+    /// Resolve this exact theme snapshot for Tern's native RGB appearance.
+    /// Runtime model styling is applied by the native projector afterwards.
+    pub(crate) fn for_native_background(
+        &self,
+        background: TerminalBackground,
+    ) -> anyhow::Result<Self> {
+        let mut capabilities = self.capabilities;
+        if capabilities.color != ColorDepth::None {
+            capabilities.color = ColorDepth::TrueColor;
+        }
+        if matches!(self.source, ThemeSource::CompiledPi) {
+            let same_profile =
+                self.background == background && self.terminal_colors.background.is_some();
+            let (foreground, canvas) = if same_profile {
+                (
+                    self.terminal_colors.foreground,
+                    self.terminal_colors.background,
+                )
+            } else if background == TerminalBackground::Light {
+                (Some((0, 0, 0)), Some((255, 255, 255)))
+            } else {
+                (Some((229, 229, 231)), Some((0, 0, 0)))
+            };
+            return pi_theme_with_colors(
+                capabilities,
+                background,
+                foreground,
+                canvas,
+                self.terminal_colors.palette,
+            );
+        }
+        let Some(source) = &self.native_source else {
+            return Ok(default_theme_for(background, capabilities));
+        };
+        load_theme_source_for(
+            source,
+            "native theme snapshot",
+            self.source.clone(),
+            &self.metadata.name,
+            capabilities,
+            background,
+        )
+    }
+
     pub fn fg(&self, token: &str, text: &str) -> String {
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
         if let Some(style) = self.semantic_styles.get(token) {
             return self.inner.apply_style(*style, text);
         }
@@ -757,6 +925,9 @@ impl OctetTheme {
     /// Resolve the accent colour of a specific model family. `None` uses the
     /// active theme token; a concrete lab remains stable across model switches.
     pub(crate) fn model_rgb(&self, lab: Option<ModelLab>) -> Option<(u8, u8, u8)> {
+        if self.is_pi_theme() {
+            return self.role_rgb("model_accent");
+        }
         let Some(lab) = lab else {
             return self.role_rgb("model_accent");
         };
@@ -832,6 +1003,24 @@ impl OctetTheme {
                 .background(Color::Rgb(color.red, color.green, color.blue)),
             text,
         )
+    }
+
+    /// Native equivalent of the default prompt wash's contrast-balanced fill.
+    pub(crate) fn native_prompt_rgb(&self, source: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+        let target = match self.background {
+            TerminalBackground::Dark => 0.10,
+            TerminalBackground::Light => 0.88,
+            TerminalBackground::Unknown => return None,
+        };
+        let color = balance_to_luminance(
+            Rgb {
+                red: source.0,
+                green: source.1,
+                blue: source.2,
+            },
+            target,
+        );
+        Some((color.red, color.green, color.blue))
     }
 
     /// Whether prompt rows are painted with each turn's stored model colour as
@@ -1122,575 +1311,6 @@ impl OctetTheme {
     }
 }
 
-fn rich_capabilities(capabilities: TerminalCapabilities) -> sexy_tui_rs::TerminalCapabilities {
-    if !capabilities.interactive {
-        return sexy_tui_rs::TerminalCapabilities::plain();
-    }
-    let color_depth = match capabilities.color {
-        ColorDepth::None => sexy_tui_rs::ColorDepth::None,
-        ColorDepth::Ansi16 => sexy_tui_rs::ColorDepth::Ansi16,
-        ColorDepth::Ansi256 => sexy_tui_rs::ColorDepth::Ansi256,
-        ColorDepth::TrueColor => sexy_tui_rs::ColorDepth::TrueColor,
-    };
-    sexy_tui_rs::TerminalCapabilities::interactive(color_depth, capabilities.unicode)
-        .with_overrides(&CapabilityOverrides {
-            italics: Some(if capabilities.italics {
-                SupportLevel::Supported
-            } else {
-                SupportLevel::Unsupported
-            }),
-            hyperlinks: Some(capabilities.hyperlinks),
-            animation: Some(capabilities.animation),
-            ..CapabilityOverrides::default()
-        })
-}
-
-fn named_color(value: &str) -> Option<Rgb> {
-    let (red, green, blue) = match value.trim().to_ascii_lowercase().as_str() {
-        "black" => (0, 0, 0),
-        "red" => (205, 49, 49),
-        "green" => (13, 188, 121),
-        "yellow" => (229, 229, 16),
-        "blue" => (36, 114, 200),
-        "magenta" | "purple" => (188, 63, 188),
-        "cyan" => (17, 168, 205),
-        "white" => (229, 229, 229),
-        "gray" | "grey" => (102, 102, 102),
-        _ => return None,
-    };
-    Some(Rgb { red, green, blue })
-}
-
-const ANSI16: [(Rgb, u8); 16] = [
-    (
-        Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
-        },
-        30,
-    ),
-    (
-        Rgb {
-            red: 205,
-            green: 49,
-            blue: 49,
-        },
-        31,
-    ),
-    (
-        Rgb {
-            red: 13,
-            green: 188,
-            blue: 121,
-        },
-        32,
-    ),
-    (
-        Rgb {
-            red: 229,
-            green: 229,
-            blue: 16,
-        },
-        33,
-    ),
-    (
-        Rgb {
-            red: 36,
-            green: 114,
-            blue: 200,
-        },
-        34,
-    ),
-    (
-        Rgb {
-            red: 188,
-            green: 63,
-            blue: 188,
-        },
-        35,
-    ),
-    (
-        Rgb {
-            red: 17,
-            green: 168,
-            blue: 205,
-        },
-        36,
-    ),
-    (
-        Rgb {
-            red: 229,
-            green: 229,
-            blue: 229,
-        },
-        37,
-    ),
-    (
-        Rgb {
-            red: 102,
-            green: 102,
-            blue: 102,
-        },
-        90,
-    ),
-    (
-        Rgb {
-            red: 241,
-            green: 76,
-            blue: 76,
-        },
-        91,
-    ),
-    (
-        Rgb {
-            red: 35,
-            green: 209,
-            blue: 139,
-        },
-        92,
-    ),
-    (
-        Rgb {
-            red: 245,
-            green: 245,
-            blue: 67,
-        },
-        93,
-    ),
-    (
-        Rgb {
-            red: 59,
-            green: 142,
-            blue: 234,
-        },
-        94,
-    ),
-    (
-        Rgb {
-            red: 214,
-            green: 112,
-            blue: 214,
-        },
-        95,
-    ),
-    (
-        Rgb {
-            red: 41,
-            green: 184,
-            blue: 219,
-        },
-        96,
-    ),
-    (
-        Rgb {
-            red: 255,
-            green: 255,
-            blue: 255,
-        },
-        97,
-    ),
-];
-
-fn color_distance(left: Rgb, right: Rgb) -> u32 {
-    let red = i32::from(left.red) - i32::from(right.red);
-    let green = i32::from(left.green) - i32::from(right.green);
-    let blue = i32::from(left.blue) - i32::from(right.blue);
-    (red * red + green * green + blue * blue) as u32
-}
-
-fn nearest_ansi16_code(color: Rgb) -> u8 {
-    ANSI16
-        .iter()
-        .min_by_key(|(candidate, _)| color_distance(color, *candidate))
-        .map_or(37, |(_, code)| *code)
-}
-
-#[cfg(test)]
-fn ansi256_rgb(index: u8) -> Rgb {
-    if index < 16 {
-        return ANSI16[usize::from(index)].0;
-    }
-    if index < 232 {
-        let value = index - 16;
-        let component = |part: u8| if part == 0 { 0 } else { 55 + part * 40 };
-        return Rgb {
-            red: component(value / 36),
-            green: component((value % 36) / 6),
-            blue: component(value % 6),
-        };
-    }
-    let gray = 8 + (index - 232) * 10;
-    Rgb {
-        red: gray,
-        green: gray,
-        blue: gray,
-    }
-}
-
-fn nearest_ansi256(color: Rgb) -> u8 {
-    sexy_tui_rs::theme::palette::nearest_ansi256(color.red, color.green, color.blue)
-}
-
-const DEFAULT_ACCENT: &str = "#16876d";
-
-// Context reports are a legend, not a status list. Keep each category on its
-// own visual channel so adjacent slices remain distinguishable even when two
-// categories happen to carry the same semantic status (for example free space
-// and tool schemas both used to resolve to the terminal foreground).
-//
-// Hex values are balanced in `OctetTheme::new`; aliases continue to follow the
-// active theme and can be overridden by a theme's `[colors]` table.
-const CONTEXT_COLOR_DEFAULTS: &[(&str, &str)] = &[
-    ("context_system", "#4aa8c7"),
-    ("context_skills", "#d19a35"),
-    ("context_tools", "#7f9fd4"),
-    ("context_messages", "#d8dee8"),
-    ("context_pending", "#d47d3f"),
-    ("context_framing", "#73808f"),
-    ("context_adjustment", "#a978c5"),
-    ("context_tokenizer_adjustment", "#c36f99"),
-    ("context_output", "#df6f7c"),
-    ("context_free", "#52c878"),
-    ("context_buffer", "#8678ba"),
-];
-
-// 0.27 gives ~5.6:1 against the test-dark reference (and ~5:1 against a
-// typical #1e1e1e terminal).  We stay well below the old AAA target of
-// 0.32 so foreground colours keep their saturation instead of washing out.
-const DARK_TARGET_LUMINANCE: f64 = 0.27;
-const LIGHT_TARGET_LUMINANCE: f64 = 0.11;
-// Symmetric midpoint: ~4.58:1 against both pure black and pure white.
-// Light-terminal users can set OCTET_COLOR_SCHEME=light for a 0.11 target.
-const UNIVERSAL_TARGET_LUMINANCE: f64 = 0.179;
-
-// Tokens that receive terminal-background-aware luminance balancing.
-// These are semantic UI signals (errors, warnings, model accent) whose
-// source colours may be unreadable on dark or light terminals without
-// adjustment. The compiled default additionally receives the standard
-// technical code/diff palette below; user file themes keep their configured
-// code colours unless they opt into their own role overrides.
-const BALANCED_FOREGROUNDS: &[(&str, &str)] = &[
-    ("muted", "#777777"),
-    ("dim", "#777777"),
-    ("accent", DEFAULT_ACCENT),
-    ("error", "#c74747"),
-    ("warning", "#9a6700"),
-    ("border_focused", DEFAULT_ACCENT),
-];
-
-/// Foreground tokens applied verbatim — no luminance balancing.
-/// "default" means the terminal's own foreground colour.
-const VERBATIM_FOREGROUNDS: &[(&str, &str)] = &[
-    ("foreground", "default"),
-    ("success", "default"),
-    ("info", "default"),
-    ("border", "default"),
-    ("border_idle", "default"),
-    ("user_msg_text", "default"),
-    ("assistant_msg_text", "default"),
-    ("tool_title", "default"),
-    ("tool_output", "default"),
-    // Diff semantics are carried by row surfaces. Source text keeps its normal
-    // syntax foregrounds (or the terminal foreground when no syntax applies).
-    ("diff_added", "default"),
-    ("diff_removed", "default"),
-    ("diff_context", "default"),
-    // --- Markdown chrome ------------------------------------------------
-    ("md_heading", "default"),
-    ("md_link", "default"),
-    ("md_code", "#78a9b0"),
-    ("md_code_block", "default"),
-    ("md_code_border", "default"),
-    ("md_quote", "default"),
-    ("md_quote_border", "default"),
-    ("md_hr", "default"),
-    ("md_list_bullet", "default"),
-    // --- syntax highlighting --------------------------------------------
-    ("syntax_comment", "default"),
-    ("syntax_keyword", "#815ac0"),
-    ("syntax_function", "#287fb8"),
-    ("syntax_variable", "#68737d"),
-    ("syntax_string", "#00b847"),
-    ("syntax_number", "#b26a00"),
-    ("syntax_type", "#9b6500"),
-    ("syntax_operator", "#b14d7d"),
-    ("syntax_punctuation", "#68737d"),
-];
-
-/// Subtle terminal-background-aware surfaces. These retain their semantic hue
-/// without replacing syntax foregrounds or looking like terminal selection.
-const DEFAULT_BACKGROUNDS: &[(&str, &str)] = &[("user_msg_bg", DEFAULT_ACCENT)];
-
-// Standard technical palette for the compiled default. Source code uses one
-// predictable language-neutral grammar: syntax owns foregrounds, diff owns
-// quiet row surfaces, and the +/- marker carries the high-salience hue.
-const STANDARD_SYNTAX_COLORS: &[(&str, &str, &str)] = &[
-    ("syntax_comment", "#9da8b5", "#505c68"),
-    ("syntax_keyword", "#f29e74", "#813d00"),
-    ("syntax_type", "#76c7c0", "#005c5e"),
-    ("syntax_function", "#a8c7fa", "#2456a6"),
-    ("syntax_variable", "#d6dee8", "#1f2933"),
-    ("syntax_string", "#a8d279", "#335e00"),
-    ("syntax_number", "#d6a6e8", "#7d3c98"),
-    ("syntax_operator", "#aab4c0", "#4d5966"),
-    ("syntax_punctuation", "#aab4c0", "#4d5966"),
-    ("diff_hunk", "#8ab4f8", "#355f9e"),
-];
-
-const STANDARD_DIFF_COLORS: &[(&str, &str, &str)] = &[
-    // Preserve green hue and readable contrast after fixed-palette quantization.
-    ("diff_added_marker", "#67d391", "#08652d"),
-    ("diff_removed_marker", "#ff7d8a", "#b4233a"),
-];
-
-const STANDARD_DIFF_SURFACES: &[(&str, &str, &str)] = &[
-    ("diff_added_bg", "#10261e", "#e8f6ee"),
-    ("diff_removed_bg", "#2a171b", "#fcebed"),
-];
-
-fn standard_foreground(dark: &str, light: &str, background: TerminalBackground) -> String {
-    match background {
-        TerminalBackground::Dark => dark.to_owned(),
-        TerminalBackground::Light => light.to_owned(),
-        TerminalBackground::Unknown => balance_foreground(light, TerminalBackground::Unknown),
-    }
-}
-
-fn standard_surface(dark: &str, light: &str, background: TerminalBackground) -> String {
-    match background {
-        TerminalBackground::Dark => dark.to_owned(),
-        TerminalBackground::Light => light.to_owned(),
-        // Unknown terminal backgrounds cannot safely receive absolute RGB row
-        // surfaces. Preserve diff semantics through +/- text and marker colour.
-        TerminalBackground::Unknown => "default".to_owned(),
-    }
-}
-
-fn apply_standard_technical_palette(theme: &mut OctetTheme, background: TerminalBackground) {
-    theme.override_token("diff_added", "default");
-    theme.override_token("diff_removed", "default");
-    theme.override_token("diff_context", "default");
-    for &(token, dark, light) in STANDARD_SYNTAX_COLORS {
-        theme.override_token(token, &standard_foreground(dark, light, background));
-    }
-    for &(token, dark, light) in STANDARD_DIFF_COLORS {
-        theme.override_token(token, &standard_foreground(dark, light, background));
-    }
-    for &(token, dark, light) in STANDARD_DIFF_SURFACES {
-        theme.override_token(token, &standard_surface(dark, light, background));
-    }
-}
-
-fn parse_hex_color(value: &str) -> Option<Rgb> {
-    let hex = value.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(Rgb {
-        red: u8::from_str_radix(&hex[0..2], 16).ok()?,
-        green: u8::from_str_radix(&hex[2..4], 16).ok()?,
-        blue: u8::from_str_radix(&hex[4..6], 16).ok()?,
-    })
-}
-
-fn hex_color(color: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", color.red, color.green, color.blue)
-}
-
-fn linear_channel(channel: u8) -> f64 {
-    let channel = f64::from(channel) / 255.0;
-    if channel <= 0.04045 {
-        channel / 12.92
-    } else {
-        ((channel + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn relative_luminance(color: Rgb) -> f64 {
-    0.2126 * linear_channel(color.red)
-        + 0.7152 * linear_channel(color.green)
-        + 0.0722 * linear_channel(color.blue)
-}
-
-fn blend_channel(source: u8, destination: u8, amount: f64) -> u8 {
-    (f64::from(source) + (f64::from(destination) - f64::from(source)) * amount)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
-fn blend(source: Rgb, destination: Rgb, amount: f64) -> Rgb {
-    Rgb {
-        red: blend_channel(source.red, destination.red, amount),
-        green: blend_channel(source.green, destination.green, amount),
-        blue: blend_channel(source.blue, destination.blue, amount),
-    }
-}
-
-/// Move a web color toward black or white until all lab colors share a useful
-/// perceived brightness. Equalizing luminance avoids a near-black OpenAI accent
-/// beside a neon-orange Amazon accent while preserving their recognizable hue.
-/// Move a colour toward the terminal background so it reads as a subtle
-/// surface tint rather than a painted slab. Used for diff-add/diff-remove
-/// backgrounds so they adapt to the user's terminal profile.
-pub(crate) fn balance_background(source: &str, background: TerminalBackground) -> String {
-    let Some(source) = parse_hex_color(source) else {
-        return source.to_owned();
-    };
-    // Most terminals do not export COLORFGBG (Ghostty included), so treating an
-    // unknown profile as "no surface" silently removes diff semantics. Use the
-    // universal midpoint already used for unknown-profile foregrounds: it
-    // retains the surface while remaining readable with either a black or
-    // white terminal-default foreground.
-    let target_luminance = match background {
-        TerminalBackground::Dark => 0.025,
-        TerminalBackground::Light => 0.95,
-        TerminalBackground::Unknown => UNIVERSAL_TARGET_LUMINANCE,
-    };
-    hex_color(balance_to_luminance(source, target_luminance))
-}
-
-fn balance_to_luminance(source: Rgb, target_luminance: f64) -> Rgb {
-    let source_luminance = relative_luminance(source);
-    if (source_luminance - target_luminance).abs() <= 0.002 {
-        return source;
-    }
-    let lighten = source_luminance < target_luminance;
-    let destination = if lighten {
-        Rgb {
-            red: 255,
-            green: 255,
-            blue: 255,
-        }
-    } else {
-        Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
-        }
-    };
-    let mut low = 0.0;
-    let mut high = 1.0;
-    for _ in 0..20 {
-        let amount = (low + high) / 2.0;
-        let candidate = blend(source, destination, amount);
-        let reached = if lighten {
-            relative_luminance(candidate) >= target_luminance
-        } else {
-            relative_luminance(candidate) <= target_luminance
-        };
-        if reached {
-            high = amount;
-        } else {
-            low = amount;
-        }
-    }
-    blend(source, destination, high)
-}
-
-fn balance_foreground(source: &str, background: TerminalBackground) -> String {
-    let Some(source) = parse_hex_color(source) else {
-        return source.to_owned();
-    };
-    let target = match background {
-        TerminalBackground::Dark => DARK_TARGET_LUMINANCE,
-        TerminalBackground::Light => LIGHT_TARGET_LUMINANCE,
-        TerminalBackground::Unknown => UNIVERSAL_TARGET_LUMINANCE,
-    };
-    let source_luminance = relative_luminance(source);
-    if (source_luminance - target).abs() <= 0.002 {
-        return hex_color(source);
-    }
-
-    let lighten = source_luminance < target;
-    let destination = if lighten {
-        Rgb {
-            red: 255,
-            green: 255,
-            blue: 255,
-        }
-    } else {
-        Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
-        }
-    };
-    let mut low = 0.0;
-    let mut high = 1.0;
-    for _ in 0..20 {
-        let amount = (low + high) / 2.0;
-        let candidate = blend(source, destination, amount);
-        let reached = if lighten {
-            relative_luminance(candidate) >= target
-        } else {
-            relative_luminance(candidate) <= target
-        };
-        if reached {
-            high = amount;
-        } else {
-            low = amount;
-        }
-    }
-    hex_color(blend(source, destination, high))
-}
-
-fn background_from_colorfgbg(value: &str) -> Option<TerminalBackground> {
-    // COLORFGBG conventionally ends in the ANSI background index, e.g. 15;0
-    // for light-on-dark and 0;15 for dark-on-light.
-    let index = value.rsplit(';').next()?.trim().parse::<u8>().ok()?;
-    match index {
-        0..=6 | 8 => Some(TerminalBackground::Dark),
-        7 | 9..=15 => Some(TerminalBackground::Light),
-        _ => None,
-    }
-}
-
-fn background_from_override(value: &str) -> Option<TerminalBackground> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "dark" => Some(TerminalBackground::Dark),
-        "light" => Some(TerminalBackground::Light),
-        "universal" | "unknown" => Some(TerminalBackground::Unknown),
-        // Returning None lets terminal_background continue to COLORFGBG.
-        "auto" => None,
-        _ => None,
-    }
-}
-
-pub(crate) fn background_from_terminal_rgb(red: u8, green: u8, blue: u8) -> TerminalBackground {
-    let background = Rgb { red, green, blue };
-    let luminance = relative_luminance(background);
-    let contrast_with_black = (luminance + 0.05) / 0.05;
-    let contrast_with_white = 1.05 / (luminance + 0.05);
-    if contrast_with_black >= contrast_with_white {
-        TerminalBackground::Light
-    } else {
-        TerminalBackground::Dark
-    }
-}
-
-fn terminal_background() -> TerminalBackground {
-    std::env::var("OCTET_COLOR_SCHEME")
-        .ok()
-        .as_deref()
-        .and_then(background_from_override)
-        .or_else(|| {
-            std::env::var("COLORFGBG")
-                .ok()
-                .as_deref()
-                .and_then(background_from_colorfgbg)
-        })
-        .unwrap_or(TerminalBackground::Unknown)
-}
-
-fn sexy_tier(capabilities: TerminalCapabilities) -> CapabilityTier {
-    if capabilities.color == ColorDepth::TrueColor {
-        CapabilityTier::TrueColor
-    } else {
-        CapabilityTier::Baseline
-    }
-}
-
 fn apply_required_surfaces(theme: &mut OctetTheme, background: TerminalBackground) {
     // Diff status belongs to the row surface, never to source foregrounds.
     theme.override_token("diff_added", "default");
@@ -1813,159 +1433,6 @@ pub(crate) fn test_theme_source_with(
         background,
     )
     .expect("renderer test theme should compile")
-}
-
-pub(crate) fn is_reserved_theme_name(name: &str) -> bool {
-    is_builtin_theme_name(name) || TerminalThemeChoice::parse(name).is_some()
-}
-
-/// Whether `name` selects a compiled-in file theme such as `Cards` or `Still`.
-/// Their stems are reserved against discovered files, and this is the predicate
-/// that lets configuration accept the built-in under its own name.
-pub(crate) fn is_compiled_file_theme_name(name: &str) -> bool {
-    compiled_file_theme_name(name).is_some()
-}
-
-/// The canonical spelling of a compiled-in file theme selector, so a persisted
-/// `cards.toml` or `Cards` both resolve to the one built-in name.
-pub(crate) fn compiled_file_theme_name(name: &str) -> Option<&'static str> {
-    let stem = name.strip_suffix(".toml").unwrap_or(name);
-    COMPILED_FILE_THEMES
-        .iter()
-        .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
-        .map(|(built_in, _)| *built_in)
-}
-
-/// Every selector answered by a compiled-in theme rather than a discovered
-/// file. Reserving these names keeps a user's `Cards.toml` or `Still.toml` from
-/// shadowing, or being shadowed by, the built-in they select.
-fn is_builtin_theme_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) || compiled_file_theme_for(name).is_some()
-}
-
-/// Selectors for the compiled-in file themes, in the order the `/theme` picker
-/// offers them.
-pub fn compiled_file_theme_names() -> impl Iterator<Item = &'static str> {
-    COMPILED_FILE_THEMES.iter().map(|(name, _)| *name)
-}
-
-/// Resolve a selector, with or without a `.toml` suffix, to the loader for a
-/// compiled-in file theme. Returns `None` for the compiled default and for
-/// discovered-file selectors.
-fn compiled_file_theme_for(name: &str) -> Option<CompiledFileTheme> {
-    let stem = name.strip_suffix(".toml").unwrap_or(name);
-    COMPILED_FILE_THEMES
-        .iter()
-        .find(|(built_in, _)| stem.eq_ignore_ascii_case(built_in))
-        .map(|(_, load)| *load)
-}
-
-/// Compile the embedded `Cards` theme for one background profile. A built-in
-/// that fails to compile is a build-time defect the example test already
-/// covers, so surface it as a load error rather than a silent fallback.
-fn cards_theme_for(
-    capabilities: TerminalCapabilities,
-    background: TerminalBackground,
-) -> anyhow::Result<OctetTheme> {
-    load_theme_source_for(
-        CARDS_THEME_SOURCE,
-        CARDS_THEME_NAME,
-        ThemeSource::CompiledCards,
-        CARDS_THEME_NAME,
-        capabilities,
-        background,
-    )
-}
-
-/// Compile the embedded `Still` theme for one background profile. A built-in
-/// that fails to compile is a build-time defect the example test already
-/// covers, so surface it as a load error rather than a silent fallback.
-fn still_theme_for(
-    capabilities: TerminalCapabilities,
-    background: TerminalBackground,
-) -> anyhow::Result<OctetTheme> {
-    load_theme_source_for(
-        STILL_THEME_SOURCE,
-        STILL_THEME_NAME,
-        ThemeSource::CompiledStill,
-        STILL_THEME_NAME,
-        capabilities,
-        background,
-    )
-}
-
-fn theme_file_name(name: &str) -> Option<String> {
-    let name = name.trim();
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || Path::new(name).components().count() != 1
-        || name
-            .bytes()
-            .any(|byte| matches!(byte, b'/' | b'\\' | b'\0'))
-    {
-        return None;
-    }
-    Some(if name.ends_with(".toml") {
-        name.to_owned()
-    } else {
-        format!("{name}.toml")
-    })
-}
-
-fn discover_themes(config: &Config) -> crate::resource_resolver::ResourceSnapshot {
-    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
-    resolver.discover(ResourceKind::Theme, &config.theme_paths)
-}
-
-/// Return best-effort diagnostics from the theme discovery pass. A diagnostic
-/// is inspectable by callers but never turns discovery into a startup error.
-#[cfg(test)]
-pub fn theme_discovery_diagnostics(
-    config: &Config,
-) -> Vec<crate::resource_resolver::ResourceDiagnostic> {
-    discover_themes(config).diagnostics().to_vec()
-}
-
-fn resolved_theme_resource(
-    name: &str,
-    config: &Config,
-) -> anyhow::Result<(ResourceResolver, crate::resource_resolver::ResolvedResource)> {
-    let file_name =
-        theme_file_name(name).ok_or_else(|| anyhow::anyhow!("invalid theme name {name:?}"))?;
-    let resource_name = file_name.strip_suffix(".toml").unwrap_or(&file_name);
-    let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
-    let snapshot = resolver.discover(ResourceKind::Theme, &config.theme_paths);
-    let resource = snapshot
-        .get(resource_name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("theme {name:?} was not discovered"))?;
-    Ok((resolver, resource))
-}
-
-/// Resolve a theme by name through the shared global/project/explicit resolver.
-#[cfg(test)]
-pub fn theme_path(name: &str, config: &Config) -> Option<PathBuf> {
-    resolved_theme_resource(name, config)
-        .ok()
-        .map(|(_, resource)| resource.path)
-}
-
-fn read_theme_file_bounded(path: &Path) -> anyhow::Result<String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("theme {} has no parent", path.display()))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("theme {} has no file name", path.display()))?;
-    // Reloads use the same no-follow, regular-file boundary as initial shared
-    // resource reads. A trusted theme cannot be swapped for a symlink or FIFO
-    // between discovery and `/theme reload`.
-    let opened_path = parent.canonicalize()?.join(name);
-    let bytes =
-        octet_agent::secure_fs::read_regular_file_bounded(&opened_path, MAX_THEME_BYTES as usize)?;
-    String::from_utf8(bytes)
-        .map_err(|error| anyhow::anyhow!("theme {} is not UTF-8: {error}", path.display()))
 }
 
 fn background_token(token: &str) -> bool {
@@ -2115,7 +1582,9 @@ fn load_theme_source_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let parsed = theme_schema::parse_theme(source_text, source_name, background)?;
-    build_parsed_theme(parsed, source, fallback_name, capabilities, background)
+    let mut theme = build_parsed_theme(parsed, source, fallback_name, capabilities, background)?;
+    theme.native_source = Some(std::sync::Arc::from(source_text));
+    Ok(theme)
 }
 
 fn load_theme_path_for(
@@ -2124,6 +1593,8 @@ fn load_theme_path_for(
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
     let source_text = read_theme_file_bounded(path)?;
+    let source_text =
+        crate::extensions::resource_paths::pi_theme::native_source(path, &source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -2156,12 +1627,14 @@ fn load_resolved_theme_for(
     capabilities: TerminalCapabilities,
     background: TerminalBackground,
 ) -> anyhow::Result<OctetTheme> {
+    let source_text =
+        crate::extensions::resource_paths::pi_theme::native_source(path, source_text)?;
     let fallback_name = path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("Custom theme");
     load_theme_source_for(
-        source_text,
+        &source_text,
         &path.display().to_string(),
         ThemeSource::File(path.to_owned()),
         fallback_name,
@@ -2298,6 +1771,26 @@ fn classify_reload_failure(error: &anyhow::Error) -> ReloadFailureKind {
     ReloadFailureKind::Invalid
 }
 
+/// Resolve compiled selectors with the already-owned terminal profile, without
+/// any resource discovery or filesystem access.
+pub(crate) fn compiled_theme_for_selector(
+    name: &str,
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> Option<anyhow::Result<OctetTheme>> {
+    if let Some(compile) = compiled_file_theme_for(name) {
+        return Some(compile(capabilities, background));
+    }
+    let choice = TerminalThemeChoice::parse(name);
+    if choice.is_some() || name.eq_ignore_ascii_case(DEFAULT_THEME_NAME) {
+        let background = choice
+            .and_then(TerminalThemeChoice::explicit_background)
+            .unwrap_or(background);
+        return Some(Ok(default_theme_for(background, capabilities)));
+    }
+    None
+}
+
 /// Load a named theme or return an error without altering the current theme.
 pub(crate) fn load_named_theme_for_background(
     name: &str,
@@ -2373,7 +1866,9 @@ pub(crate) fn selectable_file_themes(
         .resources()
         .iter()
         .filter(|resource| {
-            !is_reserved_theme_name(&resource.name) && !resource.name.ends_with(".toml")
+            !is_reserved_theme_name(&resource.name)
+                && !resource.name.ends_with(".toml")
+                && !resource.name.ends_with(".json")
         })
         .filter_map(|resource| {
             let source = resolver.read_text(resource).ok()?;
@@ -2386,7 +1881,7 @@ pub(crate) fn selectable_file_themes(
 
 /// Return the compiled default and all safe names selected by the shared
 /// resolver. Parsing is deferred to the loader so discovery stays best-effort.
-#[cfg(any(test, feature = "serve"))]
+#[cfg(test)]
 pub fn available_themes(config: &Config) -> Vec<String> {
     let mut names = BTreeSet::from([DEFAULT_THEME_NAME.to_owned()]);
     names.extend(compiled_file_theme_names().map(str::to_owned));
@@ -2545,1525 +2040,12 @@ fn apply_model_lab_for(theme: &mut OctetTheme, lab: ModelLab, background: Termin
 }
 
 pub(crate) fn apply_model_lab(theme: &mut OctetTheme, lab: ModelLab) {
+    if theme.is_pi_theme() {
+        return;
+    }
     let background = theme.background;
     apply_model_lab_for(theme, lab, background);
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
-
-    fn config(workspace: PathBuf) -> Config {
-        Config {
-            workspace: workspace.clone(),
-            invocation_cwd: workspace,
-            model: None,
-            model_explicit: false,
-            reasoning: None,
-            reasoning_explicit: false,
-            reasoning_mode: octet_ai::ReasoningMode::Standard,
-            reasoning_mode_explicit: false,
-            cache_retention: octet_ai::CacheRetention::Short,
-            effect_policy: octet_agent::EffectPolicy::Controlled,
-            sandbox: SandboxPolicy::default(),
-            theme: None,
-            system_prompt: None,
-            theme_paths: vec![],
-            color: crate::config::ColorMode::Auto,
-            mouse: crate::config::MouseMode::Auto,
-            plain: false,
-            show_images: false,
-            session_dir: PathBuf::from("sessions"),
-            compaction: CompactionPolicy::default(),
-            max_cost_microdollars: None,
-            cost_warning_microdollars: None,
-            max_turns: Some(40),
-            show_reasoning_in_print: false,
-            initial_prompt: None,
-            prompt_template: None,
-            debug_prompt: false,
-            prompt_paths: vec![],
-            mode: Mode::Interactive,
-            resume: ResumeSelector::New,
-            skill_paths: vec![],
-            extension_paths: vec![],
-            enabled_extensions: vec![],
-            extension_activation_overridden: false,
-            trusted_extensions: vec![],
-            invocation_trusted_extensions: vec![],
-            experimental_streamable_http_mcp: false,
-            extension_flag_values: Default::default(),
-            tools: crate::config::ToolPolicy::default(),
-            telemetry: None,
-            context_files: true,
-            offline: true,
-            workspace_trusted: true,
-        }
-    }
-
-    fn contrast(left: Rgb, right: Rgb) -> f64 {
-        let (dark, light) = if relative_luminance(left) < relative_luminance(right) {
-            (left, right)
-        } else {
-            (right, left)
-        };
-        (relative_luminance(light) + 0.05) / (relative_luminance(dark) + 0.05)
-    }
-
-    #[test]
-    fn shimmer_mode_accepts_only_the_documented_values() {
-        assert_eq!(ShimmerMode::parse("classic"), Some(ShimmerMode::Classic));
-        assert_eq!(
-            ShimmerMode::parse(" PHYSICAL "),
-            Some(ShimmerMode::Physical)
-        );
-        assert_eq!(ShimmerMode::parse("legacy"), None);
-        assert_eq!(ShimmerMode::parse(""), None);
-    }
-
-    #[test]
-    fn project_theme_is_discovered_loaded_and_names_are_deduplicated() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        let project = config.workspace.join(".octet/themes");
-        let explicit = directory.path().join("explicit-themes");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&explicit).unwrap();
-        std::fs::write(project.join("shared.toml"), "accent = '#123456'").unwrap();
-        std::fs::write(explicit.join("custom.toml"), "accent = '#654321'").unwrap();
-        config.theme_paths.push(explicit);
-
-        assert_eq!(
-            theme_path("shared", &config),
-            Some(project.canonicalize().unwrap().join("shared.toml"))
-        );
-        let theme = load_named_theme("shared", &config).unwrap();
-        assert_eq!(
-            theme.resolve::<String>("accent").as_deref(),
-            Some("#123456")
-        );
-
-        let names = available_themes(&config);
-        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
-        assert!(names.contains(&"shared".to_owned()));
-        assert!(names.contains(&"custom".to_owned()));
-        assert_eq!(names.iter().filter(|name| *name == "shared").count(), 1);
-    }
-
-    #[test]
-    fn picker_loads_only_valid_winning_theme_files_and_reserves_builtin_names() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        let project = config.workspace.join(".octet/themes");
-        let explicit = directory.path().join("explicit-themes");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&explicit).unwrap();
-        std::fs::write(project.join("picker-valid.toml"), "accent = '#123456'").unwrap();
-        std::fs::write(project.join("picker-shared.toml"), "accent = '#111111'").unwrap();
-        std::fs::write(project.join("picker-shadowed.toml"), "accent = '#222222'").unwrap();
-        std::fs::write(explicit.join("picker-shared.toml"), "accent = '#abcdef'").unwrap();
-        std::fs::write(explicit.join("picker-shadowed.toml"), "[invalid").unwrap();
-        std::fs::write(explicit.join("picker-invalid.toml"), "[invalid").unwrap();
-        std::fs::write(explicit.join("dark.toml"), "accent = '#123456'").unwrap();
-        std::fs::write(explicit.join("default.toml"), "accent = '#123456'").unwrap();
-        std::fs::write(
-            explicit.join("picker-double.toml.toml"),
-            "accent = '#123456'",
-        )
-        .unwrap();
-        std::fs::write(
-            explicit.join("picker-too-large.toml"),
-            vec![b' '; MAX_THEME_BYTES as usize + 1],
-        )
-        .unwrap();
-        let standalone = directory.path().join("picker-standalone.toml");
-        std::fs::write(&standalone, "accent = '#654321'").unwrap();
-        config.theme_paths.push(explicit.clone());
-        config.theme_paths.push(standalone);
-
-        let options = selectable_file_themes(&config, TerminalBackground::Dark);
-        let names: Vec<_> = options.iter().map(|(name, _)| name.as_str()).collect();
-        assert!(names.contains(&"picker-valid"));
-        assert!(names.contains(&"picker-shared"));
-        assert!(names.contains(&"picker-standalone"));
-        for hidden in [
-            "picker-shadowed",
-            "picker-invalid",
-            "picker-too-large",
-            "dark",
-            "default",
-            "picker-double.toml",
-        ] {
-            assert!(
-                !names.contains(&hidden),
-                "unexpected picker option {hidden}"
-            );
-        }
-        let shared = &options
-            .iter()
-            .find(|(name, _)| name == "picker-shared")
-            .unwrap()
-            .1;
-        assert_eq!(
-            shared.source_path(),
-            Some(
-                explicit
-                    .canonicalize()
-                    .unwrap()
-                    .join("picker-shared.toml")
-                    .as_path()
-            )
-        );
-        assert_eq!(
-            shared.resolve::<String>("accent").as_deref(),
-            Some("#abcdef")
-        );
-        config.theme = Some("dark".into());
-        assert!(
-            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
-        );
-        assert_eq!(
-            load_theme_for_background(&config, TerminalBackground::Unknown).background(),
-            TerminalBackground::Dark
-        );
-    }
-
-    #[test]
-    fn cards_example_theme_is_valid_for_every_background_profile() {
-        // `examples/themes/Cards.toml` is the source for the `Cards` built-in.
-        // Every release build compiles it in, so a change to the example must
-        // never break schema validation, the bounded size limit, or any
-        // background profile it claims to support.
-        const CARDS: &str = include_str!("../../../../examples/themes/Cards.toml");
-        assert!(
-            CARDS.len() as u64 <= MAX_THEME_BYTES,
-            "Cards.toml exceeds MAX_THEME_BYTES"
-        );
-        // Only string values are schema-checked for control bytes; ordinary
-        // newlines and tabs in comments and whitespace are fine.
-        for line in CARDS.lines() {
-            if line.trim_start().starts_with('#') {
-                assert!(
-                    !line.chars().any(|ch| ch.is_control() && ch != '\t'),
-                    "control byte in comment: {line:?}"
-                );
-                continue;
-            }
-            assert!(
-                !line.chars().any(char::is_control),
-                "control byte in {CARDS}: {line:?}"
-            );
-        }
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            let theme = load_theme_source_for(
-                CARDS,
-                "Cards",
-                ThemeSource::CompiledCards,
-                "Cards",
-                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                background,
-            )
-            .expect("Cards example theme must compile for every background");
-            assert_eq!(theme.background(), background);
-            assert_eq!(theme.metadata().name, "Cards");
-            assert!(!theme.is_compiled_default());
-            assert_eq!(
-                theme.resolve::<String>("prompt_wash").as_deref(),
-                Some("false")
-            );
-            assert_eq!(
-                theme.resolve::<String>("splash_compact").as_deref(),
-                Some("true")
-            );
-            assert_eq!(
-                theme.resolve::<String>("splash_model_adaptive").as_deref(),
-                Some("true")
-            );
-            // The adaptive splash claims the whole splash, so `Cards` must not
-            // also pin a `splash` colour.
-            assert_eq!(theme.resolve::<String>("splash"), None);
-        }
-    }
-
-    #[test]
-    fn cards_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        let themes = directory.path().join("themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        // A user's own `Cards.toml` must not replace, or be replaced by, the
-        // compiled-in selector.
-        std::fs::write(
-            themes.join("Cards.toml"),
-            "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
-        )
-        .unwrap();
-        config.theme_paths.push(themes);
-
-        let names = available_themes(&config);
-        assert!(names.contains(&CARDS_THEME_NAME.to_owned()));
-        for selector in ["Cards", "cards", "CARDS", "Cards.toml"] {
-            let theme = load_named_theme(selector, &config)
-                .unwrap_or_else(|error| panic!("{selector}: {error}"));
-            assert!(!theme.is_compiled_default(), "{selector}");
-            assert_eq!(theme.metadata().name, "Cards", "{selector}");
-            assert!(matches!(theme.source(), ThemeSource::CompiledCards));
-            assert_eq!(theme.source_path(), None, "{selector}");
-        }
-        // The impostor file stays out of the file picker and out of reach.
-        assert!(
-            !selectable_file_themes(&config, TerminalBackground::Unknown)
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(CARDS_THEME_NAME))
-        );
-        assert!(is_reserved_theme_name("Cards"));
-        assert!(is_reserved_theme_name("cards"));
-
-        // Startup honours the selector and keeps its own background profile.
-        config.theme = Some(CARDS_THEME_NAME.to_owned());
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            let theme = load_theme_for_background(&config, background);
-            assert!(!theme.is_compiled_default(), "{background:?}");
-            assert_eq!(theme.background(), background);
-            assert_eq!(theme.metadata().name, "Cards");
-            // A compiled-in theme never creates a reload watcher.
-            assert!(theme.source_path().is_none(), "{background:?}");
-        }
-    }
-
-    #[test]
-    fn still_example_theme_is_valid_for_every_background_profile() {
-        // `examples/themes/Still.toml` is the source for the `Still` built-in.
-        // Every release build compiles it in, so a change to the example must
-        // never break schema validation, the bounded size limit, or any
-        // background profile it claims to support.
-        const STILL: &str = include_str!("../../../../examples/themes/Still.toml");
-        assert!(
-            STILL.len() as u64 <= MAX_THEME_BYTES,
-            "Still.toml exceeds MAX_THEME_BYTES"
-        );
-        // Only string values are schema-checked for control bytes; ordinary
-        // newlines and tabs in comments and whitespace are fine.
-        for line in STILL.lines() {
-            if line.trim_start().starts_with('#') {
-                assert!(
-                    !line.chars().any(|ch| ch.is_control() && ch != '\t'),
-                    "control byte in comment: {line:?}"
-                );
-                continue;
-            }
-            assert!(
-                !line.chars().any(char::is_control),
-                "control byte in {STILL}: {line:?}"
-            );
-        }
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            let theme = load_theme_source_for(
-                STILL,
-                "Still",
-                ThemeSource::CompiledStill,
-                "Still",
-                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                background,
-            )
-            .expect("Still example theme must compile for every background");
-            assert_eq!(theme.background(), background);
-            assert_eq!(theme.metadata().name, "Still");
-            assert!(!theme.is_compiled_default());
-            // Model-adaptive is the point of this theme: the prompt chevron,
-            // composer marker, and shimmer follow the active model family.
-            assert!(theme.uses_model_lab_color());
-            assert_eq!(
-                theme.resolve::<String>("model.use_lab_color").as_deref(),
-                Some("true")
-            );
-            // The startup splash follows the same rule, in the compact geometry
-            // the compiled default uses. The adaptive splash claims the whole
-            // mark, so Still must not also pin a `splash` colour.
-            assert_eq!(
-                theme.resolve::<String>("splash_model_adaptive").as_deref(),
-                Some("true")
-            );
-            assert_eq!(
-                theme.resolve::<String>("splash_compact").as_deref(),
-                Some("true")
-            );
-            assert_eq!(theme.resolve::<String>("splash"), None);
-            // Still uses one soft prompt band; activity and prose stay plain.
-            for kind in [
-                "assistant",
-                "reasoning",
-                "tool",
-                "notice",
-                "outcome",
-                "shell",
-                "compaction",
-            ] {
-                let surface = theme.surface_for_width(kind, 100);
-                assert_eq!(surface.chrome, ThemeSurfaceChrome::Plain, "{kind}");
-                assert_eq!(surface.padding, 0, "{kind}");
-            }
-            let prompt = theme.surface_for_width("user", 100);
-            assert_eq!(prompt.chrome, ThemeSurfaceChrome::Band);
-            assert_eq!(prompt.padding, 1);
-            assert_eq!(
-                theme.resolve::<String>("composer").as_deref(),
-                Some("shaded")
-            );
-            assert_eq!(theme.resolve::<u16>("content_max_width"), None);
-            assert_eq!(theme.resolve::<u16>("event_marker_gutter"), Some(3));
-            // A live model family overrides the quiet sage `model_accent`.
-            let mut adapted = theme;
-            apply_model_lab(&mut adapted, ModelLab::Anthropic);
-            assert_ne!(
-                adapted.resolve::<String>("model_accent").as_deref(),
-                Some("#6f9182"),
-                "model-adaptive Still must not keep its fixed fallback accent"
-            );
-        }
-    }
-
-    #[test]
-    fn still_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        let themes = directory.path().join("themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        // A user's own `Still.toml` must not replace, or be replaced by, the
-        // compiled-in selector.
-        std::fs::write(
-            themes.join("Still.toml"),
-            "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
-        )
-        .unwrap();
-        config.theme_paths.push(themes);
-
-        let names = available_themes(&config);
-        assert!(names.contains(&STILL_THEME_NAME.to_owned()));
-        for selector in ["Still", "still", "STILL", "Still.toml"] {
-            let theme = load_named_theme(selector, &config)
-                .unwrap_or_else(|error| panic!("{selector}: {error}"));
-            assert!(!theme.is_compiled_default(), "{selector}");
-            assert_eq!(theme.metadata().name, "Still", "{selector}");
-            assert!(matches!(theme.source(), ThemeSource::CompiledStill));
-            assert_eq!(theme.source_path(), None, "{selector}");
-        }
-        // The impostor file stays out of the file picker and out of reach.
-        assert!(
-            !selectable_file_themes(&config, TerminalBackground::Unknown)
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(STILL_THEME_NAME))
-        );
-        assert!(is_reserved_theme_name("Still"));
-        assert!(is_reserved_theme_name("still"));
-
-        // Startup honours the selector and keeps its own background profile.
-        config.theme = Some(STILL_THEME_NAME.to_owned());
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            let theme = load_theme_for_background(&config, background);
-            assert!(!theme.is_compiled_default(), "{background:?}");
-            assert_eq!(theme.background(), background);
-            assert_eq!(theme.metadata().name, "Still");
-            // A compiled-in theme never creates a reload watcher.
-            assert!(theme.source_path().is_none(), "{background:?}");
-        }
-    }
-
-    /// Every compiled-in file theme must reach `reload` through the same table
-    /// that resolves its selector, so a new built-in cannot compile on first
-    /// load and then silently fall back on reload.
-    #[test]
-    fn every_compiled_file_theme_reloads_from_its_own_embedded_source() {
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            for selector in compiled_file_theme_names() {
-                let theme = load_named_theme_for_background(
-                    selector,
-                    &config(std::env::temp_dir()),
-                    background,
-                )
-                .unwrap_or_else(|error| panic!("{selector}: {error}"));
-                assert!(!theme.is_compiled_default(), "{selector}");
-                let reloaded = theme
-                    .reload()
-                    .unwrap_or_else(|error| panic!("{selector} reload: {error}"));
-                assert_eq!(
-                    reloaded.metadata().name,
-                    theme.metadata().name,
-                    "{selector}"
-                );
-                assert_eq!(reloaded.source(), theme.source(), "{selector}");
-                assert_eq!(reloaded.background(), background, "{selector}");
-            }
-        }
-    }
-
-    #[test]
-    fn missing_and_legacy_names_keep_the_compiled_default_fallback() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = config(directory.path().to_owned());
-        let names = available_themes(&config);
-        assert!(names.contains(&DEFAULT_THEME_NAME.to_owned()));
-        assert!(load_named_theme(DEFAULT_THEME_NAME, &config).is_ok());
-        assert!(load_named_theme("default.toml", &config)
-            .unwrap()
-            .is_compiled_default());
-        for name in ["legacy-theme", "custom", "compact"] {
-            assert!(
-                load_named_theme(name, &config).is_err(),
-                "unexpected theme availability for {name}"
-            );
-        }
-
-        let custom_dir = directory.path().join("themes");
-        std::fs::create_dir_all(&custom_dir).unwrap();
-        std::fs::write(custom_dir.join("custom.toml"), "accent = '#123456'").unwrap();
-        let mut configured = config;
-        configured.theme_paths.push(custom_dir);
-        configured.theme = Some("custom".to_owned());
-        assert!(available_themes(&configured).contains(&"custom".to_owned()));
-        assert!(
-            !load_theme_for_background(&configured, TerminalBackground::Unknown)
-                .is_compiled_default()
-        );
-
-        for name in ["legacy-theme", "compact"] {
-            configured.theme = Some(name.to_owned());
-            for background in [
-                TerminalBackground::Unknown,
-                TerminalBackground::Dark,
-                TerminalBackground::Light,
-            ] {
-                let theme = load_theme_for_background(&configured, background);
-                assert!(theme.is_compiled_default());
-                assert_eq!(theme.background(), background);
-                assert!(theme.layout_for_width(80).show_footer);
-            }
-        }
-    }
-
-    #[test]
-    fn malformed_and_oversized_named_themes_fall_back_without_startup_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let themes = directory.path().join("themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        std::fs::write(themes.join("malformed.toml"), "[colors\naccent = '#123456'").unwrap();
-        std::fs::write(
-            themes.join("oversized.toml"),
-            vec![b' '; MAX_THEME_BYTES as usize + 1],
-        )
-        .unwrap();
-
-        let mut config = config(directory.path().to_owned());
-        config.theme_paths.push(themes);
-        for (name, expected_error) in [("malformed", ""), ("oversized", "too large")] {
-            config.theme = Some(name.to_owned());
-            let error = load_named_theme(name, &config).unwrap_err().to_string();
-            if !expected_error.is_empty() {
-                assert!(error.contains(expected_error), "{error}");
-            }
-            assert!(
-                load_theme_for_background(&config, TerminalBackground::Unknown)
-                    .is_compiled_default(),
-                "{name} must use the compiled fallback"
-            );
-        }
-    }
-
-    #[test]
-    fn theme_names_cannot_traverse_outside_discovered_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        let themes = directory.path().join("themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        std::fs::write(themes.join("safe.toml"), "accent = '#123456'").unwrap();
-        std::fs::write(directory.path().join("outside.toml"), "accent = '#654321'").unwrap();
-        let mut config = config(directory.path().to_owned());
-        config.theme_paths.push(themes);
-
-        assert!(theme_path("safe", &config).is_some());
-        for name in [
-            "../outside",
-            r"..\outside",
-            "/tmp/outside",
-            "safe/../safe",
-            "..",
-        ] {
-            assert!(
-                theme_path(name, &config).is_none(),
-                "accepted unsafe name {name:?}"
-            );
-            assert!(
-                load_named_theme(name, &config).is_err(),
-                "loaded unsafe name {name:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn untrusted_project_themes_are_not_selected() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        config.workspace_trusted = false;
-        let project = config.workspace.join(".octet/themes");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("untrusted-project.toml"), "accent = '#123456'").unwrap();
-
-        assert!(theme_path("untrusted-project", &config).is_none());
-        assert!(!available_themes(&config).contains(&"untrusted-project".to_owned()));
-        assert!(
-            !selectable_file_themes(&config, TerminalBackground::Unknown)
-                .iter()
-                .any(|(name, _)| name == "untrusted-project")
-        );
-        assert!(theme_discovery_diagnostics(&config)
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("workspace is not trusted") }));
-        config.theme = Some("untrusted-project".to_owned());
-        assert!(
-            load_theme_for_background(&config, TerminalBackground::Unknown).is_compiled_default()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_and_fifo_theme_candidates_are_not_selected() {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let themes = directory.path().join("themes");
-        std::fs::create_dir_all(&themes).unwrap();
-        let target = directory.path().join("target.toml");
-        std::fs::write(&target, "accent = '#123456'").unwrap();
-        symlink(&target, themes.join("linked.toml")).unwrap();
-
-        let fifo = themes.join("pipe.toml");
-        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
-
-        let mut config = config(directory.path().to_owned());
-        config.theme_paths.push(themes);
-        let names = available_themes(&config);
-        assert!(!names.contains(&"linked".to_owned()));
-        assert!(!names.contains(&"pipe".to_owned()));
-        assert!(
-            !selectable_file_themes(&config, TerminalBackground::Unknown)
-                .iter()
-                .any(|(name, _)| name == "linked" || name == "pipe")
-        );
-        assert!(theme_path("linked", &config).is_none());
-        assert!(theme_path("pipe", &config).is_none());
-        assert!(theme_discovery_diagnostics(&config)
-            .iter()
-            .any(|diagnostic| {
-                diagnostic.path.ends_with("linked.toml")
-                    && diagnostic
-                        .message
-                        .contains("candidate must not be a symlink")
-            }));
-    }
-
-    #[test]
-    fn compiled_default_keeps_baseline_layout_and_plain_surfaces() {
-        let theme = test_theme();
-        assert_eq!(theme.layout, ThemeLayout::default());
-        assert_eq!(theme.surfaces, default_surfaces());
-        assert_eq!(
-            theme.metadata.description,
-            "Terminal-neutral compiled theme"
-        );
-    }
-
-    #[test]
-    fn the_default_theme_opts_into_the_full_cell_prompt_wash() {
-        // The wash is a theme capability, not a compiled-theme special case, so
-        // the default theme declares it like every other theme would.
-        let theme = test_theme();
-        assert_eq!(
-            theme.resolve::<String>("prompt_wash").as_deref(),
-            Some("true")
-        );
-        assert!(theme.prompt_wash());
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            assert!(
-                test_theme_for(
-                    background,
-                    TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                )
-                .prompt_wash(),
-                "{background:?}"
-            );
-        }
-        // A file theme inherits the wash, and `prompt_wash = false` opts out.
-        let inherited = test_theme_from_source("[colors]\naccent = \"#456789\"");
-        assert!(inherited.prompt_wash());
-        let opted_out = test_theme_from_source("[colors]\nprompt_wash = false");
-        assert!(!opted_out.prompt_wash());
-    }
-
-    #[test]
-    fn resolver_selected_theme_paths_are_bounded_validated_and_reloadable() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("custom.toml");
-        std::fs::write(
-            &path,
-            r##"
-                [metadata]
-                name = "Custom"
-                [colors]
-                accent = "#456789"
-                [roles."extension.custom"]
-                foreground = "accent"
-                bold = true
-                [glyphs]
-                prompt = ":"
-            "##,
-        )
-        .unwrap();
-        let config = config(directory.path().to_owned());
-        let theme = load_theme_path_for(
-            &path,
-            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-            TerminalBackground::Unknown,
-        )
-        .unwrap();
-        assert_eq!(theme.metadata().name, "Custom");
-        assert_eq!(theme.source_path(), Some(path.as_path()));
-        assert_eq!(theme.glyph("prompt"), ":");
-        assert!(theme
-            .apply_semantic_role("extension.custom", "custom")
-            .contains("custom"));
-
-        std::fs::write(
-            &path,
-            "[metadata]\nname = 'Reloaded'\n[glyphs]\nprompt = '#'\n",
-        )
-        .unwrap();
-        let reloaded = theme.reload().unwrap();
-        assert_eq!(reloaded.metadata().name, "Reloaded");
-        assert_eq!(reloaded.glyph("prompt"), "#");
-
-        let oversized = directory.path().join("oversized.toml");
-        std::fs::write(&oversized, vec![b' '; MAX_THEME_BYTES as usize + 1]).unwrap();
-        let error = load_theme_path(&oversized, &config)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("too large"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_theme_reload_rejects_a_path_swapped_to_a_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("active.toml");
-        let replacement = directory.path().join("replacement.toml");
-        std::fs::write(&path, "[metadata]\nname = 'Initial'\n").unwrap();
-        std::fs::write(&replacement, "[metadata]\nname = 'Replacement'\n").unwrap();
-        let theme = load_theme_path_for(
-            &path,
-            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-            TerminalBackground::Unknown,
-        )
-        .unwrap();
-
-        std::fs::remove_file(&path).unwrap();
-        symlink(&replacement, &path).unwrap();
-        assert!(theme.reload().is_err());
-    }
-
-    #[test]
-    fn shipped_reference_theme_is_schema_valid_and_variant_aware() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes/octet-default.toml");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        assert!(
-            source.len() as u64 <= MAX_THEME_BYTES,
-            "reference theme exceeds the bounded file size"
-        );
-
-        let dark =
-            theme_schema::parse_theme(&source, "reference", TerminalBackground::Dark).unwrap();
-        let light =
-            theme_schema::parse_theme(&source, "reference", TerminalBackground::Light).unwrap();
-        assert_eq!(
-            dark.tokens.get("accent").map(String::as_str),
-            Some("#16876d")
-        );
-        assert_eq!(
-            dark.tokens.get("md_code_bg").map(String::as_str),
-            Some("#202630"),
-            "dark variant keeps the dark fenced-code surface"
-        );
-        assert_eq!(
-            light.tokens.get("md_code_bg").map(String::as_str),
-            Some("#f1f5f4"),
-            "light variant overrides the universal fenced-code surface"
-        );
-        assert!(dark.roles.contains_key("extension.example.badge"));
-        assert_eq!(
-            dark.glyphs.len(),
-            dark.ascii_glyphs.len(),
-            "every unicode glyph has an ASCII fallback"
-        );
-
-        // The file must compile through the real bounded loader, not just parse.
-        let compiled = load_resolved_theme_for(
-            &path,
-            &source,
-            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-            TerminalBackground::Dark,
-        )
-        .unwrap();
-        assert!(matches!(compiled.source(), ThemeSource::File(_)));
-        assert_eq!(compiled.metadata().name, "octet default reference");
-        assert_eq!(
-            compiled.resolve::<String>("md_code_bg").as_deref(),
-            Some("#202630")
-        );
-    }
-
-    #[test]
-    fn active_theme_reload_poll_applies_edits_and_retains_last_good() {
-        use crate::tui::theme_reload::{try_send_change, FileChangeEvent, FileChangeKind};
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("active.toml");
-        std::fs::write(
-            &path,
-            "[metadata]\nname = 'Initial'\n[colors]\naccent = '#111111'\n",
-        )
-        .unwrap();
-        let theme = load_theme_path_for(
-            &path,
-            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-            TerminalBackground::Dark,
-        )
-        .unwrap();
-
-        let (mut reload, sender) =
-            ThemeFileReload::new(&theme, ThemeReloadMode::Interactive, Duration::ZERO).unwrap();
-        assert!(
-            !reload.set_active_theme(&theme).unwrap(),
-            "same source is idempotent"
-        );
-        let watch = reload.watch_spec().expect("interactive file theme watches");
-        assert_eq!(watch.directory(), directory.path());
-        assert!(!watch.recursive());
-
-        let now = Instant::now();
-        // A busy boundary drains the event but never admits a reload.
-        assert!(try_send_change(
-            &sender,
-            FileChangeEvent::new(&path, FileChangeKind::Modify)
-        ));
-        assert!(reload.poll(now, ReloadBoundary::Busy).is_none());
-
-        // A real edit loads through OctetTheme::reload at the idle boundary.
-        std::fs::write(
-            &path,
-            "[metadata]\nname = 'Edited'\n[colors]\naccent = '#222222'\n",
-        )
-        .unwrap();
-        assert!(try_send_change(
-            &sender,
-            FileChangeEvent::new(&path, FileChangeKind::Modify)
-        ));
-        match reload.poll(now, ReloadBoundary::Idle).expect("applied") {
-            ReloadDecision::Applied(theme) => assert_eq!(theme.metadata().name, "Edited"),
-            other => panic!("expected an applied theme, got {other:?}"),
-        }
-
-        // An invalid edit retains the last-good theme instead of applying it.
-        std::fs::write(&path, "[metadata]\nname = 7\n").unwrap();
-        assert!(try_send_change(
-            &sender,
-            FileChangeEvent::new(&path, FileChangeKind::Modify)
-        ));
-        assert!(matches!(
-            reload.poll(now, ReloadBoundary::Idle),
-            Some(ReloadDecision::RetainedLastGood {
-                failure: ReloadFailureKind::Invalid
-            })
-        ));
-        assert_eq!(reload.last_good().metadata().name, "Edited");
-
-        // A removed source installs the compiled fallback.
-        std::fs::remove_file(&path).unwrap();
-        assert!(try_send_change(
-            &sender,
-            FileChangeEvent::new(&path, FileChangeKind::Remove)
-        ));
-        assert!(matches!(
-            reload.poll(now, ReloadBoundary::Idle),
-            Some(ReloadDecision::FellBackToCompiledDefault(_))
-        ));
-
-        // Non-interactive modes stay inert.
-        reload.set_mode(ThemeReloadMode::Print);
-        assert!(reload.watch_spec().is_none());
-        assert!(reload.poll(now, ReloadBoundary::Idle).is_none());
-    }
-
-    #[test]
-    fn published_semantic_role_vocabulary_is_closed_and_accepted() {
-        let mut seen = std::collections::BTreeSet::new();
-        for name in SEMANTIC_ROLE_VOCABULARY {
-            assert!(seen.insert(*name), "duplicate published role {name}");
-            assert!(
-                semantic_text_role(name).is_some(),
-                "published role {name} is not a mapped semantic role"
-            );
-            let source = format!("[roles.{name}]\nbold = true\n");
-            let parsed =
-                theme_schema::parse_theme(&source, "vocabulary", TerminalBackground::Unknown)
-                    .unwrap_or_else(|error| panic!("role {name}: {error}"));
-            assert!(parsed.roles.contains_key(*name));
-            let theme = load_theme_source_for(
-                &source,
-                "vocabulary",
-                ThemeSource::CompiledDefault,
-                "Vocabulary",
-                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                TerminalBackground::Unknown,
-            )
-            .unwrap_or_else(|error| panic!("role {name}: {error}"));
-            assert!(
-                theme.semantic_styles.contains_key(*name),
-                "role {name} was not retained as a semantic style"
-            );
-        }
-
-        // The extension-namespaced channel is open but still typed.
-        let extension = "[roles.\"extension.git.branch\"]\nforeground = \"accent\"\n";
-        let parsed =
-            theme_schema::parse_theme(extension, "extension", TerminalBackground::Unknown).unwrap();
-        assert!(parsed.roles.contains_key("extension.git.branch"));
-        assert!(theme_schema::parse_theme(
-            "[roles.\"private state\"]\nbold = true\n",
-            "bad-role",
-            TerminalBackground::Unknown,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn model_identity_prefers_creator_markers_over_compatible_endpoint() {
-        assert_eq!(
-            classify_model_identity("claude-sonnet-4-5", "claude-sonnet", "openai"),
-            ModelLab::Anthropic
-        );
-        assert_eq!(
-            classify_model_identity("qwen3-coder", "qwen3-coder", "openai-compatible"),
-            ModelLab::Alibaba
-        );
-        assert_eq!(
-            classify_model_identity("gpt-5.4", "gpt-5.4", "openai-codex"),
-            ModelLab::OpenAi
-        );
-        assert_eq!(
-            classify_model_identity("deepseek-v4-pro", "deepseek-v4-pro", "deepseek"),
-            ModelLab::DeepSeek
-        );
-        assert_eq!(
-            classify_model_identity("custom", "custom", "xai"),
-            ModelLab::XAi
-        );
-        assert_eq!(
-            classify_model_identity("custom", "custom", "meta"),
-            ModelLab::Meta
-        );
-    }
-
-    #[test]
-    fn source_colors_track_recognizable_lab_chart_colors() {
-        assert_eq!(ModelLab::OpenAi.source_color(), Some("#1f1f1f"));
-        assert_eq!(ModelLab::Anthropic.source_color(), Some("#cc785c"));
-        assert_eq!(ModelLab::Google.source_color(), Some("#34a853"));
-        assert_eq!(ModelLab::DeepSeek.source_color(), Some("#2243e6"));
-        assert_eq!(ModelLab::Mistral.source_color(), Some("#fd6f00"));
-    }
-
-    #[test]
-    fn diff_rows_use_standard_background_surfaces_and_normal_foregrounds() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
-        for (background, expected_add, expected_remove) in [
-            (TerminalBackground::Dark, "#10261e", "#2a171b"),
-            (TerminalBackground::Light, "#e8f6ee", "#fcebed"),
-        ] {
-            let theme = default_theme_for(background, capabilities);
-            assert_eq!(
-                theme.resolve::<String>("diff_added").as_deref(),
-                Some("default")
-            );
-            assert_eq!(
-                theme.resolve::<String>("diff_removed").as_deref(),
-                Some("default")
-            );
-            assert_eq!(
-                theme.resolve::<String>("diff_added_bg").as_deref(),
-                Some(expected_add)
-            );
-            assert_eq!(
-                theme.resolve::<String>("diff_removed_bg").as_deref(),
-                Some(expected_remove)
-            );
-        }
-
-        let unknown = default_theme_for(TerminalBackground::Unknown, capabilities);
-        assert_eq!(
-            unknown.resolve::<String>("diff_added_bg").as_deref(),
-            Some("default")
-        );
-        assert_eq!(
-            unknown.resolve::<String>("diff_removed_bg").as_deref(),
-            Some("default")
-        );
-    }
-
-    fn required_rgb_token(theme: &OctetTheme, token: &str) -> Rgb {
-        let value = theme
-            .resolve::<String>(token)
-            .unwrap_or_else(|| panic!("missing token {token}"));
-        parse_hex_color(&value).unwrap_or_else(|| panic!("{token} was not RGB: {value}"))
-    }
-
-    #[test]
-    fn standard_syntax_palette_contrasts_with_diff_surfaces() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
-        let syntax_tokens = STANDARD_SYNTAX_COLORS
-            .iter()
-            .map(|(token, _, _)| *token)
-            .chain(["diff_added_marker", "diff_removed_marker"]);
-
-        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = default_theme_for(background, capabilities);
-            for surface in ["diff_added_bg", "diff_removed_bg"] {
-                let surface_color = required_rgb_token(&theme, surface);
-                for token in syntax_tokens.clone() {
-                    let foreground = required_rgb_token(&theme, token);
-                    assert!(
-                        contrast(foreground, surface_color) >= 4.5,
-                        "{:?} {:?} {token} on {surface}",
-                        theme.source(),
-                        background
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn ansi256_diff_surfaces_preserve_syntax_contrast_and_distinction() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi256);
-        for background in [TerminalBackground::Dark, TerminalBackground::Light] {
-            let theme = default_theme_for(background, capabilities);
-            let quantized = |token| ansi256_rgb(nearest_ansi256(required_rgb_token(&theme, token)));
-            for added in [
-                required_rgb_token(&theme, "diff_added_marker"),
-                quantized("diff_added_marker"),
-            ] {
-                assert!(
-                    added.green > added.red && added.green > added.blue,
-                    "{background:?}: added marker must remain green: {added:?}"
-                );
-            }
-            // Subtle surfaces may quantize together; signed markers retain distinction.
-            assert_ne!(
-                quantized("diff_added_marker"),
-                quantized("diff_removed_marker")
-            );
-            for surface in ["diff_added_bg", "diff_removed_bg"] {
-                for token in STANDARD_SYNTAX_COLORS
-                    .iter()
-                    .map(|(token, _, _)| *token)
-                    .chain(["diff_added_marker", "diff_removed_marker"])
-                {
-                    assert!(
-                        contrast(quantized(token), quantized(surface)) >= 4.5,
-                        "{background:?}: {token} on {surface}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unknown_background_uses_no_fixed_diff_surfaces_and_universal_syntax() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
-        let theme = default_theme_for(TerminalBackground::Unknown, capabilities);
-        let black = Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
-        };
-        let white = Rgb {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-
-        for surface in ["diff_added_bg", "diff_removed_bg"] {
-            assert_eq!(theme.resolve::<String>(surface).as_deref(), Some("default"));
-        }
-        for token in STANDARD_SYNTAX_COLORS
-            .iter()
-            .map(|(token, _, _)| *token)
-            .chain(["diff_added_marker", "diff_removed_marker"])
-        {
-            let foreground = required_rgb_token(&theme, token);
-            assert!(contrast(foreground, black) >= 4.5, "{token} on black");
-            assert!(contrast(foreground, white) >= 4.5, "{token} on white");
-        }
-    }
-
-    #[test]
-    fn composer_idle_border_moves_toward_the_terminal_background() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
-        let accent = (96, 80, 64);
-        let dark = default_theme_for(TerminalBackground::Dark, capabilities);
-        let light = default_theme_for(TerminalBackground::Light, capabilities);
-        let unknown = default_theme_for(TerminalBackground::Unknown, capabilities);
-
-        assert_eq!(dark.composer_idle_rgb(accent), (12, 10, 8));
-        assert_eq!(light.composer_idle_rgb(accent), (236, 234, 232));
-        assert_eq!(unknown.composer_idle_rgb(accent), (124, 122, 120));
-    }
-
-    #[test]
-    fn terminal_theme_choices_are_builtin_and_override_detection() {
-        assert_eq!(
-            TerminalThemeChoice::all()
-                .into_iter()
-                .map(TerminalThemeChoice::label)
-                .collect::<Vec<_>>(),
-            vec!["Auto (recommended)", "Light terminal", "Dark terminal"]
-        );
-        assert_eq!(
-            TerminalThemeChoice::parse("LIGHT"),
-            Some(TerminalThemeChoice::Light)
-        );
-        assert_eq!(TerminalThemeChoice::parse("custom"), None);
-        assert_eq!(TerminalThemeChoice::parse("compact"), None);
-
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = config(directory.path().to_owned());
-        config.theme = Some("dark".to_owned());
-        assert_eq!(
-            load_theme_for_background(&config, TerminalBackground::Light).background,
-            TerminalBackground::Dark
-        );
-        config.theme = Some("light".to_owned());
-        assert_eq!(
-            load_theme_for_background(&config, TerminalBackground::Dark).background,
-            TerminalBackground::Light
-        );
-        config.theme = Some("auto".to_owned());
-        assert_eq!(
-            load_theme_for_background(&config, TerminalBackground::Unknown).background,
-            TerminalBackground::Unknown
-        );
-    }
-
-    #[test]
-    fn openai_idle_border_does_not_quantize_to_black_on_light_profiles() {
-        for color in [
-            ColorDepth::Ansi16,
-            ColorDepth::Ansi256,
-            ColorDepth::TrueColor,
-        ] {
-            let capabilities = TerminalCapabilities::test(true, true, color);
-            let mut theme = default_theme_for(TerminalBackground::Light, capabilities);
-            apply_model_lab_for(&mut theme, ModelLab::OpenAi, TerminalBackground::Light);
-            let accent = theme.role_rgb("model_accent").expect("model accent");
-            let idle = theme.composer_idle_rgb(accent);
-            assert!(idle.0 > accent.0 && idle.1 > accent.1 && idle.2 > accent.2);
-
-            let rendered = theme.rgb_fg(idle, "─");
-            assert!(!rendered.contains("\x1b[30m"), "{color:?}: {rendered:?}");
-            assert!(!rendered.contains("38;5;0m"), "{color:?}: {rendered:?}");
-        }
-    }
-
-    #[test]
-    fn active_lab_populates_the_dedicated_model_token() {
-        let mut theme = test_theme();
-        apply_model_lab_for(&mut theme, ModelLab::OpenAi, TerminalBackground::Unknown);
-        assert_eq!(
-            theme.resolve::<String>("model_accent").as_deref(),
-            Some("#767676")
-        );
-        apply_model_lab_for(&mut theme, ModelLab::Anthropic, TerminalBackground::Unknown);
-        assert_eq!(
-            theme.resolve::<String>("model_accent").as_deref(),
-            Some("#a9634c")
-        );
-        assert_eq!(
-            theme.resolve::<String>("model_assistant").as_deref(),
-            Some("default")
-        );
-    }
-
-    #[test]
-    fn rich_text_roles_are_semantic_not_model_accent() {
-        let mut theme = test_theme();
-        apply_model_lab_for(&mut theme, ModelLab::Anthropic, TerminalBackground::Unknown);
-        let renderer = theme.rich_renderer();
-        let accent = sexy_tui_rs::Color::Rgb(169, 99, 76);
-        // Semantic roles in the rich renderer use their own colour tokens,
-        // NOT the model accent. Only octet's structural chrome uses model colors.
-        for role in [
-            TextRole::Heading,
-            TextRole::ListMarker,
-            TextRole::InlineCode,
-            TextRole::Border,
-            TextRole::Code,
-            TextRole::Link,
-            TextRole::Emphasis,
-            TextRole::Strong,
-        ] {
-            assert_ne!(
-                renderer.theme().style(role).foreground,
-                accent,
-                "{role:?} must not use the model accent"
-            );
-        }
-    }
-
-    #[test]
-    fn named_theme_roles_survive_without_model_palette_opt_in() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi16);
-        let mut theme = OctetTheme::new(
-            SexyTheme::load(None, CapabilityTier::Baseline),
-            capabilities,
-            TerminalBackground::Unknown,
-        );
-        theme.override_token("accent", "#005f5f");
-        theme.override_token("assistant_msg_text", "#7a3e65");
-        apply_model_lab_for(&mut theme, ModelLab::Anthropic, TerminalBackground::Unknown);
-        assert_eq!(
-            theme.resolve::<String>("model_accent"),
-            Some(balance_foreground("#005f5f", TerminalBackground::Unknown))
-        );
-        assert_eq!(
-            theme.resolve::<String>("model_assistant"),
-            Some(balance_foreground("#7a3e65", TerminalBackground::Unknown))
-        );
-    }
-
-    #[test]
-    fn balanced_lab_colors_have_terminal_safe_contrast() {
-        let labs = [
-            ModelLab::OpenAi,
-            ModelLab::Anthropic,
-            ModelLab::Google,
-            ModelLab::XAi,
-            ModelLab::Meta,
-            ModelLab::Mistral,
-            ModelLab::DeepSeek,
-            ModelLab::Alibaba,
-            ModelLab::MiniMax,
-            ModelLab::Kimi,
-            ModelLab::ZAi,
-            ModelLab::Nvidia,
-            ModelLab::Xiaomi,
-            ModelLab::Cohere,
-            ModelLab::Amazon,
-            ModelLab::Microsoft,
-            ModelLab::Ai21,
-            ModelLab::ByteDance,
-            ModelLab::Perplexity,
-            ModelLab::Ibm,
-            ModelLab::Baidu,
-            ModelLab::Tencent,
-            ModelLab::AllenAi,
-        ];
-        let black = Rgb {
-            red: 0,
-            green: 0,
-            blue: 0,
-        };
-        let white = Rgb {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let dark = Rgb {
-            red: 18,
-            green: 20,
-            blue: 22,
-        };
-        let light = Rgb {
-            red: 250,
-            green: 250,
-            blue: 250,
-        };
-
-        for lab in labs {
-            let source = lab.source_color().unwrap();
-            let universal =
-                parse_hex_color(&balance_foreground(source, TerminalBackground::Unknown)).unwrap();
-            assert!(contrast(universal, black) >= 4.5, "{lab:?} on black");
-            assert!(contrast(universal, white) >= 4.5, "{lab:?} on white");
-
-            let dark_color =
-                parse_hex_color(&balance_foreground(source, TerminalBackground::Dark)).unwrap();
-            assert!(contrast(dark_color, dark) >= 5.5, "{lab:?} on dark");
-            assert!(
-                contrast(ansi256_rgb(nearest_ansi256(dark_color)), dark) >= 4.5,
-                "{lab:?} quantized on dark: {dark_color:?} -> {:?}",
-                ansi256_rgb(nearest_ansi256(dark_color))
-            );
-
-            let light_color =
-                parse_hex_color(&balance_foreground(source, TerminalBackground::Light)).unwrap();
-            assert!(contrast(light_color, light) >= 5.5, "{lab:?} on light");
-            assert!(
-                contrast(ansi256_rgb(nearest_ansi256(light_color)), light) >= 4.5,
-                "{lab:?} quantized on light"
-            );
-        }
-    }
-
-    #[test]
-    fn ansi256_semantic_surfaces_and_model_accents_use_fixed_palette() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi256);
-        for background in [
-            TerminalBackground::Dark,
-            TerminalBackground::Light,
-            TerminalBackground::Unknown,
-        ] {
-            let mut theme = default_theme_for(background, capabilities);
-            for lab in [
-                ModelLab::OpenAi,
-                ModelLab::Anthropic,
-                ModelLab::Google,
-                ModelLab::Alibaba,
-                ModelLab::Kimi,
-            ] {
-                apply_model_lab_for(&mut theme, lab, background);
-                let mut samples = theme
-                    .semantic_styles
-                    .keys()
-                    .map(|role| theme.fg(role, "sample"))
-                    .collect::<Vec<_>>();
-                samples.push(theme.model_fg(Some(lab), "sample"));
-                samples.push(theme.prompt_color_cell(lab.source_color(), "sample"));
-                for (color, _) in ANSI16 {
-                    // These exact RGBs selected theme-owned slots before #382.
-                    samples.push(theme.color_text(color, "sample"));
-                }
-                for sample in samples {
-                    assert_eq!(sexy_tui_rs::strip_terminal_sequences(&sample), "sample");
-                    assert!(
-                        !sample.contains("38;2;") && !sample.contains("48;2;"),
-                        "{sample:?}"
-                    );
-                    for escape in sample.split("\x1b[").skip(1) {
-                        let Some((sgr, _)) = escape.split_once('m') else {
-                            continue;
-                        };
-                        let codes = sgr.split(';').collect::<Vec<_>>();
-                        for triple in codes.windows(3) {
-                            if matches!(triple[0], "38" | "48") && triple[1] == "5" {
-                                let index: u8 = triple[2].parse().unwrap();
-                                assert!(index >= 16, "{background:?}/{lab:?}: {sample:?}");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn styling_degrades_without_changing_text() {
-        let plain = test_theme_with(TerminalCapabilities::test(false, false, ColorDepth::None));
-        assert_eq!(plain.fg("model_accent", "octet"), "octet");
-        assert_eq!(plain.bold("octet"), "octet");
-        assert_eq!(plain.dim("octet"), "octet");
-
-        let ansi16 = test_theme_with(TerminalCapabilities::test(true, true, ColorDepth::Ansi16));
-        let styled = ansi16.fg("model_accent", "octet");
-        assert!(styled.starts_with("\x1b["));
-        let dimmed = ansi16.dim("octet");
-        assert_ne!(dimmed, "octet");
-        assert!(!dimmed.contains("\x1b[2m"));
-        assert!(!styled.contains("38;2;"));
-        assert!(!styled.contains("38;5;"));
-
-        let ansi256 = test_theme_with(TerminalCapabilities::test(true, true, ColorDepth::Ansi256));
-        assert!(ansi256.fg("model_accent", "octet").contains("38;5;"));
-
-        let truecolor = test_theme_with(TerminalCapabilities::test(
-            true,
-            true,
-            ColorDepth::TrueColor,
-        ));
-        assert!(truecolor.fg("model_accent", "octet").contains("38;2;"));
-    }
-
-    #[test]
-    fn prompt_colors_follow_the_lab_palette_instead_of_exact_model_aliases() {
-        let openai = prompt_color_for_lab(ModelLab::OpenAi);
-        assert_eq!(openai, prompt_color_for_model_id(" GPT-5.6 "));
-        assert_eq!(openai, prompt_color_for_model_id("gpt-5.6-sol"));
-        assert_eq!(openai, prompt_color_for_model_id("openai/codex-mini"));
-
-        let deepseek = prompt_color_for_lab(ModelLab::DeepSeek);
-        assert_eq!(
-            deepseek,
-            prompt_color_for_model_id("opencode/deepseek-v4-flash-free")
-        );
-        assert_eq!(deepseek, prompt_color_for_model_id("deepseek-v4-pro"));
-        assert_ne!(openai, deepseek);
-
-        for color in [openai, deepseek] {
-            assert_eq!(color.len(), 7);
-            assert!(color.starts_with('#'));
-            assert!(color[1..].bytes().all(|byte| byte.is_ascii_hexdigit()));
-        }
-    }
-
-    #[test]
-    fn every_recognized_model_family_uses_its_lab_prompt_color() {
-        for (model_id, lab) in [
-            ("gpt-5.6-terra", ModelLab::OpenAi),
-            ("claude-opus-4.5", ModelLab::Anthropic),
-            ("gemini-3-pro", ModelLab::Google),
-            ("grok-4", ModelLab::XAi),
-            ("llama-4", ModelLab::Meta),
-            ("mistral-large", ModelLab::Mistral),
-            ("deepseek-v4", ModelLab::DeepSeek),
-            ("qwen3-coder", ModelLab::Alibaba),
-            ("minimax-m2", ModelLab::MiniMax),
-            ("kimi-k2", ModelLab::Kimi),
-            ("glm-5", ModelLab::ZAi),
-            ("nemotron-4", ModelLab::Nvidia),
-            ("mimo-v2", ModelLab::Xiaomi),
-            ("command-r-plus", ModelLab::Cohere),
-            ("nova-pro", ModelLab::Amazon),
-            ("phi-4", ModelLab::Microsoft),
-            ("jamba-large", ModelLab::Ai21),
-            ("doubao-pro", ModelLab::ByteDance),
-            ("sonar-pro", ModelLab::Perplexity),
-            ("granite-4", ModelLab::Ibm),
-            ("ernie-5", ModelLab::Baidu),
-            ("hunyuan-t1", ModelLab::Tencent),
-            ("olmo-3", ModelLab::AllenAi),
-        ] {
-            assert_eq!(
-                prompt_color_for_model_id(model_id),
-                prompt_color_for_lab(lab),
-                "{model_id} did not use the {lab:?} prompt color"
-            );
-        }
-    }
-
-    #[test]
-    fn settled_event_dots_keep_full_strength_signal_colors() {
-        let theme = test_theme_with(TerminalCapabilities::test(
-            true,
-            true,
-            ColorDepth::TrueColor,
-        ));
-
-        let success = theme.settled_event_dot("success", "•");
-        let error = theme.settled_event_dot("error", "•");
-        assert!(success.contains("\x1b[38;2;82;200;116m"), "{success:?}");
-        assert!(error.contains("\x1b[38;2;230;83;83m"), "{error:?}");
-    }
-
-    #[test]
-    fn exact_prompt_marker_degrades_without_painting_or_emitting_unsafe_data() {
-        let plain = test_theme_with(TerminalCapabilities::test(false, false, ColorDepth::None));
-        assert_eq!(plain.prompt_color_marker(Some("#123456"), "> "), "> ");
-
-        let ansi16 = test_theme_with(TerminalCapabilities::test(true, true, ColorDepth::Ansi16));
-        let rendered = ansi16.prompt_color_marker(Some("#123456"), "> ");
-        assert!(rendered.contains("> "));
-        assert!(rendered.contains("\x1b["));
-        assert!(!rendered.contains("48;"));
-
-        let ansi256 = test_theme_with(TerminalCapabilities::test(true, true, ColorDepth::Ansi256));
-        let rendered = ansi256.prompt_color_marker(Some("#123456"), "> ");
-        assert!(rendered.contains("38;5;"), "{rendered:?}");
-        assert!(!rendered.contains("48;"));
-
-        let truecolor = test_theme_with(TerminalCapabilities::test(
-            true,
-            true,
-            ColorDepth::TrueColor,
-        ));
-        let rendered = truecolor.prompt_color_marker(Some("#123456"), "> ");
-        assert!(rendered.contains("38;2;"), "{rendered:?}");
-        assert!(!rendered.contains("48;"));
-        assert_eq!(
-            truecolor.prompt_color_marker(Some("#12\u{1b}3456"), "> "),
-            "> "
-        );
-    }
-
-    #[test]
-    fn ansi16_light_and_dark_balancing_never_paints_a_background() {
-        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::Ansi16);
-        for background in [TerminalBackground::Light, TerminalBackground::Dark] {
-            let mut theme = default_theme_for(background, capabilities);
-            apply_model_lab_for(&mut theme, ModelLab::Anthropic, background);
-            let rendered = theme.fg("model_accent", "model");
-            assert!(rendered.contains("model"));
-            assert!(!rendered.contains("48;"));
-        }
-    }
-
-    #[test]
-    fn colorfgbg_explicit_override_and_osc_rgb_detect_backgrounds() {
-        assert_eq!(
-            background_from_colorfgbg("15;0"),
-            Some(TerminalBackground::Dark)
-        );
-        assert_eq!(
-            background_from_colorfgbg("0;15"),
-            Some(TerminalBackground::Light)
-        );
-        assert_eq!(
-            background_from_override("universal"),
-            Some(TerminalBackground::Unknown)
-        );
-        assert_eq!(
-            background_from_terminal_rgb(12, 18, 24),
-            TerminalBackground::Dark
-        );
-        assert_eq!(
-            background_from_terminal_rgb(240, 240, 240),
-            TerminalBackground::Light
-        );
-    }
-}
+mod tests;

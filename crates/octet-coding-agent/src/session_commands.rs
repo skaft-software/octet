@@ -18,11 +18,20 @@ use crate::session_store::{
 };
 use crate::session_tree::render_session_tree;
 
+mod import;
+mod pi;
+mod share;
+mod strict_json;
+pub(crate) use import::{import_session, SessionImportReport};
+pub(crate) use share::{prepare_share, publish_share, PreparedShare};
+
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum ExportFormat {
     #[default]
     Json,
     Html,
+    /// Octet durable JSONL: whole graph and head, not Pi's branch-only format.
+    Jsonl,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -52,7 +61,7 @@ pub enum SessionCommand {
         id: String,
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Portable JSON (default) or a script-free, self-contained HTML view.
+        /// Portable JSON (default), native whole-graph JSONL, or script-free HTML.
         #[arg(long, value_enum, default_value = "json")]
         format: ExportFormat,
         /// Include raw export-eligible values. Private extension metadata stays excluded.
@@ -62,6 +71,15 @@ pub enum SessionCommand {
         /// Replace an existing export path.
         #[arg(long)]
         force: bool,
+    },
+    /// Import a portable Octet package or Pi v3 JSONL as a NEW session.
+    Import { path: PathBuf },
+    /// Prepare a redacted snapshot and confirm publishing an unlisted GitHub gist.
+    Share {
+        id: String,
+        /// Explicitly approve publication: anyone with the link can read it.
+        #[arg(long)]
+        yes: bool,
     },
     /// Move a session into the store's recoverable trash directory.
     Delete { id: String },
@@ -86,6 +104,27 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
         SessionCommand::Export {
             id,
             output,
+            format: ExportFormat::Jsonl,
+            include_secrets,
+            force,
+        } => {
+            let report = export_jsonl(
+                &store,
+                &id,
+                output,
+                &config.invocation_cwd,
+                include_secrets,
+                force,
+            )?;
+            crate::output::stdout_line(format!(
+                "Exported Octet JSONL to {} (not Pi JSONL).",
+                report.destination.display()
+            ));
+            Ok(())
+        }
+        SessionCommand::Export {
+            id,
+            output,
             format,
             include_secrets,
             force,
@@ -99,6 +138,22 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
             matches!(format, ExportFormat::Html)
                 .then_some(config.theme.as_deref().unwrap_or("dark")),
         ),
+        SessionCommand::Import { path } => {
+            let report: SessionImportReport =
+                import_session(&store, &path, &config.invocation_cwd)?;
+            crate::output::stdout_line(format!(
+                "Imported NEW session {} from {} to {}. Resume with `octet --resume {}`.",
+                report.id,
+                report.source_format,
+                report.destination.display(),
+                report.id
+            ));
+            for warning in report.warnings {
+                crate::output::stdout_line(format!("Warning: {warning}"));
+            }
+            Ok(())
+        }
+        SessionCommand::Share { id, yes } => share::share_cli(&store, &id, yes),
         SessionCommand::Delete { id } => delete(&store, &id),
         SessionCommand::Repair { id } => repair(&store, &id),
         SessionCommand::Accounting => accounting(&store),
@@ -340,6 +395,7 @@ pub(crate) struct SessionExportReport {
     pub ignored_torn_tail: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn export_portable(
     store: &SessionStore,
     id: &str,
@@ -351,7 +407,7 @@ pub(crate) fn export_portable(
     export_with_format(store, id, output, cwd, include_secrets, force, None)
 }
 
-fn export_with_format(
+pub(crate) fn export_with_format(
     store: &SessionStore,
     id: &str,
     output: Option<PathBuf>,
@@ -360,26 +416,76 @@ fn export_with_format(
     force: bool,
     html_theme: Option<&str>,
 ) -> anyhow::Result<SessionExportReport> {
+    let (package, redaction_count, ignored_torn_tail) =
+        build_export_package(store, id, include_secrets)?;
+    let destination = output.unwrap_or_else(|| {
+        PathBuf::from(if html_theme.is_some() {
+            format!("{id}.html")
+        } else {
+            format!("{id}.octet-session.json")
+        })
+    });
+    let destination = if destination.is_absolute() {
+        destination
+    } else {
+        cwd.join(destination)
+    };
+    let payload = match html_theme {
+        Some(theme) => crate::modes::export_html::render(&package, theme)?,
+        None => serde_json::to_vec_pretty(&package)?,
+    };
+    write_export(&destination, &payload, force)?;
+    Ok(SessionExportReport {
+        destination,
+        redaction_count,
+        included_secrets: include_secrets,
+        ignored_torn_tail,
+    })
+}
+
+fn build_export_package(
+    store: &SessionStore,
+    id: &str,
+    include_secrets: bool,
+) -> anyhow::Result<(Value, usize, bool)> {
     let path = store.path_by_id(id)?;
-    Session::open_read_only(&path)
-        .map_err(|error| anyhow::anyhow!("refusing to export corrupt session {id:?}: {error}"))?;
     let opened_path = crate::session_store::absolute_read_path(&path)?;
     let bytes =
         octet_agent::secure_fs::read_regular_file_bounded(&opened_path, MAX_SESSION_FILE_BYTES)?;
     let (mut records, ignored_torn_tail) = parse_export_records(&bytes)?;
+    import::validate_records(&records)?;
+    // Replay the exact captured bytes: independently reopening the live source
+    // can validate one generation and export a different, unvalidated generation.
+    let snapshot = tempfile::Builder::new()
+        .prefix("octet-export-validate-")
+        .tempdir()?;
+    let snapshot_path = snapshot.path().canonicalize()?.join("source.jsonl");
+    let captured = import::encode_jsonl(&records)?;
+    octet_agent::secure_fs::write_private_atomic_if_unchanged(
+        &snapshot_path,
+        None,
+        &captured,
+        MAX_SESSION_FILE_BYTES,
+    )?;
+    let session = Session::open_read_only(&snapshot_path)
+        .map_err(|_| anyhow::anyhow!("refusing to export corrupt session {id:?}"))?;
+    session.context()?;
+    records.retain(|r| !matches!(r["type"].as_str(), Some("tool_invocation" | "deferred_run")));
     project_export_visibility(&mut records);
     let mut redaction_count = 0usize;
-    let meta = store
-        .list()
-        .into_iter()
-        .find(|candidate| candidate.id == id)
-        .ok_or_else(|| anyhow::anyhow!("session {id:?} has no resumable conversation"))?;
+    if !session
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, octet_agent::EntryValue::Message(_)))
+    {
+        anyhow::bail!("session has no resumable conversation");
+    }
     let package = PortableSessionExport {
         format: "octet-session-export",
         version: 1,
         exported_at_unix_seconds: unix_seconds(SystemTime::now()),
         source_id: id.to_owned(),
-        source_title: meta.title,
+        source_title: active_branch_title(&session),
         metadata: store.load_metadata(id)?,
         redacted: !include_secrets,
         redaction_count: 0,
@@ -393,29 +499,51 @@ fn export_with_format(
         redact_value(&mut package, None, &mut redaction_count)?;
     }
     package["redaction_count"] = Value::from(redaction_count);
-    let destination = output.unwrap_or_else(|| {
-        PathBuf::from(if html_theme.is_some() {
-            format!("{id}.html")
-        } else {
-            format!("{id}.octet-session.json")
-        })
-    });
-    let destination = if destination.is_absolute() {
-        destination
-    } else {
-        cwd.join(destination)
-    };
+    Ok((package, redaction_count, ignored_torn_tail))
+}
+
+fn write_export(destination: &Path, payload: &[u8], force: bool) -> anyhow::Result<()> {
     if destination.exists() && !force {
         anyhow::bail!(
             "export destination {} already exists; pass --force to replace it",
             destination.display()
         );
     }
-    let payload = match html_theme {
-        Some(theme) => crate::modes::export_html::render(&package, theme)?,
-        None => serde_json::to_vec_pretty(&package)?,
+    if force {
+        crate::auth::write_private_atomic(destination, payload, ".session-export-")?;
+    } else {
+        let destination = crate::session_store::absolute_read_path(destination)?;
+        octet_agent::secure_fs::write_private_atomic_if_unchanged(
+            &destination,
+            None,
+            payload,
+            MAX_SESSION_FILE_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn export_jsonl(
+    store: &SessionStore,
+    id: &str,
+    output: Option<PathBuf>,
+    cwd: &Path,
+    include_secrets: bool,
+    force: bool,
+) -> anyhow::Result<SessionExportReport> {
+    let (package, redaction_count, ignored_torn_tail) =
+        build_export_package(store, id, include_secrets)?;
+    let records = package["records"]
+        .as_array()
+        .expect("export records are an array");
+    let payload = import::encode_jsonl(records)?;
+    let destination = output.unwrap_or_else(|| PathBuf::from(format!("{id}.octet-session.jsonl")));
+    let destination = if destination.is_absolute() {
+        destination
+    } else {
+        cwd.join(destination)
     };
-    crate::auth::write_private_atomic(&destination, &payload, ".session-export-")?;
+    write_export(&destination, &payload, force)?;
     Ok(SessionExportReport {
         destination,
         redaction_count,
@@ -465,6 +593,7 @@ fn project_export_visibility(records: &mut [Value]) {
         let Some(metadata) = record.get_mut("metadata").and_then(Value::as_object_mut) else {
             continue;
         };
+        metadata.remove("tool_composition");
         if let Some(extensions) = metadata
             .get_mut("extension_metadata")
             .and_then(Value::as_object_mut)
@@ -500,9 +629,15 @@ fn parse_export_records(bytes: &[u8]) -> anyhow::Result<(Vec<Value>, bool)> {
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_str(line) {
+        match strict_json::parse(line.as_bytes()) {
             Ok(record) => records.push(record),
-            Err(_) if is_last && !segment.ends_with('\n') => ignored_torn_tail = true,
+            Err(_)
+                if is_last
+                    && !segment.ends_with('\n')
+                    && serde_json::from_str::<Value>(line).is_err() =>
+            {
+                ignored_torn_tail = true
+            }
             Err(error) => return Err(anyhow::anyhow!("invalid JSONL record: {error}")),
         }
     }
@@ -1029,6 +1164,7 @@ mod tests {
         let mut records = vec![
             serde_json::json!({"type": "entry", "metadata": {
                 "display_text": "keep host field",
+                "tool_composition": {"kind":"store","tool":"codemode","set":{"private":"not exported"},"delete":[]},
                 "extension_metadata": {"public": public.clone(), "private": {"public": false, "value": "hidden"}, "default": {"value": "also hidden"}}
             }, "value": ordinary.clone()}),
             serde_json::json!({"type": "entry", "metadata": {"extension_metadata": {"private": {"value": "hidden"}}}}),
@@ -1039,6 +1175,7 @@ mod tests {
             records[0]["metadata"]["extension_metadata"],
             serde_json::json!({"public": public})
         );
+        assert!(records[0]["metadata"].get("tool_composition").is_none());
         assert_eq!(records[0]["metadata"]["display_text"], "keep host field");
         assert_eq!(records[0]["value"], ordinary);
         assert!(records[1]["metadata"].get("extension_metadata").is_none());
@@ -1348,7 +1485,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.destination, destination);
-        assert_eq!(report.redaction_count, 1);
+        // The derived source title is redacted independently of the message.
+        assert_eq!(report.redaction_count, 2);
         assert!(!report.included_secrets);
         let export: Value =
             serde_json::from_slice(&std::fs::read(&report.destination).unwrap()).unwrap();

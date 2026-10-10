@@ -6,6 +6,7 @@
 //! selection/event loops and model/session/extension/subagent flows remain with
 //! the view and picker owners.
 
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use sexy_tui_rs::{visible_width, TextEditAction, TextEditor, TextEditorProjection, CURSOR_MARKER};
@@ -702,7 +703,10 @@ fn footer_workspace(
                 if relative.as_os_str().is_empty() {
                     "~".to_owned()
                 } else {
-                    format!("~/{}", relative.display())
+                    let relative = relative.display().to_string();
+                    #[cfg(windows)]
+                    let relative = relative.replace('\\', "/");
+                    format!("~/{relative}")
                 }
             },
         );
@@ -954,7 +958,12 @@ fn render_status_footer_with_gap(
     // left-hand metadata. Keep the same two-cell right inset as the composer.
     let cwd = if !left_text.is_empty() && theme_layout.show_footer && !theme_layout.show_header {
         state.workspace.as_deref().map_or_else(String::new, |path| {
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            // Workspace roots are canonicalized by the CLI. Resolve the same
+            // spelling for the platform home (including Windows verbatim paths
+            // and Unix symlinks), once rather than doing I/O on every frame.
+            static HOME: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+            let home = HOME
+                .get_or_init(|| dirs::home_dir().map(|home| home.canonicalize().unwrap_or(home)));
             footer_workspace(
                 path,
                 home.as_deref(),
@@ -988,6 +997,11 @@ fn render_status_footer_with_gap(
 }
 
 pub(crate) fn status_footer_visible(state: &super::view::ShellState, width: u16) -> bool {
+    // Pi setFooter replaces the stock footer rather than stacking another one.
+    // Retirement clears the contribution, restoring ordinary status chrome.
+    if state.extension_footer_replaces_status() {
+        return false;
+    }
     let layout = state.theme.layout_for_width(width);
     let has_identity = layout.show_footer && !layout.show_header;
     (has_identity || layout.show_status_line)
@@ -1359,6 +1373,66 @@ mod tests {
     }
 
     #[test]
+    fn default_footer_masks_the_platform_home_directory() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+
+        // The CLI canonicalizes workspace roots. On Windows this also adds the
+        // verbatim prefix, unlike USERPROFILE or Git Bash's POSIX-style HOME.
+        let home = dirs::home_dir().expect("platform home directory");
+        let home = home.canonicalize().expect("canonical home directory");
+        for unicode in [true, false] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                true,
+                unicode,
+                ColorDepth::None,
+            ));
+            state.model_display = "Test".into();
+            for (path, expected) in [
+                (home.clone(), "~"),
+                (
+                    home.join("projects").join("footer-fixture"),
+                    "~/projects/footer-fixture",
+                ),
+            ] {
+                state.workspace = Some(path.clone());
+                let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                    &state,
+                    160,
+                    Instant::now(),
+                ));
+                assert!(footer.ends_with(expected), "{footer:?}");
+                assert!(!footer.contains(&home.display().to_string()), "{footer:?}");
+                assert_eq!(state.workspace.as_deref(), Some(path.as_path()));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_footer_masks_a_symlinked_home_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("home-alias");
+        std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+        // A fresh process avoids changing HOME or the cached home of parallel
+        // tests, and exercises the renderer with a canonicalized workspace.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::composer_surface::tests::default_footer_masks_the_platform_home_directory",
+            ])
+            .env("HOME", &alias)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn footer_workspace_uses_home_components_not_string_prefixes() {
         use std::path::Path;
         let home = Some(Path::new("/home/user"));
@@ -1374,6 +1448,37 @@ mod tests {
             footer_workspace(Path::new("/work/project"), None, 80, true),
             "/work/project"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn footer_workspace_masks_canonical_windows_home_paths() {
+        use std::path::Path;
+
+        for (home, project) in [
+            (
+                r"\\?\C:\Users\developer",
+                r"\\?\C:\Users\developer\projects\octet",
+            ),
+            (
+                r"\\?\UNC\server\profiles\developer",
+                r"\\?\UNC\server\profiles\developer\projects\octet",
+            ),
+        ] {
+            for unicode in [true, false] {
+                let home = Path::new(home);
+                assert_eq!(footer_workspace(home, Some(home), 80, unicode), "~");
+                assert_eq!(
+                    footer_workspace(Path::new(project), Some(home), 80, unicode),
+                    "~/projects/octet"
+                );
+                let sibling = home.with_file_name("developer-other").join("octet");
+                assert_eq!(
+                    footer_workspace(&sibling, Some(home), 80, unicode),
+                    sibling.display().to_string()
+                );
+            }
+        }
     }
 
     #[test]

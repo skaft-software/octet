@@ -1,0 +1,67 @@
+#!/bin/sh
+# Octet codemode entrypoint.
+#
+# Codemode is one Rust executable with the JavaScript prelude and the QuickJS
+# WASM engine embedded at compile time. This shim only resolves which build of
+# that executable to run; it never starts a Node, Python or other runtime.
+#
+# Resolution order:
+#   1. $OCTET_CODEMODE_BINARY (explicit override; tests and local development)
+#   2. a prebuilt executable shipped inside the bundle (bin/octet-codemode)
+#   3. an in-tree cargo build (target/release, then target/debug)
+#   4. an installed `octet-codemode` on PATH
+#   5. a one-time `cargo build --locked --release` into a private cache
+# Rust is required only for step 5; an installed bundle carrying a prebuilt
+# binary or a source checkout that has already been built starts directly.
+set -eu
+
+extension_dir=${OCTET_EXTENSION_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+if [ -n "${OCTET_CODEMODE_CACHE:-}" ]; then
+    cache_root=$OCTET_CODEMODE_CACHE
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+    cache_root=$XDG_CACHE_HOME/octet-codemode
+elif [ -n "${HOME:-}" ]; then
+    cache_root=$HOME/.cache/octet-codemode
+else
+    cache_root=${TMPDIR:-/tmp}/octet-codemode-cache
+fi
+binary=${OCTET_CODEMODE_BINARY:-}
+
+if [ -n "$binary" ] && [ ! -x "$binary" ]; then
+    printf 'octet-codemode: OCTET_CODEMODE_BINARY is not executable: %s\n' "$binary" >&2
+    exit 1
+fi
+
+if [ -z "$binary" ]; then
+    for candidate in \
+        "$extension_dir/bin/octet-codemode" \
+        "$extension_dir/target/release/octet-codemode" \
+        "$extension_dir/target/debug/octet-codemode"
+    do
+        if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+            binary=$candidate
+            break
+        fi
+    done
+fi
+
+if [ -z "$binary" ] && command -v octet-codemode >/dev/null 2>&1; then
+    binary=$(command -v octet-codemode)
+fi
+
+if [ -z "$binary" ]; then
+    if [ ! -f "$extension_dir/Cargo.toml" ]; then
+        printf 'octet-codemode: no Rust executable in %s and no crate source to build one\n' "$extension_dir" >&2
+        exit 1
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        printf 'octet-codemode: no prebuilt Rust executable in %s and cargo is unavailable; install Rust or set OCTET_CODEMODE_BINARY\n' "$extension_dir" >&2
+        exit 1
+    fi
+    printf 'octet-codemode: building the extension once into %s\n' "$cache_root" >&2
+    cargo build --locked --release --manifest-path "$extension_dir/Cargo.toml" \
+        --target-dir "$cache_root/target" >&2
+    binary=$cache_root/target/release/octet-codemode
+fi
+
+exec "$binary" "$@"

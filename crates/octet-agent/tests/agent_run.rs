@@ -311,6 +311,35 @@ fn partial_text_turn(text: &str) -> String {
         )
 }
 
+/// A streamed OpenAI-completions tool call whose arguments are raw provider
+/// text, so a test can emit JSON that conservative repair cannot recover.
+fn openai_raw_tool_turn(id: &str, name: &str, argument_chunks: &[&str]) -> String {
+    let mut body = String::new();
+    for (index, chunk) in argument_chunks.iter().enumerate() {
+        let call = if index == 0 {
+            serde_json::json!({
+                "index": 0,
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": chunk},
+            })
+        } else {
+            serde_json::json!({
+                "index": 0,
+                "function": {"arguments": chunk},
+            })
+        };
+        let frame = serde_json::json!({
+            "id": "chat-tools",
+            "choices": [{"index": 0, "delta": {"tool_calls": [call]}}],
+        });
+        body += &format!("data: {frame}\n\n");
+    }
+    body += "data: {\"id\":\"chat-tools\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    body += "data: [DONE]\n\n";
+    body
+}
+
 /// A complete turn that requests the given tool calls.
 fn tool_turn_with_stop(calls: &[(&str, &str, serde_json::Value)], stop_reason: &str) -> String {
     let mut s = msg_start();
@@ -417,6 +446,12 @@ async fn handle_responses_connection_limit(
                 .send(WebSocketMessage::Text(event.to_string().into()))
                 .await?;
         }
+        // A limit asks for reconnection; close the handshake cleanly so the
+        // client observes the limit terminal instead of a transport reset.
+        // (An abrupt TCP abort surfaces as RST/10054 on Windows and masks the
+        // already-delivered limit outcome; crash drops are covered by the
+        // disconnect-recovery tests instead.)
+        let _ = socket.close(None).await;
         return Ok(());
     }
 
@@ -431,6 +466,34 @@ async fn handle_responses_connection_limit(
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
+    }
+    // Drain the request body, if any: closing with unread received data
+    // aborts the connection with RST on Windows, which the client reports
+    // as a transport error instead of reading the response already queued.
+    let head = String::from_utf8_lossy(&request).into_owned();
+    let mut body_remaining = head
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                (name.trim().eq_ignore_ascii_case("content-length"))
+                    .then(|| value.trim().parse::<usize>().unwrap_or(0))
+            })
+        })
+        .unwrap_or(0);
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .unwrap_or(request.len());
+    body_remaining = body_remaining.saturating_sub(request.len().saturating_sub(header_end));
+    let mut discard = vec![0_u8; body_remaining.min(64 * 1024)];
+    while body_remaining > 0 {
+        let want = body_remaining.min(discard.len());
+        let read = stream.read(&mut discard[..want]).await?;
+        if read == 0 {
+            break;
+        }
+        body_remaining -= read;
     }
     let attempt = http_requests.fetch_add(1, Ordering::SeqCst);
     let completed_body = concat!(
@@ -2413,7 +2476,7 @@ async fn request_output_ceiling_clamps_only_to_remaining_context() {
 }
 
 #[tokio::test]
-async fn hard_cost_reservation_blocks_network_before_a_request_can_overshoot() {
+async fn hard_cost_ceiling_without_enforceable_input_bound_refuses_before_dispatch() {
     let server = MockServer::start().await;
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
@@ -2452,8 +2515,13 @@ async fn hard_cost_reservation_blocks_network_before_a_request_can_overshoot() {
         .complete("do not spend beyond the ceiling")
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("cost limit"), "{error}");
+    assert!(
+        matches!(error, octet_agent::AgentError::InputLimitUnavailable),
+        "{error:?}"
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
 }
 
 #[tokio::test]
@@ -3619,6 +3687,30 @@ async fn multiple_parallel_safe_tool_calls_start_together_and_coalesce_in_order(
 
     // On the wire the two persisted results coalesce into ONE user message.
     let requests = wire_requests(h.server.as_ref().unwrap()).await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "two independent reads should cost one tool turn, not one model turn each"
+    );
+    let tool_defs = requests[0]["tools"].as_array().unwrap();
+    {
+        let name = "read";
+        let definition = tool_defs
+            .iter()
+            .find(|definition| definition["name"] == name)
+            .unwrap_or_else(|| panic!("missing advertised {name} tool"));
+        assert!(
+            definition["description"]
+                .as_str()
+                .unwrap()
+                .contains("independent")
+                || definition["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("together"),
+            "{name} description should steer independent inspections into one tool-call turn"
+        );
+    }
     let last_message = requests[1]["messages"].as_array().unwrap().last().unwrap();
     assert_eq!(last_message["role"], "user");
     assert_eq!(count_tool_results(last_message), 2);
@@ -6022,6 +6114,50 @@ impl Tool for SchemaMismatchBashProbe {
     }
 }
 
+struct MalformedArgumentsEditProbe {
+    effect_calls: Arc<AtomicUsize>,
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Tool for MalformedArgumentsEditProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "edit".into(),
+            description: "Records calls whose streamed arguments were unparseable".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string"}
+                },
+                "required": ["path", "old_text"],
+                "additionalProperties": false,
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        self.effect_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolEffect::Pure)
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::new("must not execute"))
+    }
+}
+
 struct AdmissionHookProbe {
     before: Arc<AtomicUsize>,
     after: Arc<AtomicUsize>,
@@ -6054,12 +6190,28 @@ impl ToolCallHook for AdmissionHookProbe {
 struct DenyingAdmissionHook {
     before: Arc<AtomicUsize>,
     after: Arc<AtomicUsize>,
+    transformed_results: Arc<AtomicUsize>,
 }
 
 const HOOK_DENIAL_SECRET: &str = "secondary-hook-secret-marker";
 
 #[async_trait::async_trait]
 impl ToolCallHook for DenyingAdmissionHook {
+    async fn transform_tool_result(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        result: Result<ToolOutput, ToolError>,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        assert_eq!(
+            result.as_ref().unwrap_err().message,
+            "tool call denied by host policy"
+        );
+        self.transformed_results.fetch_add(1, Ordering::SeqCst);
+        result
+    }
+
     async fn before_tool_call(
         &self,
         _name: &str,
@@ -6117,9 +6269,11 @@ async fn assert_secondary_hook_denials(parallel: bool) {
         },
         executions: Arc::clone(&executions),
     });
+    let transformed_results = Arc::new(AtomicUsize::new(0));
     extensions.tool_call_hook(DenyingAdmissionHook {
         before: Arc::clone(&before),
         after: Arc::clone(&after),
+        transformed_results: Arc::clone(&transformed_results),
     });
     let mut agent = Agent::new(AgentConfig {
         client: AiClient::new(),
@@ -6184,6 +6338,9 @@ async fn assert_secondary_hook_denials(parallel: bool) {
             .unwrap();
         assert!(started < decided && decided < finished);
     }
+    // Result transformations observe policy denials, but execution observers
+    // must not invent tool executions for calls rejected at admission.
+    assert_eq!(transformed_results.load(Ordering::SeqCst), calls.len());
     assert_eq!(before.load(Ordering::SeqCst), calls.len());
     assert_eq!(after.load(Ordering::SeqCst), 0);
     assert_eq!(executions.load(Ordering::SeqCst), 0);
@@ -6361,6 +6518,136 @@ async fn schema_rejected_bash_is_never_classified_or_executed() {
     assert!(requests[1].to_string().contains(SCHEMA_MISMATCH_ERROR));
 }
 
+const MALFORMED_ARGUMENTS_ERROR: &str =
+    "tool call was not executed because its streamed arguments were not valid JSON and could not be repaired; re-issue the call with one complete JSON object";
+
+/// A model that emits one tool call whose streamed arguments are not valid JSON
+/// (a missing comma no conservative repair may invent) must receive an error
+/// result and get another turn, exactly as Pi continues after a failed tool
+/// validation. The call is never executed and never carries guessed arguments.
+#[tokio::test]
+async fn malformed_streamed_tool_arguments_do_not_abort_the_run() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(Script {
+            bodies: vec![
+                openai_raw_tool_turn(
+                    "call_malformed",
+                    "edit",
+                    &[r#"{"path": "lib/"#, r#"slugify.js" "old_text": 1}"#],
+                ),
+                openai_text_turn("malformed arguments corrected"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut extensions = ExtensionHost::new();
+    extensions.tool(MalformedArgumentsEditProbe {
+        effect_calls: Arc::clone(&effect_calls),
+        executions: Arc::clone(&executions),
+    });
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model: openai_multimodal_model(&server.uri()),
+        session: Session::create(session_dir.path().join("session.jsonl")).unwrap(),
+        system: "malformed arguments test".into(),
+        sandbox: SandboxConfig::new(workspace_dir.path()),
+        effect_broker: EffectBroker::new(EffectPolicy::UnsafeHost),
+        extensions,
+        max_turns: Some(4),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+
+    let mut run = agent.prompt("fix the slugify bug").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{:?}",
+        assert_single_run_finished(&events)
+    );
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolFinished {
+                id,
+                result: Err(error),
+                ..
+            } if id.0 == "call_malformed" => Some(error.message.as_str()),
+            _ => None,
+        })
+        .expect("malformed arguments are surfaced as a tool error");
+    assert_eq!(error, MALFORMED_ARGUMENTS_ERROR);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    let call = agent
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.value {
+            EntryValue::Message(Message::Assistant(message)) => {
+                message.content.iter().find_map(|part| match part {
+                    AssistantPart::ToolCall(call) if call.id.0 == "call_malformed" => Some(call),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the malformed call keeps its envelope in the session");
+    assert_eq!(call.name, "edit");
+    assert_eq!(call.arguments_json, "{}");
+    assert_eq!(call.argument_error, Some(ToolCallArgumentError::Malformed));
+    assert!(!call.arguments_json.contains("slugify"));
+
+    let result = agent
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(message)) => {
+                message.content.iter().find_map(|part| match part {
+                    UserPart::ToolResult(result) if result.tool_call_id.0 == "call_malformed" => {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("paired rejection result is durable");
+    assert!(result.is_error);
+    let text = result
+        .content
+        .iter()
+        .find_map(|part| match part {
+            octet_ai::ToolResultPart::Text(text) => Some(text),
+            _ => None,
+        })
+        .expect("static error text");
+    assert_eq!(text, MALFORMED_ARGUMENTS_ERROR);
+
+    let requests = wire_requests(&server).await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "one rejected-tool turn and one corrective turn"
+    );
+    assert!(requests[1].to_string().contains(MALFORMED_ARGUMENTS_ERROR));
+}
+
 #[tokio::test]
 async fn resumed_schema_rejection_skips_hooks_effects_and_replay() {
     let server = MockServer::start().await;
@@ -6507,6 +6794,17 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     std::fs::write(&external_file, "host secret").unwrap();
     let external_write = external_dir.path().join("must-not-exist.txt");
     let bash_marker = workspace.join("bash-must-not-run.txt");
+    // The shell command carries a literal path: use the non-canonical
+    // spelling with forward slashes. Canonicalization adds a `\\?\`
+    // verbatim prefix shells cannot consume, and Git Bash silently drops
+    // `>` redirects to backslash paths (exit 0, no file created). Both
+    // spellings name the same file.
+    let bash_marker_for_shell = workspace_dir
+        .path()
+        .join("bash-must-not-run.txt")
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     let calls = vec![
         (
@@ -6520,14 +6818,14 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
             serde_json::json!({"path": "https://example.com/image.png"}),
         ),
         (
-            "call_search",
-            "search",
-            serde_json::json!({"query": "secret"}),
+            "call_native_process",
+            "native_process_probe",
+            serde_json::json!({}),
         ),
         (
             "call_process",
             "bash",
-            serde_json::json!({"command": format!("printf ran > {}", bash_marker.display())}),
+            serde_json::json!({"command": format!("printf ran > {}", bash_marker_for_shell)}),
         ),
         (
             "call_host_mutation",
@@ -6553,6 +6851,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     let mut extensions = ExtensionHost::new();
     extensions.load(&CoreTools);
     for (name, effect) in [
+        ("native_process_probe", ToolEffect::HostProcess),
         ("delegation_probe", ToolEffect::Delegation),
         ("extension_probe", ToolEffect::Extension),
         ("unknown_probe", ToolEffect::Unknown),
@@ -6649,7 +6948,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
             ToolPolicyDenialCode::EffectNetworkDenied,
         ),
         (
-            "call_search",
+            "call_native_process",
             ToolEffect::HostProcess,
             ToolPolicyDenialCode::EffectNativeProcessDenied,
         ),
@@ -6730,7 +7029,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     for id in [
         "call_host_read",
         "call_network",
-        "call_search",
+        "call_native_process",
         "call_host_mutation",
         "call_delegation",
         "call_extension",
@@ -6742,7 +7041,7 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
     assert!(succeeded.contains("call_process"));
     assert!(denied["call_host_read"].contains("reading outside the workspace"));
     assert!(denied["call_network"].contains("trusted egress broker"));
-    assert!(denied["call_search"].contains("OS or VM isolation backend"));
+    assert!(denied["call_native_process"].contains("OS or VM isolation backend"));
     assert!(denied["call_host_mutation"].contains("mutating outside the workspace"));
     assert!(denied["call_delegation"].contains("attenuated authority"));
     assert!(denied["call_extension"].contains("executable extensions"));
@@ -7021,10 +7320,24 @@ async fn controlled_workspace_mutation_requires_and_consumes_exact_approval() {
             approvals += 1;
             assert!(request.destructive);
             assert!(!request.default);
-            let detail = request.detail.as_deref().expect("canonical intent detail");
-            assert!(detail.contains("workspace_mutation"));
-            assert!(detail.contains("approved.txt"));
-            assert!(detail.contains("approved content"));
+            assert_eq!(request.prompt, "Write this file?");
+            let detail = request.detail.as_deref().expect("human action and scope");
+            assert!(detail.contains("File: \"approved.txt\""));
+            assert!(detail.contains("Review all arguments in technical details"));
+            assert!(!detail.contains("approved content"));
+            assert!(!detail.contains("effect:"));
+            assert!(!detail.contains("sha256"));
+            let technical = request
+                .technical_detail
+                .as_deref()
+                .expect("exact intent diagnostics");
+            assert!(technical.contains("effect: workspace_mutation"));
+            assert!(technical.contains("complete intent sha256:"));
+            assert!(technical.contains("approved.txt"));
+            assert!(technical.contains("approved content"));
+            assert!(!workspace.join("approved.txt").exists());
+            assert_eq!(before.load(Ordering::SeqCst), 0);
+            assert_eq!(after.load(Ordering::SeqCst), 0);
             request.clone().respond(true);
         }
         events.push(event);
@@ -8023,12 +8336,76 @@ async fn qualified_codex_permanent_failures_do_not_replace() {
     }
 }
 
+struct Gateway504ThenAnswer(AtomicUsize);
+impl Respond for Gateway504ThenAnswer {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(504)
+                .set_body_json(serde_json::json!({"error":{"code":"server_error"}}))
+        } else {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_text_turn(
+                    "ok",
+                    "bounded retry",
+                    "response.completed",
+                    "accepted",
+                ))
+        }
+    }
+}
+
 #[tokio::test]
-async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usage() {
+async fn output_capped_504_refuses_hard_cost_ceiling_and_uncapped_recovery_stays_uncertain() {
+    let (mut agent, server, _workspace, session_path) =
+        recovery_harness_with_output_cap(vec![], true).await;
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("responses"))
+        .respond_with(Gateway504ThenAnswer(AtomicUsize::new(0)))
+        .mount(&server)
+        .await;
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert!(matches!(
+        agent.complete("possibly accepted").await,
+        Err(octet_agent::AgentError::InputLimitUnavailable)
+    ));
+    assert!(wire_requests(&server).await.is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
+
+    // Removing the ceiling permits ordinary recovery, but an output cap alone
+    // cannot bound the failed attempt's provider-tokenized input or spend.
+    agent.set_max_session_cost_microdollars(None);
+    assert_eq!(
+        agent
+            .complete("recover without a ceiling")
+            .await
+            .unwrap()
+            .text,
+        "bounded retry"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
+
+    agent.set_max_session_cost_microdollars(Some(u64::MAX));
+    assert!(matches!(
+        agent.complete("unknown historical spend").await,
+        Err(octet_agent::AgentError::UsageUncertain)
+    ));
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    let reopened = Session::open_read_only(&session_path).unwrap();
+    assert!(reopened.has_uncertain_usage());
+    assert!(reopened.usage_uncertainty_exposure().is_none());
+}
+
+#[tokio::test]
+async fn output_cap_without_input_bound_refuses_hard_cost_ceiling_before_interruption() {
     let (mut agent, server, _workspace, _) = recovery_harness_with_output_cap(
         vec![
             interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
-            responses_text_turn("no", "must not replay", "response.completed", "no"),
+            responses_text_turn("ok", "later", "response.completed", "ok"),
         ],
         true,
     )
@@ -8037,21 +8414,56 @@ async fn cap_supported_hard_cost_budget_fails_closed_on_unknown_interrupted_usag
     let mut run = agent.prompt("bounded spending").await.unwrap();
     let events = collect(&mut run).await;
     drop(run);
+    // Neither a roomy ceiling nor an enforced output cap provides a sound
+    // provider-tokenized input bound. No failed attempt is admitted.
     assert!(
         matches!(
             assert_single_run_finished(&events),
-            FinishReason::Failed(octet_agent::AgentError::ProviderRecovery {
-                retries: 0,
-                usage_unknown: true,
-                ..
-            })
+            FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)
         ),
         "{events:?}"
     );
-    assert_eq!(wire_requests(&server).await.len(), 1);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ProviderUsageUncertain | AgentEvent::ProviderRetry { .. }
+    )));
+    assert!(wire_requests(&server).await.is_empty());
+    assert!(agent.session().usage_records().is_empty());
+    assert!(agent.session().usage_uncertainty_records().is_empty());
+
+    // This output-capped Default route does not replace interrupted streams.
+    // With no cumulative ceiling it may dispatch, preserving unknown exposure.
+    agent.set_max_session_cost_microdollars(None);
+    let mut run = agent.prompt("uncapped interruption").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(
+            assert_single_run_finished(&events),
+            FinishReason::Failed(octet_agent::AgentError::Ai(_))
+        ),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderUsageUncertain)));
     assert!(!events
         .iter()
-        .any(|e| matches!(e, AgentEvent::ProviderRetry { .. })));
+        .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
+    assert_eq!(wire_requests(&server).await.len(), 1);
+    assert_eq!(agent.session().usage_uncertainty_records().len(), 1);
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
+
+    let mut run = agent.prompt("later uncapped answer").await.unwrap();
+    let events = collect(&mut run).await;
+    drop(run);
+    assert!(
+        matches!(assert_single_run_finished(&events), FinishReason::Completed),
+        "{events:?}"
+    );
+    assert_eq!(wire_requests(&server).await.len(), 2);
+    assert!(agent.session().has_uncertain_usage());
+    assert!(agent.session().usage_uncertainty_exposure().is_none());
 }
 
 #[tokio::test]
@@ -8452,6 +8864,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     message: AssistantMessage { content: vec![AssistantPart::Text("R".into())], model: model.id, protocol: model.protocol },
                     stop_reason: octet_ai::StopReason::EndTurn, usage: octet_ai::Usage::default(),
                     deferred: None,
+                    inference: None,
                     cost: response_cost, response_id: None, responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8485,6 +8898,7 @@ impl octet_ai::HostStreamTransport for OperationRecoveryTransport {
                     stop_reason: octet_ai::StopReason::EndTurn,
                     usage: octet_ai::Usage::default(), cost: response_cost, response_id: None,
                     deferred: None,
+                    inference: None,
                     responses_output: None, diagnostics: Vec::new(),
                 }));
             })),
@@ -8942,8 +9356,10 @@ async fn qualified_http_admission_and_stream_budgets_are_independent_and_cumulat
 }
 
 #[tokio::test(start_paused = true)]
-async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_admission_budget() {
-    for (status, code, hard_budget) in [
+async fn http_failures_recover_without_ceilings_but_finite_input_budgets_refuse_dispatch() {
+    // Transient HTTP failures retain their ordinary recovery policy without a
+    // ceiling. Output caps alone cannot authorize finite cumulative budgets.
+    for (status, code, output_capped) in [
         (500, "server_error", true),
         (502, "server_error", true),
         (503, "server_error", true),
@@ -8956,40 +9372,79 @@ async fn qualified_http_503_hard_budget_and_permanent_rejections_never_spend_adm
         (429, "insufficient_quota", false),
         (401, "invalid_api_key", false),
     ] {
-        let (mut agent, server, _workspace, _) =
-            recovery_harness_with_output_cap(vec![], hard_budget).await;
-        server.reset().await;
-        Mock::given(method("POST"))
-            .and(path("responses"))
-            .respond_with(
-                ResponseTemplate::new(status)
-                    .set_body_json(serde_json::json!({"error":{"code":code}})),
-            )
-            .mount(&server)
-            .await;
-        if hard_budget {
-            agent.set_max_session_cost_microdollars(Some(u64::MAX));
-        }
-        let mut run = agent
-            .prompt("do not exceed hard budget or retry permanent failures")
-            .await
-            .unwrap();
-        let events = collect_virtual_recovery(&mut run).await;
-        drop(run);
-        assert!(
-            matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
-            "{events:?}"
-        );
-        let requests = wire_requests(&server).await;
-        assert_eq!(requests.len(), 1);
-        if hard_budget {
-            assert!(requests[0]["max_output_tokens"].as_u64().is_some());
-        }
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
-        if status == 503 {
-            assert!(agent.session().has_uncertain_usage());
+        for hard_budget in [false, true] {
+            let (mut agent, server, _workspace, _) =
+                recovery_harness_with_output_cap(vec![], output_capped).await;
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("responses"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error":{"code":code}})),
+                )
+                .mount(&server)
+                .await;
+            if hard_budget {
+                agent.set_max_session_cost_microdollars(Some(u64::MAX));
+            }
+            let mut run = agent
+                .prompt("charge a hard budget and never retry permanent failures")
+                .await
+                .unwrap();
+            let events = collect_virtual_recovery(&mut run).await;
+            drop(run);
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
+                "{events:?}"
+            );
+            let requests = wire_requests(&server).await;
+            let retries = events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ProviderRetry { .. }))
+                .count();
+            if hard_budget {
+                let expected = if output_capped {
+                    matches!(
+                        assert_single_run_finished(&events),
+                        FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)
+                    )
+                } else {
+                    matches!(
+                        assert_single_run_finished(&events),
+                        FinishReason::Failed(octet_agent::AgentError::OutputLimitUnavailable)
+                    )
+                };
+                assert!(expected, "{status} {code}: {events:?}");
+                assert!(requests.is_empty(), "{status} {code}");
+                assert_eq!(retries, 0);
+                assert!(agent.session().usage_records().is_empty());
+                assert!(agent.session().usage_uncertainty_records().is_empty());
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ProviderUsageUncertain)));
+                continue;
+            }
+            assert_eq!(retries, requests.len() - 1, "{status} {code}");
+            if !output_capped {
+                assert_eq!(requests.len(), 1, "{status} {code}");
+            }
+            if output_capped {
+                assert!(requests
+                    .iter()
+                    .all(|request| request["max_output_tokens"].as_u64().is_some()));
+                // Ordinary routes allow three replacements for their legacy
+                // HTTP statuses; HTTP 520 requires Codex qualification.
+                assert_eq!(
+                    requests.len(),
+                    if status == 520 { 1 } else { 4 },
+                    "{status} {code}"
+                );
+                assert!(agent.session().has_uncertain_usage());
+                assert!(agent.session().usage_uncertainty_exposure().is_none());
+            }
+            if status == 503 {
+                assert!(agent.session().has_uncertain_usage());
+            }
         }
     }
 }
@@ -9028,7 +9483,9 @@ async fn unpriced_history_blocks_auxiliary_cost_reservation_before_dispatch() {
 async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_uncertainty() {
     for status in [503, 520] {
         for gate in [false, true] {
-            for hard_budget in [false, true] {
+            // Uncapped Codex and output-capped Default routes retain their own
+            // recovery policies. Finite ceilings refuse before either dispatch.
+            for (capped, hard_budget) in [(false, false), (true, false), (true, true)] {
                 let mut steps = Vec::new();
                 if gate {
                     steps.push(RecoveryStep::Reply("candidate", Duration::ZERO));
@@ -9042,11 +9499,8 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if !gate {
                     steps.push(RecoveryStep::Reply("answer", Duration::ZERO));
                 }
-                let (mut agent, transport, workspace) = operation_recovery_agent_with_output_cap(
-                    steps,
-                    ExtensionHost::new(),
-                    hard_budget,
-                );
+                let (mut agent, transport, workspace) =
+                    operation_recovery_agent_with_output_cap(steps, ExtensionHost::new(), capped);
                 if gate {
                     agent.set_completion_policy(CompletionPolicy::TerminalGate);
                 } else {
@@ -9068,33 +9522,75 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 if hard_budget {
                     agent.set_max_session_cost_microdollars(Some(u64::MAX));
                 }
+                let known_records_before = agent.session().usage_records().len();
                 let mut run = agent.prompt("recover auxiliary").await.unwrap();
                 let events = collect(&mut run).await;
                 drop(run);
-                assert_eq!(
+                let outcome = (
                     matches!(assert_single_run_finished(&events), FinishReason::Completed),
-                    !hard_budget,
-                    "gate={gate} hard={hard_budget} {events:?}"
-                );
-                assert_eq!(
                     transport.requests.lock().unwrap().len(),
-                    if hard_budget {
-                        1 + usize::from(gate)
-                    } else {
-                        23
-                    }
-                );
-                assert_eq!(
                     agent.session().usage_uncertainty_records().len(),
-                    if hard_budget { 1 } else { 21 }
                 );
+                let label =
+                    format!("status={status} gate={gate} capped={capped} hard={hard_budget}");
                 assert_eq!(
                     events
                         .iter()
                         .filter(|event| matches!(event, AgentEvent::ProviderUsageUncertain))
                         .count(),
-                    1
+                    usize::from(!hard_budget),
+                    "{label}"
                 );
+                match (capped, hard_budget) {
+                    (false, _) => assert_eq!(outcome, (true, 23, 21), "{label}"),
+                    (true, false) => {
+                        // HTTP 520 requires Codex qualification. Otherwise,
+                        // summaries allow three attempts and gates four.
+                        let attempts = if status == 520 {
+                            1
+                        } else if gate {
+                            4
+                        } else {
+                            3
+                        };
+                        assert_eq!(
+                            outcome,
+                            (false, attempts + usize::from(gate), attempts),
+                            "{label}"
+                        );
+                    }
+                    (true, true) => {
+                        assert!(
+                            matches!(
+                                assert_single_run_finished(&events),
+                                FinishReason::Failed(
+                                    octet_agent::AgentError::InputLimitUnavailable
+                                )
+                            ),
+                            "{label}: {events:?}"
+                        );
+                        assert_eq!(outcome, (false, 0, 0), "{label}");
+                        assert_eq!(
+                            agent.session().usage_records().len(),
+                            known_records_before,
+                            "{label}"
+                        );
+                        assert!(
+                            !events.iter().any(|event| matches!(
+                                event,
+                                AgentEvent::ProviderRetry { .. }
+                                    | AgentEvent::ProviderOperationRetry { .. }
+                            )),
+                            "{label}"
+                        );
+                    }
+                }
+                if !hard_budget {
+                    assert!(
+                        agent.session().usage_uncertainty_exposure().is_none(),
+                        "{label}"
+                    );
+                }
             }
         }
     }
@@ -9246,9 +9742,19 @@ async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_to
             let mut run = agent.prompt("recover malformed provider frame").await.unwrap();
             let events = collect_virtual_recovery(&mut run).await;
             drop(run);
-            assert_eq!(matches!(assert_single_run_finished(&events), FinishReason::Completed), !hard_budget, "{events:?}");
-            assert_eq!(wire_requests(&server).await.len(), if hard_budget { 1 } else { 2 });
-            assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
+            if hard_budget {
+                assert!(matches!(assert_single_run_finished(&events), FinishReason::Failed(octet_agent::AgentError::InputLimitUnavailable)), "{events:?}");
+                assert!(wire_requests(&server).await.is_empty());
+                assert!(agent.session().usage_records().is_empty());
+                assert!(agent.session().usage_uncertainty_records().is_empty());
+                assert!(!events.iter().any(|event| matches!(event, AgentEvent::ProviderRetry { .. } | AgentEvent::ProviderUsageUncertain)));
+            } else {
+                assert!(matches!(assert_single_run_finished(&events), FinishReason::Completed), "{events:?}");
+                assert_eq!(wire_requests(&server).await.len(), 2);
+                assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
+                assert!(agent.session().usage_uncertainty_exposure().is_none());
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ProviderRetry { .. })).count(), 1);
+            }
             assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
         }
     }
@@ -11242,25 +11748,23 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         .iter()
         .map(|contribution| contribution.name.as_str())
         .collect::<Vec<_>>();
+    // `PowerShellTool` registers (with a snippet) on Windows only.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut expected = vec!["read", "edit", "write", "bash"];
+    #[cfg(windows)]
+    expected.push("powershell");
     assert_eq!(
-        declared,
-        vec!["read", "edit", "write", "bash", "search"],
+        declared, expected,
         "contributions follow wire order for exactly the tools that declare a snippet"
     );
-    // Search contributes its own snippet and stays callable. Rendering does
-    // not reintroduce any of the withdrawn ls/find/grep aliases.
-    assert!(
-        enabled
+    for name in ["search", "ls", "find", "grep"] {
+        assert!(!enabled
             .agent
             .registered_tool_names()
             .iter()
-            .any(|name| name == "search"),
-        "search stays registered"
-    );
-    assert!(
-        declared.contains(&"search"),
-        "the real search contribution reaches the section"
-    );
+            .any(|registered| registered == name));
+        assert!(!declared.contains(&name));
+    }
     enabled.agent.complete("hello").await.unwrap();
     let requests = wire_requests(enabled.server.as_ref().unwrap()).await;
     assert_eq!(requests.len(), 1);
@@ -11278,8 +11782,9 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         );
     }
     assert!(
-        system.contains("- bash: ") && system.contains("ripgrep"),
-        "the bash snippet names rg, not the withdrawn search tools: {system}"
+        system.contains("- bash: ")
+            && system.contains("prefer rg/ripgrep when available; otherwise use grep"),
+        "the bash snippet prefers rg with a grep fallback, not separate search tools: {system}"
     );
     for withdrawn in ["\n- ls:", "\n- find:", "\n- grep:"] {
         assert!(
@@ -11987,3 +12492,6 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
 
 #[path = "agent_run/gpt6.rs"]
 mod gpt6;
+
+#[path = "agent_run/responses_prewarm.rs"]
+mod responses_prewarm;

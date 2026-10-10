@@ -5,9 +5,7 @@ use sexy_tui_rs::{
 };
 
 use super::terminal_text::sanitize_for_terminal;
-use super::{
-    subdued_text, understated_tool_output, wrap_hanging, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS,
-};
+use super::{subdued_text, wrap_hanging, ToolPanel};
 use crate::tui::theme::OctetTheme;
 
 #[cfg(test)]
@@ -77,6 +75,14 @@ pub(super) fn tool_diff(panel: &ToolPanel) -> Option<String> {
 }
 
 fn compute_tool_diff(panel: &ToolPanel) -> Option<String> {
+    // Durable metadata channel wins: edit/write no longer put diffs in the
+    // result text, and that text is also replayed into model context.
+    if let Some(diff) = &panel.diff {
+        if !diff.trim().is_empty() {
+            return Some(diff.clone());
+        }
+    }
+    // Legacy sessions recorded diffs inside the result text; keep scanning.
     if looks_like_diff(&panel.output) {
         return Some(panel.output.clone());
     }
@@ -109,13 +115,16 @@ const TOOL_LABEL_MAX_WIDTH: usize = 18;
 pub(crate) fn tool_display_label(name: &str) -> String {
     match name {
         "read" => "Read".to_string(),
-        "search" => "Explored".to_string(),
         "edit" => "Edit".to_string(),
         "write" => "Write".to_string(),
         _ if super::is_subagent_tool(name) => "Delegated".to_string(),
         _ if name.starts_with("browser_") => "Browse".to_string(),
         _ if name.starts_with("ssh_") => "SSH".to_string(),
         _ => {
+            let name = name
+                .strip_prefix("computer_use_")
+                .filter(|suffix| !suffix.is_empty())
+                .unwrap_or(name);
             let mut s = name.replace('_', " ");
             if let Some(first) = s.get_mut(0..1) {
                 first.make_ascii_uppercase();
@@ -278,47 +287,6 @@ pub(super) fn render_diff_only(
     lines
 }
 
-pub(super) fn render_compact_tool_output(
-    panel: &ToolPanel,
-    theme: &OctetTheme,
-    width: u16,
-    expanded: bool,
-    output_indent: &str,
-) -> Vec<String> {
-    let output = sanitize_for_terminal(&panel.output);
-    let lines = output
-        .lines()
-        .filter(|line| !line.trim().is_empty() && *line != "(no output)");
-    let omitted = if expanded {
-        0
-    } else {
-        lines
-            .clone()
-            .count()
-            .saturating_sub(COMPACT_EXEC_OUTPUT_ROWS)
-    };
-    let mut rendered = Vec::new();
-    if omitted > 0 {
-        let unit = if omitted == 1 { "line" } else { "lines" };
-        let hint = format!("{omitted} {unit} hidden");
-        rendered.extend(wrap_hanging(
-            &understated_tool_output(theme, &hint),
-            output_indent,
-            output_indent,
-            width,
-        ));
-    }
-    for line in lines.skip(omitted) {
-        rendered.extend(wrap_hanging(
-            &understated_tool_output(theme, line),
-            output_indent,
-            output_indent,
-            width,
-        ));
-    }
-    rendered
-}
-
 pub(super) fn without_redundant_tool_lead(tool: &str, text: &str) -> String {
     let mut words = text.splitn(2, char::is_whitespace);
     let Some(first) = words.next() else {
@@ -326,7 +294,6 @@ pub(super) fn without_redundant_tool_lead(tool: &str, text: &str) -> String {
     };
     let redundant = match tool {
         "read" => matches!(first, "read" | "reading"),
-        "search" => matches!(first, "search" | "searched" | "searching" | "explored"),
         "bash" | "exec" => {
             matches!(
                 first,

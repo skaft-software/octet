@@ -1,0 +1,17 @@
+// Importable Pi child SDK exports. Host runtime glue is explicit; there is no
+// dependency on an upstream coding-agent package and no provider fallback.
+export {
+  createAgentSession, AgentSession, SessionManager,
+  createCodingTools, codingTools, readTool, bashTool, editTool, writeTool,
+  createReadTool, createBashTool, createEditTool, createWriteTool,
+} from '../lib/children.mjs';
+import { unsupported } from '../lib/errors.mjs';
+export class DefaultResourceLoader { constructor() { unsupported('DefaultResourceLoader', 'child resource discovery, callbacks and system-prompt replacement are not yet bound'); } }
+export class SettingsManager {
+  constructor() { unsupported('SettingsManager', 'native child settings inherit from the owning host'); }
+  static create() { unsupported('SettingsManager.create', 'Pi settings files cannot replace host policy'); }
+  static inMemory() { unsupported('SettingsManager.inMemory', 'native child settings inherit from the owning host'); }
+}
+export const createGrepTool = () => unsupported('createGrepTool', 'Pi grep has no native tool implementation');
+export const createFindTool = () => unsupported('createFindTool', 'Pi find has no native tool implementation');
+export const createLsTool = () => unsupported('createLsTool', 'Pi ls has no native tool implementation');

@@ -11,7 +11,7 @@ what Codex and Pi actually ship and resolves contradictions in revision 1.
 ## Problem
 
 1. `octet-browse` runs a visible Chromium with a **persistent profile owned only
-   by octet** (`extensions/octet-browse/REFERENCE.md:13,180`). Logins made there
+   by octet** (`extensions/octet-browse/REFERENCE.md`: its launch contract and "Owned state and cleanup"). Logins made there
    survive restarts, but the user's existing Chrome/Edge sessions are not
    reachable, and Browse never pairs with or copies a normal profile.
 2. Human co-driving is fragile. `eN` refs die on every new snapshot/navigation,
@@ -29,25 +29,25 @@ async module in a fresh V8 isolate: "no Node, no file system, no network
 access, no console" (`code-mode-protocol/src/description.rs`,
 `EXEC_DESCRIPTION_TEMPLATE`). Enabled tools are on a global `tools` object.
 Pragma `// @exec: {"yield_time_ms", "max_output_tokens"}` defaults to 10000 ms
-(`DEFAULT_EXEC_YIELD_TIME_MS`, `code-mode-protocol/src/runtime.rs:15`) and 10000
+(`DEFAULT_EXEC_YIELD_TIME_MS` in `code-mode-protocol/src/runtime.rs`) and 10000
 tokens. Helpers: `exit`, `text`, `image`, `audio`, `store/load`, `notify`,
 `setTimeout/clearTimeout`, `ALL_TOOLS`, `yield_control`. `wait(cell_id,
 yield_time_ms, max_tokens, terminate)` resumes a running cell. The isolate runs
 in a standalone host process (`Feature::CodeModeHost`, stable). Nested calls go
 through normal tool dispatch (`core/src/tools/code_mode/delegate.rs`), so each
 keeps its own approvals. `code_mode` itself is `UnderDevelopment`, off by
-default (`features/src/lib.rs:1054`), and can hide direct tools
+default (its `Feature` spec in `features/src/lib.rs`), and can hide direct tools
 (`CodeModeOnly`) behind `ALL_TOOLS` search.
 
 **B. Browser and computer use.** These do not run through code mode. They are
 bundled plugins (`browser@`, `chrome@`, `computer-use@`,
 `unified-computer-use@openai-bundled`, in `plugin/src/bundled_hooks.rs`). Each
 runs an MCP server, `node_repl` or `cua_repl`, that exposes a `js` tool
-(`protocol/src/mcp.rs:39`, `ext/guardian-v2/src/async_scorer/observation.rs:103`).
+(`protocol/src/mcp.rs`, `ext/guardian-v2/src/async_scorer/observation.rs`).
 Cleanup runs through `turn_ended` hooks on Stop/Interrupt/SubagentStop. The
 browser runtime itself is not in the repository. Inside `tools/call`, the
 server asks the host for per-action approval
-(`app-server/tests/suite/v2/mcp_tool.rs:1357-1375`).
+(the MCP tool-call approval tests in `app-server/tests/suite/v2/mcp_tool.rs`).
 
 **Codex policy has three layers, and only one is typed:**
 
@@ -66,7 +66,7 @@ server asks the host for per-action approval
   `BrowserUseFullCdpAccess`, `BrowserUseExternal`, and `ComputerUse` are
   "requirements-only", stable, and enabled by default.
 - **Prompt-text judgment.** Confirmation policies come from per-model metadata
-  (`core/src/mcp_tool_call.rs:1366-1390`). Guardian auto-review is itself a
+  (`core/src/mcp_tool_call.rs`). Guardian auto-review is itself a
   model call that follows `prompts/templates/guardian/node_repl_policy.md`:
   - evaluate nested calls recursively;
   - treat every site as untrusted;
@@ -77,7 +77,7 @@ server asks the host for per-action approval
 
 Pi takes a clear position: "No MCP … build CLI tools with READMEs", "No
 permission popups", no in-process sandbox that pretends to be one
-(`packages/coding-agent/README.md:501-513`, `docs/security.md`). Its browser
+(`packages/coding-agent/README.md`, `docs/security.md`). Its browser
 answer is the `pi-skills/browser-tools` skill: bash scripts over CDP on `:9222`.
 Its `--profile` flag copies the user's profile to keep logins. It fixes
 per-element slowness by running batched JS in the page (`browser-eval.js`).
@@ -118,11 +118,12 @@ departure from Codex. It makes approval reuse (below) a design requirement.
     helpers.
   - QuickJS is the fallback only if V8 binary size or build cost fails the #390
     packaging gate. Python is not an option: it cannot provide an isolate.
-  - The existing `code_runtime.py` AST interpreter is retired, not reused.
+  - The earlier `code_runtime.py` AST interpreter is retired, not reused. It
+    was removed in v0.8.2.
 - **Containment, stated honestly.** The isolate is the security claim for
   *model code*. Nested tools still run with their normal authority. This
-  reverses `code_runtime.py`'s fail-closed "no execution without OS
-  containment" stance. It is acceptable because model code has no ambient
+  reverses the removed `code_runtime.py`'s fail-closed "no execution without
+  OS containment" stance. It is acceptable because model code has no ambient
   authority and every effect is a host-dispatched, policy-checked tool call.
   Calling that a "sandbox" is still forbidden (#391).
 - **Budgets per cell** (proposed, tuned in #391):

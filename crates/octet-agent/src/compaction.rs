@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::{Entry, EntryId, EntryValue, Session, SessionError};
 
+mod session_operations;
+pub use session_operations::{
+    run_session_operation_hooks, session_operation_branch, ModelTurnAssistantMetadata,
+    SessionCompactionReason, SessionCompactionReplacement, SessionOperation,
+    SessionOperationDecision, SessionOperationError, SessionOperationFuture, SessionOperationHook,
+    SessionOperationInvocation, SessionSourceRevision, TreeNavigationPreparation,
+};
+
 /// System instruction shared by every compaction/handoff summarizer call.
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
@@ -164,7 +172,7 @@ pub struct CompactionDetails {
 }
 
 /// Owned input for one structured handoff request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HandoffPreparation {
     /// Older messages being folded into the checkpoint.
     pub messages: Vec<Message>,
@@ -334,18 +342,42 @@ pub fn prepare_handoff(
     let history_end = split_turn_start.unwrap_or(first_kept_index);
     let mut messages = Vec::new();
     for entry in &branch[boundary_start..history_end] {
-        if let EntryValue::Message(message) = &entry.value {
-            extract_file_operations(message, &mut operations);
-            messages.push(message.clone());
+        match &entry.value {
+            EntryValue::Message(message) => {
+                extract_file_operations(message, &mut operations);
+                messages.push(message.clone());
+            }
+            EntryValue::BranchSummary {
+                summary, details, ..
+            } => {
+                operations.read.extend(details.read_files.iter().cloned());
+                operations
+                    .edited
+                    .extend(details.modified_files.iter().cloned());
+                messages.push(crate::session::branch_summary_message(summary));
+            }
+            _ => {}
         }
     }
 
     let mut turn_prefix_messages = Vec::new();
     if let Some(turn_start) = split_turn_start {
         for entry in &branch[turn_start..first_kept_index] {
-            if let EntryValue::Message(message) = &entry.value {
-                extract_file_operations(message, &mut operations);
-                turn_prefix_messages.push(message.clone());
+            match &entry.value {
+                EntryValue::Message(message) => {
+                    extract_file_operations(message, &mut operations);
+                    turn_prefix_messages.push(message.clone());
+                }
+                EntryValue::BranchSummary {
+                    summary, details, ..
+                } => {
+                    operations.read.extend(details.read_files.iter().cloned());
+                    operations
+                        .edited
+                        .extend(details.modified_files.iter().cloned());
+                    turn_prefix_messages.push(crate::session::branch_summary_message(summary));
+                }
+                _ => {}
             }
         }
     }
@@ -540,9 +572,14 @@ where
     // `candidates` is built in ascending index order, so a binary search
     // replaces the linear scan per budget step (O(n log c) not O(n*c)).
     for index in (0..entries.len()).rev() {
-        if let EntryValue::Message(message) = &entries[index].value {
-            accumulated = accumulated.saturating_add(estimate_message_tokens(message));
-        }
+        let tokens = match &entries[index].value {
+            EntryValue::Message(message) => estimate_message_tokens(message),
+            EntryValue::BranchSummary { summary, .. } => {
+                estimate_message_tokens(&crate::session::branch_summary_message(summary))
+            }
+            _ => 0,
+        };
+        accumulated = accumulated.saturating_add(tokens);
         // Continue past the budget crossing instead of breaking: when the
         // crossing lands on a non-cut-point, the boundary becomes the newest
         // valid cut point at or before it rather than the oldest candidate.
@@ -610,7 +647,8 @@ pub fn prepare_branch_handoff(
                         && user
                             .content
                             .iter()
-                            .all(|part| matches!(part, UserPart::ToolResult(_)))
+                            .all(|part| matches!(part, UserPart::ToolResult(_) | UserPart::Media(_)))
+                        && user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_)))
             )
         })
         .collect();

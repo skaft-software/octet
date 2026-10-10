@@ -17,6 +17,13 @@ impl InteractiveShell {
             false,
         )));
     }
+
+    /// Render one isolated frame and publish its geometry, as a completed
+    /// terminal write does for the threaded renderer.
+    pub(in crate::tui::view) fn render_written_test_frame(&mut self) {
+        self.render();
+        self.state.frame_written();
+    }
 }
 
 #[test]
@@ -302,6 +309,51 @@ fn rapid_page_and_wheel_navigation_reuse_painted_history_after_draft_edits() {
 }
 
 #[test]
+fn navigation_after_unpainted_output_keeps_the_reader_position() {
+    for page in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 16);
+        for index in 0..120 {
+            shell.notice(format!("reader-history-{index:03}"));
+        }
+        shell.state.borrow_mut().render_threaded = true;
+        let component = ShellComponent::isolated(shell.state.clone(), false);
+        component.render(80);
+        shell.state.frame_written();
+        shell.scroll(-1);
+        component.render_update(80);
+        shell.state.frame_written();
+        let expected = {
+            let state = shell.state.borrow();
+            let geometry = state.retained_render_geometry().unwrap();
+            let step = if page {
+                usize::from(state.size.1 / 2)
+            } else {
+                1
+            };
+            let expected = state.rendered_transcript(80)[geometry.visible_start - step].clone();
+            expected
+        };
+        // Accepted tail output invalidates the full semantic geometry fence.
+        // The next input must not drop the existing reader anchor before paint.
+        for index in 0..20 {
+            shell.notice(format!("unpainted-tail-{index:03}"));
+        }
+        if page {
+            shell.scroll(-1);
+        } else {
+            shell.scroll_lines(-1);
+        }
+        let update = component.render_update(80).unwrap();
+        assert_eq!(
+            sexy_tui_rs::strip_terminal_sequences(&update.replacement[0]),
+            sexy_tui_rs::strip_terminal_sequences(&expected),
+            "page={page}: new tail output must not swallow a repeated reader movement"
+        );
+    }
+}
+
+#[test]
 fn page_up_before_next_paint_anchors_an_offscreen_reader_through_new_output() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 16);
@@ -347,6 +399,76 @@ fn page_up_before_next_paint_anchors_an_offscreen_reader_through_new_output() {
             .block_hint,
         usize::MAX,
         "the first rendered viewport upgrades its visual fallback to a semantic anchor"
+    );
+}
+
+#[test]
+fn scrolled_pointer_receipt_survives_anchor_promotion_without_feedback() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 16);
+    for index in 0..120 {
+        shell.notice(format!("receipt-history-{index:03}"));
+    }
+    {
+        let mut state = shell.state.borrow_mut();
+        state.render_threaded = true;
+        state.application_viewport_requested = true;
+    }
+    let component = ShellComponent::isolated(shell.state.clone(), false);
+    component.render(80);
+    shell.state.frame_written();
+    shell.scroll(-1);
+    shell.notice("new tail output before scrolled pointer paint");
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .viewport_anchor
+            .get()
+            .unwrap()
+            .block_hint,
+        usize::MAX
+    );
+
+    let rendered = component.borrow_for_render();
+    let frame = super::super::viewport::render_shell_viewport_at(&rendered, 80, Instant::now());
+    assert_ne!(
+        rendered.viewport_anchor.get().unwrap().block_hint,
+        usize::MAX
+    );
+    // A pointer arrives before this frame's terminal write completes. It cannot
+    // use stale geometry, but must not invalidate the otherwise identical cells.
+    shell.begin_transcript_selection(0, 0, false);
+    drop(rendered);
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .viewport_anchor
+            .get()
+            .unwrap()
+            .block_hint,
+        usize::MAX
+    );
+    shell.state.frame_written();
+    assert!(shell.state.borrow().retained_render_geometry().is_some());
+
+    let (row, expected) = frame
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let plain = sexy_tui_rs::strip_terminal_sequences(line);
+            plain
+                .find("receipt-history-")
+                .map(|start| (row as u16, plain[start..].trim_end().to_owned()))
+        })
+        .unwrap();
+    shell.begin_transcript_selection(row, 0, false);
+    shell.extend_transcript_selection(row, 79);
+    shell.end_transcript_selection(row, 79);
+    assert_eq!(
+        shell.copy_selected_plain_text().unwrap().trim_end(),
+        expected
     );
 }
 
@@ -553,10 +675,10 @@ fn published_panels_and_reports_share_immutable_bodies() {
     let Some(ShellOverlay::Report(report)) = state.overlay.as_mut() else {
         panic!()
     };
-    report.body = ReportBody::Markdown(document.clone());
+    report.body = ReportBody::Markdown(document.clone(), "# shared markdown\n\ncontent".into());
     owner.accept(RenderModel::capture(&mut state));
     let Some(ShellOverlay::Report(ReportOverlay {
-        body: ReportBody::Markdown(published),
+        body: ReportBody::Markdown(published, _),
         ..
     })) = &owner.state.overlay
     else {

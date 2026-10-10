@@ -252,7 +252,7 @@ def orchestrate(args):
         fingerprint="0123456789abcdef" * 4,
         message="Inspect the current provider tool catalog.",
         idempotency_key=f"catalog:{ext.request_id}",
-        tools=["read", "search"],
+        tools=["read"],
         max_depth=1,
         max_concurrent_children=2,
         max_turns=8,

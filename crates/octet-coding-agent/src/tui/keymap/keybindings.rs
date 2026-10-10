@@ -53,9 +53,6 @@ pub fn use_windows_keybindings(platform: &str, wsl: bool) -> bool {
 #[must_use]
 pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinition> {
     let windows = use_windows_keybindings(platform, wsl);
-    // Platform-specific tree bindings were withdrawn with `/tree`; this
-    // helper still keys the remaining Windows-only defaults.
-    let _darwin = platform == "darwin";
 
     BASE_DEFINITIONS
         .iter()
@@ -89,7 +86,6 @@ pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinitio
                 }],
                 "app.suspend" if platform == "win32" => Vec::new(),
                 "app.model.cycleBackward" if windows => vec!["alt+p".to_owned()],
-                "app.message.followUp" if windows => vec!["ctrl+q".to_owned()],
                 "app.message.dequeue" if windows => vec!["alt+q".to_owned()],
                 "app.clipboard.pasteImage" if windows => vec!["alt+v".to_owned()],
                 _ => strings(keys),
@@ -353,9 +349,8 @@ impl KeybindingsManager {
             .any(|key| normalize_key_id(key) == event_id)
     }
 
-    /// Every id with its resolved keys.
+    /// Every id with its resolved keys, for read-only frontend projection.
     #[must_use]
-    #[cfg(test)]
     pub fn get_resolved_bindings(&self) -> BTreeMap<String, Vec<String>> {
         self.definitions
             .iter()
@@ -496,6 +491,7 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("dequeue", "app.message.dequeue"),
     ("pasteImage", "app.clipboard.pasteImage"),
     ("newSession", "app.session.new"),
+    ("tree", "app.session.tree"),
     ("fork", "app.session.fork"),
     ("resume", "app.session.resume"),
     ("toggleSessionPath", "app.session.togglePath"),
@@ -683,17 +679,20 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.session.toggleNamedFilter", &["ctrl+n"], "Toggle named session filter"),
     ("app.editor.external", &["ctrl+g"], "Open external editor"),
     ("app.message.copy", &["ctrl+x"], "Copy message to clipboard"),
-    ("app.message.followUp", &["alt+enter"], "Queue follow-up message"),
+    ("app.message.followUp", &["ctrl+s"], "Queue follow-up message"),
     ("app.message.dequeue", &["alt+up"], "Restore queued messages"),
     ("app.clipboard.pasteImage", &["ctrl+v"], "Paste image from clipboard (text fallback)"),
     ("app.session.new", &[], "Start a new session"),
-    ("app.session.fork", &[], "Fork current session"),
+    ("app.session.tree", &[], "Open session tree"),
+    ("app.session.fork", &[], "Fork a new session file"),
     ("app.session.resume", &[], "Resume a session"),
     ("app.session.togglePath", &["ctrl+p"], "Toggle session path display"),
     ("app.session.toggleSort", &["ctrl+s"], "Toggle session sort mode"),
     ("app.session.search", &["ctrl+f"], "Search session transcripts for the query"),
     ("app.session.rename", &["ctrl+r"], "Rename session"),
-    ("app.session.delete", &["ctrl+d"], "Delete session"),
+    // Not ctrl+d: that is the close key on every surface, so it never reaches
+    // the picker. Many keyboards (every Mac laptop) lack a forward Delete key.
+    ("app.session.delete", &["ctrl+x"], "Delete session"),
     ("app.session.deleteNoninvasive", &["ctrl+backspace"], "Delete session when query is empty"),
     ("app.models.save", &["ctrl+s"], "Save model selection"),
     ("app.models.enableAll", &["ctrl+a"], "Enable all models"),
@@ -748,7 +747,7 @@ mod tests {
         assert_eq!(win.get_keys("tui.editor.undo"), ["ctrl+z"]);
         assert!(win.get_keys("app.suspend").is_empty());
         assert_eq!(win.get_keys("tui.altScreen.search"), ["ctrl+f"]);
-        assert_eq!(win.get_keys("app.message.followUp"), ["ctrl+q"]);
+        assert_eq!(win.get_keys("app.message.followUp"), ["ctrl+s"]);
 
         let wsl = KeybindingsManager::with_platform("linux", true, BTreeMap::new());
         assert_eq!(wsl.get_keys("tui.editor.undo"), ["alt+z"]);
@@ -833,6 +832,33 @@ mod tests {
             KeybindingsManager::with_platform("linux", false, BTreeMap::new())
                 .matches(&escape, "app.interrupt")
         );
+    }
+
+    #[test]
+    fn tree_is_configurable_and_unbound_by_default_like_pi() {
+        for platform in ["darwin", "linux", "win32"] {
+            let manager = KeybindingsManager::with_platform(platform, false, BTreeMap::new());
+            assert!(manager.has_definition("app.session.tree"));
+            assert!(manager.get_keys("app.session.tree").is_empty());
+        }
+        let raw = serde_json::from_str(r#"{"tree":"ctrl+r"}"#).unwrap();
+        let (migrated, changed) = migrate_keybindings_config(&raw);
+        assert!(changed);
+        let manager =
+            KeybindingsManager::with_platform("linux", false, to_keybindings_config(&migrated));
+        assert!(manager.matches(
+            &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            "app.session.tree"
+        ));
+    }
+
+    #[test]
+    fn session_delete_default_is_not_the_close_key() {
+        let manager = KeybindingsManager::with_platform("linux", false, BTreeMap::new());
+        let ctrl = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+        assert!(manager.matches(&ctrl('x'), "app.session.delete"));
+        assert!(!manager.matches(&ctrl('d'), "app.session.delete"));
+        assert!(crate::tui::keymap::is_close_key(&ctrl('d')));
     }
 
     #[test]

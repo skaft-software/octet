@@ -19,6 +19,7 @@ PLATFORM_PACKAGES = {
     "octet-darwin-arm64": ("@skaft/octet-darwin-arm64", "darwin", "arm64"),
     "octet-darwin-x64": ("@skaft/octet-darwin-x64", "darwin", "x64"),
     "octet-linux-x64-gnu": ("@skaft/octet-linux-x64-gnu", "linux", "x64"),
+    "octet-win32-x64": ("@skaft/octet-win32-x64", "win32", "x64"),
 }
 REPOSITORY = "https://github.com/skaft-software/octet"
 SECRET_SCANNER_VERSION = "octet-npm-secret-rules-v1"
@@ -125,6 +126,13 @@ def expected_packages(version: str) -> List[ExpectedPackage]:
             "linux",
             "x64",
         ),
+        ExpectedPackage(
+            f"octet-win32-x64-{version}.tgz",
+            PLATFORM_PACKAGES["octet-win32-x64"][0],
+            "octet-win32-x64",
+            "win32",
+            "x64",
+        ),
     ]
 
 
@@ -170,15 +178,19 @@ def allowed_member(expected: ExpectedPackage, relative: str, is_directory: bool)
         return relative in {
             "bin/octet",
             "bin/octet-host",
-            "lib/launch.sh",
+            "lib/launch.js",
         } and not is_directory
+    binary_members = (
+        {"bin/octet.exe", "bin/octet-host.exe"}
+        if expected.os == "win32"
+        else {"bin/octet", "bin/octet-host"}
+    )
     fixed = {
         "package.json",
         "README.md",
         "LICENSE",
         "bin",
-        "bin/octet",
-        "bin/octet-host",
+        *binary_members,
         "share",
         "share/octet",
         "share/octet/.octet-version",
@@ -301,7 +313,11 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
         fail(f"{inspection.expected.artifact} has the wrong package name")
     if manifest.get("version") != version:
         fail(f"{inspection.expected.artifact} version is not {version}")
-    if manifest.get("license") != "MIT" or manifest.get("repository") != REPOSITORY:
+    if (
+        manifest.get("license") != "MIT"
+        or manifest.get("repository") != REPOSITORY
+        or manifest.get("homepage") != "https://octet.skaft.org"
+    ):
         fail(f"{inspection.expected.artifact} has the wrong release identity or license")
     if manifest.get("description") is None or not isinstance(manifest["description"], str):
         fail(f"{inspection.expected.artifact} must have a description")
@@ -314,6 +330,7 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
             "description",
             "license",
             "repository",
+            "homepage",
             "files",
             "bin",
             "optionalDependencies",
@@ -335,6 +352,7 @@ def check_manifest(inspection: Inspection, version: str) -> Mapping[str, Any]:
             "description",
             "license",
             "repository",
+            "homepage",
             "os",
             "cpu",
             "files",
@@ -374,8 +392,8 @@ def scan_secrets(inspection: Inspection) -> None:
 def validate(inspection: Inspection, version: str) -> None:
     check_manifest(inspection, version)
     if inspection.expected.platform is None:
-        require_files(inspection, ("package.json", "README.md", "LICENSE", "bin/octet", "bin/octet-host", "lib/launch.sh"))
-        for name in ("bin/octet", "bin/octet-host", "lib/launch.sh"):
+        require_files(inspection, ("package.json", "README.md", "LICENSE", "bin/octet", "bin/octet-host", "lib/launch.js"))
+        for name in ("bin/octet", "bin/octet-host"):
             require_executable(inspection, name)
     else:
         require_files(
@@ -384,8 +402,7 @@ def validate(inspection: Inspection, version: str) -> None:
                 "package.json",
                 "README.md",
                 "LICENSE",
-                "bin/octet",
-                "bin/octet-host",
+                *( ("bin/octet.exe", "bin/octet-host.exe") if inspection.expected.os == "win32" else ("bin/octet", "bin/octet-host") ),
                 "share/octet/.octet-version",
                 "share/octet/README.md",
             ),
@@ -394,8 +411,11 @@ def validate(inspection: Inspection, version: str) -> None:
         # Some inventoried source references (e.g. Python __init__.py) are empty.
         # They must still survive as regular files, not disappear during packing.
         require_files(inspection, ("share/octet/" + name for name in sorted(DOCUMENTATION_FILES)), allow_empty=True)
-        for name in ("bin/octet", "bin/octet-host"):
+        binaries = ("bin/octet.exe", "bin/octet-host.exe") if inspection.expected.os == "win32" else ("bin/octet", "bin/octet-host")
+        for name in binaries:
             require_executable(inspection, name)
+            if inspection.expected.os == "win32" and not inspection.contents[name].startswith(b"MZ"):
+                fail(f"{inspection.expected.artifact} package/{name} is not a PE executable")
         if inspection.contents["share/octet/.octet-version"].decode("utf-8").strip() != version:
             fail(f"{inspection.expected.artifact} packaged documentation version is not {version}")
         for root in ("share/octet/docs/", "share/octet/examples/", "share/octet/sdk/"):

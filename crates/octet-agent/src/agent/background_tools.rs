@@ -10,9 +10,10 @@ struct BackgroundJob {
     completed: Option<CompletedToolExecution>,
 }
 
-#[derive(Default)]
 pub(super) struct BackgroundTools {
     jobs: VecDeque<BackgroundJob>,
+    /// The run's read-wave width; a wholly eligible batch never exceeds it.
+    capacity: usize,
 }
 
 impl Drop for BackgroundTools {
@@ -28,8 +29,22 @@ impl Drop for BackgroundTools {
 }
 
 impl BackgroundTools {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            jobs: VecDeque::new(),
+            capacity,
+        }
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.jobs.is_empty()
+    }
+
+    /// Only the next original-order result can cross a request boundary.
+    pub(super) fn front_ready(&self) -> bool {
+        self.jobs.front().is_some_and(|job| {
+            job.completed.is_some() || job.task.as_ref().is_some_and(|task| task.is_finished())
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -49,7 +64,7 @@ impl BackgroundTools {
         registered_tools: Vec<String>,
         cancellation: CancellationToken,
     ) {
-        assert!(self.jobs.len() < MAX_PARALLEL_READ_WAVE_WIDTH);
+        assert!(self.jobs.len() < self.capacity);
         let owned_call = call.clone();
         let task = tokio::spawn(async move {
             let prepared = prepare_parallel_read_call(
@@ -77,6 +92,7 @@ impl BackgroundTools {
                 ParallelReadPreparation::Admitted(admitted) => Box::new(
                     execute_admitted_parallel_read(
                         *admitted,
+                        None,
                         &sandbox,
                         &tool_scope,
                         &resource_owner,
@@ -88,10 +104,10 @@ impl BackgroundTools {
                 ),
             };
             if let Some(after) = completed.after.take() {
-                run_parallel_after_tool_hooks(
+                completed.execution.result = run_parallel_after_tool_hooks(
                     after,
                     &hooks,
-                    &completed.execution.result,
+                    completed.execution.result,
                     &sandbox,
                     &tool_scope,
                     &resource_owner,
@@ -182,6 +198,12 @@ impl BackgroundTools {
             .completed
             .expect("joined background result");
         resolve_tool_delivery_after_persistence(&execution.result, sandbox.max_output_bytes);
+        if let Some(usage) = resolved_tool_output(&execution.result)
+            .and_then(ToolOutput::usage)
+            .copied()
+        {
+            session.record_tool_composition_usage(call.id.0.clone(), usage)?;
+        }
         if let Some(evidence) = evidence {
             evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
         }
@@ -206,7 +228,7 @@ impl BackgroundTools {
             });
         }
         context.tool_finished();
-        if let Ok(output) = &execution.result {
+        if let Some(output) = resolved_tool_output(&execution.result) {
             if let Some(tool_usage) = output.usage() {
                 add_usage(usage, tool_usage);
             }
@@ -271,6 +293,7 @@ mod tests {
                 task: Some(task),
                 completed: None,
             }]),
+            capacity: MIN_PARALLEL_READ_WAVE_WIDTH,
         };
         let sandbox = SandboxConfig::new(directory.path());
         let context = ContextTracker::default();

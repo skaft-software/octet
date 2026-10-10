@@ -256,8 +256,14 @@ fn selected_shell(configured: Option<&Path>) -> ShellSelection {
     }
     #[cfg(not(unix))]
     {
-        let _ = configured;
-        ShellSelection::Unavailable
+        // Execution honors an explicit host path (see
+        // `tools::bash::resolve_windows_shell`), so diagnostics must agree.
+        // Without one, Bash execution is unavailable on this platform.
+        if configured.is_some() {
+            ShellSelection::Configured
+        } else {
+            ShellSelection::Unavailable
+        }
     }
 }
 
@@ -317,7 +323,7 @@ pub struct SandboxConfig {
     /// Explicit Bash-compatible shell executable. When unset on Unix, octet
     /// follows Pi's order: `/bin/bash`, `bash` on `PATH`, then `sh`.
     pub shell_path: Option<PathBuf>,
-    /// Maximum duration for a `bash` call (also bounds `search`).
+    /// Maximum duration for a `bash` call.
     pub bash_timeout: Duration,
     /// Maximum bytes of tool output before truncation.
     pub max_output_bytes: usize,
@@ -598,7 +604,14 @@ pub(crate) fn display_path(workspace: &Path, path: &str, allow_external_paths: b
         if relative.as_os_str().is_empty() {
             ".".to_owned()
         } else {
-            relative.display().to_string()
+            // Tool output stays comparable across platforms: diff headers and
+            // test fixtures use `/`, while `Path::display` emits `\` on
+            // Windows. `MAIN_SEPARATOR` is `/` on Unix, so this is a no-op
+            // there and never corrupts a Unix filename containing `\`.
+            relative
+                .display()
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/")
         }
     } else {
         path.to_owned()

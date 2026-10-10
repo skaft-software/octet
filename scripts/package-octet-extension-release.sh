@@ -30,6 +30,8 @@ script_directory=$(cd "$(dirname "$0")" && pwd)
 repository_directory=$(cd "$script_directory/.." && pwd)
 package_version=${version#v}
 tracked_manifest=
+dependency_directory=
+trap '[[ -z "$tracked_manifest" ]] || rm -f "$tracked_manifest"; [[ -z "$dependency_directory" ]] || rm -rf "$dependency_directory"' EXIT
 
 if [[ -z "$source_override" ]]; then
     if ! grep -Ev '^[[:space:]]*(#|$)' "$repository_directory/extensions/release-catalog.txt" \
@@ -43,7 +45,6 @@ if [[ -z "$source_override" ]]; then
     fi
     source_directory="$repository_directory/extensions/$package_id"
     tracked_manifest=$(mktemp "${TMPDIR:-/tmp}/octet-extension-files.XXXXXX")
-    trap 'rm -f "$tracked_manifest"' EXIT
     git -C "$repository_directory" ls-files -z -- "extensions/$package_id" >"$tracked_manifest"
     if [[ ! -s "$tracked_manifest" ]]; then
         printf 'official extension has no tracked source files: %s\n' "$package_id" >&2
@@ -77,6 +78,12 @@ case "$source_date_epoch" in
         ;;
 esac
 
+# Resolve the locked adapter dependencies only in private build staging. Never
+# reuse a workstation node_modules tree or run npm/extension lifecycle scripts.
+if [[ "$package_id" == octet-pi-compat ]]; then
+    dependency_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-extension-dependencies.XXXXXX")
+fi
+
 mkdir -p "$output_directory"
 archive="$output_directory/$package_id-$package_version.tar.gz"
 python3 - \
@@ -86,17 +93,21 @@ python3 - \
     "$package_version" \
     "$archive" \
     "$source_date_epoch" \
-    "$tracked_manifest" <<'PY'
+    "$tracked_manifest" \
+    "$dependency_directory" <<'PY'
 import gzip
+import json
 import os
 import pathlib
 import re
+import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tomllib
 
-repository, source, package_id, octet_version, archive, epoch, tracked_manifest = sys.argv[1:8]
+repository, source, package_id, octet_version, archive, epoch, tracked_manifest, dependency_directory = sys.argv[1:9]
 repository = pathlib.Path(repository)
 source = pathlib.Path(source)
 archive = pathlib.Path(archive)
@@ -166,23 +177,59 @@ files = [
     for path in files
     if "__pycache__" not in path.relative_to(source).parts
     and path.suffix not in {".pyc", ".pyo"}
+    and not (dependency_directory and any(
+        part in {"node_modules", ".npm-cache"} for part in path.relative_to(source).parts
+    ))
 ]
 
 if not files:
     raise SystemExit("extension source has no files")
+file_roots = {path: source for path in files}
+if dependency_directory:
+    dependency_root = pathlib.Path(dependency_directory)
+    for name in ("package.json", "package-lock.json", "bridge.json", "LICENSE.pi"):
+        path = source / name
+        if path not in file_roots or not stat.S_ISREG(path.lstat().st_mode):
+            raise SystemExit(f"Pi adapter release requires a regular {name}")
+    bridge = json.loads((source / "bridge.json").read_text(encoding="utf-8"))
+    if bridge != {"extensions": [], "registrations": {key: [] for key in (
+        "tools", "commands", "hooks", "flags", "shortcuts", "events", "tool_renderers"
+    )}}:
+        raise SystemExit("Pi adapter release must ship empty reviewed-factory configuration")
+    for name in ("package.json", "package-lock.json"):
+        shutil.copyfile(source / name, dependency_root / name)
+    npm = shutil.which("npm")
+    if npm is None:
+        raise SystemExit("required release command is unavailable: npm")
+    subprocess.run([
+        npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund",
+        "--bin-links=false",
+    ], cwd=dependency_root, check=True)
+    modules = dependency_root / "node_modules"
+    for path in modules.rglob("*"):
+        if path.is_symlink():
+            raise SystemExit(f"release bundle cannot contain links or special files: {path}")
+        if not path.is_dir():
+            file_roots[path] = dependency_root
+    # Pi's published TUI tarball omits its MIT license, as codemode's does.
+    # Retain the reviewed upstream notice alongside the bundled package.
+    license_path = modules / "@earendil-works/pi-tui/LICENSE"
+    shutil.copyfile(source / "LICENSE.pi", license_path)
+    file_roots[license_path] = dependency_root
+
 relative_files = []
-for path in files:
+for path, root in file_roots.items():
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
         raise SystemExit(f"release bundle cannot contain links or special files: {path}")
     try:
-        relative = path.relative_to(source)
+        relative = path.relative_to(root)
     except ValueError as error:
         raise SystemExit(f"extension file escaped source root: {path}") from error
     if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
         raise SystemExit(f"extension path is not portable: {relative}")
     for parent in path.parents:
-        if parent == source:
+        if parent == root:
             break
         if parent.is_symlink():
             raise SystemExit(f"release bundle cannot contain linked ancestors: {path}")

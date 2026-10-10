@@ -285,19 +285,41 @@ pub(crate) fn project_tool_output_images(
     images
 }
 
-/// Activity families presented as one quiet row in Still. A change of family
-/// closes the preceding group even when a model response contains no prose.
+/// Read the durable presentation diff a tool attached to its result metadata.
+/// Edit and write keep their diffs out of the model-visible text; the card
+/// renders whatever this returns.
+pub(crate) fn presentation_diff_metadata(output: &octet_agent::ToolOutput) -> Option<String> {
+    output
+        .metadata()
+        .and_then(|value| value.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|diff| !diff.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// Activity families presented as one quiet row in Still. Exploration, edits,
+/// web activity, MCP, and computer-use stay separate; delegation remains on its
+/// existing subagent presentation. A change of family closes the preceding
+/// group even when a model response contains no prose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolActivityKind {
     Explore,
     Edit,
+    WebSearch,
+    WebFetch,
+    Mcp,
+    ComputerUse,
 }
 
 impl ToolActivityKind {
     pub(crate) fn for_name(name: &str) -> Option<Self> {
         match name {
-            "read" | "search" | "bash" | "exec" => Some(Self::Explore),
+            "read" | "bash" | "exec" => Some(Self::Explore),
             "edit" | "write" => Some(Self::Edit),
+            "web_search" => Some(Self::WebSearch),
+            "web_fetch" => Some(Self::WebFetch),
+            name if name.starts_with("mcp_") => Some(Self::Mcp),
+            name if name.starts_with("computer_use_") => Some(Self::ComputerUse),
             _ => None,
         }
     }
@@ -309,9 +331,12 @@ impl ToolActivityKind {
 pub(crate) struct ToolActivityGroup {
     pub(crate) member_ids: Vec<ToolCallId>,
     pub(crate) read_files: usize,
-    pub(crate) searches: usize,
     pub(crate) commands: usize,
     pub(crate) edited_files: usize,
+    pub(crate) web_searches: usize,
+    pub(crate) web_fetches: usize,
+    pub(crate) mcp_calls: usize,
+    pub(crate) computer_use_actions: usize,
     pub(crate) file_paths: Vec<String>,
 }
 
@@ -319,6 +344,14 @@ impl ToolActivityGroup {
     pub(crate) fn kind(&self) -> ToolActivityKind {
         if self.edited_files > 0 {
             ToolActivityKind::Edit
+        } else if self.web_searches > 0 {
+            ToolActivityKind::WebSearch
+        } else if self.web_fetches > 0 {
+            ToolActivityKind::WebFetch
+        } else if self.mcp_calls > 0 {
+            ToolActivityKind::Mcp
+        } else if self.computer_use_actions > 0 {
+            ToolActivityKind::ComputerUse
         } else {
             ToolActivityKind::Explore
         }
@@ -341,8 +374,11 @@ impl ToolActivityGroup {
                     }
                 }
             }
-            "search" => self.searches += 1,
             "bash" | "exec" => self.commands += 1,
+            "web_search" => self.web_searches += 1,
+            "web_fetch" => self.web_fetches += 1,
+            name if name.starts_with("mcp_") => self.mcp_calls += 1,
+            name if name.starts_with("computer_use_") => self.computer_use_actions += 1,
             _ => unreachable!("only activity tools are grouped"),
         }
         self.member_ids.push(id);
@@ -356,11 +392,18 @@ impl ToolActivityGroup {
                 match kind {
                     ToolActivityKind::Explore => self.read_files += 1,
                     ToolActivityKind::Edit => self.edited_files += 1,
+                    ToolActivityKind::WebSearch
+                    | ToolActivityKind::WebFetch
+                    | ToolActivityKind::Mcp
+                    | ToolActivityKind::ComputerUse => {}
                 }
             }
         }
-        self.searches += other.searches;
         self.commands += other.commands;
+        self.web_searches += other.web_searches;
+        self.web_fetches += other.web_fetches;
+        self.mcp_calls += other.mcp_calls;
+        self.computer_use_actions += other.computer_use_actions;
         self.member_ids.extend(other.member_ids);
     }
 }
@@ -413,6 +456,25 @@ pub enum TranscriptItem {
         /// Exact immutable sRGB gutter colour recorded with the prompt.
         prompt_color: Option<String>,
     },
+    /// Visible extension message, distinct from user-authored prompts.
+    CustomMessage {
+        id: octet_agent::EntryId,
+        timestamp_unix_ms: Option<u64>,
+        content: octet_agent::session::CustomMessageContent,
+        custom_type: String,
+        text: String,
+        details: Option<serde_json::Value>,
+    },
+    /// Inert private record, visible only through its namespace's renderer.
+    PrivateEntry {
+        namespace: String,
+        entry: serde_json::Value,
+    },
+    /// Exact non-model tool details retained independently of the display text.
+    ToolPresentation {
+        id: ToolCallId,
+        result: Option<serde_json::Value>,
+    },
     Assistant(String),
     Reasoning(String),
     ToolCall {
@@ -433,6 +495,9 @@ pub enum TranscriptItem {
         /// Opaque bounded image projection. Text/copy/plain surfaces ignore
         /// this field and retain their existing payload-free semantics.
         images: Vec<ToolResultImage>,
+        /// Durable presentation diff from the tool's result metadata. This is
+        /// the model-invisible `ToolOutputDetails` channel, not replay text.
+        diff: Option<String>,
     },
     CompactionMarker {
         summary: String,
@@ -502,6 +567,17 @@ fn tool_result_duration_ms(metadata: Option<&EntryMetadata>) -> Option<u64> {
     })
 }
 
+/// Presentation diff recorded in the tool result's durable metadata.
+fn tool_result_diff(metadata: Option<&EntryMetadata>) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.tool_output.as_ref())
+        .and_then(|details| details.metadata())
+        .and_then(|value| value.get("diff"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|diff| !diff.is_empty())
+        .map(str::to_owned)
+}
+
 fn push_message(
     items: &mut Vec<TranscriptItem>,
     image_budget: &mut ToolImageBudget,
@@ -560,11 +636,54 @@ fn push_message(
                                 prompt_color: prompt_color.clone(),
                             });
                         }
+                        let details = metadata.and_then(|metadata| metadata.tool_output.as_ref());
+                        let presentation = if details.is_some()
+                            || !adjacent_tool_media.is_empty()
+                            || !matches!(result.content.as_slice(), [ToolResultPart::Text(_)])
+                        {
+                            let output = octet_agent::ToolOutput::from_content_parts(
+                                result
+                                    .content
+                                    .iter()
+                                    .map(|part| match part {
+                                        ToolResultPart::Text(text) => {
+                                            octet_agent::ToolOutputContentPart::Text(text.clone())
+                                        }
+                                        ToolResultPart::Media(media) => {
+                                            octet_agent::ToolOutputContentPart::Media(media.clone())
+                                        }
+                                    })
+                                    .chain(adjacent_tool_media.iter().filter_map(
+                                        |part| match part {
+                                            UserPart::Media(media) => {
+                                                Some(octet_agent::ToolOutputContentPart::Media(
+                                                    media.clone(),
+                                                ))
+                                            }
+                                            _ => None,
+                                        },
+                                    )),
+                            )
+                            .with_is_error(result.is_error)
+                            .try_with_details(
+                                details
+                                    .and_then(|details| details.structured_content())
+                                    .cloned(),
+                                details.and_then(|details| details.metadata()).cloned(),
+                            )
+                            .expect("validated durable tool details");
+                            Some(crate::tui::view::transcript_extensions::tool_result(
+                                &output,
+                            ))
+                        } else {
+                            None
+                        };
                         items.push(TranscriptItem::ToolResult {
                             id: result.tool_call_id.clone(),
                             text: tool_result_text(&result.content),
                             is_error: result.is_error,
                             duration_ms: tool_result_duration_ms(metadata),
+                            diff: tool_result_diff(metadata),
                             images: project_tool_images(
                                 result
                                     .content
@@ -581,7 +700,13 @@ fn push_message(
                                     )),
                                 image_budget,
                             ),
-                        })
+                        });
+                        if let Some(presentation) = presentation {
+                            items.push(TranscriptItem::ToolPresentation {
+                                id: result.tool_call_id.clone(),
+                                result: presentation,
+                            });
+                        }
                     }
                     UserPart::Media(Media::Image(_)) if !adjacent_tool_media.is_empty() => {}
                     UserPart::Media(media) => text.push_str(&media_marker(media)),
@@ -651,6 +776,7 @@ fn active_branch_tail_from<'a>(
             &entry.value,
             EntryValue::Message(_)
                 | EntryValue::Compaction { .. }
+                | EntryValue::BranchSummary { .. }
                 | EntryValue::ResponsesCompaction { .. }
         ) {
             displayable_entries = displayable_entries.saturating_add(1);
@@ -684,6 +810,7 @@ fn active_branch_tail_from<'a>(
                 &entry.value,
                 EntryValue::Message(_)
                     | EntryValue::Compaction { .. }
+                    | EntryValue::BranchSummary { .. }
                     | EntryValue::ResponsesCompaction { .. }
             ) {
                 break;
@@ -750,6 +877,35 @@ fn hydrate_entries_with_image_budget(
     let mut items = Vec::new();
     let mut image_budget = ToolImageBudget::default();
     for entry in entries {
+        if let Some(metadata) = &entry.metadata {
+            for namespace in metadata.extension_metadata.keys() {
+                if let Some(value) =
+                    octet_agent::extension_process::transcript_private_entry(entry, namespace)
+                {
+                    items.push(TranscriptItem::PrivateEntry {
+                        namespace: namespace.clone(),
+                        entry: value,
+                    });
+                }
+            }
+        }
+        if let Some(custom) = entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.custom_message.as_ref())
+        {
+            if custom.display {
+                items.push(TranscriptItem::CustomMessage {
+                    id: entry.id.clone(),
+                    timestamp_unix_ms: entry.timestamp_unix_ms,
+                    content: custom.content.clone(),
+                    custom_type: custom.custom_type.clone(),
+                    text: custom.text(),
+                    details: custom.details.clone(),
+                });
+            }
+            continue;
+        }
         match &entry.value {
             EntryValue::Message(message) => {
                 // New sessions attach the exact prompt model/source to the
@@ -819,6 +975,7 @@ fn hydrate_entries_with_image_budget(
                                 text: "interrupted before a durable tool result was recorded; this call is not running and will be reconciled before the next prompt".into(),
                                 is_error: true,
                                 duration_ms: None,
+                                diff: None,
                                 images: Vec::new(),
                             });
                         }
@@ -834,6 +991,23 @@ fn hydrate_entries_with_image_budget(
                     active_lab = lab;
                     active_model = Some(model_name.clone());
                 }
+            }
+            EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            } => {
+                // A branch handoff is not compaction or a user-authored prompt.
+                // Reuse the ordinary custom-message surface without inventing
+                // extension ownership or reviving abandoned conversation.
+                items.push(TranscriptItem::CustomMessage {
+                    id: entry.id.clone(),
+                    timestamp_unix_ms: entry.timestamp_unix_ms,
+                    content: octet_agent::session::CustomMessageContent::Text(summary.clone()),
+                    custom_type: "octet:branch-summary".into(),
+                    text: summary.clone(),
+                    details: Some(serde_json::json!({"fromId": from_entry.0, "details": details})),
+                });
             }
             EntryValue::Compaction { summary, .. } => {
                 items.push(TranscriptItem::CompactionMarker {
@@ -935,9 +1109,9 @@ mod tests {
                 call("r2", "read"),
                 call("b1", "bash"),
                 AssistantPart::Text("analysis".into()),
-                call("s1", "search"),
+                call("s1", "bash"),
                 call("e1", "edit"),
-                call("s2", "search"),
+                call("s2", "bash"),
                 call("b2", "exec"),
                 call("r3", "read"),
             ],
@@ -950,18 +1124,50 @@ mod tests {
             groups[0].member_ids,
             ["r1", "r2", "b1"].map(|id| ToolCallId(id.into()))
         );
-        assert_eq!(
-            (groups[0].read_files, groups[0].searches, groups[0].commands),
-            (2, 0, 1)
-        );
+        assert_eq!((groups[0].read_files, groups[0].commands), (2, 1));
         assert_eq!(
             groups[1].member_ids,
             ["s2", "b2", "r3"].map(|id| ToolCallId(id.into()))
         );
-        assert_eq!(
-            (groups[1].read_files, groups[1].searches, groups[1].commands),
-            (1, 1, 1)
-        );
+        assert_eq!((groups[1].read_files, groups[1].commands), (1, 2));
+    }
+
+    #[test]
+    fn activity_groups_keep_web_mcp_and_computer_use_distinct_from_delegation() {
+        let call = |id: &str, name: &str| {
+            AssistantPart::ToolCall(ToolCall {
+                async_execution: false,
+                id: ToolCallId(id.into()),
+                name: name.into(),
+                arguments_json: "{}".into(),
+                argument_error: None,
+            })
+        };
+        let message = AssistantMessage {
+            content: vec![
+                call("ws1", "web_search"),
+                call("ws2", "web_search"),
+                call("wf1", "web_fetch"),
+                call("wf2", "web_fetch"),
+                call("mcp1", "mcp_fixture_echo"),
+                call("mcp2", "mcp_fixture_write"),
+                call("cu1", "computer_use_click"),
+                call("cu2", "computer_use_window_state"),
+                call("delegate", "delegate"),
+            ],
+            model: ModelId("test".into()),
+            protocol: Protocol::OpenAiChat,
+        };
+        let groups = tool_activity_groups(&message);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].kind(), ToolActivityKind::WebSearch);
+        assert_eq!(groups[0].web_searches, 2);
+        assert_eq!(groups[1].kind(), ToolActivityKind::WebFetch);
+        assert_eq!(groups[1].web_fetches, 2);
+        assert_eq!(groups[2].kind(), ToolActivityKind::Mcp);
+        assert_eq!(groups[2].mcp_calls, 2);
+        assert_eq!(groups[3].kind(), ToolActivityKind::ComputerUse);
+        assert_eq!(groups[3].computer_use_actions, 2);
     }
 
     #[test]
@@ -979,7 +1185,6 @@ mod tests {
             content: vec![
                 call("r1", "read", "src/a.rs"),
                 call("r2", "read", "src/a.rs"),
-                call("s1", "search", ""),
                 call("b1", "bash", ""),
                 call("e1", "edit", "src/b.rs"),
                 call("w1", "write", "src/b.rs"),
@@ -992,10 +1197,7 @@ mod tests {
         };
         let groups = tool_activity_groups(&message);
         assert_eq!(groups.len(), 2);
-        assert_eq!(
-            (groups[0].read_files, groups[0].searches, groups[0].commands),
-            (1, 1, 1)
-        );
+        assert_eq!((groups[0].read_files, groups[0].commands), (1, 1));
         assert_eq!(groups[0].file_paths, ["src/a.rs"]);
         assert_eq!(groups[1].edited_files, 2);
         assert_eq!(groups[1].file_paths, ["src/b.rs", "src/c.rs"]);
@@ -1088,7 +1290,10 @@ mod tests {
                 .append(EntryValue::Message(Message::User(UserMessage { content })))
                 .unwrap();
             let items = hydrate_transcript(&session).unwrap();
-            assert_eq!(items.len(), 1, "{protocol:?}");
+            assert_eq!(items.len(), 2, "{protocol:?}");
+            assert!(
+                matches!(&items[1], TranscriptItem::ToolPresentation { result: Some(result), .. } if result["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "image")))
+            );
             let TranscriptItem::ToolResult { images, .. } = &items[0] else {
                 panic!("tool result")
             };
@@ -1196,6 +1401,32 @@ mod tests {
         let (items, truncated) = hydrate_transcript_tail(&session, 100).unwrap();
         assert!(!truncated);
         assert_eq!(items.len(), 100);
+    }
+
+    #[test]
+    fn resumed_branch_summary_is_visible_and_counts_toward_the_transcript_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let kept = session.append(user("kept prompt")).unwrap();
+        let abandoned = session.append(user("abandoned work")).unwrap();
+        let summary = "# Branch handoff\n\nKeep the exact sentinel.";
+        let head = session
+            .branch_with_summary(Some(kept), summary.into(), Default::default())
+            .unwrap();
+        drop(session);
+
+        let resumed = Session::open(path).unwrap();
+        let (items, truncated) = hydrate_transcript_tail(&resumed, 1).unwrap();
+        assert!(truncated);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            TranscriptItem::CustomMessage { id, custom_type, text, .. }
+                if id == &head && custom_type == "octet:branch-summary" && text == summary
+        ));
+        assert!(!format!("{:?}", hydrate_transcript(&resumed).unwrap()).contains("abandoned work"));
+        assert!(resumed.entry(&abandoned).is_some());
     }
 
     #[test]
@@ -1315,6 +1546,7 @@ mod tests {
                     text: "ok".into(),
                     is_error: false,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
                 TranscriptItem::User {
@@ -1335,9 +1567,12 @@ mod tests {
             .append_with_metadata(
                 user("prompt for model A"),
                 Some(EntryMetadata {
+                    custom_message: None,
                     prompt_model: Some(ModelId("local-alias-a".into())),
                     prompt_model_source: Some("deepseek".into()),
                     prompt_color: Some("#123456".into()),
+                    replay_safe_tool_calls: None,
+                    tool_composition: None,
                     display_text: None,
                     run_outcome: None,
                     local_synthetic_assistant: false,
@@ -1360,9 +1595,12 @@ mod tests {
             .append_with_metadata(
                 user("prompt for model B"),
                 Some(EntryMetadata {
+                    custom_message: None,
                     prompt_model: Some(ModelId("local-alias-b".into())),
                     prompt_model_source: Some("anthropic".into()),
                     prompt_color: Some("#abcdef".into()),
+                    replay_safe_tool_calls: None,
+                    tool_composition: None,
                     display_text: None,
                     run_outcome: None,
                     local_synthetic_assistant: false,

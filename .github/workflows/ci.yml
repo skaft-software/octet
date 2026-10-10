@@ -19,26 +19,24 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
 
   dependencies:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
-      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
 
   quality:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -56,10 +54,10 @@ jobs:
           MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 scripts/check-release-model-metadata.py
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Test binary release tooling
         run: |
           sh -n scripts/install.sh
@@ -67,7 +65,6 @@ jobs:
             scripts/build-octet-image.sh \
             scripts/package-octet-extension-release.sh \
             scripts/package-octet-release.sh \
-            scripts/package-octet-serve-release.sh \
             scripts/test-binary-installer.sh \
             scripts/package-octet-npm.sh \
             scripts/test-octet-npm.sh \
@@ -75,7 +72,11 @@ jobs:
             scripts/test-homebrew-formula.sh
           python3 -m py_compile scripts/provider-acceptance.py scripts/generate-octet-release-metadata.py scripts/create-octet-npm-manifest.py scripts/verify-octet-npm.py scripts/verify-octet-npm-provenance.py scripts/generate-homebrew-formula.py
           python3 scripts/test_provider_acceptance.py
+          python3 scripts/test_release_serve_trust.py
+          python3 scripts/test_release_source_qualification.py
+          python3 scripts/test_windows_release_surface.py
           python3 scripts/test_repository_identity.py
+          python3 scripts/test-packaged-docs.py
           version="v$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
@@ -100,13 +101,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --doc --profile ci-test --locked
-      - run: cargo fmt --manifest-path extensions/octet-serve/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path extensions/octet-serve/Cargo.toml --all-targets --locked -- -D warnings
-      - run: cargo test --manifest-path extensions/octet-serve/Cargo.toml --profile ci-test --locked
       # Cargo 1.90 stabilized packaging interdependent workspace crates. Keep
-      # the dedicated compilation check on the 1.86 MSRV in the job below; use
-      # 1.90 only to assemble the publishable crates together. The serve feature depends on the
-      # publish-excluded optional extension.
+      # the dedicated compilation check on the 1.88 MSRV in the job below; use
+      # 1.90 only to assemble the publishable crates together.
       - name: Install Rust 1.90 packaging toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
       - run: cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
@@ -114,7 +111,14 @@ jobs:
   first-party-extension-tests:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          # The Pi adapter still runs on Node; codemode needs no Node at all.
+          node-version: "22.19.0"
+      - name: Build the no-Node codemode extension
+        run: cargo build --locked --release --manifest-path extensions/octet-codemode/Cargo.toml
       - name: Test the shared Python SDK and every official extension adapter
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -125,6 +129,12 @@ jobs:
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
             root="extensions/$extension"
+            if [[ -f "$root/package.json" && ! -d "$root/tests" ]]; then
+              # Node adapters run their own suites in the test job, which
+              # builds the native editor peer their editor tests require.
+              echo "$extension: Node suite runs in the test job"
+              continue
+            fi
             test -d "$root/tests"
             if [[ -f "$root/tests/__init__.py" ]]; then
               (cd "$root" && python3 -m unittest discover -s tests -t .)
@@ -132,18 +142,46 @@ jobs:
               (cd "$root" && python3 -m unittest discover -s tests)
             fi
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
+      - name: Test source-only first-party extensions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          # Source-only extensions are not published, so this job has no Rust
+          # toolchain by default. Install one that can build their renderers and
+          # put it first on PATH; suites that still cannot build skip themselves.
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          shim="$RUNNER_TEMP/source-extension-toolchain"
+          mkdir -p "$shim"
+          # Call the rustup proxy by absolute path: a bare `cargo` would resolve
+          # back to this shim once the shim directory leads PATH.
+          cat > "$shim/cargo" <<SHIM
+          #!/bin/sh
+          exec "$HOME/.cargo/bin/cargo" +1.96.0 "\$@"
+          SHIM
+          chmod 0755 "$shim/cargo"
+          export PATH="$shim:$PATH"
+          while IFS= read -r extension; do
+            [[ -n "$extension" ]] || continue
+            root="extensions/$extension"
+            if [[ -f "$root/tests/__init__.py" ]]; then
+              (cd "$root" && python3 -m unittest discover -s tests -t .)
+            elif [[ -d "$root/tests" ]]; then
+              (cd "$root" && python3 -m unittest discover -s tests)
+            else
+              (cd "$root" && python3 -m unittest discover -s . -p 'test_*.py')
+            fi
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/source-catalog.txt)
 
   extension-api-v03:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: apps/web/.node-version
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          node-version: "22.13.0"
       - name: Verify generated API 0.3 artifacts and language conformance
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -155,8 +193,7 @@ jobs:
           PYTHONPATH=sdk/python python3 -m unittest sdk/python/tests/test_extension_api_v03.py
           node sdk/typescript/tests/api_v03_conformance.mjs
           node sdk/typescript/tests/package_conformance.mjs
-          npm ci --prefix apps/web
-          apps/web/node_modules/.bin/tsc -p sdk/typescript/tsconfig.json
+          npx --yes --package typescript@5.9.3 tsc -p sdk/typescript/tsconfig.json
 
   test:
     strategy:
@@ -165,60 +202,410 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22.19.0"
+      - name: Install reviewed Pi adapter test dependencies
+        run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
+      - name: Install ripgrep for the search tool
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ripgrep
+          else
+            brew install ripgrep
+          fi
+          rg --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      # Cold compilation has its own bound; retain the full execution budget.
+      - name: Build workspace test binaries
         timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
+      - name: Run workspace tests
+        timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
         env:
           OCTET_PTY_TRACE: "1"
+      # `cargo test --all-targets` builds examples only as test harnesses.
+      - name: Build the native editor peer for the Node adapter suites
+        run: cargo build -p octet-coding-agent --example native-editor-test-host --profile ci-test --locked
+      - name: Test the Node extension adapters in the release catalog
+        env:
+          OCTET_NATIVE_EDITOR_TEST_HOST: ${{ github.workspace }}/target/ci-test/examples/native-editor-test-host
+        run: |
+          set -euo pipefail
+          while IFS= read -r extension; do
+            root="extensions/$extension"
+            [[ -f "$root/package.json" && ! -d "$root/tests" ]] || continue
+            npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            npm test --prefix "$root"
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
       - run: cargo check --workspace --all-targets --no-default-features --locked
+
+  windows:
+    # Native Windows x64 build and qualification lane for pull requests. It
+    # uses the target of the opt-in release-candidate contract
+    # (scripts/package-octet-windows-release.py) and produces an unsigned,
+    # PR-scoped test artifact only; signed release publication stays in
+    # release-octet.yml. No GUI, driver, credential, or permission action runs.
+    name: windows (x86_64-pc-windows-gnu)
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-gnu
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The runner's Git converts checkouts to CRLF; the repository's fixtures
+      # and golden files are LF, as on every other platform.
+      - name: Check out with repository line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # This action revision is fixed to Rust 1.88.0 (the MSRV used by CI).
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: x86_64-pc-windows-gnu
+      - name: Select the MinGW-w64 linker and C compiler for the GNU target
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = 'x86_64-w64-mingw32-gcc.exe'
+          $found = @('C:\mingw64\bin', 'C:\msys64\mingw64\bin') |
+            Where-Object { Test-Path (Join-Path $_ $compiler) } | Select-Object -First 1
+          if (-not $found) {
+            # The runner image ships MSYS2; install its MinGW-w64 GCC only when
+            # the image has no preinstalled toolchain.
+            C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
+            if ($LASTEXITCODE -ne 0) { throw 'MinGW-w64 GCC installation failed' }
+            $found = 'C:\msys64\mingw64\bin'
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $found
+          & (Join-Path $found $compiler) --version
+          rustc -vV
+      - id: build
+        name: Build native octet.exe and octet-host.exe
+        run: cargo build --release --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --bins
+      - id: smoke
+        name: Smoke native binaries (version, help, host hello handshake)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $release = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release"
+          $octet = Join-Path $release 'octet.exe'
+          $octetHost = Join-Path $release 'octet-host.exe'
+          $observed = (& $octet --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $observed -ne "octet $version") { throw "octet.exe --version: '$observed'" }
+          & $octet --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'octet.exe --help failed' }
+          $request = '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}'
+          $hello = ($request | & $octetHost | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "octet-host.exe exited $LASTEXITCODE" }
+          $frame = $hello | ConvertFrom-Json
+          if ($frame.type -ne 'hello' -or $frame.request_id -ne 'ci-smoke' -or
+              $frame.data.protocol_version -ne 1 -or $frame.data.sdk_version -ne $version) {
+            throw "unexpected host hello frame: $hello"
+          }
+          Write-Output "octet.exe: $observed"
+          Write-Output "octet-host.exe hello: $hello"
+      - name: Test the native terminal frontend (capabilities, console writer, ConPTY)
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib auth::subscription
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib auth::meta
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib tui::terminal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The same ConPTY scenarios against the release binary the artifact ships.
+          $env:OCTET_CONPTY_BINARY = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release\octet.exe"
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --test windows_conpty -- --nocapture
+      - name: Test the renderer, private file access, extension launch, and Windows process control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p sexy-tui-rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --lib -- `
+            secure_fs `
+            tools::bash::tests `
+            extension_process::tests::python_script_detection_uses_the_extension_or_interpreter_line `
+            extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter `
+            extension_process::tests::compaction_strategy_negotiates_and_renders_through_host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test windows_process_current
+      - name: Test the Python SDK, computer-use extension, and Windows release tooling
+        if: ${{ !cancelled() }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python --version
+          $env:PYTHONPATH = 'sdk/python'
+          python -m unittest discover -s sdk/python/tests
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK tests failed' }
+          Push-Location extensions/octet-computer-use
+          try {
+            # No Cua Driver is provisioned on the runner: live-driver tests skip
+            # and the no-driver status/fail-closed tests run.
+            $env:PYTHONPATH = '.;vendor;tests'
+            python -m unittest discover -s tests -p 'test_*.py' -v
+            if ($LASTEXITCODE -ne 0) { throw 'computer-use tests failed (flat discovery)' }
+            Remove-Item Env:PYTHONPATH
+            python -m unittest discover -s tests -t .
+            if ($LASTEXITCODE -ne 0) { throw 'computer-use tests failed (package discovery)' }
+            python tests/live_smoke.py --i-have-an-unlocked-desktop
+            if ($LASTEXITCODE -ne 2) { throw 'the attended live smoke must refuse to run in CI' }
+          } finally {
+            Pop-Location
+          }
+          python scripts/test-windows-release.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release tooling tests failed' }
+      # Informational: most of the workspace suite has never run on Windows.
+      # The runner account is an elevated administrator on Windows Server,
+      # whose files are owned by the Administrators group and so fail octet's
+      # owner-only private-file checks, and many tests assume Unix paths,
+      # modes, or signals. The per-target results are published in the job
+      # summary so the backlog stays visible; the gating Windows suites are
+      # the steps above.
+      - name: Workspace test baseline on Windows (not gating)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'windows-workspace-tests.log'
+          cargo test --workspace --all-targets --profile ci-test --locked --target $env:WINDOWS_TARGET --no-fail-fast 2>&1 |
+            ForEach-Object { "$_" } | Tee-Object -FilePath $log | Out-Null
+          $status = $LASTEXITCODE
+          # Cargo colors its status lines (CARGO_TERM_COLOR), so strip SGR
+          # escapes first. Case-sensitive: `-match` would also take libtest's
+          # "running N tests" line as a target. A failing test's captured
+          # output can hold a nested harness summary, so each target keeps the
+          # last summary printed before the next target starts.
+          $target = $null
+          $result = $null
+          $rows = @(foreach ($raw in Get-Content $log) {
+            $line = $raw -replace '\x1b\[[0-9;]*m', ''
+            if ($line -cmatch '^\s*Running (.+)$') {
+              if ($result) { $result }
+              $target = $Matches[1] -replace '^unittests ', '' -replace ' \(.*[\\/]([^\\/]+?)-[0-9a-f]{16}(\.exe)?\)$', ' ($1)'
+              $result = $null
+              continue
+            }
+            if ($target -and $line -cmatch '^test result: \w+\. (\d+) passed; (\d+) failed') {
+              $result = [pscustomobject]@{ Target = $target; Passed = [int]$Matches[1]; Failed = [int]$Matches[2] }
+            }
+          }
+          if ($result) { $result })
+          $summary = @('### Windows workspace test baseline (not gating)', '',
+            "cargo exit status: $status", '', '| Test target | Passed | Failed |', '| --- | ---: | ---: |')
+          $summary += $rows | Where-Object { $_.Passed + $_.Failed -gt 0 } |
+            ForEach-Object { '| {0} | {1} | {2} |' -f $_.Target, $_.Passed, $_.Failed }
+          $summary += '', ('Total: {0} passed, {1} failed' -f ($rows | Measure-Object Passed -Sum).Sum, ($rows | Measure-Object Failed -Sum).Sum)
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          $summary | Write-Output
+          Select-String -Path $log -Pattern 'test (\S+) \.\.\. FAILED' |
+            ForEach-Object { 'FAILED ' + $_.Matches[0].Groups[1].Value } | Write-Output
+          exit $status
+      - id: artifact
+        name: Assemble the unsigned PR test artifact
+        if: ${{ !cancelled() && steps.smoke.outcome == 'success' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $commit = (git rev-parse HEAD).Trim()
+          $name = "octet-pr-$($commit.Substring(0, 12))-$env:WINDOWS_TARGET"
+          $out = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $release = Join-Path $env:GITHUB_WORKSPACE "target\$env:WINDOWS_TARGET\release"
+          Copy-Item (Join-Path $release 'octet.exe'), (Join-Path $release 'octet-host.exe') $out
+          $sums = Get-ChildItem $out -Filter *.exe | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant(), $_.Name
+          }
+          [IO.File]::WriteAllLines((Join-Path $out 'SHA256SUMS'), [string[]]$sums)
+          $request = '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}'
+          $info = [ordered]@{
+            kind = 'unsigned pull-request test build; not a release'
+            version = $version
+            target = $env:WINDOWS_TARGET
+            source_commit = $commit
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            rustc = (rustc -V).Trim()
+            linker = ((x86_64-w64-mingw32-gcc --version) | Select-Object -First 1).Trim()
+            runner_os = [Environment]::OSVersion.VersionString
+            version_stdout = (& (Join-Path $out 'octet.exe') --version | Out-String).Trim()
+            hello_stdout = ($request | & (Join-Path $out 'octet-host.exe') | Out-String).Trim()
+          }
+          $info | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $out 'BUILD-INFO.json')
+          Copy-Item docs/windows.md (Join-Path $out 'WINDOWS.md')
+          # The source computer-use bundle, version-matched to these binaries,
+          # for the attended Windows procedure (`--extension-dir .\extensions`).
+          $extensions = New-Item -ItemType Directory -Path (Join-Path $out 'extensions')
+          Copy-Item -Recurse extensions/octet-computer-use $extensions.FullName
+          Get-ChildItem -Recurse -Directory -Filter __pycache__ $extensions.FullName | Remove-Item -Recurse -Force
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "path=$out" >> $env:GITHUB_OUTPUT
+          Get-Content (Join-Path $out 'SHA256SUMS')
+      - name: Run the packaged binaries without the build toolchain on PATH
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        env:
+          ARTIFACT: ${{ steps.artifact.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Only the OS directories: proves no MinGW, Rust, Git, or WSL runtime
+          # is needed to start the executables.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $scratch = Join-Path $env:RUNNER_TEMP 'octet-clean-run'
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          Push-Location $scratch
+          try {
+            $observed = (& (Join-Path $env:ARTIFACT 'octet.exe') --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "packaged octet.exe failed: $observed" }
+            $request = '{"protocol_version":1,"request_id":"clean-path","command":"hello"}'
+            $hello = ($request | & (Join-Path $env:ARTIFACT 'octet-host.exe') | Out-String).Trim()
+            if ((ConvertFrom-Json $hello).type -ne 'hello') { throw "packaged host hello failed: $hello" }
+            Write-Output "clean PATH: $observed"
+          } finally {
+            Pop-Location
+          }
+      - name: Run the packaged binaries as a standard (non-administrator) user
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        env:
+          ARTIFACT: ${{ steps.artifact.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $shared = 'C:\octet-standard-user'
+          New-Item -ItemType Directory -Path $shared | Out-Null
+          Copy-Item (Join-Path $env:ARTIFACT '*.exe') $shared
+          $request = Join-Path $shared 'hello.json'
+          Set-Content -Path $request -Encoding ascii -Value '{"protocol_version":1,"request_id":"standard-user","command":"hello"}'
+          icacls $shared /grant 'Users:(OI)(CI)M' | Out-Null
+          $user = 'octetpr' + (Get-Random -Maximum 99999)
+          # `net user` stops to ask Y/N about passwords longer than 14
+          # characters, which fails non-interactively. This one is 14
+          # characters with all four complexity classes and lives only for
+          # this step.
+          $password = 'Oa1!' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          net user $user $password /add /expires:never | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the standard test account $user" }
+          try {
+            if ((net localgroup Administrators) -contains $user) { throw 'test account must not be an administrator' }
+            $credential = [PSCredential]::new($user, (ConvertTo-SecureString $password -AsPlainText -Force))
+            foreach ($case in @(
+                @{ File = 'octet.exe'; Arguments = '--version'; Input = $null; Log = 'version' },
+                @{ File = 'octet-host.exe'; Arguments = ''; Input = $request; Log = 'hello' })) {
+              $stdout = Join-Path $shared "$($case.Log).out"
+              $stderr = Join-Path $shared "$($case.Log).err"
+              $options = @{
+                FilePath = Join-Path $shared $case.File
+                Credential = $credential
+                WorkingDirectory = $shared
+                RedirectStandardOutput = $stdout
+                RedirectStandardError = $stderr
+                LoadUserProfile = $true
+                Wait = $true
+                PassThru = $true
+              }
+              if ($case.Arguments) { $options.ArgumentList = $case.Arguments }
+              if ($case.Input) { $options.RedirectStandardInput = $case.Input }
+              $process = Start-Process @options
+              $output = (Get-Content -Raw $stdout).Trim()
+              Write-Output "$($case.File) as ${user}: exit $($process.ExitCode): $output"
+              if ($process.ExitCode -ne 0) { throw "$($case.File) failed as a standard user: $(Get-Content -Raw $stderr)" }
+            }
+            if ((Get-Content -Raw (Join-Path $shared 'hello.out') | ConvertFrom-Json).type -ne 'hello') {
+              throw 'standard-user host hello did not return a hello frame'
+            }
+          } finally {
+            net user $user /delete | Out-Null
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() && steps.artifact.outcome == 'success' }}
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release-candidate:
+    # Unsigned release-candidate archives for attended testing. Built like
+    # release-octet.yml's build job (clean runner, Rust 1.97.1, the release
+    # packager) but never signed, tagged or published, and only when this
+    # workflow is dispatched by hand. The windows job above supplies the
+    # Windows test build from the same run.
+    if: github.event_name == 'workflow_dispatch'
+    name: release candidate (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: source
+          fetch-depth: 0
+      # The release toolchain, independent of the workspace's 1.88 MSRV.
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build optimized octet binaries
+        working-directory: source
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --bins
+      - id: package
+        name: Package and smoke-test the release-candidate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' source/Cargo.toml | head -n 1)
+          source/scripts/package-octet-release.sh "${{ matrix.target }}" "$RUNNER_TEMP/octet-rc" "v$version" source
+          archive="$RUNNER_TEMP/octet-rc/octet-$version-${{ matrix.target }}.tar.gz"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          package="$RUNNER_TEMP/octet-$version-${{ matrix.target }}"
+          test "$("$package/octet" --version)" = "octet $version"
+          home="$RUNNER_TEMP/octet-rc-home"
+          mkdir -p "$home"
+          HOME="$home" "$package/octet" --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"rc-smoke","command":"hello"}' \
+            | HOME="$home" "$package/octet-host" | grep -F '"type":"hello"' >/dev/null
+          commit=$(git -C source rev-parse HEAD)
+          echo "name=octet-rc-${commit:0:12}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+          (cd "$RUNNER_TEMP/octet-rc" && shasum -a 256 *.tar.gz)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ runner.temp }}/octet-rc/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
 
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      # This action revision is fixed to Rust 1.86.0; it has no toolchain input.
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # This action revision is fixed to Rust 1.88.0; it has no toolchain input.
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo check --workspace --all-targets --all-features --locked
-
-  web:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: apps/web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: apps/web/.node-version
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run check:fonts
-      - run: npm run build
-      - run: npm run check:external
-      - run: npm run bundle:check
-      - run: cargo build -p octet-coding-agent --bin octet --features serve --locked
-        working-directory: ${{ github.workspace }}
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
-      - run: npm run test:e2e:live
 
   smoke-install:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --features serve --root "$RUNNER_TEMP/octet-install"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --root "$RUNNER_TEMP/octet-install"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --version"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --help"
       - name: Smoke-test installed native host
@@ -227,4 +614,3 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}' \
             | "$RUNNER_TEMP/octet-install/bin/octet-host" \
             | grep -F '"type":"hello"' >/dev/null
-      - run: scripts/smoke-octet-serve-installed.sh "$RUNNER_TEMP/octet-install/bin/octet"

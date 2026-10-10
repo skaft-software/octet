@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! One-enter coverage against the real interactive binary and a controlling PTY.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -436,7 +436,7 @@ fn streaming_octet() -> (StreamApi, PtyOctet) {
 fn real_octet_slash_help_renders_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/help\r");
-    octet.pty.wait_for(b"Slash commands:");
+    octet.pty.wait_for(b"Slash commands");
 
     // The response tail cannot exist yet: the run is provably still open.
     assert!(
@@ -529,14 +529,32 @@ fn real_octet_slash_context_renders_while_a_response_is_streaming() {
     octet.shutdown();
 }
 
-/// 2d.1 / 2d.2 — the settings and scope reports render mid-run from captured
-/// facts, and a mutation queues for the idle boundary with an explicit notice
-/// instead of silently doing nothing while the run owns the application.
+/// 2d.1 / 2d.2 — the settings menu and its diagnostic report open mid-run,
+/// scope reports render from captured facts, and a mutation queues for the idle
+/// boundary with an explicit notice while the run owns the application.
 #[test]
 fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/settings\r");
-    octet.pty.wait_for(b"octet settings");
+    octet
+        .pty
+        .wait_for(b"Choose a display or new-session preference");
+    octet.pty.wait_for(b"Theme");
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+
+    // The last destination may be outside this small pane's initial viewport.
+    // Filter the real SelectList before asserting and confirming that row.
+    octet.pty.write_input(b"Show effective settings");
+    octet.pty.wait_for(b"Show effective settings");
+    octet.pty.output.clear();
+    octet.pty.write_input(b"\r");
+    octet.pty.wait_for(b"Launch and session");
+    octet.pty.wait_for(b"Configured model");
+    octet.pty.wait_for(b"Active reasoning");
+    // The structured report is paged: scroll its owner to inspect the trust
+    // section rather than requiring offscreen facts in the initial frame.
+    octet.pty.write_input(b"\x1b[F");
     octet
         .pty
         .wait_for(b"Project trust is deliberately not persisted here");
@@ -547,18 +565,37 @@ fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() 
     );
     assert!(!api.completed.load(Ordering::SeqCst));
 
-    // Enter dismisses the report overlay; an empty draft is not a follow-up.
+    // Confirming a destination closes the menu. Dismiss the report, reopen the
+    // root, then cancel it; Escape must belong to that modal, not the held run.
     octet.pty.write_input(b"\r");
-    octet.pty.write_input(b"/scoped-models\r");
+    octet.pty.output.clear(); // Require a fresh menu render, not its earlier frame.
+    octet.pty.write_input(b"/settings\r");
+    octet
+        .pty
+        .wait_for(b"Choose a display or new-session preference");
+    // Exercise cancellation and the next command in the same input delivery.
+    octet
+        .pty
+        .write_input(&[PICKER_ESCAPE, b"/scoped-models\r"].concat());
     octet.pty.wait_for(b"Model cycling scope");
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+
     octet.pty.write_input(b"\r");
     octet.pty.write_input(b"/scoped-models all\r");
     octet
         .pty
         .wait_for(b"model scope change queued for the next idle boundary");
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+    assert!(!contains_bytes(
+        &octet.pty.output,
+        b"model scope now covers"
+    ));
 
     api.release();
     octet.pty.wait_for(TAIL_MARKER);
+    octet.pty.wait_for(b"model scope now covers");
     octet.shutdown();
 }
 

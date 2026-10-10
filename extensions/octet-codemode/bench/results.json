@@ -1,0 +1,65 @@
+{
+  "engines": {
+    "node-pi": [
+      {
+        "case": "cold_first_script",
+        "cpu_seconds": 2.28,
+        "median_ms": 47.42,
+        "min_ms": 39.8,
+        "p95_ms": 61.55,
+        "peak_rss_mib": 99.0,
+        "samples": 30
+      },
+      {
+        "case": "warm_script",
+        "cpu_seconds": 2.28,
+        "median_ms": 28.11,
+        "min_ms": 20.65,
+        "p95_ms": 34.63,
+        "peak_rss_mib": 99.0,
+        "samples": 29
+      },
+      {
+        "case": "tool_call_50",
+        "cpu_seconds": 2.28,
+        "median_ms": 32.0,
+        "min_ms": 25.25,
+        "p95_ms": 42.82,
+        "peak_rss_mib": 99.0,
+        "samples": 30
+      }
+    ],
+    "rust-wasi": [
+      {
+        "case": "cold_first_script",
+        "cpu_seconds": 2.04,
+        "median_ms": 53.92,
+        "min_ms": 47.69,
+        "p95_ms": 98.7,
+        "peak_rss_mib": 15.8,
+        "samples": 30
+      },
+      {
+        "case": "warm_script",
+        "cpu_seconds": 2.04,
+        "median_ms": 18.95,
+        "min_ms": 17.12,
+        "p95_ms": 37.97,
+        "peak_rss_mib": 15.8,
+        "samples": 29
+      },
+      {
+        "case": "tool_call_50",
+        "cpu_seconds": 2.04,
+        "median_ms": 44.07,
+        "min_ms": 35.43,
+        "p95_ms": 64.27,
+        "peak_rss_mib": 15.8,
+        "samples": 30
+      }
+    ]
+  },
+  "node_bundle_revision": "901e12eb",
+  "note": "The shipped Node/Pi bundle rejects the 0.9.0 feature offer; it is measured on the offer it accepts. The Rust extension runs the real 0.9.0 offer.",
+  "samples": 30
+}

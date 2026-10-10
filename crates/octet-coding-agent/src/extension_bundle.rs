@@ -241,11 +241,6 @@ fn validate_bundle_manifest(
     archive_root: &str,
 ) -> anyhow::Result<InstalledBundleManifest> {
     validate_bundle_id(&manifest.name)?;
-    if manifest.name == super::extension_package::PACKAGE_ID {
-        anyhow::bail!(
-            "octet-serve is an application package and must use package.toml, not an executable-extension bundle"
-        );
-    }
     if manifest.name != archive_root {
         anyhow::bail!(
             "extension manifest name {:?} does not match archive directory {:?}",
@@ -522,7 +517,11 @@ fn copy_archive_file<R: Read>(
     destination: &Path,
     expected_size: u64,
 ) -> anyhow::Result<()> {
+    // Read on every platform so a header whose mode field cannot be decoded
+    // fails identically everywhere; only the unix branches below consult it.
     let mode = entry.header().mode()?;
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -670,7 +669,7 @@ pub(super) fn list_installed(root: &Path) -> anyhow::Result<Vec<InstalledBundle>
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if validate_bundle_id(&id).is_err() || id == super::extension_package::PACKAGE_ID {
+        if validate_bundle_id(&id).is_err() {
             continue;
         }
         let file_type = entry
@@ -871,9 +870,10 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "octet-browse",
+                "octet-codemode",
                 "octet-computer-use",
                 "octet-mcp",
+                "octet-pi-compat",
                 "octet-subagents",
                 "octet-web-search",
             ]
@@ -883,6 +883,13 @@ mod tests {
         }
     }
 
+    // The update path needs atomic directory exchange, which is unavailable
+    // on Windows (`atomic_exchange_directories` is linux/macOS-only); a
+    // non-atomic fallback with crash recovery is a separate product decision.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        ignore = "atomic directory exchange is unavailable on this platform"
+    )]
     #[test]
     fn local_bundle_installs_lists_updates_atomically_and_removes() {
         let directory = tempfile::tempdir().unwrap();
@@ -1049,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_requires_exact_octet_compatibility_and_cannot_claim_serve_id() {
+    fn bundle_requires_exact_octet_compatibility() {
         let source = manifest("test-extension");
         let parsed = octet_agent::ExtensionManifest::parse(&source).unwrap();
         validate_bundle_manifest(&parsed, "test-extension").unwrap();
@@ -1060,9 +1067,5 @@ mod tests {
         );
         let parsed = octet_agent::ExtensionManifest::parse(&missing).unwrap();
         assert!(validate_bundle_manifest(&parsed, "test-extension").is_err());
-
-        let serve = source.replace("test-extension", "octet-serve");
-        let parsed = octet_agent::ExtensionManifest::parse(&serve).unwrap();
-        assert!(validate_bundle_manifest(&parsed, "octet-serve").is_err());
     }
 }

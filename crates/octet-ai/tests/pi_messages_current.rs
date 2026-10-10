@@ -167,7 +167,21 @@ fn root_error(error: &AiError) -> &AiError {
 
 fn finished(events: &[StreamEvent]) -> &Response {
     match events.last().expect("terminal event") {
-        StreamEvent::Finished(response) => response,
+        StreamEvent::Finished(response) => {
+            let metrics = response
+                .inference
+                .as_ref()
+                .expect("all client protocols are measured");
+            assert_eq!(
+                metrics.client.as_ref().unwrap().scope,
+                Some(octet_ai::inference::ClientTimingScope::Request)
+            );
+            assert_eq!(
+                metrics.server_unavailable,
+                Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+            );
+            response
+        }
         event => panic!("expected Finished, got {event:?}"),
     }
 }

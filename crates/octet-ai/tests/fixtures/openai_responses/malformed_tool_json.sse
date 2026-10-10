@@ -1,4 +1,4 @@
-: cite: docs/design/octet-ai.md §8/§13 (bad tool-arg JSON at assembly -> Decode)
+: cite: docs/design/octet-ai.md §8/§13 (bad tool-arg JSON at assembly -> call envelope marked ToolCallArgumentError::Malformed, Finished retained)
 data: {"type":"response.created","response":{"id":"resp_bad"}}
 
 data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_bad","type":"function_call","call_id":"call_bad","name":"foo"}}

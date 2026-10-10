@@ -78,10 +78,16 @@ pub mod events;
 pub mod extension;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub(crate) mod extension_bulk;
+mod extension_bulk_host;
+pub mod extension_diagnostics;
+pub mod extension_menu;
+pub mod extension_operations;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
 pub mod extension_provider;
+pub mod extension_remote_ui;
 pub mod extension_runtime;
 pub mod extension_secret;
 pub mod goal_driver;
@@ -90,17 +96,20 @@ pub mod input;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod session;
+pub mod session_leaf;
 mod session_writer;
 mod shell_safety;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
 pub mod skills;
 pub mod telemetry;
 pub mod tool;
+pub mod tool_composition;
 pub mod tools;
 
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
     PreparedSteering, RequestContextEstimate, Run, RunControl, RunOutput, SteeringReceipt,
+    TreeNavigationResult,
 };
 pub use artifact::{
     ArtifactError, ArtifactGenerationSettlement, ArtifactId, ArtifactPublication, ArtifactSource,
@@ -113,7 +122,10 @@ pub use cache::{
     analyze_session_cache, analyze_session_cache_stats, CacheMiss, CacheStats,
     CACHE_MISS_NOISE_TOKENS,
 };
-pub use cache_warmer::{CacheWarmMode, CacheWarmOutcome, CacheWarmPolicy};
+pub use cache_warmer::{
+    CacheWarmMode, CacheWarmingAction, CacheWarmingDecision, CacheWarmingPhase, CacheWarmingState,
+    CacheWarmingStatus,
+};
 pub use compaction::{
     build_branch_handoff_message, build_handoff_message, build_turn_prefix_handoff_message,
     choose_first_kept_by_tokens, finish_branch_handoff, finish_handoff, format_file_operations,
@@ -145,9 +157,20 @@ pub use extension::{
     AssistantPersistenceContext, CompactionStrategy, EventObserver, Extension, ExtensionHost,
     PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
     PostMutationDisposition, PostMutationKind, PostMutationRescan, PostMutationState,
-    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook, ProviderRetryKind, ToolCallHook,
-    MAX_POST_MUTATION_AFFECTED_RESOURCES, MAX_POST_MUTATION_ID_BYTES,
-    MAX_POST_MUTATION_RESOURCE_ID_BYTES, MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+    ProviderContextHook, ProviderContextProjection, ProviderContextProjectionContext,
+    ProviderContextSessionWait, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+    ProviderRetryKind, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
+    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
+    MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+};
+pub use extension_bulk::{BlobDigest, BlobRef, BulkError, BulkLimits};
+pub use extension_bulk_host::BulkStorage;
+pub use extension_diagnostics::Diagnostic;
+pub use extension_menu::{
+    ExtensionMenu, ExtensionMenuItem, MAX_EXTENSION_MENU_ARGUMENTS,
+    MAX_EXTENSION_MENU_ARGUMENT_BYTES, MAX_EXTENSION_MENU_BYTES, MAX_EXTENSION_MENU_DEPTH,
+    MAX_EXTENSION_MENU_DESCRIPTION_BYTES, MAX_EXTENSION_MENU_DETAIL_BYTES,
+    MAX_EXTENSION_MENU_ID_BYTES, MAX_EXTENSION_MENU_ITEMS, MAX_EXTENSION_MENU_LABEL_BYTES,
 };
 pub use extension_policy::{
     ExtensionActionIntent, ExtensionAdapterHints, ExtensionApprovalStore, ExtensionApprovalToken,
@@ -166,8 +189,8 @@ pub use extension_presentation::{
 };
 pub use extension_process::{
     default_extension_roots, discover_extension_manifests, load_extension_manifest_paths,
-    AgentSessionListRequest, AgentSessionMessageRequest, AgentSessionSpawnRequest,
-    AgentSessionTargetRequest, AgentSessionWaitRequest,
+    AgentSessionEventsRequest, AgentSessionListRequest, AgentSessionMessageRequest,
+    AgentSessionSpawnRequest, AgentSessionTargetRequest, AgentSessionWaitRequest,
     CommandDefinition as ExtensionCommandDefinition, CommandOutput as ExtensionCommandOutput,
     ConfirmationRequest as ExtensionConfirmationRequest,
     ConfirmationResponse as ExtensionConfirmationResponse, ContextContribution,
@@ -185,18 +208,20 @@ pub use extension_process::{
     ExtensionProtocolRequest, ExtensionProtocolResponse, ExtensionProviderRetryAdvice,
     ExtensionReloadReport, ExtensionRequestId, ExtensionResourceOwner, ExtensionRoot,
     ExtensionRuntimeConfig, ExtensionRuntimeError, ExtensionSource, ExtensionStatusContribution,
-    ExtensionTrust, ExtensionUiSurface, RenderedToolCall,
+    ExtensionTrust, ExtensionUiSurface, OperationDescriptor, RenderedToolCall, ResourceAccess,
+    ResourceCleanupStatus, ResourceInput, ResourceOutput, ResourceRef, ResourceReleaseStatus,
     ToolCallOutput as ExtensionToolCallOutput, ToolCatalogUpdateResponse,
     ToolDefinition as ExtensionToolDefinition, ToolRegistrationRequest, ToolRenderSegment,
     DELEGATION_TELEMETRY_SCHEMA, EXTENSION_API_VERSION, EXTENSION_API_VERSION_0_1,
     EXTENSION_API_VERSION_0_2, EXTENSION_API_VERSION_0_3, EXTENSION_API_VERSION_0_4,
-    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_APPROVALS, EXTENSION_FEATURE_ARTIFACTS,
-    EXTENSION_FEATURE_COMPACTION_STRATEGY, EXTENSION_FEATURE_CONTENT_PARTS,
-    EXTENSION_FEATURE_DELEGATION_TELEMETRY, EXTENSION_FEATURE_DYNAMIC_TOOLS,
-    EXTENSION_FEATURE_LIFECYCLE_EVENTS, EXTENSION_FEATURE_POLICY_INTENTS,
-    EXTENSION_FEATURE_PROGRESS_DECORATION, EXTENSION_FEATURE_REQUEST_CANCELLATION,
-    EXTENSION_FEATURE_REQUEST_PROGRESS, EXTENSION_FEATURE_RUNTIME_COMMANDS,
-    EXTENSION_FEATURE_SECRETS, EXTENSION_MANIFEST_FILENAME,
+    EXTENSION_FEATURE_AGENT_SESSIONS, EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1,
+    EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1, EXTENSION_FEATURE_APPROVALS,
+    EXTENSION_FEATURE_ARTIFACTS, EXTENSION_FEATURE_COMPACTION_STRATEGY,
+    EXTENSION_FEATURE_CONTENT_PARTS, EXTENSION_FEATURE_DELEGATION_TELEMETRY,
+    EXTENSION_FEATURE_DYNAMIC_TOOLS, EXTENSION_FEATURE_LIFECYCLE_EVENTS,
+    EXTENSION_FEATURE_POLICY_INTENTS, EXTENSION_FEATURE_PROGRESS_DECORATION,
+    EXTENSION_FEATURE_REQUEST_CANCELLATION, EXTENSION_FEATURE_REQUEST_PROGRESS,
+    EXTENSION_FEATURE_RUNTIME_COMMANDS, EXTENSION_FEATURE_SECRETS, EXTENSION_MANIFEST_FILENAME,
     MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION, MAX_EXTENSION_INPUT_PROMPT_BYTES,
     MAX_EXTENSION_INPUT_VALUE_BYTES, MAX_EXTENSION_RESULT_CONTENT_PARTS,
     MAX_EXTENSION_RESULT_MEDIA_BYTES,
@@ -205,6 +230,20 @@ pub use extension_provider::{
     ExtensionProviderAuthorizationPolicy, ExtensionProviderAuthorizationStatus,
     ExtensionProviderCatalogEntry, ExtensionProviderOwner, ExtensionProviderRegistry,
     ExtensionProviderRegistryError, ExtensionProviderRoute,
+};
+pub use extension_remote_ui::{
+    validate_remote_ui_line, ExtensionRemoteUiChrome, ExtensionRemoteUiChromeRequest,
+    ExtensionRemoteUiCloseRequest, ExtensionRemoteUiCloseResult, ExtensionRemoteUiClosed,
+    ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey,
+    ExtensionRemoteUiKeyKind, ExtensionRemoteUiKeyModifier, ExtensionRemoteUiMouse,
+    ExtensionRemoteUiMouseButton, ExtensionRemoteUiMouseKind, ExtensionRemoteUiOpenRequest,
+    ExtensionRemoteUiOpenResult, ExtensionRemoteUiOperation, ExtensionRemoteUiPlacement,
+    ExtensionRemoteUiResize, EXTENSION_FEATURE_REMOTE_UI, MAX_EXTENSION_REMOTE_UI_FRAME_BYTES,
+    MAX_EXTENSION_REMOTE_UI_KEY_BYTES, MAX_EXTENSION_REMOTE_UI_LINES,
+    MAX_EXTENSION_REMOTE_UI_LINE_BYTES, MAX_EXTENSION_REMOTE_UI_REASON_BYTES,
+    MAX_EXTENSION_REMOTE_UI_REVISION, MAX_EXTENSION_REMOTE_UI_SGR_BYTES,
+    MAX_EXTENSION_REMOTE_UI_SURFACES, MAX_EXTENSION_REMOTE_UI_SURFACE_ID_BYTES,
+    MAX_EXTENSION_REMOTE_UI_TITLE_BYTES,
 };
 pub use extension_secret::{
     ExtensionSecretBroker, ExtensionSecretError, ExtensionSecretRequest, ExtensionSecretValue,
@@ -228,7 +267,7 @@ pub use session::{
     CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId, EntryMetadata, EntryValue,
     ExtensionEntryMetadata, ExtensionMetadataProvenance, Session, SessionError, SessionRecord,
     SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
-    UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
+    UsageUncertaintyBound, UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
     MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
 };
 pub use skills::{
@@ -246,4 +285,4 @@ pub use tool::{
     ToolPromptContribution, MAX_PROGRESS_CHUNK_BYTES, MAX_TOOL_METADATA_BYTES,
     MAX_TOOL_STRUCTURED_CONTENT_BYTES,
 };
-pub use tools::{BashTool, CoreTools, EditTool, ReadTool, SearchTool, WriteTool};
+pub use tools::{BashTool, CoreTools, EditTool, ReadTool, WriteTool};

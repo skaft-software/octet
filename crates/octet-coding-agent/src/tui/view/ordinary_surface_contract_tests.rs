@@ -212,14 +212,10 @@ fn hostile_metadata_shell(fixture: ContractFixture) -> InteractiveShell {
         trust: crate::prompts::PromptTrust::UserInstalled,
         content_hash: "hostile".into(),
     }]));
-    shell.set_skill_commands(Arc::from(vec![(
-        "hostile-skill".into(),
-        HOSTILE_METADATA.into(),
-    )]));
-    shell.set_extension_commands(Arc::from(vec![(
-        "hostile-extension".into(),
-        HOSTILE_METADATA.into(),
-    )]));
+    shell.set_skill_commands(Arc::from(vec![
+        ("hostile-skill".into(), HOSTILE_METADATA.into()),
+        ("hostile-workflow".into(), HOSTILE_METADATA.into()),
+    ]));
     set_editor(&mut shell, "/hostile-");
     shell
 }
@@ -422,7 +418,7 @@ fn ordinary_surface_contract_fixture_matrix_preserves_grid_and_capabilities() {
 fn ordinary_surface_contract_migrates_resume_extensions_and_inline_completion() {
     let mut resume = shell_for(REGULAR);
     resume.open_panel(Panel::SessionPicker {
-        picker: PickerState::new(Vec::new(), None),
+        picker: Box::new(PickerState::new(Vec::new(), None)),
     });
     let resume_text = rendered_panel(&resume, REGULAR.width);
     assert!(
@@ -650,22 +646,13 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
                 super::input_overlays::SlashSuggestionProvenance::Prompt,
                 "prompt provenance must remain typed until rendering"
             );
-            for (name, provenance) in [
-                (
-                    "hostile-skill",
-                    super::input_overlays::SlashSuggestionProvenance::Skill,
-                ),
-                (
-                    "hostile-extension",
-                    super::input_overlays::SlashSuggestionProvenance::Extension,
-                ),
-            ] {
+            for name in ["hostile-skill", "hostile-workflow"] {
                 assert_eq!(
                     suggestions
                         .iter()
                         .find(|suggestion| suggestion.name == name)
                         .map(|suggestion| suggestion.provenance),
-                    Some(provenance),
+                    Some(super::input_overlays::SlashSuggestionProvenance::Skill),
                     "{name} provenance must remain typed until rendering"
                 );
             }
@@ -727,7 +714,7 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
         assert!(
             rendered.contains(prompt_fragment)
                 && rendered.contains("hostile-skill")
-                && rendered.contains("hostile-extension"),
+                && rendered.contains("hostile-workflow"),
             "{} did not sanitize and clip hostile metadata deterministically: {rendered:?}",
             fixture.name
         );
@@ -750,7 +737,7 @@ fn ordinary_surface_contract_sanitizes_hostile_dynamic_slash_metadata() {
             );
         }
 
-        for name in ["hostile-prompt", "hostile-skill", "hostile-extension"] {
+        for name in ["hostile-prompt", "hostile-skill", "hostile-workflow"] {
             set_editor(&mut shell, &format!("/{name}"));
             shell.complete_slash_command();
             assert_eq!(
@@ -768,7 +755,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut picker = PickerState::new(Vec::new(), None);
     picker.scope = PickerScope::All;
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
-    loading.open_panel(Panel::SessionPicker { picker });
+    loading.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let loading_text = rendered_panel(&loading, NO_COLOR.width);
     assert!(
         loading_text.to_ascii_lowercase().contains("loading")
@@ -779,7 +768,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut narrow_loading = shell_for(NARROW);
     let mut picker = PickerState::new(Vec::new(), None);
     picker.surface.lifecycle = OrdinarySurfaceLifecycle::loading("all workspaces");
-    narrow_loading.open_panel(Panel::SessionPicker { picker });
+    narrow_loading.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let narrow_loading_text = rendered_panel(&narrow_loading, NARROW.width);
     assert!(
         narrow_loading_text.to_ascii_lowercase().contains("loading"),
@@ -792,7 +783,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
         "session renamed",
         Instant::now() + Duration::from_secs(60),
     );
-    completed.open_panel(Panel::SessionPicker { picker });
+    completed.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let completed_text = rendered_panel(&completed, NO_COLOR.width);
     assert!(
         completed_text.to_ascii_lowercase().contains("completed")
@@ -806,7 +799,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
         "to rename session: permission denied",
         Instant::now() + Duration::from_secs(60),
     );
-    failed.open_panel(Panel::SessionPicker { picker });
+    failed.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let failed_text = rendered_panel(&failed, NO_COLOR.width);
     assert!(
         failed_text.to_ascii_lowercase().contains("failed")
@@ -819,7 +814,9 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
     let mut picker = PickerState::new(Vec::new(), None);
     picker.surface.lifecycle =
         OrdinarySurfaceLifecycle::cancelled("rename", Instant::now() + Duration::from_secs(60));
-    cancelled.open_panel(Panel::SessionPicker { picker });
+    cancelled.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
     let cancelled_text = rendered_panel(&cancelled, NO_COLOR.width);
     assert!(
         cancelled_text.to_ascii_lowercase().contains("cancelled")

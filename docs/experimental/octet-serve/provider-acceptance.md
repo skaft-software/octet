@@ -1,7 +1,8 @@
 # Configured-provider acceptance
 
-Maintainer reference for provider routes and acceptance procedures in the
-octet 0.8.0. For usage, see the [Serve guide](README.md). Optional
+Retained maintainer reference for provider routes and acceptance procedures in
+the octet 0.8.0. This record is kept because earlier release notes cite it; the
+Serve application it qualified is no longer built or shipped by octet. Optional
 live-provider/native-host audio checks are **NOT RUN** in this source review.
 Graphical media, recovery, and capture work remains separately tracked. The
 [historical 0.7.6 release](https://github.com/skaft-software/octet/releases/tag/v0.7.6)
@@ -76,6 +77,10 @@ snapshot documents its wire route; individual model capabilities still depend
 on the provider's model metadata.
 
 ## Deterministic CI gate
+
+Historical procedure: the web client and the `serve` cargo feature referenced below
+were removed with the Serve application, so this sequence is retained as the record
+of what was qualified, not as a runnable procedure.
 
 `apps/web/tests/live-host.spec.ts` is documented to launch the real Serve-capable
 `octet` binary with a temporary owner-only `HOME`, workspace, credential registry,
@@ -179,8 +184,8 @@ evidence for:
 - review and search.
 
 Fixtures and native-host checks cannot substitute for this graphical journey.
-See [web criteria](web-acceptance.md) and the
-[Project](https://github.com/orgs/skaft-software/projects/5) for work tracking.
+See the [Project](https://github.com/orgs/skaft-software/projects/5) for work
+tracking.
 
 ## Release record
 

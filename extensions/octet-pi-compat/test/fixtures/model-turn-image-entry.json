@@ -1,0 +1,29 @@
+{
+  "type": "message",
+  "User": {
+    "content": [
+      {
+        "ToolResult": {
+          "tool_call_id": "frame-call",
+          "content": [
+            {
+              "Text": "frame rendered"
+            }
+          ],
+          "is_error": false
+        }
+      },
+      {
+        "Media": {
+          "Image": {
+            "source": {
+              "Inline": "iVBORw0KGgpwaS1kb29tLWZyYW1l"
+            },
+            "media_type": "image/png",
+            "detail": null
+          }
+        }
+      }
+    ]
+  }
+}

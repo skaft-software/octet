@@ -12,6 +12,25 @@ use crate::presentation::{
     summarize_tool, summarize_tool_with_workspace, tool_failure_reason, tool_result_is_failure,
 };
 
+#[cfg(test)]
+std::thread_local! {
+    static HYDRATION_BLOCK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn active_hydrated_subagent_index(state: &ShellState, active: &mut Option<usize>) -> Option<usize> {
+    // Parent output (including activity groups) moves an active summary behind
+    // the new block. Only a live tail can move; settled history is unchanged.
+    if let Some(block) = state.transcript.last() {
+        #[cfg(test)]
+        HYDRATION_BLOCK_VISITS.with(|visits| visits.set(visits.get() + 1));
+        if matches!(block, TranscriptBlock::Subagents(summary) if summary.hydrated && summary.running > 0)
+        {
+            *active = Some(state.transcript.len() - 1);
+        }
+    }
+    *active
+}
+
 fn apply_hydrated_tool_result(panel: &mut ToolPanel, text: &str, is_error: bool) {
     panel.finished = true;
     let replayed = Ok(octet_agent::ToolOutput::new(text.to_owned()));
@@ -40,7 +59,14 @@ pub(super) fn append_hydrated_items(
     // The ordinary tool_panels index continues to identify the newest card for
     // repeated results; this temporary index also retains older open duplicates.
     let mut pending_by_id: HashMap<octet_ai::ToolCallId, Vec<usize>> = HashMap::new();
+    let mut active_hydrated_subagents = None;
     for (index, block) in state.transcript.iter().enumerate() {
+        #[cfg(test)]
+        HYDRATION_BLOCK_VISITS.with(|visits| visits.set(visits.get() + 1));
+        if matches!(block, TranscriptBlock::Subagents(summary) if summary.hydrated && summary.running > 0)
+        {
+            active_hydrated_subagents = Some(index);
+        }
         if let TranscriptBlock::Tool(panel) = block {
             if !panel.finished {
                 pending_by_id
@@ -64,6 +90,31 @@ pub(super) fn append_hydrated_items(
                     prompt_color,
                     persisted: true,
                 });
+            }
+            TranscriptItem::CustomMessage {
+                id,
+                timestamp_unix_ms,
+                content,
+                custom_type,
+                details,
+                ..
+            } => {
+                state.retain_custom_message(
+                    &id,
+                    &octet_agent::session::CustomMessage {
+                        custom_type,
+                        content,
+                        display: true,
+                        details,
+                    },
+                    timestamp_unix_ms,
+                );
+            }
+            TranscriptItem::PrivateEntry { namespace, entry } => {
+                state.retain_private_entry(namespace, entry)
+            }
+            TranscriptItem::ToolPresentation { id, result } => {
+                state.retain_tool_presentation(&id, result)
             }
             TranscriptItem::Assistant(text) => {
                 state.seal_activity_group();
@@ -92,24 +143,28 @@ pub(super) fn append_hydrated_items(
                         "subagent_spawn" | "subagent_continue" | "subagent_wait" | "subagent_stop"
                     ) && state.hydrated_pending_subagent_calls.insert(id.clone())
                     {
-                        if let Some(index) = state.transcript.iter().rposition(|block| {
-                            matches!(block, TranscriptBlock::Subagents(summary) if summary.hydrated && summary.running > 0)
-                        }) {
-                            if let TranscriptBlock::Subagents(summary) = &mut state.transcript[index] {
+                        if let Some(index) =
+                            active_hydrated_subagent_index(state, &mut active_hydrated_subagents)
+                        {
+                            if let TranscriptBlock::Subagents(summary) =
+                                &mut state.transcript[index]
+                            {
                                 summary.running += 1;
                             }
                             state.touch_block(index);
                         } else {
-                            state.push_block(TranscriptBlock::Subagents(SubagentTranscript {
-                                queued: 0,
-                                running: 1,
-                                succeeded: 0,
-                                failed: 0,
-                                stopped: 0,
-                                hydrated: true,
-                                live_workers: Vec::new(),
-                                worker_ids: Vec::new(),
-                            }));
+                            active_hydrated_subagents = Some(state.push_block(
+                                TranscriptBlock::Subagents(SubagentTranscript {
+                                    queued: 0,
+                                    running: 1,
+                                    succeeded: 0,
+                                    failed: 0,
+                                    stopped: 0,
+                                    hydrated: true,
+                                    live_workers: Vec::new(),
+                                    worker_ids: Vec::new(),
+                                }),
+                            ));
                         }
                     }
                     state.hidden_hydrated_subagent_calls.insert(id, name);
@@ -141,6 +196,7 @@ pub(super) fn append_hydrated_items(
                 text,
                 is_error,
                 duration_ms,
+                diff,
                 images,
             } => {
                 if let Some(name) = state.hidden_hydrated_subagent_calls.get(&id) {
@@ -150,12 +206,21 @@ pub(super) fn append_hydrated_items(
                                 name,
                                 &Ok(octet_agent::ToolOutput::new(text.clone())),
                             );
-                        if let Some(index) = state.transcript.iter().rposition(|block| {
-                            matches!(block, TranscriptBlock::Subagents(summary) if summary.hydrated && summary.running > 0)
-                        }) {
-                            if let TranscriptBlock::Subagents(summary) = &mut state.transcript[index] {
+                        if let Some(index) =
+                            active_hydrated_subagent_index(state, &mut active_hydrated_subagents)
+                        {
+                            if let TranscriptBlock::Subagents(summary) =
+                                &mut state.transcript[index]
+                            {
                                 summary.running -= 1;
-                                if failed { summary.failed += 1; } else { summary.succeeded += 1; }
+                                if failed {
+                                    summary.failed += 1;
+                                } else {
+                                    summary.succeeded += 1;
+                                }
+                                if summary.running == 0 {
+                                    active_hydrated_subagents = None;
+                                }
                             }
                             state.touch_block(index);
                         }
@@ -176,6 +241,7 @@ pub(super) fn append_hydrated_items(
                         {
                             apply_hydrated_tool_result(panel, &text, is_error);
                             panel.images = registered_images;
+                            panel.diff = diff.clone();
                             panel.duration = duration_ms.map(Duration::from_millis);
                         }
                     }
@@ -184,6 +250,7 @@ pub(super) fn append_hydrated_items(
                     if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get_mut(index) {
                         apply_hydrated_tool_result(panel, &text, is_error);
                         panel.images = registered_images;
+                        panel.diff = diff;
                         panel.duration = duration_ms.map(Duration::from_millis);
                     }
                 } else {
@@ -207,9 +274,18 @@ pub(super) fn append_hydrated_items(
                         model_lab,
                     );
                     panel.images = registered_images;
+                    panel.diff = diff;
                     let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id, index);
                 }
+                state.retain_tool_presentation(
+                    &group_id,
+                    (text.len() <= 524_288).then(|| {
+                        serde_json::json!({
+                            "content":[{"type":"text","text":text}], "isError":is_error,
+                        })
+                    }),
+                );
                 if let Some(index) = state.tool_panels.get(&group_id).copied() {
                     if let Some(TranscriptBlock::Tool(panel)) = state.transcript.get(index) {
                         let name = panel.name.clone();
@@ -242,6 +318,10 @@ pub(super) fn append_hydrated_items(
 }
 
 #[cfg(test)]
+#[path = "transcript_hydration/resume_tests.rs"]
+mod resume_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use octet_ai::ToolCallId;
@@ -262,7 +342,6 @@ mod tests {
         let group = ToolActivityGroup {
             member_ids: vec![read.clone(), bash.clone()],
             read_files: 1,
-            searches: 0,
             commands: 1,
             file_paths: vec!["src/main.rs".into()],
             ..Default::default()
@@ -291,6 +370,7 @@ mod tests {
                     text: "content".into(),
                     is_error: false,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
                 TranscriptItem::ToolResult {
@@ -298,6 +378,7 @@ mod tests {
                     text: "permission denied".into(),
                     is_error: true,
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 },
             ],
@@ -351,6 +432,7 @@ mod tests {
                     .into(),
                     is_error: path == "src/b.rs",
                     duration_ms: None,
+                    diff: None,
                     images: Vec::new(),
                 }],
             );
@@ -381,7 +463,6 @@ mod tests {
         let group = crate::hydrate::ToolActivityGroup {
             member_ids: vec![id.clone()],
             read_files: 1,
-            searches: 0,
             commands: 0,
             file_paths: vec!["src/file.rs".into()],
             ..Default::default()
@@ -439,6 +520,7 @@ mod tests {
             text: "ok".into(),
             is_error: false,
             duration_ms: None,
+            diff: None,
             images: Vec::new(),
         };
         append_hydrated_items(
@@ -496,6 +578,7 @@ mod tests {
                 text: "SECRET-WORKER-OUTPUT".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -506,6 +589,7 @@ mod tests {
                 text: "SECRET-FAILURE".into(),
                 is_error: true,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -566,6 +650,7 @@ mod tests {
                 text: "{\"child_id\":\"pending-child\"}".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -607,6 +692,7 @@ mod tests {
                 text: "ordinary output".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -624,6 +710,7 @@ mod tests {
                 text: "updated ordinary output".into(),
                 is_error: false,
                 duration_ms: None,
+                diff: None,
                 images: Vec::new(),
             }],
         );
@@ -649,6 +736,7 @@ mod tests {
             text: text.into(),
             is_error: false,
             duration_ms: Some(7),
+            diff: None,
             images: Vec::new(),
         };
         append_hydrated_items(

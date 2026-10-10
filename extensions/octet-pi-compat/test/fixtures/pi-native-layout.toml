@@ -1,0 +1,281 @@
+# Partial palette projection from Pi JSON; not Pi theme format.
+[metadata]
+name = "Pi presentation QA"
+description = "Pi colors and shaded transcript surfaces; native input and ownership"
+terminal = "dark"
+adaptive = false
+
+[colors]
+accent = "#00aaff"
+border = "#00aaff"
+border_focused = "#00aaff"
+border_idle = "#00aaff"
+success = "#00aaff"
+error = "#00aaff"
+warning = "#00aaff"
+muted = "#00aaff"
+dim = "#00aaff"
+foreground = "#ddeeff"
+reasoning_text = "#00aaff"
+selected_bg = "#00aaff"
+user_msg_text = "#ddeeff"
+user_msg_bg = "#223344"
+tool_title = "#00aaff"
+tool_output = "#00aaff"
+tool_pending_bg = "#182838"
+tool_success_bg = "#183828"
+tool_error_bg = "#381828"
+md_heading = "#00aaff"
+md_link = "#00aaff"
+md_code = "#00aaff"
+md_code_block = "#00aaff"
+md_code_border = "#00aaff"
+md_quote = "#00aaff"
+md_quote_border = "#00aaff"
+md_hr = "#00aaff"
+md_list_bullet = "#00aaff"
+diff_added = "#00aaff"
+diff_removed = "#00aaff"
+diff_context = "#00aaff"
+syntax_comment = "#00aaff"
+syntax_keyword = "#00aaff"
+syntax_function = "#00aaff"
+syntax_variable = "#00aaff"
+syntax_string = "#00aaff"
+syntax_number = "#00aaff"
+syntax_type = "#00aaff"
+syntax_operator = "#00aaff"
+syntax_punctuation = "#00aaff"
+prompt_wash = false
+margin_markers = false
+thinking_spinner = true
+splash_compact = true
+assistant_msg_text = "#ddeeff"
+model_assistant = "#ddeeff"
+model_accent = "#00aaff"
+md_code_bg = "default"
+md_code_inline_bg = "default"
+
+[model]
+use_lab_color = false
+
+[layout]
+transcript_inset = 0
+
+[roles."surface.user"]
+foreground = "#ddeeff"
+background = "#223344"
+
+[surfaces.user]
+chrome = "band"
+padding = 1
+narrow_chrome = "band"
+narrow_padding = 1
+
+[roles."surface.assistant"]
+foreground = "#ddeeff"
+background = "default"
+
+[surfaces.assistant]
+chrome = "plain"
+padding = 1
+narrow_chrome = "plain"
+narrow_padding = 1
+
+[roles."surface.reasoning"]
+foreground = "#00aaff"
+background = "default"
+
+[surfaces.reasoning]
+chrome = "plain"
+padding = 0
+narrow_chrome = "plain"
+narrow_padding = 0
+
+[roles."surface.tool"]
+foreground = "#00aaff"
+background = "#182838"
+
+[surfaces.tool]
+chrome = "band"
+padding = 1
+narrow_chrome = "band"
+narrow_padding = 1
+
+[roles."surface.shell"]
+foreground = "#00aaff"
+background = "#182838"
+
+[surfaces.shell]
+chrome = "band"
+padding = 1
+narrow_chrome = "band"
+narrow_padding = 1
+
+[roles."extension.pi.accent"]
+foreground = "#00aaff"
+
+[roles."extension.pi.border"]
+foreground = "#00aaff"
+
+[roles."extension.pi.borderAccent"]
+foreground = "#00aaff"
+
+[roles."extension.pi.borderMuted"]
+foreground = "#00aaff"
+
+[roles."extension.pi.success"]
+foreground = "#00aaff"
+
+[roles."extension.pi.error"]
+foreground = "#00aaff"
+
+[roles."extension.pi.warning"]
+foreground = "#00aaff"
+
+[roles."extension.pi.muted"]
+foreground = "#00aaff"
+
+[roles."extension.pi.dim"]
+foreground = "#00aaff"
+
+[roles."extension.pi.text"]
+foreground = "#ddeeff"
+
+[roles."extension.pi.thinkingText"]
+foreground = "#00aaff"
+
+[roles."extension.pi.scrollbarTrack"]
+foreground = "#00aaff"
+
+[roles."extension.pi.scrollbarThumb"]
+foreground = "#00aaff"
+
+[roles."extension.pi.searchMatchText"]
+foreground = "#00aaff"
+
+[roles."extension.pi.userMessageText"]
+foreground = "#ddeeff"
+
+[roles."extension.pi.customMessageText"]
+foreground = "#00aaff"
+
+[roles."extension.pi.customMessageLabel"]
+foreground = "#00aaff"
+
+[roles."extension.pi.toolTitle"]
+foreground = "#00aaff"
+
+[roles."extension.pi.toolOutput"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdHeading"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdLink"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdLinkUrl"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdCode"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdCodeBlock"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdCodeBlockBorder"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdQuote"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdQuoteBorder"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdHr"]
+foreground = "#00aaff"
+
+[roles."extension.pi.mdListBullet"]
+foreground = "#00aaff"
+
+[roles."extension.pi.toolDiffAdded"]
+foreground = "#00aaff"
+
+[roles."extension.pi.toolDiffRemoved"]
+foreground = "#00aaff"
+
+[roles."extension.pi.toolDiffContext"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxComment"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxKeyword"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxFunction"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxVariable"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxString"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxNumber"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxType"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxOperator"]
+foreground = "#00aaff"
+
+[roles."extension.pi.syntaxPunctuation"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingOff"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingMinimal"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingLow"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingMedium"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingHigh"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingXhigh"]
+foreground = "#00aaff"
+
+[roles."extension.pi.thinkingMax"]
+foreground = "#00aaff"
+
+[roles."extension.pi.bashMode"]
+foreground = "#00aaff"
+
+[roles."extension.pi.selectedBg"]
+background = "#00aaff"
+
+[roles."extension.pi.searchMatchBg"]
+background = "#00aaff"
+
+[roles."extension.pi.userMessageBg"]
+background = "#223344"
+
+[roles."extension.pi.customMessageBg"]
+background = "#00aaff"
+
+[roles."extension.pi.toolPendingBg"]
+background = "#182838"
+
+[roles."extension.pi.toolSuccessBg"]
+background = "#183828"
+
+[roles."extension.pi.toolErrorBg"]
+background = "#381828"

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
     DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 
@@ -29,10 +29,10 @@ pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result
     cwd.canonicalize()
 }
 
-/// Mouse ownership policy. `Auto`, `Terminal`, and `Off` preserve terminal
-/// selection and uncaptured wheel history. `App` explicitly captures mouse
-/// gestures for octet's semantic viewport; keyboard navigation can claim that
-/// viewport independently in every mode.
+/// Mouse ownership policy. `Auto` (the default), `Terminal`, and `Off` stay
+/// inline and preserve terminal selection and uncaptured wheel history. `App`
+/// opts into the bounded semantic viewport and captures mouse gestures for it;
+/// keyboard navigation can claim the viewport independently in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
     #[default]
@@ -57,6 +57,45 @@ impl MouseMode {
     /// ownership is intentionally independent of this setting.
     pub fn application_owned(self) -> bool {
         matches!(self, Self::App)
+    }
+}
+
+/// Tern Surface Protocol rendering policy for the interactive frontend.
+///
+/// `Auto` (the default) negotiates native surfaces only when the terminal
+/// advertises itself (`TERM_PROGRAM=tern`), so every other terminal keeps the
+/// ANSI renderer untouched. `On` forces negotiation regardless of detection,
+/// which is how a non-Tern host is exercised against the protocol path. `Off`
+/// disables the native backend outright and always renders ANSI, even inside
+/// Tern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TernMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl TernMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "on" | "true" | "yes" | "1" => Ok(Self::On),
+            "off" | "false" | "no" | "0" => Ok(Self::Off),
+            _ => anyhow::bail!("invalid tern mode {value:?}; use auto, on, or off"),
+        }
+    }
+
+    /// Whether octet may negotiate a native Tern surface at all. `Auto` still
+    /// requires terminal detection, so this is the cheap deny-first gate.
+    pub fn permitted(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether the terminal's own advertisement must be ignored and the
+    /// protocol path attempted unconditionally.
+    pub fn forced(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -116,9 +155,8 @@ impl Default for SandboxPolicy {
 }
 
 /// Tool names understood by the v0.1 coding product.
-pub const SUPPORTED_TOOL_NAMES: [&str; 9] = [
+pub const SUPPORTED_TOOL_NAMES: [&str; 8] = [
     "read",
-    "search",
     "edit",
     "write",
     "bash",
@@ -146,11 +184,10 @@ impl Default for ToolPolicy {
         Self {
             enabled: SUPPORTED_TOOL_NAMES
                 .into_iter()
-                // `bash` already provides faster, composable discovery through
-                // rg/find/ls. Keep the narrower search schema available for
-                // explicit allowlists without charging every default request.
-                // PowerShell is likewise explicit-only and Windows-gated.
-                .filter(|name| !matches!(*name, "search" | "powershell"))
+                // PowerShell is explicit-only and Windows-gated: it is an
+                // alternative shell for one platform, not part of the
+                // portable surface.
+                .filter(|name| !matches!(*name, "powershell"))
                 .map(str::to_owned)
                 .collect(),
             excluded: BTreeSet::new(),
@@ -434,12 +471,20 @@ pub struct Config {
     /// True when the reasoning mode came from an explicit command-line override.
     pub reasoning_mode_explicit: bool,
     pub cache_retention: CacheRetention,
+    /// Billable prompt-cache refresh policy. Project configuration cannot override it.
+    pub cache_warming: CacheWarmMode,
+    /// Opt-in presentation of cache misses and successful warming; accounting is unconditional.
+    pub show_cache_miss_notices: bool,
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
     /// Built-in appearance (auto, light, dark, Cards, Still) or a discovered TOML theme name.
     /// Unrecognized or malformed names fall back to the compiled default.
     pub theme: Option<String>,
+    /// CLI/environment or interactive choice for this invocation. A reviewed
+    /// extension's session-only startup preference may supersede a saved theme,
+    /// never this explicit choice, and never writes the saved configuration.
+    pub theme_explicit: bool,
     /// Explicit system prompt override. `None` uses composed built-in
     /// instructions, while `Some("")` intentionally blanks the system
     /// prompt.
@@ -451,6 +496,10 @@ pub struct Config {
     pub mouse: MouseMode,
     /// Force the chronological ASCII frontend even on a capable TTY.
     pub plain: bool,
+    /// Tern Surface Protocol policy for the interactive frontend. `Auto`
+    /// negotiates native surfaces only inside a Tern pane; `Off` always keeps
+    /// the ANSI renderer.
+    pub tern: TernMode,
     /// Opt in to bounded inline image placement for interactive tool results.
     /// Plain, print, and noninteractive frontends always remain payload-free.
     pub show_images: bool,
@@ -485,6 +534,10 @@ pub struct Config {
     pub trusted_extensions: Vec<String>,
     /// One-shot extension names trusted only for this process invocation.
     pub invocation_trusted_extensions: Vec<String>,
+    /// Whether this product surface may start executable extension processes
+    /// at all. The native-host protocol reports discovery only, whatever the
+    /// activation and host-authority grants in its request say.
+    pub start_extension_processes: bool,
     /// One-shot process-owner gate for experimental remote Streamable HTTP MCP.
     /// This is deliberately not loaded from configuration, environment, or sessions.
     pub experimental_streamable_http_mcp: bool,
@@ -562,6 +615,25 @@ pub fn parse_cache_retention(value: &str) -> anyhow::Result<CacheRetention> {
     }
 }
 
+/// Parse the user-owned billable cache-warming policy.
+pub fn parse_cache_warming(value: &str) -> anyhow::Result<CacheWarmMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(CacheWarmMode::Off),
+        "streaming" => Ok(CacheWarmMode::Streaming),
+        "idle" => Ok(CacheWarmMode::Idle),
+        _ => anyhow::bail!("invalid cache warming {value:?}; use off, streaming, or idle"),
+    }
+}
+
+/// Stable configuration and diagnostics spelling for a cache-warming mode.
+pub fn cache_warming_label(mode: CacheWarmMode) -> &'static str {
+    match mode {
+        CacheWarmMode::Off => "off",
+        CacheWarmMode::Streaming => "streaming",
+        CacheWarmMode::Idle => "idle",
+    }
+}
+
 /// Default location for persistent sessions.
 pub fn default_session_dir() -> PathBuf {
     dirs::home_dir()
@@ -576,7 +648,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn mouse_mode_defaults_to_native_selection_and_scrollback() {
+    fn mouse_mode_owner_decision_defaults_to_auto() {
         assert_eq!(MouseMode::default(), MouseMode::Auto);
         assert_eq!(MouseMode::parse("app").unwrap(), MouseMode::App);
         assert_eq!(MouseMode::parse("terminal").unwrap(), MouseMode::Terminal);
@@ -586,6 +658,24 @@ mod tests {
         assert!(!MouseMode::Terminal.application_owned());
         assert!(!MouseMode::Off.application_owned());
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn tern_mode_gates_native_surfaces_without_touching_detection() {
+        assert_eq!(TernMode::default(), TernMode::Auto);
+        assert_eq!(TernMode::parse("auto").unwrap(), TernMode::Auto);
+        assert_eq!(TernMode::parse("on").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("1").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("off").unwrap(), TernMode::Off);
+        assert_eq!(TernMode::parse("0").unwrap(), TernMode::Off);
+        assert!(TernMode::parse("sometimes").is_err());
+        // Off denies negotiation outright; On forces it past detection; Auto
+        // still waits for the terminal to advertise itself.
+        assert!(!TernMode::Off.permitted());
+        assert!(TernMode::Auto.permitted());
+        assert!(!TernMode::Auto.forced());
+        assert!(TernMode::On.permitted());
+        assert!(TernMode::On.forced());
     }
 
     #[test]
@@ -605,6 +695,24 @@ mod tests {
         );
         assert_eq!(parse_cache_retention("long").unwrap(), CacheRetention::Long);
         assert!(parse_cache_retention("sometimes").is_err());
+    }
+
+    #[test]
+    fn cache_warming_accepts_only_the_three_modes() {
+        assert_eq!(CacheWarmMode::default(), CacheWarmMode::Streaming);
+        for mode in [
+            CacheWarmMode::Off,
+            CacheWarmMode::Streaming,
+            CacheWarmMode::Idle,
+        ] {
+            assert_eq!(
+                parse_cache_warming(cache_warming_label(mode)).unwrap(),
+                mode
+            );
+        }
+        for invalid in ["", "on", "none", "sometimes"] {
+            assert!(parse_cache_warming(invalid).is_err());
+        }
     }
 
     #[test]
@@ -650,12 +758,12 @@ mod tests {
 
     #[test]
     fn tool_policy_validates_and_filters_names() {
-        let mut policy = ToolPolicy::only(["read".to_owned(), "search".to_owned()]).unwrap();
-        policy.exclude("search").unwrap();
+        let mut policy = ToolPolicy::only(["read".to_owned(), "bash".to_owned()]).unwrap();
+        policy.exclude("bash").unwrap();
         assert_eq!(policy.names().collect::<Vec<_>>(), vec!["read"]);
         assert_eq!(
             policy.explicit_names().unwrap().collect::<Vec<_>>(),
-            vec!["read", "search"],
+            vec!["bash", "read"],
             "startup diagnostics must retain explicitly requested names removed by later gates"
         );
 
@@ -688,19 +796,21 @@ mod tests {
     }
 
     #[test]
-    fn default_tool_policy_uses_bash_instead_of_a_redundant_search_schema() {
+    fn default_tool_policy_omits_builtin_search_and_keeps_powershell_explicit() {
         let policy = ToolPolicy::default();
         for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
         }
-        assert!(!policy.enabled("search"));
+        assert!(policy.explicit_names().is_none());
         assert!(!policy.enabled("powershell"));
         assert!(ToolPolicy::only(["powershell".to_owned()])
             .unwrap()
             .enabled("powershell"));
-        assert!(ToolPolicy::only(["search".to_owned()])
-            .unwrap()
-            .enabled("search"));
+        assert!(!policy.names().any(|name| name == "search"));
+        assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
+        // Removal from the built-in inventory does not reserve an extension
+        // name: the default policy still permits discovered extension tools.
+        assert!(policy.enabled("search"));
     }
 
     #[test]

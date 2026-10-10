@@ -1,9 +1,10 @@
 # octet documentation
 
-octet is a fast, small coding host across cloud and local models. Extensions add
-tools and bounded host-shaped integrations; they do not promise Pi execution
-parity or an everything-as-extension platform. These docs describe **octet 0.8.1**;
-see [installation](installation.md) for supported channels.
+octet is a fast, small coding host for cloud and local models. Extensions add
+tools and bounded, host-shaped integrations. They don't promise Pi execution
+parity or an everything-as-extension platform. These docs describe **octet
+0.9.0 candidate**, not a published release. [Installation](installation.md) separates
+source builds from planned publication channels.
 
 ## Getting started
 
@@ -20,6 +21,7 @@ see [installation](installation.md) for supported channels.
 - [CLI options](cli.md)
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
+- [Inference measurements (unreleased)](inference-metrics.md)
 - [Images and audio](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)
@@ -34,32 +36,36 @@ see [installation](installation.md) for supported channels.
 - [Themes](themes.md)
 - [Shell aliases](shell-aliases.md)
 - [tmux setup](tmux.md)
+- [Tern native surfaces](tern.md)
 - [Herdr integration](herdr.md)
+- [Linux setup (Omarchy/Hyprland)](linux.md)
 - [Windows setup](windows.md)
 - [Termux (Android)](termux.md)
 
 ## Integrations
 
-- [Extension packages](packages.md)
 - [Subagents](../extensions/octet-subagents/README.md)
 - [Computer use](../extensions/octet-computer-use/README.md)
-- [Browser (deprecated)](../extensions/octet-browse/README.md)
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Serve](experimental/octet-serve/README.md)
+- [Optional Pi extension adapter (source preview)](pi-compatibility.md)
+- [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 
 ## Development
 
 - [Extension authoring](extensions.md)
 - [Extension event bus (bounded, host-mediated)](extensions/event-bus.md)
 - [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
+- [Remote component UI (API 0.4)](extensions/remote-ui.md)
 - [Native embedding — host protocol 1](sdk.md)
 - [Examples and their compatibility status](../examples/README.md)
-- Architecture: [model clients](design/octet-ai.md), [agent runtime](design/octet-agent.md),
-  [application](design/octet-coding-agent.md), [terminal renderer](design/octet-tui.md)
+- Architecture: [model clients](design/octet-ai.md), [agent
+  runtime](design/octet-agent.md), [application](design/octet-coding-agent.md),
+  [terminal renderer](design/octet-tui.md)
 - [Performance and measurement contract](design/performance.md)
 - [Build profiles](build-profiles.md)
+- [Testing lanes](testing/README.md)
 - [Distribution](distribution.md)
 - [Maintainer prompts, skills and playbooks](maintainers/README.md)
 - [Contributing](../CONTRIBUTING.md)
@@ -68,16 +74,15 @@ see [installation](installation.md) for supported channels.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- [0.8.1 release notes](releases/v0.8.1.md)
-- [0.8.0 release notes](releases/v0.8.0.md)
-- [0.7.6 hotfix notes](releases/v0.7.6.md)
-- [0.7.5 release notes](releases/v0.7.5.md)
-- [0.7.4 release notes and documentation correction](releases/v0.7.4.md)
-- [0.7.3 release notes](releases/v0.7.3.md)
-- [0.7.1 release notes](releases/v0.7.1.md)
+- Release notes: [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
+  [0.8.0](releases/v0.8.0.md), [0.7.6 hotfix](releases/v0.7.6.md),
+  [0.7.5](releases/v0.7.5.md), [0.7.4 and its documentation
+  correction](releases/v0.7.4.md), [0.7.3](releases/v0.7.3.md),
+  [0.7.1](releases/v0.7.1.md)
 - [Benchmarks and performance](benchmarks/README.md)
 - [Download benchmark results](assets/evidence/README.md)
 - [Brand Kit](assets/octet/README.md)
 - [License and attribution](../THIRD_PARTY_NOTICES.md)
 
-[Previous reference headings](current-reference.md) remain available as topic links.
+Looking for an older section name? [Previous reference
+headings](current-reference.md) still work as topic links.

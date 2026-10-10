@@ -7,7 +7,9 @@ use crate::modes::rpc::JsonEventStream;
 use octet_agent::{AgentEvent, InputPart, OutputChannel, UserInput};
 use octet_ai::Media;
 
-use crate::app::bootstrap::{build_app, resolve_launch_print, Bootstrap};
+use crate::app::bootstrap::{
+    build_app_with_resource_consumer as build_app, resolve_launch_print, Bootstrap,
+};
 use crate::modes::{timestamp, HostRunOutcome};
 use crate::resources::{compose_instructions, expand_skill_command};
 
@@ -65,6 +67,10 @@ pub(crate) async fn run_invocation(
     let launch = resolve_launch_print(&boot, &timestamp())?;
     let system = compose_instructions(&boot.config)?;
     let mut app = build_app(boot, launch, system)?;
+    // Stdout carries only the answer or the JSON event stream.
+    for notice in app.executable_extensions.startup_failure_notices() {
+        crate::output::stderr!("warning: {notice}");
+    }
     if json {
         JsonEventStream::header(&app)?;
     }
@@ -99,8 +105,12 @@ async fn run_prompt(
     media: Vec<Media>,
     json: bool,
 ) -> anyhow::Result<()> {
+    app.refresh_resource_paths_headless().await?;
     if app.config.prompt_template.is_none() {
         crate::commands::reject_tui_changelog(&prompt)?;
+        if crate::commands::handle_cache_warming_input(app, &prompt)? {
+            return Ok(());
+        }
     }
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
@@ -142,21 +152,27 @@ async fn run_prompt(
         &app.reasoning,
         &app.sessions,
     );
+    // Non-interactive modes serve the same extension requests: publish the
+    // catalog an approved provider-credential request resolves against.
+    app.executable_extensions
+        .refresh_native_credential_catalog(&app.catalog);
     let composition = app
         .executable_extensions
         .compose_prompt(&app.system, prompt.clone())
         .await?;
     let pending_context_count = composition.pending_context_count;
     for notification in composition.notifications {
-        crate::output::stderr!("extension: {notification}");
+        crate::output::stderr_multiline(format!("extension: {notification}"));
     }
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(display_prompt));
     let mut parts = vec![InputPart::Text(composition.prompt)];
     parts.extend(media.into_iter().map(InputPart::Media));
-    let input = UserInput::from(parts);
+    let mut input = UserInput::from(parts);
+    input.custom_messages = composition.custom_messages;
     let mut events = json.then(|| JsonEventStream::new(app, &input));
-    let mut run = match app.agent.prompt(input.clone()).await {
+    let prior_cache_misses = crate::commands::cache_miss_count(app);
+    let mut run = match app.agent.prompt_with_responses_prewarm(input.clone()).await {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
             "{}",
@@ -232,6 +248,7 @@ async fn run_prompt(
                 channel: OutputChannel::Reasoning,
                 text,
             } if show_reasoning => pending_output.push_str(&text),
+            AgentEvent::ProviderInference { .. } => {}
             AgentEvent::ProviderLifecycle { lifecycle } => {
                 // `--print` stdout is response-only. Surface opt-in endpoint
                 // telemetry only as a separate stderr diagnostic.
@@ -242,6 +259,21 @@ async fn run_prompt(
                         &lifecycle
                     )
                 );
+            }
+            AgentEvent::CacheWarmed {
+                cost,
+                extension_override,
+                ..
+            } => {
+                if app.config.show_cache_miss_notices {
+                    crate::output::stderr_line(crate::commands::cache_warmed_notice(
+                        cost,
+                        extension_override,
+                    ));
+                }
+            }
+            AgentEvent::ExtensionObservationWarning { message } => {
+                crate::output::stderr!("warning: {message}");
             }
             AgentEvent::ProviderUsageUncertain => {
                 crate::output::stderr!("warning: provider usage and cost are uncertain for this session; all subsequent numeric usage/cost values are known subtotals, not complete totals (including after resume).");
@@ -327,6 +359,9 @@ async fn run_prompt(
         }
     };
     drop(run);
+    if let Some(notice) = crate::commands::cache_miss_notice(app, prior_cache_misses) {
+        crate::output::stderr_line(notice);
+    }
     if let Some(events) = events.as_mut() {
         events.finish(&outcome)?;
     }
@@ -340,7 +375,7 @@ async fn run_prompt(
             .after_response(&response_text)
             .await
         {
-            crate::output::stderr!("extension: {notification}");
+            crate::output::stderr_multiline(format!("extension: {notification}"));
         }
     }
     let presentation = app.executable_extensions.presentation_text();
