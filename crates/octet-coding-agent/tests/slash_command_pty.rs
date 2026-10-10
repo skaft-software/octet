@@ -436,7 +436,7 @@ fn streaming_octet() -> (StreamApi, PtyOctet) {
 fn real_octet_slash_help_renders_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/help\r");
-    octet.pty.wait_for(b"Slash commands:");
+    octet.pty.wait_for(b"Slash commands");
 
     // The response tail cannot exist yet: the run is provably still open.
     assert!(
@@ -539,14 +539,22 @@ fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() 
     octet
         .pty
         .wait_for(b"Choose a display or new-session preference");
-    octet.pty.wait_for(b"Show effective settings");
+    octet.pty.wait_for(b"Theme");
     assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
     assert!(!api.completed.load(Ordering::SeqCst));
 
-    // Filter the real SelectList, then confirm its read-only destination rather
-    // than assuming the bare command still opens the diagnostic report.
-    octet.pty.write_input(b"Show effective settings\r");
-    octet.pty.wait_for(b"octet settings");
+    // The last destination may be outside this small pane's initial viewport.
+    // Filter the real SelectList before asserting and confirming that row.
+    octet.pty.write_input(b"Show effective settings");
+    octet.pty.wait_for(b"Show effective settings");
+    octet.pty.output.clear();
+    octet.pty.write_input(b"\r");
+    octet.pty.wait_for(b"Launch and session");
+    octet.pty.wait_for(b"Configured model");
+    octet.pty.wait_for(b"Active reasoning");
+    // The structured report is paged: scroll its owner to inspect the trust
+    // section rather than requiring offscreen facts in the initial frame.
+    octet.pty.write_input(b"\x1b[F");
     octet
         .pty
         .wait_for(b"Project trust is deliberately not persisted here");
