@@ -7320,10 +7320,24 @@ async fn controlled_workspace_mutation_requires_and_consumes_exact_approval() {
             approvals += 1;
             assert!(request.destructive);
             assert!(!request.default);
-            let detail = request.detail.as_deref().expect("canonical intent detail");
-            assert!(detail.contains("workspace_mutation"));
-            assert!(detail.contains("approved.txt"));
-            assert!(detail.contains("approved content"));
+            assert_eq!(request.prompt, "Write this file?");
+            let detail = request.detail.as_deref().expect("human action and scope");
+            assert!(detail.contains("File: \"approved.txt\""));
+            assert!(detail.contains("Review all arguments in technical details"));
+            assert!(!detail.contains("approved content"));
+            assert!(!detail.contains("effect:"));
+            assert!(!detail.contains("sha256"));
+            let technical = request
+                .technical_detail
+                .as_deref()
+                .expect("exact intent diagnostics");
+            assert!(technical.contains("effect: workspace_mutation"));
+            assert!(technical.contains("complete intent sha256:"));
+            assert!(technical.contains("approved.txt"));
+            assert!(technical.contains("approved content"));
+            assert!(!workspace.join("approved.txt").exists());
+            assert_eq!(before.load(Ordering::SeqCst), 0);
+            assert_eq!(after.load(Ordering::SeqCst), 0);
             request.clone().respond(true);
         }
         events.push(event);
