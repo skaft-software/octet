@@ -6,10 +6,6 @@ use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
 use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
 async fn adapter(temp: &tempfile::TempDir) -> ExtensionProcess {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../extensions/octet-pi-compat")
-        .canonicalize()
-        .unwrap();
     let factory = temp.path().join("history.mjs");
     std::fs::write(&factory, r#"
 import { writeFileSync } from 'node:fs';
@@ -32,27 +28,9 @@ export default function(pi) {
   });
 }
 "#).unwrap();
-    let bundle = temp.path().join("octet-pi-compat");
-    let output = tokio::process::Command::new("node")
-        .arg(root.join("configure.mjs"))
-        .arg("--reviewed")
-        .arg("--output")
-        .arg(&bundle)
-        .arg(&factory)
-        .env("HOME", temp.path())
-        .current_dir(temp.path())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "adapter capture: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let manifest_path = bundle.join("extension.toml");
+    let manifest_path = super::super::pi_fixture::capture(temp.path(), &[factory]).await;
     let manifest = ExtensionManifest::load(&manifest_path).unwrap();
-    ExtensionProcess::start(
+    let process = ExtensionProcess::start(
         DiscoveredExtension {
             manifest,
             manifest_path,
@@ -65,7 +43,11 @@ export default function(pi) {
         ExtensionRuntimeConfig::new(temp.path()),
     )
     .await
-    .unwrap()
+    .unwrap();
+    assert!(!process
+        .negotiated_protocol()
+        .supports(EXTENSION_FEATURE_RESOURCE_PATHS));
+    process
 }
 
 /// One real Agent run over `session` with the reviewed adapter, returning the

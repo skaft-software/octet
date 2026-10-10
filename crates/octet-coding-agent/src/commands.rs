@@ -1620,8 +1620,8 @@ pub fn settings_text(surface: &SettingsSurface) -> String {
         .unwrap_or("(chosen at startup or by the session)");
     format!(
         "octet settings\n\n\
-         Default model      {default_model}\n\
-         Default reasoning  {}\n\
+         Configured model   {default_model}\n\
+         Active reasoning   {}\n\
          Theme              {}\n\
          Transport          {} (declared by the {} route; not a user preference)\n\
          Inline images      {}\n\

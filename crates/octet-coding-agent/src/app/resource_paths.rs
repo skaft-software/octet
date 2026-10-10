@@ -117,6 +117,20 @@ fn dynamic_suffix(
 }
 
 impl App {
+    /// Deferred startup can negotiate its first contributor after App construction.
+    /// Observe that admitted process without creating an offer or changing grants.
+    pub(crate) fn activate_resource_paths_consumer(&mut self) {
+        if !self.resource_paths.enabled
+            && self.resource_paths.capability == ResourceConsumerCapability::AppFrontend
+            && self.executable_extensions.has_resource_consumer_processes()
+        {
+            self.agent
+                .extension_host_mut()
+                .provider_context_hook(self.resource_paths.guard.clone());
+            self.resource_paths.enabled = true;
+        }
+    }
+
     pub(crate) fn resource_paths_pending(&self) -> bool {
         self.resource_paths.enabled
             && (self.resource_paths.pending.is_some() || !self.resource_paths.guard.current())

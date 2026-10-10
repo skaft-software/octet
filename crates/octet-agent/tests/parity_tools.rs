@@ -776,7 +776,7 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     );
     assert_eq!(
         by_name("bash").snippet,
-        "Execute bash commands (prefer rg/ripgrep for file and content search)"
+        "Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)"
     );
     assert_eq!(by_name("read").snippet, "Read file contents");
     assert_eq!(by_name("write").snippet, "Create or overwrite files");

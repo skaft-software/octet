@@ -11768,8 +11768,9 @@ async fn tool_prompt_section_is_opt_in_visible_and_never_names_withdrawn_tools()
         );
     }
     assert!(
-        system.contains("- bash: ") && system.contains("ripgrep"),
-        "the bash snippet names rg, not the withdrawn search tools: {system}"
+        system.contains("- bash: ")
+            && system.contains("prefer rg/ripgrep when available; otherwise use grep"),
+        "the bash snippet prefers rg with a grep fallback, not separate search tools: {system}"
     );
     for withdrawn in ["\n- ls:", "\n- find:", "\n- grep:"] {
         assert!(

@@ -341,6 +341,40 @@ excluded. Saved-source reproduction, 11 offline metadata-tooling tests, 13
 release-gate tests and the live freshness check passed after this review.
 Exact-head hosted CI and later final-source freshness remain required.
 
+### 2026-10-10 v0.9.0 qualification refresh
+
+The release freshness gate detected changed supported projections. All four
+outputs were regenerated together from the retained 5,375,265-byte public
+response with SHA-256
+`13e828596291ac5f47fcc009c698e791a0bf7998e3e7424aefee4498f68f1871`.
+The matching response and complete projection diff remain local qualification
+evidence, not bundled artifacts. Saved-source reproduction and live projection
+freshness passed, together with 11 offline metadata-tooling tests and 13
+release-gate tests. Final-source hosted CI remains required.
+
+Relative to the preceding exact-head refresh:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 913 | 3 | 11 | 29 |
+| Canonical names | 415 | 0 | 0 | 0 |
+| Capability routes | 936 | 3 | 11 | 17 |
+
+The additions are Hugging Face MiniMax M1 80K, Qwen3 VL 30B A3B Instruct and
+AutoGLM Phone 9B Multilingual metadata. Eleven OpenRouter Qwen routes disappear
+from the source. All 29 changed quotes are OpenRouter records: for example,
+DeepSeek V4 Pro now quotes $0.9483/$1.8966/$0.079025 per million
+input/output/cache-read tokens, and GLM-5.2 quotes $0.06/$7/$0.059. These are
+exact aggregator quotes, not direct-provider tariffs or route availability.
+
+Capability changes include 14 limit records, two display names and Ling 3.0
+Flash Fin's source structured-output flag becoming false. Qwen3 14B's context
+falls to 40,960 with a 36,864 output ceiling; Kimi K2 Thinking's output falls to
+98,304. No generator policy, endpoint precedence, reasoning/tool grant or
+provider inventory changed. Direct DeepSeek schedule pricing remains unverified
+and excluded. These are reviewed metadata projections, not live inference or
+provider certification; future supported projection changes require review again.
+
 ## GPT-6 contract review (2026-09-23)
 
 The public [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),

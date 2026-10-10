@@ -46,19 +46,28 @@ preference, even when host settings save `theme = "dark"`. `--theme`, `OCTET_THE
 and later `/theme` choices win for native appearance; Auto/Light/Dark/Cards/Still remain available. No
 host or Pi settings are rewritten. `octet-config.toml` and printed theme arguments
 are optional standalone alternatives, not extra steps for the bridge launch above.
-Re-import to refresh these snapshots. Composer color uses Pi's configured thinking
-level (unset: medium); dynamic per-model reasoning changes are not projected.
-Terminal-dependent system/automatic themes are diagnosed rather than guessed.
+Re-import to refresh these snapshots. Every newly configured, enabled bridge also
+contributes current enabled Pi palette files to `/theme`, including manually
+configured nonmirror bridges. Native validation rejects malformed winning files
+without exposing lower-precedence shadows. This reads palette data; it does not
+enable factories, load skills or apply setup preferences outside mirror mode.
+Existing manifests must be regenerated to declare `resources_discover`.
+
+Octet's built-in `pi` selector generates Pi 1.0.2 system colors natively, without
+Node or this bridge. Use `--theme pi` or `/theme pi`; terminal colors refresh through
+the existing input owner, and geometry remains native. Importing terminal-dependent
+system/automatic snapshots is still diagnosed rather than guessed.
 
 The selected JSON snapshot also initializes the bridge's Pi Theme **before**
 route probes, registration capture and factory loading. `ctx.ui.theme`, remote
 editors/footers, helper callbacks and custom renderers share it; admitted installed-Pi
 helpers use the same palette without calling Pi `initTheme` or starting a watcher.
 Palette rebinding retires renderer caches and invalidates live component frames.
-The native host currently supplies no theme selector/palette snapshot, so explicit
-native `--theme` or later `/theme` changes cannot yet recolor Pi remote content:
-those components keep the bridge-owned imported palette. No native palette service
-or live host-theme synchronization is claimed.
+The interactive native host supplies callback-free palette snapshots and theme
+selection through the admitted frontend. Native `--theme` and later `/theme`
+choices remain authoritative; the built-in `pi` snapshot preserves all Pi tokens
+without substituting model-family colors. This is palette projection, not copied
+Pi renderer geometry or full original-package qualification.
 
 Failing lifecycle observation callbacks are reported with their factory and event
 while later callbacks continue. Permission/veto hooks, owner fences, cancellation
@@ -677,8 +686,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated working-candidate adapter and phase2 run is **900 tests: 879 passed, 0
-failed, 21 optional skips**, exit 0, with the freshly built native editor test host.
+The isolated Pi-theme working-candidate adapter run is **932 tests: 912 passed, 0
+failed, 20 optional skips**, exit 0, with the freshly built native editor test host
+and a read-only Pi reference checkout.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing

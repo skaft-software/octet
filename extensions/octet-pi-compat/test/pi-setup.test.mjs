@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configureMirror, MIRROR_SUBSCRIBED_HOOKS } from '../configure.mjs';
+import { configure, configureMirror, MIRROR_SUBSCRIBED_HOOKS } from '../configure.mjs';
 import { discoverPiSetup, resolveThemeFile } from '../lib/pi-setup.mjs';
 import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
 import { launch } from './helper.mjs';
@@ -184,4 +184,43 @@ test('pi setup: mirror refuses changed factory sources before executing new hook
   const result = spawnSync(process.execPath, [join(adapter, 'runner.mjs'), '--config', join(output, 'bridge.json'), '--inspect'], { cwd: root, encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /(?:changed|source|review)/);
+});
+
+test('pi setup: non-mirror palette discovery respects package deltas and live project trust without reordering factory roots', async t => {
+  const root = temporary(t), agent = piHome(root), output = join(root, 'extensions/octet-pi-compat');
+  const palette = name => JSON.stringify({ name, appearance: 'dark', colors: Object.fromEntries([
+    ...foregroundTokens.map(token => [token, '#ffffff']), ...backgroundTokens.map(token => [token, '']),
+  ]) });
+  const settings = JSON.parse(readFileSync(join(agent, 'settings.json'), 'utf8'));
+  settings.packages = [
+    { source: 'npm:filtered@1.2.3', autoload: false, themes: ['themes/kept.json'] },
+    { source: 'npm:disabled@1.2.3', autoload: false },
+    { source: 'npm:empty@1.2.3', themes: [] },
+  ];
+  put(join(agent, 'settings.json'), JSON.stringify(settings));
+  for (const name of ['filtered', 'disabled', 'empty']) {
+    const pkg = join(agent, 'npm/node_modules', name);
+    put(join(pkg, 'package.json'), JSON.stringify({ version: '1.2.3', pi: { themes: ['themes'] } }));
+    put(join(pkg, 'themes/kept.json'), palette(`${name}-kept`));
+    put(join(pkg, 'themes/excluded.json'), palette(`${name}-excluded`));
+    put(join(pkg, 'extensions/never.mjs'), 'throw new Error("inventory must not execute package code");');
+  }
+  const project = join(root, '.pi/themes/project.json'), later = join(root, 'factory-root/pi-setup-theme.json');
+  put(project, palette('project')); put(later, '{');
+  // The malformed later same-stem file must reach native winner resolution;
+  // the adapter must not remove it and revive the earlier valid palette.
+  const factory = join(root, 'manual.mjs');
+  put(factory, `export default pi => pi.on('resources_discover', () => ({themePaths:[${JSON.stringify(later)}]}));`);
+  const { registrations: metadata } = configure({ output, reviewed: true, extensions: [factory], piAgentDir: agent, cwd: root });
+  const peer = launch(t, [factory], { config: join(output, 'bridge.json'), metadata, cwd: root });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  for (const project_trusted of [false, true, false]) {
+    const setup = discoverPiSetup({ agentDir: agent, cwd: root, projectTrusted: project_trusted });
+    const response = await peer.request('hook/run', { hook: 'resources_discover', payload: { cwd: root, reason: 'reload' }, context: peer.context({ project_trusted }) }).response;
+    assert.deepEqual(response.result.resource_paths, { skill_paths: [], prompt_paths: [], theme_paths: [...setup.themesPaths, later] });
+    assert.equal(response.result.resource_paths.theme_paths.includes(project), project_trusted);
+    assert.ok(response.result.resource_paths.theme_paths.includes(join(agent, 'npm/node_modules/filtered/themes/kept.json')));
+    assert.ok(!response.result.resource_paths.theme_paths.some(path => /excluded|disabled|empty/.test(path)));
+  }
+  await peer.close();
 });

@@ -93,6 +93,14 @@ pub(super) fn parse(color: &str) -> anyhow::Result<String> {
         linear.iter().all(|v| v.is_finite()),
         "Pi color conversion must be finite"
     );
+    let (r, g, b) = linear_to_rgb(linear);
+    Ok(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+type Vector = [f64; 3];
+type Rgb = (u8, u8, u8);
+
+fn linear_to_rgb(linear: Vector) -> Rgb {
     let [r, g, b] = linear.map(|v| {
         let encoded = if v > 0.0031308 {
             1.055 * v.powf(1.0 / 2.4) - 0.055
@@ -101,10 +109,78 @@ pub(super) fn parse(color: &str) -> anyhow::Result<String> {
         };
         (encoded.clamp(0.0, 1.0) * 255.0).round() as u8
     });
-    Ok(format!("#{r:02x}{g:02x}{b:02x}"))
+    (r, g, b)
 }
 
-type Vector = [f64; 3];
+// The system-theme generator uses these same pinned conversions directly,
+// without round-tripping through formatted perceptual-color strings.
+pub(crate) fn okhsl_rgb(h: f64, s: f64, l: f64) -> Rgb {
+    linear_to_rgb(okhsl(h, s, l))
+}
+
+pub(crate) fn oklch_rgb(l: f64, c: f64, h: f64) -> Rgb {
+    linear_to_rgb(oklch(l, c, h))
+}
+
+pub(crate) fn oklab_to_okhsl_lightness(x: f64) -> f64 {
+    const K1: f64 = 0.206;
+    const K2: f64 = 0.03;
+    const K3: f64 = (1.0 + K1) / (1.0 + K2);
+    0.5 * (K3 * x - K1 + ((K3 * x - K1).powi(2) + 4.0 * K2 * K3 * x).sqrt())
+}
+
+#[allow(clippy::excessive_precision)]
+fn rgb_to_lab((r, g, b): Rgb) -> Vector {
+    const LINEAR_SRGB_TO_LMS: [Vector; 3] = [
+        [0.4122214694707629, 0.5363325372617349, 0.0514459932675022],
+        [0.2119034958178251, 0.6806995506452344, 0.1073969535369405],
+        [0.0883024591900564, 0.2817188391361215, 0.6299787016738222],
+    ];
+    const LMS_TO_LAB: [Vector; 3] = [
+        [0.210454268309314, 0.793617774702305, -0.0040720430116193],
+        [1.9779985324311684, -2.42859224204858, 0.450593709617411],
+        [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
+    ];
+    let linear = [r, g, b].map(|v| {
+        let value = f64::from(v) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let lms = LINEAR_SRGB_TO_LMS.map(|row| dot(row, linear).cbrt());
+    LMS_TO_LAB.map(|row| dot(row, lms))
+}
+
+pub(crate) fn rgb_to_oklch(rgb: Rgb) -> Vector {
+    let [l, a, b] = rgb_to_lab(rgb);
+    [
+        l,
+        a.hypot(b),
+        (b.atan2(a) * 180.0 / std::f64::consts::PI + 360.0) % 360.0,
+    ]
+}
+
+pub(crate) fn rgb_to_okhsl(rgb: Rgb) -> Vector {
+    let [l, a, b] = rgb_to_lab(rgb);
+    let chroma = a.hypot(b);
+    let lightness = oklab_to_okhsl_lightness(l);
+    if chroma < 1e-9 || lightness <= 0.0 || lightness >= 1.0 {
+        return [0.0, 0.0, lightness];
+    }
+    let h = (b.atan2(a) * 180.0 / std::f64::consts::PI + 360.0) % 360.0;
+    let [c0, c_mid, c_max] = chroma_stops(l, a / chroma, b / chroma);
+    let saturation = if chroma < c_mid {
+        let k1 = 0.8 * c0;
+        0.8 * (chroma / (k1 + (1.0 - k1 / c_mid) * chroma))
+    } else {
+        let k1 = 0.2 * c_mid.powi(2) * 1.25_f64.powi(2) / c0;
+        let offset = chroma - c_mid;
+        0.8 + 0.2 * (offset / (k1 + (1.0 - k1 / (c_max - c_mid)) * offset))
+    };
+    [h, saturation.clamp(0.0, 1.0), lightness]
+}
 const LAB_TO_LMS: [Vector; 3] = [
     [1.0, 0.3963377773761749, 0.2158037573099136],
     [1.0, -0.1055613458156586, -0.0638541728258133],

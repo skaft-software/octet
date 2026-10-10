@@ -10,8 +10,26 @@ octet --safe-mode --tools read --no-context-files --offline
 
 This allows read only, skips context files and optional discovery, and keeps
 approvals on. It isn't a network sandbox: inference still contacts your
-provider. Use OS isolation for untrusted work. Content search uses `bash` with
-`rg` (ripgrep), subject to the same process and approval policy as other commands.
+provider. Use OS isolation for untrusted work. Content search uses `bash`,
+subject to the same process and approval policy as other commands. Always prefer
+`rg` (ripgrep) when it is available on `PATH`; otherwise use `grep`. Ripgrep is
+optional, not a startup prerequisite. There is no separate native search tool,
+and octet does not rewrite shell commands or translate rg options into grep
+options. Use the chosen program's own flags, and bound the search to the intended
+files or directories. For example:
+
+```sh
+if command -v rg >/dev/null 2>&1; then
+  rg -F -n -- 'needle' src
+else
+  grep -R -F -n -- 'needle' src
+fi
+```
+
+The default agent instructions and bash tool description carry this preference.
+`octet doctor` reports missing ripgrep as optional rather than failing because
+it is absent. If neither program is installed, install one before requesting
+content searches; other enabled tools do not depend on them.
 
 ## Built-in tools
 
@@ -98,6 +116,17 @@ Full-access launches default to `allow_external_paths = true`. Set it to `false`
 to keep the built-in file tools inside the workspace. That doesn't contain shell
 commands or extension processes. `--safe` is a hidden alias for `--safe-mode`,
 and `--yolo` and its settings and environment forms are no longer accepted.
+
+## Approval prompts
+
+Interactive broker approvals ask in plain language, such as **Run this command?**
+or **Write this file?**, with a bounded command/path preview. **Technical details**
+opens a read-only view of the effect classification, exact-intent digest and
+argument projection. Opening or scrolling that view never grants permission;
+Escape returns to the decision with Deny selected for broker requests. Ctrl+C,
+dropping an unanswered request or ending its run denies it. An omission marker
+means the preview is incomplete; the approval still binds the complete intent,
+not the displayed prefix. The combined request remains bounded to 8 KiB.
 
 <a id="shell-selection"></a>
 

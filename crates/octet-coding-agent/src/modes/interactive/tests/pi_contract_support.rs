@@ -61,6 +61,7 @@ pub(super) fn pi_ui_app_with_native_command(
         Some(&shell),
         false,
         Some((extension, command)),
+        false,
     );
     assert!(
         app.executable_extensions.remote_ui_wake().is_some(),
@@ -75,7 +76,92 @@ fn pi_app_policy_with_frontend(
     frontend: Option<&InteractiveShell>,
     workspace_only: bool,
 ) -> (tempfile::TempDir, App) {
-    pi_app_policy_with_frontend_and_native(factory, policy, frontend, workspace_only, None)
+    pi_app_policy_with_frontend_and_native(factory, policy, frontend, workspace_only, None, false)
+}
+
+/// Deliberately unconfigured runner: its actual captured hook catalog has no
+/// resource consumer. Keep generic non-resource startup barrier/failure coverage
+/// independent of the palette hook reserved by every configured bridge.
+pub(super) fn pi_non_resource_app(factory: &str) -> (tempfile::TempDir, App) {
+    pi_app_policy_with_frontend_and_native(
+        factory,
+        octet_agent::EffectPolicy::UnsafeHost,
+        None,
+        false,
+        None,
+        true,
+    )
+}
+
+fn write_direct_pi_fixture(
+    adapter: &std::path::Path,
+    entry: &std::path::Path,
+    output: &std::path::Path,
+    workspace: &std::path::Path,
+) {
+    let runner = adapter.join("runner.mjs");
+    let captured = std::process::Command::new("node")
+        .arg(&runner)
+        .arg("--inspect")
+        .arg(entry)
+        .current_dir(workspace)
+        .env("PI_OFFLINE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        captured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&captured.stderr)
+    );
+    let frame: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+    let metadata = &frame["result"];
+    assert!(!metadata["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hook| hook == "resources_discover"));
+    assert!(metadata["shortcuts"].as_array().unwrap().is_empty());
+    assert!(metadata["flags"].as_array().unwrap().is_empty());
+    let names = |field: &str| -> Vec<&str> {
+        metadata[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect()
+    };
+    std::fs::create_dir_all(output).unwrap();
+    std::fs::write(
+        output.join("extension.toml"),
+        format!(
+            r#"name = "octet-pi-compat"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "node"
+args = {args}
+[capabilities]
+filesystem = "unrestricted"
+process = true
+network = true
+system_prompt = true
+[contributes]
+tools = {tools}
+commands = {commands}
+hooks = {hooks}
+tool_renderers = {renderers}
+notifications = true
+confirmations = true
+providers = true
+"#,
+            args = serde_json::json!([runner, entry]),
+            tools = serde_json::json!(names("tools")),
+            commands = serde_json::json!(names("commands")),
+            hooks = metadata["hooks"],
+            renderers = metadata["tool_renderers"],
+        ),
+    )
+    .unwrap();
 }
 
 /// A minimal API 0.1 extension that answers `command/execute` with one bounded
@@ -138,6 +224,7 @@ fn pi_app_policy_with_frontend_and_native(
     frontend: Option<&InteractiveShell>,
     workspace_only: bool,
     native: Option<(&str, &str)>,
+    direct_runner: bool,
 ) -> (tempfile::TempDir, App) {
     let (directory, mut app) = crate::compaction::tests::app_for_estimate();
     if workspace_only {
@@ -166,21 +253,31 @@ fn pi_app_policy_with_frontend_and_native(
         .join("../../extensions/octet-pi-compat")
         .canonicalize()
         .unwrap();
-    let configured = std::process::Command::new("node")
-        .arg(adapter.join("configure.mjs"))
-        .arg("--reviewed")
-        .arg("--output")
-        .arg(extension_root.join("octet-pi-compat"))
-        .arg(&entry)
-        .current_dir(&app.config.workspace)
-        .env("PI_OFFLINE", "1")
-        .output()
-        .expect("existing Node and adapter dependencies are required");
-    assert!(
-        configured.status.success(),
-        "{}",
-        String::from_utf8_lossy(&configured.stderr)
-    );
+    if direct_runner {
+        write_direct_pi_fixture(
+            &adapter,
+            &entry,
+            &extension_root.join("octet-pi-compat"),
+            &app.config.workspace,
+        );
+    } else {
+        let configured = std::process::Command::new("node")
+            .arg(adapter.join("configure.mjs"))
+            .arg("--reviewed")
+            .arg("--output")
+            .arg(extension_root.join("octet-pi-compat"))
+            .arg(&entry)
+            .current_dir(&app.config.workspace)
+            .env("PI_OFFLINE", "1")
+            .env("OCTET_PI_AGENT_DIR", directory.path().join("pi-agent"))
+            .output()
+            .expect("existing Node and adapter dependencies are required");
+        assert!(
+            configured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+    }
     if let Some((extension, command)) = native {
         write_native_command_extension(&extension_root, extension, command);
     }
@@ -232,7 +329,7 @@ fn pi_app_policy_with_frontend_and_native(
     }
     host.finalize_tool_surface();
     // Preserve the real App frontend capability through rebuild_app. Resource
-    // loading is enabled only for factories that actually contribute paths.
+    // loading is enabled for every configured bridge, including an empty inventory.
     app.resource_paths = crate::app::resource_paths::ResourcePathConsumer::new(
         &app.config,
         &app.skills,

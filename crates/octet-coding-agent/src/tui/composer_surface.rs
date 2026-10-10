@@ -997,6 +997,11 @@ fn render_status_footer_with_gap(
 }
 
 pub(crate) fn status_footer_visible(state: &super::view::ShellState, width: u16) -> bool {
+    // Pi setFooter replaces the stock footer rather than stacking another one.
+    // Retirement clears the contribution, restoring ordinary status chrome.
+    if state.extension_footer_replaces_status() {
+        return false;
+    }
     let layout = state.theme.layout_for_width(width);
     let has_identity = layout.show_footer && !layout.show_header;
     (has_identity || layout.show_status_line)

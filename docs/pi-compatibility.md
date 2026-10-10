@@ -61,8 +61,13 @@ import credentials, change Pi settings, or enable the bridge. It snapshots enabl
 Pi palettes as native `pi-*` themes and makes the selected palette this session's
 startup preference; explicit `--theme`/`OCTET_THEME` wins. Saved settings are not
 rewritten. Pi helper/remote-component colors use the imported snapshot; later
-native theme changes are not yet synchronized to those components. Missing
-packages are not installed. The Pi install location is recorded, so a different
+native theme changes are not yet synchronized to those components. While enabled,
+the bridge also exposes current enabled Pi themes in `/theme` at startup and
+`/reload`, even without mirror mode. This read-only palette discovery does not
+expand executable grants or change Pi/Octet settings. Invalid or over-budget
+palettes are diagnosed; disabling the extension withdraws them. The built-in
+`pi` theme is Pi 1.0's default system palette and works without the bridge.
+Missing packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
 <a id="mirror-your-pi-setup"></a>

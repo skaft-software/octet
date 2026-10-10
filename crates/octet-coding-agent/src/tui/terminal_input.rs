@@ -59,12 +59,20 @@ mod intercept;
 mod raw;
 pub use codec::Packet;
 pub(crate) use intercept::InputInterceptors;
+#[path = "terminal_input/theme_colors.rs"]
+mod theme_colors;
+pub(crate) use theme_colors::{TerminalThemeColors, ThemeColorHandler};
 
 const OSC11_PREFIX: &str = "\x1b]11;";
 
 #[derive(Default)]
 struct BackgroundReplies {
     pending: bool,
+    pending_slots: u32,
+    theme_queried: bool,
+    received_palette: [Option<(u8, u8, u8)>; 16],
+    theme_colors: TerminalThemeColors,
+    theme_handler: Option<ThemeColorHandler>,
     prefix_updated: Option<Instant>,
     text: String,
     held: Vec<Packet>,
@@ -90,7 +98,7 @@ impl BackgroundReplies {
     }
 
     fn deadline(&self) -> Option<Instant> {
-        let osc = if self.text.starts_with(OSC11_PREFIX) {
+        let osc = if self.identified_color_reply(&self.text) {
             None
         } else {
             self.prefix_updated
@@ -143,7 +151,7 @@ impl BackgroundReplies {
                 return;
             }
         }
-        if !self.pending {
+        if !self.pending && self.pending_slots == 0 {
             self.ready.push_back(event);
             return;
         }
@@ -169,7 +177,7 @@ impl BackgroundReplies {
             // A bracketed paste or a shortcut can arrive between identified
             // reply fragments. It remains genuine input, not payload, and
             // must not flush terminal-response text into the next owner.
-            if !self.text.starts_with(OSC11_PREFIX) {
+            if !self.identified_color_reply(&self.text) {
                 self.replay();
             }
             self.ready.push_back(event);
@@ -177,7 +185,7 @@ impl BackgroundReplies {
         };
         let mut candidate = self.text.clone();
         candidate.push_str(fragment);
-        match candidate_status(&candidate) {
+        match self.candidate_status(&candidate) {
             Candidate::Prefix => {
                 self.text = candidate;
                 self.held.push(event);
@@ -185,7 +193,16 @@ impl BackgroundReplies {
             }
             Candidate::Color(color) => {
                 self.color = Some(color);
+                self.theme_colors.background = Some((color.r, color.g, color.b));
+                self.publish_theme_colors();
                 self.pending = false;
+                self.clear_fragment();
+                if let Event::Key(key) = &event.event {
+                    self.trailing_release = Some((key.code, key.modifiers));
+                }
+            }
+            Candidate::ThemeColor(target, color) => {
+                self.accept_theme_color(target, color);
                 self.clear_fragment();
                 if let Event::Key(key) = &event.event {
                     self.trailing_release = Some((key.code, key.modifiers));
@@ -194,7 +211,7 @@ impl BackgroundReplies {
             Candidate::NotReply => {
                 self.replay();
                 // A mismatch may itself begin a new reply (e.g. Esc, Alt+]).
-                if matches!(candidate_status(fragment), Candidate::Prefix) {
+                if matches!(self.candidate_status(fragment), Candidate::Prefix) {
                     self.text = fragment.to_owned();
                     self.held.push(event);
                     self.prefix_updated = Some(now);
@@ -398,6 +415,7 @@ fn reply_fragment(packet: &Packet) -> Option<&str> {
 enum Candidate {
     Prefix,
     Color(RgbColor),
+    ThemeColor(theme_colors::ColorTarget, RgbColor),
     NotReply,
 }
 
@@ -780,7 +798,19 @@ impl<E: Into<Packet>, S: Stream<Item = io::Result<E>> + Unpin> Stream for Termin
                 return Poll::Ready(None);
             }
             match Pin::new(&mut this.source).poll_next(cx) {
-                Poll::Ready(Some(Ok(event))) => this.replies.push_filtered(event, Instant::now()),
+                Poll::Ready(Some(Ok(event))) => {
+                    let event = event.into();
+                    if matches!(event.event, Event::FocusGained)
+                        && this
+                            .replies
+                            .theme_handler
+                            .as_ref()
+                            .is_some_and(|handler| handler(this.replies.theme_colors))
+                    {
+                        let _ = crate::tui::terminal::query_terminal_theme_colors(this, true);
+                    }
+                    this.replies.push_filtered(event, Instant::now());
+                }
                 Poll::Ready(Some(Err(error))) => {
                     this.input_error = Some(error);
                     this.replies.replay();
@@ -824,7 +854,7 @@ mod tests {
     // second hand-written model of it: one contiguous read when `split_escapes`
     // is false, one byte per read when a fragmented sequence is under test. The
     // PTY lane below separately verifies the reader against actual bytes.
-    fn decoded(bytes: &str, split_escapes: bool) -> Vec<Event> {
+    pub(super) fn decoded(bytes: &str, split_escapes: bool) -> Vec<Event> {
         let mut decoder = codec::Decoder::default();
         let mut events = Vec::new();
         let raw = bytes.as_bytes();

@@ -124,7 +124,8 @@ fn render_surface_content_line(
     if plan.event_spacing && line.is_empty() {
         return String::new();
     }
-    let (content_role, border_role, _) = surface_roles(plan.kind);
+    let (_, border_role, _) = surface_roles(plan.kind);
+    let content_role = plan.content_role;
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
@@ -288,6 +289,16 @@ pub(super) fn event_margin_marker(
     )
 }
 
+pub(super) fn spinner_glyph(unicode: bool, frame: usize) -> &'static str {
+    const BRAILLE: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const ASCII: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
+    if unicode {
+        BRAILLE[frame % BRAILLE.len()]
+    } else {
+        ASCII[frame % ASCII.len()]
+    }
+}
+
 pub(super) fn event_margin_marker_with_frame(
     block: &TranscriptBlock,
     theme: &OctetTheme,
@@ -315,15 +326,10 @@ pub(super) fn event_margin_marker_with_frame(
         }
     };
     match block {
-        TranscriptBlock::Reasoning(_) if collapsed_reasoning && thinking_spinner => {
-            const BRAILLE_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            const ASCII_FRAMES: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
-            let spinner = if theme.unicode() {
-                BRAILLE_FRAMES[spinner_frame % BRAILLE_FRAMES.len()]
-            } else {
-                ASCII_FRAMES[spinner_frame % ASCII_FRAMES.len()]
-            };
-            Some(theme.fg("accent", spinner))
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning && thinking_spinner && !reasoning.finished =>
+        {
+            Some(theme.fg("accent", spinner_glyph(theme.unicode(), spinner_frame)))
         }
         TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && markers_enabled => {
             Some(status_shimmer_frame.map_or_else(

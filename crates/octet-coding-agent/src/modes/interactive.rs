@@ -264,6 +264,23 @@ where
         self.shell.render();
     }
 
+    fn confirm_effect<'a>(
+        &'a mut self,
+        _extension: &'a str,
+        request: &'a octet_agent::tool::ToolConfirmation,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "confirm", async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    anyhow::bail!("shutdown requested while awaiting effect confirmation")
+                }
+                result = confirmation_picker(self.shell, self.input, request) => result,
+            }
+        }))
+    }
+
     fn confirm<'a>(
         &'a mut self,
         extension: &'a str,
@@ -1093,14 +1110,14 @@ fn apply_goal_command(
     use octet_agent::GoalAction as DurableGoalAction;
 
     match command {
-        commands::GoalCommand::Help => shell.show_report_text(
+        commands::GoalCommand::Help => shell.show_report_facts(
             "Goal help",
             "Browse commands for the current session goal",
             "Goal commands\n\n/goal <objective>\n/goal status\n/goal pause\n/goal resume\n/goal clear"
                 .to_owned(),
         ),
         commands::GoalCommand::Status => match access.status_text() {
-            Ok(status) => shell.show_report_text(
+            Ok(status) => shell.show_report_facts(
                 "Goal status",
                 "Review the current session goal",
                 status,
@@ -2768,7 +2785,7 @@ where
         Command::Hotkeys => show_hotkeys(shell),
         Command::Copy => copy_last_assistant(shell),
         Command::Session => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Session",
                 "Durable session facts",
                 format!(
@@ -2779,13 +2796,13 @@ where
             ),
             Err(error) => shell.error(format!("session report unavailable: {error}")),
         },
-        Command::Help(topic) => shell.show_report_text(
+        Command::Help(topic) => shell.show_report_facts(
             "Help",
             "Browse commands and keyboard shortcuts",
             commands::help_text(&inspection.workspace, topic.as_deref()),
         ),
         Command::Cost => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cost",
                 "Review session token usage and estimated cost",
                 commands::cost_text(&session, &inspection.model),
@@ -2793,7 +2810,7 @@ where
             Err(error) => shell.error(format!("cost report unavailable: {error}")),
         },
         Command::Cache => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cache",
                 "Review session cache accounting",
                 format!(
@@ -2805,7 +2822,7 @@ where
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
         },
         Command::CacheWarming(None) => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cache warming",
                 "Billable refresh policy",
                 inspection.cache_warming_text(&session),
@@ -2829,6 +2846,7 @@ where
             }
         }
         Command::Theme(requested) => apply_active_theme(shell, requested, queue)?,
+        // A template catalogue is resource-owned text, not a built-in fact grammar.
         Command::Prompt(None) => shell.show_report_text(
             "Prompts", "Available prompt templates", shell.prompt_templates_report(),
         ),
@@ -2836,7 +2854,7 @@ where
             shell.queue_follow_up(ComposedInput::from_text(format!("/{invocation}")));
             shell.notice("prompt template queued for expansion at the next idle boundary");
         }
-        Command::Context => shell.show_report_text(
+        Command::Context => shell.show_report_facts(
             "Context",
             "Review the estimated request context before the next turn",
             active_context_text(context, &inspection.model),
@@ -3033,9 +3051,9 @@ where
                     if let Some(control) = &inspection.cache_warming_control {
                         settings.cache_warming = control.cache_warming_mode();
                     }
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Settings",
-                        "Effective display and default preferences",
+                        "Effective display, launch, and session settings",
                         commands::settings_text(&settings),
                     );
                 }
@@ -3070,7 +3088,7 @@ where
                 .collect::<Vec<_>>();
             available.sort();
             match sub {
-                commands::ScopedModelsCommand::Show => shell.show_report_text(
+                commands::ScopedModelsCommand::Show => shell.show_report_facts(
                     "Scoped models",
                     "Ordered model cycling scope",
                     commands::scoped_models_text(inspection.model_scope.as_deref(), &available),
@@ -3372,7 +3390,8 @@ impl ActiveToolInteraction {
             ActiveToolRequest::Confirmation(request) => request
                 .prompt
                 .len()
-                .saturating_add(request.detail.as_ref().map_or(0, String::len)),
+                .saturating_add(request.detail.as_ref().map_or(0, String::len))
+                .saturating_add(request.technical_detail.as_ref().map_or(0, String::len)),
             ActiveToolRequest::Input(request, _) => request.prompt.len(),
         }
     }
@@ -3401,29 +3420,35 @@ impl ActiveToolInteraction {
     fn open(&self, shell: &mut InteractiveShell) {
         match &self.request {
             ActiveToolRequest::Confirmation(request) => {
-                let items = if request.default {
-                    vec!["Approve".into(), "Deny".into()]
-                } else {
-                    vec!["Deny".into(), "Approve".into()]
-                };
-                let title = if request.destructive {
-                    format!("Action requires approval · {}", request.prompt)
-                } else {
-                    request.prompt.clone()
-                };
-                shell.open_panel(Panel::SelectList {
-                    surface: OrdinarySurfaceMetadata::new(title),
-                    items,
-                    descriptions: vec![request.detail.clone(), request.detail.clone()],
-                    selected: 0,
-                    filter: String::new(),
-                    action: PanelAction::Confirmation,
-                });
+                Self::open_confirmation(request, shell);
             }
             ActiveToolRequest::Input(request, _) => {
                 shell.begin_tool_input(&request.prompt, request.secret)
             }
         }
+    }
+
+    fn open_confirmation(
+        request: &octet_agent::tool::ToolConfirmation,
+        shell: &mut InteractiveShell,
+    ) {
+        let mut items = if request.default {
+            vec!["Approve".into(), "Deny".into()]
+        } else {
+            vec!["Deny".into(), "Approve".into()]
+        };
+        if request.technical_detail.is_some() {
+            items.push("Technical details".into());
+        }
+        let descriptions = vec![request.detail.clone(); items.len()];
+        shell.open_panel(Panel::SelectList {
+            surface: OrdinarySurfaceMetadata::new(request.prompt.clone()),
+            items,
+            descriptions,
+            selected: 0,
+            filter: String::new(),
+            action: PanelAction::Confirmation,
+        });
     }
 
     fn input(&mut self, shell: &mut InteractiveShell, event: &Event) -> bool {
@@ -3433,14 +3458,29 @@ impl ActiveToolInteraction {
                     && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
                 let result = if cancelled {
                     shell.close_panel();
-                    Some(PanelResult::Cancel)
+                    Some((PanelResult::Cancel, PanelAction::Confirmation))
                 } else {
-                    shell.panel_input(event).map(|(result, _)| result)
+                    shell.panel_input(event)
                 };
-                let Some(result) = result else {
+                let Some((result, action)) = result else {
                     return false;
                 };
-                let confirmed = matches!(result, PanelResult::Confirm(index) if (index == 0) == request.default);
+                if matches!(action, PanelAction::ReadOnlyDocument) && !cancelled {
+                    Self::open_confirmation(request, shell);
+                    return false;
+                }
+                if matches!(result, PanelResult::Confirm(2)) {
+                    if let Some(detail) = &request.technical_detail {
+                        shell.open_panel(Panel::ReadOnlyDocument {
+                            title: "Technical details · Esc to return".into(),
+                            text: detail.clone().into(),
+                            styled: false,
+                            scroll_from_bottom: 0,
+                        });
+                        return false;
+                    }
+                }
+                let confirmed = matches!(result, PanelResult::Confirm(index) if index < 2 && (index == 0) == request.default);
                 request.respond(confirmed);
                 let notice = confirmation_notice(self.tool.as_deref(), confirmed);
                 if confirmed {
@@ -9333,9 +9373,9 @@ async fn apply_settings_command(
     };
     match sub {
         Sub::Menu => unreachable!("menu navigation returns only a selected effect or report"),
-        Sub::Show => shell.show_report_text(
+        Sub::Show => shell.show_report_facts(
             "Settings",
-            "Effective display and default preferences",
+            "Effective display, launch, and session settings",
             commands::settings_text(&commands::SettingsSurface::capture(app)),
         ),
         Sub::Transport => shell.notice(format!(
@@ -9527,7 +9567,7 @@ async fn apply_scoped_models_command(
             .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
             .collect::<Vec<_>>();
         available.sort();
-        shell.show_report_text(
+        shell.show_report_facts(
             "Scoped models",
             "Ordered model cycling scope",
             commands::scoped_models_text(app.model_scope.as_deref(), &available),
@@ -9679,7 +9719,7 @@ async fn run_idle_command_inner(
         Command::Changelog => shell.show_changelog(),
         Command::Hotkeys => show_hotkeys(shell),
         Command::Copy => copy_last_assistant(shell),
-        Command::Session => shell.show_report_text(
+        Command::Session => shell.show_report_facts(
             "Session",
             "Durable session facts",
             format!(
@@ -9689,7 +9729,7 @@ async fn run_idle_command_inner(
             ),
         ),
         Command::Help(topic) => {
-            shell.show_report_text(
+            shell.show_report_facts(
                 "Help",
                 "Browse commands and keyboard shortcuts",
                 commands::help_text(&app.config.workspace, topic.as_deref()),
@@ -9701,12 +9741,12 @@ async fn run_idle_command_inner(
         Command::Context => {
             shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
         }
-        Command::Cost => shell.show_report_text(
+        Command::Cost => shell.show_report_facts(
             "Cost",
             "Review session token usage and estimated cost",
             commands::cost_text(app.agent.session(), &app.model),
         ),
-        Command::Cache => shell.show_report_text(
+        Command::Cache => shell.show_report_facts(
             "Cache",
             "Review session cache accounting",
             format!(
@@ -9726,7 +9766,7 @@ async fn run_idle_command_inner(
                     ));
                 }
             } else {
-                shell.show_report_text(
+                shell.show_report_facts(
                     "Cache warming",
                     "Billable refresh policy",
                     commands::app_cache_warming_text(&app),
@@ -10553,6 +10593,19 @@ async fn apply_detected_terminal_background_with_timeout<
 where
     S: Stream<Item = std::io::Result<E>> + Unpin,
 {
+    if matches!(
+        shell.theme().source(),
+        crate::tui::theme::ThemeSource::CompiledPi
+    ) {
+        if shell.theme().capabilities().color != crate::tui::terminal::ColorDepth::None
+            && !explicit_terminal_background_override()
+        {
+            // The ordinary input owner consumes these replies and repaints via
+            // its handler, including replies arriving after readiness.
+            let _ = crate::tui::terminal::query_terminal_theme_colors(input, false);
+        }
+        return false;
+    }
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
             .and_then(TerminalThemeChoice::explicit_background)
@@ -10712,12 +10765,13 @@ where
         .and_then(|key| {
             let key = TerminalThemeChoice::parse(key)
                 .map(TerminalThemeChoice::key)
+                .or_else(|| compiled_file_theme_name(key))
                 .unwrap_or_else(|| key.strip_suffix(".toml").unwrap_or(key));
             choices.iter().position(|choice| choice.key() == key)
         })
         .unwrap_or(0);
     if let Some(ThemeSelection::File(_)) = choices.get(current) {
-        if previews[current].source_path() == original.source_path() {
+        if previews[current].source() == original.source() {
             previews[current] = original.clone();
         }
     }
@@ -10828,7 +10882,12 @@ where
             shell.theme().background(),
         ));
     }
-    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto)) {
+    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto))
+        || matches!(
+            shell.theme().source(),
+            crate::tui::theme::ThemeSource::CompiledPi
+        )
+    {
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
@@ -10968,7 +11027,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Session => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Session",
                         "Durable session facts",
                         commands::session_text(&session),
@@ -10980,7 +11039,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Help(topic) => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Help",
                         "Browse commands and keyboard shortcuts",
                         commands::help_text(&workspace, topic.as_deref()),
@@ -10988,7 +11047,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Status => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Status",
                         "Review the read-only session configuration",
                         "No model is configured. The session can be read, but prompts are disabled."
@@ -11716,7 +11775,8 @@ async fn run_interactive_once(
     let mut input = EventStream::new()
         .with_interceptors(shell.terminal_input_interceptors())
         .with_cede_flag(shell.terminal_input_parking())
-        .with_tern_handler(shell.tern_input_handler());
+        .with_tern_handler(shell.tern_input_handler())
+        .with_theme_color_handler(shell.terminal_theme_handler());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain
@@ -12210,6 +12270,9 @@ async fn run_interactive_once(
                             continue;
                         }
                     }
+                    // Prompt-hook admission may attach the first resource consumer
+                    // before the ordinary idle pump has observed it.
+                    refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
                 }
                 let transformed = await_with_ctrl_c(
                     app.executable_extensions.process_input(

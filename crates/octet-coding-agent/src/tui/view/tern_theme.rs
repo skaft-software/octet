@@ -218,6 +218,26 @@ fn variant(theme: &OctetTheme) -> Map<String, Value> {
         }
     }
 
+    // Built-in and imported Pi themes own their exact palette, including tool
+    // state fills and thinking ramps. Do not replace them with model-derived ink.
+    if theme.is_pi_theme() {
+        for role in theme.semantic_role_names() {
+            let Some(token) = role.strip_prefix("extension.pi.") else {
+                continue;
+            };
+            let style = theme.semantic_style(role);
+            out.remove(token);
+            put(
+                &mut out,
+                token,
+                if token.ends_with("Bg") {
+                    style.background
+                } else {
+                    style.foreground
+                },
+            );
+        }
+    }
     out
 }
 

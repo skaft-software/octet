@@ -72,8 +72,8 @@ Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
 canonical release commit. Its metadata generator requires that ref, and the
 protected environment must admit the tag without removing required reviewers.
 
-Cargo can build the published canonical tag's exact source (Rust 1.88+ and
-ripgrep):
+Cargo can build the published canonical tag's exact source (Rust 1.88+;
+ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
 cargo install --locked --git https://github.com/skaft-software/octet --tag v0.9.0 --bins octet-coding-agent
@@ -118,10 +118,10 @@ The Homebrew formula is generated from the signed `OCTET_RELEASE_METADATA.json`
 that the protected binary-release workflow produces, and nothing in the process
 reads a mutable `latest` or the release API. The proposed tap is
 `skaft-software/homebrew-tap`, publishing the `octet` formula. It installs only
-`octet` and `octet-host`, declares
-`ripgrep`, has no Linux runtime, and doesn't run an npm lifecycle hook, invoke
-Cargo or build from source. To check a formula generated from local release
-assets:
+`octet` and `octet-host`, does not require or install ripgrep, has no Linux
+runtime, and doesn't run an npm lifecycle hook, invoke Cargo or build from
+source. Content search prefers `rg` when available, otherwise `grep`. To check
+a formula generated from local release assets:
 
 ```sh
 scripts/test-homebrew-formula.sh

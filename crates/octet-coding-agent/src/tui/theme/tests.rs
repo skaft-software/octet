@@ -442,6 +442,42 @@ fn still_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
     }
 }
 
+#[test]
+fn pi_builtin_is_reserved_standalone_and_retains_terminal_colors_on_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path().to_owned());
+    let themes = config.workspace.join(".octet/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    std::fs::write(themes.join("pi.toml"), "accent = '#123456'").unwrap();
+    for selector in ["pi", "PI", "pi.toml", "pi.json"] {
+        config.theme = Some(selector.into());
+        let theme = load_theme_for_background(&config, TerminalBackground::Dark);
+        assert_eq!(theme.source(), &ThemeSource::CompiledPi);
+        assert!(theme.source_path().is_none());
+        assert!(!theme.prompt_wash());
+        assert!(!theme.uses_model_lab_color());
+    }
+    assert!(compiled_file_theme_names().eq(["Cards", "Still", "pi"]));
+    assert!(!selectable_file_themes(&config, TerminalBackground::Dark)
+        .iter()
+        .any(|(name, _)| name == "pi"));
+    let colors = TerminalThemeColors {
+        background: Some((40, 42, 54)),
+        foreground: Some((248, 248, 242)),
+        palette: None,
+    };
+    let mut theme = load_theme_for_background(&config, TerminalBackground::Unknown)
+        .with_terminal_colors(colors);
+    let accent = theme.resolve::<String>("accent");
+    apply_model_lab(&mut theme, ModelLab::Anthropic);
+    assert_eq!(theme.resolve::<String>("accent"), accent);
+    assert_eq!(theme.resolve::<String>("model_accent"), accent);
+    let reloaded = theme.reload().unwrap();
+    assert_eq!(reloaded.terminal_colors(), colors);
+    assert_eq!(reloaded.resolve::<String>("accent"), accent);
+    assert_eq!(reloaded.source(), &ThemeSource::CompiledPi);
+}
+
 /// Every compiled-in file theme must reach `reload` through the same table
 /// that resolves its selector, so a new built-in cannot compile on first
 /// load and then silently fall back on reload.

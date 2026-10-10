@@ -208,6 +208,8 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
         ("cards.toml", "Cards", ThemeSource::CompiledCards),
         ("Still", "Still", ThemeSource::CompiledStill),
         ("still.json", "Still", ThemeSource::CompiledStill),
+        ("pi", "pi", ThemeSource::CompiledPi),
+        ("PI.json", "pi", ThemeSource::CompiledPi),
     ] {
         let (selection, loaded) =
             requested_theme_selection(name, &config, TerminalBackground::Dark).unwrap();
@@ -239,7 +241,7 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
 async fn direct_builtin_theme_selection_matches_picker_and_startup() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = terminal_theme_test_config(directory.path().to_owned());
-    for name in ["Still", "Cards"] {
+    for name in ["Still", "Cards", "pi"] {
         let mut shell = InteractiveShell::test_shell();
         let mut input = EventStream::from_stream(tokio_stream::empty());
         assert_eq!(
@@ -259,14 +261,71 @@ async fn direct_builtin_theme_selection_matches_picker_and_startup() {
         assert_eq!(config.theme.as_deref(), Some(name));
         assert_eq!(
             *shell.theme().source(),
-            if name == "Still" {
-                ThemeSource::CompiledStill
-            } else {
-                ThemeSource::CompiledCards
+            match name {
+                "Still" => ThemeSource::CompiledStill,
+                "Cards" => ThemeSource::CompiledCards,
+                "pi" => ThemeSource::CompiledPi,
+                _ => unreachable!(),
             },
             "direct /theme {name} must install the compiled built-in"
         );
     }
+}
+
+#[tokio::test]
+async fn pi_theme_picker_preview_cancel_and_confirm_preserve_draft_and_canonical_selector() {
+    let mut config = terminal_theme_test_config(PathBuf::from("."));
+    config.theme = Some("Cards".into());
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_theme(load_theme_for_background(&config, TerminalBackground::Dark));
+    let original = shell.theme();
+    shell.extension_set_editor_at("retained 雪 draft".into(), Some(9));
+    let draft = shell.extension_editor_snapshot();
+    for cancel in [true, false] {
+        let mut events: Vec<_> = "pi"
+            .chars()
+            .map(|key| theme_picker_key(KeyCode::Char(key)))
+            .collect();
+        events.push(theme_picker_key(if cancel {
+            KeyCode::Esc
+        } else {
+            KeyCode::Enter
+        }));
+        let mut input = tokio_stream::iter(events);
+        let selected = pick_terminal_theme(&mut shell, &mut input, &config, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            selected,
+            (!cancel).then(|| ThemeSelection::File("pi".into()))
+        );
+        assert_eq!(
+            shell.theme().source(),
+            if cancel {
+                original.source()
+            } else {
+                &ThemeSource::CompiledPi
+            }
+        );
+        assert_eq!(
+            config.theme.as_deref(),
+            Some("Cards"),
+            "preview never persists"
+        );
+        let retained = shell.extension_editor_snapshot();
+        assert_eq!(retained.text, draft.text);
+        assert_eq!(retained.cursor, draft.cursor);
+        assert_eq!(retained.revision, draft.revision);
+    }
+    config.theme = Some("PI.json".into());
+    let mut input = tokio_stream::iter([theme_picker_key(KeyCode::Enter)]);
+    assert_eq!(
+        pick_terminal_theme(&mut shell, &mut input, &config, false)
+            .await
+            .unwrap(),
+        Some(ThemeSelection::File("pi".into()))
+    );
+    assert_eq!(shell.theme().source(), &ThemeSource::CompiledPi);
 }
 
 #[tokio::test]

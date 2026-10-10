@@ -49,6 +49,12 @@ pub(super) fn node(
             .set("placeholder", "Filter options…"),
     ));
     let item_id = |index| format!("{panel}.item.{index}");
+    let action_menu = matches!(
+        action_kind,
+        PanelAction::SelectSettings(_)
+            | PanelAction::SelectExtension(_)
+            | PanelAction::ProviderSetup(_)
+    );
     body.push(Node::with_children(
         &panel,
         Kind::List,
@@ -58,9 +64,11 @@ pub(super) fn node(
         order
             .iter()
             .map(|index| {
-                Node::new(
-                    item_id(*index),
-                    Kind::Item,
+                let props = if action_menu {
+                    // Keep the action label distinct from its explanation.
+                    // The full selected description wraps below the list.
+                    Props::new().text("label", vec![Span::styled(safe(&items[*index]), "strong")])
+                } else {
                     Props::new().text("label", safe(&items[*index])).text(
                         "detail",
                         descriptions
@@ -68,8 +76,9 @@ pub(super) fn node(
                             .and_then(Option::as_deref)
                             .map(safe)
                             .unwrap_or_default(),
-                    ),
-                )
+                    )
+                };
+                Node::new(item_id(*index), Kind::Item, props)
             })
             .collect(),
     ));

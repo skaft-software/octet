@@ -83,6 +83,10 @@ test('from-Pi imports enabled palettes as native themes, stages the Pi default a
   const imported = readFileSync(join(output, 'themes/pi-ghostty-dark.toml'), 'utf8');
   assert.match(imported, /accent = "#123456"/);
   assert.match(imported, /composer_border = "#7e57c2"/);
+  const headers = [...imported.matchAll(/^\[([^\n]+)\]$/gm)].map(match => match[1]);
+  assert.equal(new Set(headers).size, headers.length, 'native tables must be emitted exactly once');
+  const colors = imported.split('\n[colors]\n')[1].split('\n[')[0];
+  assert.match(colors, /composer_border = "#7e57c2"/, 'composer snapshot belongs to colors, not a role');
   assert.match(imported, /\[roles\."extension\.pi\.thinkingXhigh"\]\nforeground = "#c792ea"/);
   assert.match(imported, /prompt_wash = false/);
   assert.equal(readFileSync(join(output, 'octet-config.toml'), 'utf8').split('\n').filter(line => !line.startsWith('#') && line).join('\n'), 'theme = "pi-ghostty-dark"');

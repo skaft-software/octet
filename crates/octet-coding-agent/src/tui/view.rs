@@ -77,7 +77,7 @@ use self::renderer_runtime::{render_loop, RenderCommand, SharedState};
 use self::shell_chrome::responsive_identity;
 use self::shell_chrome::shell_chrome;
 use self::status_telemetry::{
-    output_tokens_per_second, status_telemetry, styled_extension_output, styled_status_text,
+    output_tokens_per_second, status_telemetry, styled_extension_output,
     usage_cache_hit_rate_basis_points,
 };
 #[cfg(test)]
@@ -3024,6 +3024,10 @@ impl ShellState {
         })
     }
 
+    pub(super) fn extension_footer_replaces_status(&self) -> bool {
+        self.theme.is_pi_theme() && !self.extension_ui.footer.is_empty() && self.panel.is_none()
+    }
+
     fn has_active_event_dot(&self) -> bool {
         let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
         let thinking_spinner = self
@@ -3068,7 +3072,7 @@ impl ShellState {
     /// on the label makes `Working` and `Thinking` one continuous sweep, while
     /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        reasoning.is_shimmering_activity()
+        !self.theme.is_pi_theme() && reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -3358,6 +3362,22 @@ fn render_user_prompt(
     theme: &OctetTheme,
     width: u16,
 ) -> Vec<String> {
+    if theme.is_pi_theme() {
+        let document = parse_markdown(&sanitize_for_terminal(text));
+        let lines = renderer
+            .render(&document, width)
+            .lines
+            .into_iter()
+            .map(|line| {
+                if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+                    line.plain
+                } else {
+                    line.styled
+                }
+            })
+            .collect();
+        return finish_transcript_block(lines);
+    }
     let marker_glyph = sanitize_for_terminal(prompt_marker(theme));
     let marker_width = visible_width(&marker_glyph);
     let inner_width = width
@@ -6936,6 +6956,19 @@ impl InteractiveShell {
         );
     }
 
+    /// Show an Octet-owned fact report with structured headings and bold labels.
+    /// Values are terminal-sanitized and Markdown-escaped, never markup authority.
+    pub fn show_report_facts(
+        &mut self,
+        title: impl Into<String>,
+        purpose: impl Into<String>,
+        text: String,
+    ) {
+        let title = title.into();
+        let source = report_document::facts_markdown(&title, &text);
+        self.show_report_markdown(title, purpose, &source);
+    }
+
     /// Open this binary's bundled release notes as a read-only rich document.
     /// This report never becomes transcript, session, or provider input.
     pub fn show_changelog(&mut self) {
@@ -6963,23 +6996,6 @@ impl InteractiveShell {
         self.show_report(
             OrdinarySurfaceMetadata::with_purpose(title, purpose),
             ReportBody::Markdown(Arc::new(parse_markdown(&source)), source),
-        );
-    }
-
-    /// Styled report text must already have been terminal-sanitized at its
-    /// producing boundary. Only octet-owned theme SGR is retained while wrapping.
-    pub fn show_styled_report_text(
-        &mut self,
-        title: impl Into<String>,
-        purpose: impl Into<String>,
-        text: String,
-    ) {
-        self.show_report(
-            OrdinarySurfaceMetadata::with_purpose(title, purpose),
-            ReportBody::Text {
-                text: text.into(),
-                styled: true,
-            },
         );
     }
 
@@ -7036,15 +7052,14 @@ impl InteractiveShell {
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
-        let (theme, text) = {
+        let text = {
             let state = self.state.borrow();
-            let text = format!("{text}\n\n{}", status_telemetry(&state, Instant::now()));
-            (state.theme.clone(), text)
+            format!("{text}\n\n{}", status_telemetry(&state, Instant::now()))
         };
-        self.show_styled_report_text(
+        self.show_report_facts(
             "Status",
             "Review active model, session, and safety diagnostics",
-            styled_status_text(&theme, &text),
+            text,
         );
     }
 
@@ -8334,7 +8349,38 @@ impl InteractiveShell {
         state.invalidate_rich_text();
     }
 
+    /// Terminal protocol colors cannot touch the draft or modal input owner.
+    /// Repaint only the generated Pi palette, keeping every transcript source.
+    pub(crate) fn terminal_theme_handler(&self) -> crate::tui::terminal::ThemeColorHandler {
+        let state = self.state.clone();
+        let render = self.render_tx.clone();
+        std::sync::Arc::new(move |colors| {
+            let mut state = state.borrow_mut();
+            let generated = matches!(
+                state.theme.source(),
+                crate::tui::theme::ThemeSource::CompiledPi
+            ) && state.theme.capabilities().color
+                != crate::tui::terminal::ColorDepth::None;
+            if colors == state.theme.terminal_colors() {
+                return generated;
+            }
+            state.theme = state.theme.clone().with_terminal_colors(colors);
+            if generated {
+                state.theme_epoch = state.theme_epoch.wrapping_add(1);
+                state.invalidate_rich_text();
+            }
+            drop(state);
+            if generated {
+                if let Some(tx) = render.lock().expect("render sender poisoned").as_ref() {
+                    let _ = tx.try_send(renderer_runtime::RenderCommand::Render);
+                }
+            }
+            generated
+        })
+    }
+
     pub fn set_theme(&mut self, mut theme: OctetTheme) {
+        theme = theme.with_terminal_colors(self.state.borrow().theme.terminal_colors());
         // Native terminal history cannot be recoloured in place. Materialize a
         // deferred resume before the swap so the replay below includes every
         // persisted tool card, not just the first-paint tail.
@@ -8659,6 +8705,7 @@ mod remote_ui;
 mod renderer_geometry;
 mod renderer_model;
 mod renderer_runtime;
+mod report_document;
 // Keep the built-in implementation unchanged; compose cached remote regions at
 // the existing shell chrome seam rather than introducing another renderer.
 mod shell_chrome {

@@ -9,8 +9,9 @@ changes small and back them with evidence.
 The octet source supports macOS and Linux and needs Rust 1.88 or newer. A native
 Windows x64 build (`x86_64-pc-windows-gnu`) is built and tested in CI but not
 released yet: see [Windows](docs/windows.md). Install Rust through
-[rustup](https://rustup.rs/) and install `rg` (ripgrep). Clone the repository if
-you need a checkout:
+[rustup](https://rustup.rs/). `rg` (ripgrep) is preferred for content search when
+available; `grep` is the fallback, so ripgrep is not required. Clone the
+repository if you need a checkout:
 
 ```sh
 git clone https://github.com/skaft-software/octet.git octet

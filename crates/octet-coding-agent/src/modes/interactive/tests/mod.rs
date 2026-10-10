@@ -18,6 +18,7 @@ mod active_reports_and_status_tests;
 mod active_run_commands_and_steering_tests;
 mod active_subagent_and_queued_control_tests;
 mod after_response_frontend_tests;
+mod approval_details_tests;
 mod cache_warming_tests;
 mod codex_context_window_tests;
 mod compaction_ui_pump_tests;

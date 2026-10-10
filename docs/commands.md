@@ -121,6 +121,18 @@ split-prefix summaries use host-owned retries, reservations and accounting, and
 the summary is committed once. That doesn't promise retry-progress UI or
 exactly-once inference after a transport interruption.
 
+## Read-only reports
+
+Interactive status and fact reports use section headings and bold field labels,
+including cache warming, safety permissions and telemetry. Cost and cache records
+stack their named fields rather than clipping wide ASCII tables. Values remain
+literal text; filenames, model names and diagnostics cannot inject Markdown or
+terminal controls. Plain/CLI report output keeps its text format.
+
+Up/Down scroll, PageUp/PageDown page, and Escape returns to the unchanged draft.
+Reports are transient: they do not enter transcript copy, session history or
+model input, and reading a report never approves an effect.
+
 ## Settings menu
 
 Bare `/settings` opens a filterable menu immediately, including during active
@@ -140,6 +152,11 @@ changes use the same safe display or deferred settings dispatch as explicit
 commands; opening and browsing the menu does not interrupt active work.
 
 **Show effective settings**, or `/settings show`, opens read-only diagnostics.
+**Configured model** is a launch fact and **Active reasoning** is session state;
+neither is presented as the saved default for new sessions. In narrower terminal
+panes, settings, extension and setup menus put descriptions below their bold
+action labels instead of squeezing both into one row. Native Tern sheets keep
+bold action labels in the list and wrap the full selected description below it.
 Existing explicit `/settings theme`, `images`, `default model`, `default
 reasoning`, `transport` and `padding` forms keep their behavior. Transport,
 padding, permissions and project trust are not editable menu preferences, and

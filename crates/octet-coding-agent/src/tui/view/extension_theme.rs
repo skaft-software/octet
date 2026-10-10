@@ -79,8 +79,10 @@ fn palette(theme: &OctetTheme, selector: &str) -> Value {
     let mut foregrounds = Map::new();
     let mut backgrounds = Map::new();
     let mut colors = Map::new();
+    let pi = theme.is_pi_theme();
     for &(token, role) in FOREGROUNDS {
-        let style = theme.semantic_style(role);
+        let pi_role = format!("extension.pi.{token}");
+        let style = theme.semantic_style(if pi { &pi_role } else { role });
         let resolved = color(if enabled {
             style.foreground
         } else {
@@ -93,12 +95,15 @@ fn palette(theme: &OctetTheme, selector: &str) -> Value {
         );
     }
     for &(token, role, fallback) in BACKGROUNDS {
-        let background = theme.semantic_style(role).background;
+        let pi_role = format!("extension.pi.{token}");
+        let background = theme
+            .semantic_style(if pi { &pi_role } else { role })
+            .background;
         backgrounds.insert(
             token.into(),
             color(if !enabled {
                 Color::Default
-            } else if background == Color::Default {
+            } else if !pi && background == Color::Default {
                 theme.semantic_style(fallback).foreground
             } else {
                 background
@@ -131,7 +136,10 @@ impl InteractiveShell {
             if let Some(Ok(theme)) =
                 compiled_theme_for_selector(name, current.capabilities(), current.background())
             {
-                themes.push((name.to_owned(), theme));
+                themes.push((
+                    name.to_owned(),
+                    theme.with_terminal_colors(current.terminal_colors()),
+                ));
             }
         }
         if let Some(config) = self.runtime_config() {
@@ -145,6 +153,7 @@ impl InteractiveShell {
             .unwrap_or_else(|| match self.theme().source() {
                 crate::tui::theme::ThemeSource::CompiledCards => "Cards".into(),
                 crate::tui::theme::ThemeSource::CompiledStill => "Still".into(),
+                crate::tui::theme::ThemeSource::CompiledPi => "pi".into(),
                 crate::tui::theme::ThemeSource::File(path) => path
                     .file_stem()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -156,6 +165,16 @@ impl InteractiveShell {
         let Some(name) = name else {
             return Some(palette(&self.theme(), &self.selected_theme_name()));
         };
+        if crate::tui::theme::compiled_file_theme_name(name)
+            == Some(crate::tui::theme::PI_THEME_NAME)
+        {
+            let current = self.theme();
+            let theme =
+                compiled_theme_for_selector(name, current.capabilities(), current.background())?
+                    .ok()?
+                    .with_terminal_colors(current.terminal_colors());
+            return Some(palette(&theme, crate::tui::theme::PI_THEME_NAME));
+        }
         if self.extension_themes.borrow().is_none() {
             self.preload_extension_themes();
         }

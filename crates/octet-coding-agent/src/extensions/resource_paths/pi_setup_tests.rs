@@ -278,6 +278,106 @@ fn assert_pi_setup_active(app: &App, pi: &PiHome) {
     assert!(app.agent.system_prompt().contains("PI-SETUP-CONTEXT"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manually_enabled_pi_compat_lists_all_live_palettes_and_withdraws_on_retirement() {
+    use crate::tui::theme::{selectable_file_themes, TerminalBackground, ThemeSource};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let pi = fixture_pi_home(&root);
+    put(
+        pi.agent.join("themes/second.json"),
+        super::pi_theme::fixture("Second Pi palette", "#abcdef").to_string(),
+    );
+    put(pi.agent.join("themes/broken.json"), "{}");
+    put(
+        root.join("manual.mjs"),
+        "export default pi => pi.registerCommand('manual-only', {handler(){}});",
+    );
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/octet-pi-compat");
+    let output = root.join("extensions/octet-pi-compat");
+    let configured = Command::new("node")
+        .arg(adapter.join("configure.mjs"))
+        .args(["--reviewed", "--output"])
+        .arg(&output)
+        .arg(root.join("manual.mjs"))
+        .current_dir(&workspace)
+        .env("OCTET_PI_AGENT_DIR", &pi.agent)
+        .output()
+        .unwrap();
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let manifest = std::fs::read(output.join("extension.toml")).unwrap();
+    let bridge = std::fs::read(output.join("bridge.json")).unwrap();
+    let before = tree_contents(&pi.home);
+    let mut on = app_for(&root, &workspace, true);
+    // Explicit built-in selection is unaffected by Pi's saved preference.
+    on.config.theme = Some("pi".into());
+    on.config.theme_explicit = true;
+    on.refresh_resource_paths_headless().await.unwrap();
+    let names = |app: &App| {
+        selectable_file_themes(&app.config, TerminalBackground::Dark)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+    };
+    let choices = names(&on);
+    assert!(choices.contains(&"pi-setup-theme".into()), "{choices:?}");
+    assert!(choices.contains(&"second".into()), "{choices:?}");
+    assert!(!choices.contains(&"broken".into()));
+    assert_eq!(
+        crate::tui::theme::load_theme(&on.config).source(),
+        &ThemeSource::CompiledPi
+    );
+    assert_eq!(extension_commands(&on), vec!["manual-only"]);
+    assert!(
+        on.skills.load(&"pi-setup-skill".into()).is_err(),
+        "themes must not enable mirror skills or factories"
+    );
+    assert_eq!(
+        tree_contents(&pi.home),
+        before,
+        "discovery must not write Pi settings or resources"
+    );
+
+    std::fs::remove_file(pi.agent.join("themes/second.json")).unwrap();
+    put(
+        pi.agent.join("themes/new.json"),
+        super::pi_theme::fixture("New Pi palette", "#123abc").to_string(),
+    );
+    let reloaded_home = tree_contents(&pi.home);
+    on.mark_resource_paths_reload();
+    on.refresh_resource_paths_headless().await.unwrap();
+    let choices = names(&on);
+    assert!(
+        !choices.contains(&"second".into()),
+        "deleted palette must not accumulate"
+    );
+    assert!(choices.contains(&"new".into()));
+    assert_eq!(on.config.theme.as_deref(), Some("pi"));
+    assert_eq!(tree_contents(&pi.home), reloaded_home);
+    assert_eq!(
+        std::fs::read(output.join("extension.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(std::fs::read(output.join("bridge.json")).unwrap(), bridge);
+    // Retire the contributor, not the entire App/session binding. Terminal
+    // fleet shutdown deliberately forbids all later publication.
+    on.executable_extensions.processes[0].shutdown().await;
+    on.refresh_resource_paths_headless().await.unwrap();
+    assert!(names(&on)
+        .iter()
+        .all(|name| name != "pi-setup-theme" && name != "new"));
+    let off = app_for(&root, &workspace, false);
+    assert!(names(&off)
+        .iter()
+        .all(|name| name != "pi-setup-theme" && name != "new"));
+}
+
 fn assert_octet_only(app: &App) {
     assert!(app.skills.load(&"pi-setup-skill".into()).is_err());
     assert!(!app.prompts.contains("pi-setup-prompt"));

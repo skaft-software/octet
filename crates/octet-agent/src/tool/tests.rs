@@ -325,12 +325,58 @@ async fn confirmation_detail_is_redacted_from_debug_output() {
         _ => panic!("expected confirmation request"),
     };
 
+    assert!(request.technical_detail.is_none());
     let debug = format!("{request:?}");
     assert!(debug.contains("Approve?"));
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("exact-secret-effect-arguments"));
     request.respond(false);
     assert!(!waiter.await.unwrap());
+}
+
+#[tokio::test]
+async fn technical_confirmation_details_are_redacted_and_share_the_approval_bound() {
+    let (sink, mut receiver) = ToolProgressSink::bounded_channel();
+    let waiter = tokio::spawn(async move {
+        sink.confirmation_with_technical_detail(
+            "Run this command?".into(),
+            Some("human-secret".into()),
+            Some("technical-secret".into()),
+            true,
+            false,
+        )
+        .await
+    });
+    let Some(ToolProgress::Confirmation(request)) = receiver.recv().await else {
+        panic!("confirmation")
+    };
+    assert_eq!(
+        request.technical_detail.as_deref(),
+        Some("technical-secret")
+    );
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("human-secret"));
+    assert!(!debug.contains("technical-secret"));
+    assert!(debug.contains("technical_detail"));
+    request.respond(false);
+    assert!(!waiter.await.unwrap());
+
+    let (sink, mut receiver) = ToolProgressSink::bounded_channel();
+    assert!(
+        !sink
+            .confirmation_with_technical_detail(
+                "?".into(),
+                Some("h".repeat(MAX_PROGRESS_CHUNK_BYTES / 2)),
+                Some("t".repeat(MAX_PROGRESS_CHUNK_BYTES / 2)),
+                true,
+                false,
+            )
+            .await
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "oversized confirmation must not be emitted"
+    );
 }
 
 #[tokio::test]

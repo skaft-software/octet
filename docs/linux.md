@@ -10,11 +10,14 @@ the worked example, but every step applies to any X11 or Wayland desktop.
 ## Install
 
 The [native installer](installation.md) needs `curl` and `python3`, and the
-prebuilt release requires GNU libc (musl is not supported). octet itself also
-needs `ripgrep`. On Arch and Omarchy:
+prebuilt release requires GNU libc (musl is not supported). Content search
+prefers `rg` (ripgrep) when available and otherwise uses `grep`; ripgrep is
+optional. On Arch and Omarchy:
 
 ```sh
-sudo pacman -S --needed curl python ripgrep
+sudo pacman -S --needed curl python
+# Optional preferred search helper:
+sudo pacman -S --needed ripgrep
 ```
 
 Then run the installer from the [README](../README.md#install). Building from

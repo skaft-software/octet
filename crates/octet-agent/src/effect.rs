@@ -225,6 +225,7 @@ pub struct EffectIntent {
     tool: String,
     effect: ToolEffect,
     confirmation_arguments: String,
+    confirmation_detail: String,
     digest: [u8; 32],
     /// `bash` command safety classification was conservative and precomputed
     /// during construction so host-policy decisions stay deterministic without
@@ -338,6 +339,7 @@ impl EffectIntent {
         };
         let digest = streaming_digest(&envelope)?;
         let confirmation_arguments = approval_projection(&tool, arguments)?;
+        let confirmation_detail = approval_human_detail(&tool, arguments)?;
         let bash_requires_approval = requires_bash_host_process_approval(&tool, arguments);
 
         Ok(Self {
@@ -348,6 +350,7 @@ impl EffectIntent {
             tool,
             effect,
             confirmation_arguments,
+            confirmation_detail,
             digest,
             bash_requires_approval,
         })
@@ -693,7 +696,7 @@ impl EffectBroker {
                         tool: intent.tool.clone(),
                     });
                 };
-                let detail = format!(
+                let technical_detail = format!(
                     "effect: {}\ncomplete intent sha256: {}\nbounded argument projection:\n{}",
                     intent.effect.policy_label(),
                     intent.digest(),
@@ -701,9 +704,16 @@ impl EffectBroker {
                 );
                 let approved = tokio::time::timeout(
                     APPROVAL_RESPONSE_TIMEOUT,
-                    progress.confirmation(
-                        format!("Approve one exact `{}` tool effect?", intent.tool),
-                        Some(detail),
+                    progress.confirmation_with_technical_detail(
+                        match intent.tool.as_str() {
+                            "bash" => "Run this command?",
+                            "write" => "Write this file?",
+                            "edit" => "Edit this file?",
+                            _ => "Allow this action?",
+                        }
+                        .to_owned(),
+                        Some(intent.confirmation_detail.clone()),
+                        Some(technical_detail),
                         true,
                         false,
                     ),
@@ -1066,6 +1076,41 @@ impl Write for PreviewWriter {
     }
 }
 
+/// Human scope is a bounded escaped preview, never authorization input. The
+/// canonical projection retains every argument, including unfamiliar fields.
+fn approval_human_detail(
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Result<String, EffectBrokerError> {
+    let fields: &[(&str, &str)] = match tool {
+        "bash" => &[("command", "Command"), ("cwd", "Working directory")],
+        _ => &[("path", "File")],
+    };
+    let mut detail = String::new();
+    for (field, label) in fields {
+        if let Some(value) = arguments.get(*field) {
+            detail.push_str(label);
+            detail.push_str(": ");
+            if let Some(value) = value.as_str() {
+                let preview = clip_chars(value, CONFIRMATION_FIELD_CHARS);
+                let encoded = serde_json::to_vec(&preview)
+                    .map_err(|error| EffectBrokerError::InvalidIntent(error.to_string()))?;
+                let display = sanitize_json_bytes(&encoded);
+                if display.len() <= 256 {
+                    detail.push_str(&display);
+                } else {
+                    detail.push_str("[Preview omitted: escaped value exceeds display limit]");
+                }
+            } else {
+                detail.push_str("[Not a text value; see technical details]");
+            }
+            detail.push('\n');
+        }
+    }
+    detail.push_str("Review all arguments in technical details. Omission markers mean the preview is not complete.");
+    Ok(detail)
+}
+
 fn approval_projection(
     tool: &str,
     arguments: &serde_json::Value,
@@ -1256,9 +1301,15 @@ mod tests {
             };
             assert!(request.destructive);
             assert!(!request.default);
-            let detail = request.detail.clone().expect("effect detail");
+            let detail = request.detail.as_deref().expect("human detail");
+            assert!(!detail.contains("complete intent sha256:"));
+            let technical = request.technical_detail.clone().expect("technical detail");
+            assert!(
+                request.prompt.len() + detail.len() + technical.len()
+                    <= crate::tool::MAX_PROGRESS_CHUNK_BYTES
+            );
             request.respond(true);
-            detail
+            technical
         });
         let reservation = broker.reserve(intent, Some(&sink)).await.unwrap();
         let detail = responder.await.unwrap();
@@ -1415,6 +1466,159 @@ mod tests {
         }));
         assert!(spoof.confirmation_arguments().contains("\\u{202e}"));
         assert!(!spoof.confirmation_arguments().contains('\u{202e}'));
+    }
+
+    #[tokio::test]
+    async fn approval_human_scope_is_separate_from_exact_technical_evidence() {
+        for (tool, effect, arguments, prompt, preview) in [
+            (
+                "bash",
+                ToolEffect::HostProcess,
+                serde_json::json!({"command": "cargo test", "cwd": "crates", "extra": "unfamiliar"}),
+                "Run this command?",
+                "Command: \"cargo test\"",
+            ),
+            (
+                "write",
+                ToolEffect::WorkspaceMutation,
+                serde_json::json!({"path": "notes.txt", "content": "hello", "extra": "unfamiliar"}),
+                "Write this file?",
+                "File: \"notes.txt\"",
+            ),
+            (
+                "edit",
+                ToolEffect::WorkspaceMutation,
+                serde_json::json!({"path": "src/main.rs", "old": "a", "new": "b", "extra": "unfamiliar"}),
+                "Edit this file?",
+                "File: \"src/main.rs\"",
+            ),
+            (
+                "custom",
+                ToolEffect::WorkspaceMutation,
+                serde_json::json!({"operation": "example", "extra": "unfamiliar"}),
+                "Allow this action?",
+                "Review all arguments",
+            ),
+        ] {
+            let original = EffectIntent::new("p", "r", 1, "c", tool, effect, arguments).unwrap();
+            let broker = EffectBroker::new(EffectPolicy::ControlledBashApproval);
+            let (sink, mut receiver) = ToolProgressSink::bounded_channel();
+            let responder = tokio::spawn(async move {
+                let Some(ToolProgress::Confirmation(request)) = receiver.recv().await else {
+                    panic!("confirmation")
+                };
+                assert_eq!(request.prompt, prompt);
+                assert!(request.detail.as_deref().unwrap().contains(preview));
+                assert!(!request.detail.as_deref().unwrap().contains("sha256"));
+                assert!(!request.detail.as_deref().unwrap().contains("effect:"));
+                assert!(request
+                    .technical_detail
+                    .as_deref()
+                    .unwrap()
+                    .contains("unfamiliar"));
+                assert!(request
+                    .technical_detail
+                    .as_deref()
+                    .unwrap()
+                    .contains("complete canonical arguments:"));
+                assert!(!request.default);
+                request.respond(true);
+            });
+            let receipt = broker.authorize(&original, Some(&sink)).await.unwrap();
+            responder.await.unwrap();
+            assert_eq!(receipt.intent_digest(), original.digest());
+            assert_eq!(receipt.authorization(), EffectAuthorization::HumanGrant);
+        }
+    }
+
+    #[tokio::test]
+    async fn command_previews_escape_controls_and_clipping_keeps_exact_binding() {
+        let command = "printf 'one'\nprintf '\u{1b}[31m\u{202e}'";
+        let controlled = EffectIntent::new(
+            "p",
+            "r",
+            1,
+            "c",
+            "bash",
+            ToolEffect::HostProcess,
+            serde_json::json!({"command": command}),
+        )
+        .unwrap();
+        let human = &controlled.confirmation_detail;
+        assert!(human.contains("\\n"));
+        assert!(human.contains("\\u001b"));
+        assert!(human.contains("\\u{202e}"));
+        assert!(!human.contains('\u{1b}'));
+        assert!(!human.contains('\u{202e}'));
+        assert!(!human.contains(command));
+
+        let command = format!("{}hidden-middle{}", "a".repeat(5000), "z".repeat(5000));
+        let changed_command = command.replace("hidden-middle", "changed-middle");
+        let original = EffectIntent::new(
+            "p",
+            "r",
+            1,
+            "c",
+            "bash",
+            ToolEffect::HostProcess,
+            serde_json::json!({"command": command, "extra": "unknown-field"}),
+        )
+        .unwrap();
+        let changed = EffectIntent::new(
+            "p",
+            "r",
+            1,
+            "c",
+            "bash",
+            ToolEffect::HostProcess,
+            serde_json::json!({"command": changed_command, "extra": "unknown-field"}),
+        )
+        .unwrap();
+        assert!(original.confirmation_detail.contains("OMITTED"));
+        assert!(original.confirmation_detail.contains("not complete"));
+        assert!(!original.confirmation_detail.contains("hidden-middle"));
+        assert!(original.confirmation_arguments.contains("NOT COMPLETE"));
+        assert!(original
+            .confirmation_arguments
+            .contains("canonical arguments sha256"));
+        assert_ne!(original.digest(), changed.digest());
+        let broker = EffectBroker::new(EffectPolicy::ControlledBashApproval);
+        let (reservation, _) = approve_reservation(&broker, &original).await;
+        assert!(matches!(
+            reservation.commit(&changed),
+            Err(EffectBrokerError::GrantRejected)
+        ));
+        assert!(broker.grants.grants.lock().unwrap().is_empty());
+
+        let escaped = approval_human_detail(
+            "bash",
+            &serde_json::json!({"command": "\u{202e}".repeat(100), "cwd": "\u{1b}".repeat(100)}),
+        )
+        .unwrap();
+        assert!(escaped.contains("Preview omitted"));
+        assert!(escaped.len() < 768);
+        assert!(!escaped.contains('\u{202e}'));
+        assert!(!escaped.contains('\u{1b}'));
+    }
+
+    #[tokio::test]
+    async fn unanswered_confirmation_still_denies_without_issuing_a_grant() {
+        let broker = EffectBroker::new(EffectPolicy::Controlled);
+        let original = intent(serde_json::json!({"path": "a", "content": "one"}));
+        let (sink, mut receiver) = ToolProgressSink::bounded_channel();
+        let responder = tokio::spawn(async move {
+            let Some(ToolProgress::Confirmation(request)) = receiver.recv().await else {
+                panic!("confirmation")
+            };
+            assert!(!request.default);
+            drop(request);
+        });
+        assert!(matches!(
+            broker.reserve(&original, Some(&sink)).await,
+            Err(EffectBrokerError::ApprovalDenied { .. })
+        ));
+        responder.await.unwrap();
+        assert!(broker.grants.grants.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1603,7 +1807,7 @@ mod tests {
         let (reservation, detail) = approve_reservation(&broker, &original).await;
         assert!(detail.contains("complete intent sha256:"));
         assert!(detail.contains(&original.digest()));
-        assert!(detail.len() + "Approve one exact `write` tool effect?".len() < 8 * 1024);
+        assert!(detail.len() + "Write this file?".len() < 8 * 1024);
         let replay = duplicate_token(reservation.grant.as_ref().unwrap());
         assert!(matches!(
             reservation.commit(&changed),

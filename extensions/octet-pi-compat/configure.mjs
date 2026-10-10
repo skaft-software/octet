@@ -54,6 +54,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   extensions = extensions.map(p => realpathSync(resolve(p)));
   if (new Set(extensions).size !== extensions.length) throw new Error('Duplicate entrypoint');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed catalog`);
+  piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
   const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
@@ -70,11 +71,11 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   // channels up front; callbacks remain local and initially inert. Provider
   // wire hooks are an exception: while subscribed, the host refuses
   // extension-registered (host stream transport) providers. Resource discovery
-  // also requires a complete native consumer. Reserve it for imported themes
-  // or captured callbacks; late factory subscriptions must reconfigure.
+  // also requires a complete native consumer. Every configured bridge reserves
+  // it so current enabled Pi palettes refresh at startup and reload.
   const captureOnly = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response', 'resources_discover']);
   const subscribed_hooks = [...new Set(Object.values(hookEvents))]
-    .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover' && (themePaths.length || mirrorPiSetup)).sort();
+    .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover').sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
   if (entrypoint_sources && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');

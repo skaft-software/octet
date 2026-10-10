@@ -230,7 +230,7 @@ impl Tool for BashTool {
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Execute bash commands (prefer rg/ripgrep for file and content search)")
+        Some("Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)")
     }
 
     async fn execute(

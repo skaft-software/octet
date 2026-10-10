@@ -14,6 +14,7 @@ use super::{collapsed_reasoning_lines, transcript_transition_rows, TranscriptBlo
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SurfacePlan<'a> {
     pub(super) kind: &'static str,
+    pub(super) content_role: &'static str,
     pub(super) chrome: ThemeSurfaceChrome,
     pub(super) heading: ThemeSurfaceHeading,
     pub(super) label: Option<&'a str>,
@@ -247,9 +248,16 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         && theme
             .resolve::<bool>("quiet_tool_summaries")
             .unwrap_or(false);
-    let needs_marker_gutter = uses_event_marker_gutter(block)
-        || (full_width_user && !still_user_band)
-        || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail);
+    let needs_marker_gutter = if theme.is_pi_theme() {
+        // The loader alone owns a two-cell spinner/label grid. Cards and prose
+        // use Pi's one-cell padding, without Octet's event-marker gutter.
+        matches!(block, TranscriptBlock::Reasoning(reasoning)
+            if !reasoning.finished && !reasoning.reasoning_expanded && !expanded_reasoning)
+    } else {
+        uses_event_marker_gutter(block)
+            || (full_width_user && !still_user_band)
+            || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail)
+    };
     let marker_gutter_width = theme
         .resolve::<u16>("event_marker_gutter")
         .unwrap_or(PRIMARY_TEXT_GUTTER)
@@ -486,8 +494,22 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     } else {
         (0, 0)
     };
+    let content_role = if theme.is_pi_theme() {
+        match block {
+            TranscriptBlock::Tool(panel) if !panel.finished => "extension.pi.toolPendingBg",
+            TranscriptBlock::Tool(panel) if panel.is_error => "extension.pi.toolErrorBg",
+            TranscriptBlock::Tool(_) => "extension.pi.toolSuccessBg",
+            TranscriptBlock::Shell(shell) if shell.running => "extension.pi.toolPendingBg",
+            TranscriptBlock::Shell(shell) if shell.exit_code != 0 => "extension.pi.toolErrorBg",
+            TranscriptBlock::Shell(_) => "extension.pi.toolSuccessBg",
+            _ => surface_roles(kind).0,
+        }
+    } else {
+        surface_roles(kind).0
+    };
     SurfacePlan {
         kind,
+        content_role,
         chrome,
         heading,
         label: resolved.label,

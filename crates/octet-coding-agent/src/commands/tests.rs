@@ -384,7 +384,7 @@ fn scoped_scope_targets_toggle_move_and_persist_in_requested_order() {
 }
 
 #[test]
-fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() {
+fn settings_text_reports_effective_values_without_claiming_saved_defaults() {
     let surface = SettingsSurface {
         default_model: Some("gpt-4o-mini".into()),
         reasoning: "high".into(),
@@ -396,8 +396,8 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     };
     let text = settings_text(&surface);
     for expected in [
-        "Default model      gpt-4o-mini",
-        "Default reasoning  high",
+        "Configured model   gpt-4o-mini",
+        "Active reasoning   high",
         "Theme              dark",
         "Transport          websocket-preferred (declared by the codex route; not a user preference)",
         "Inline images      on",
@@ -406,7 +406,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     ] {
         assert!(text.contains(expected), "missing {expected:?} in {text}");
     }
-    // Unset defaults are named, never rendered as an empty value.
+    // An unset launch model is named, never claimed to be a saved preference.
     let empty = SettingsSurface {
         default_model: None,
         reasoning: "off".into(),
@@ -418,7 +418,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     };
     let text = settings_text(&empty);
     assert!(
-        text.contains("Default model      (chosen at startup or by the session)"),
+        text.contains("Configured model   (chosen at startup or by the session)"),
         "{text}"
     );
     assert!(text.contains("Theme              auto"), "{text}");

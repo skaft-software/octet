@@ -2,8 +2,8 @@
 //!
 //! This does not execute the adapter, grant filesystem access, or resolve roots.
 //! The shared resolver/reader still owns precedence, trust and no-follow reads;
-//! the resulting TOML goes through the ordinary native schema/compiler. Pi layout,
-//! HTML export and model-specific presentation are not native theme contracts.
+//! the resulting TOML goes through the ordinary native schema/compiler. Native
+//! surfaces reproduce Pi's shaded user/tool blocks; HTML export is not rendered.
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{ensure, Context};
 use serde_json::{Map, Value};
 
-mod colors;
+pub(crate) mod colors;
 
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_VARS: usize = 256;
@@ -193,8 +193,7 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
     metadata.insert(
         "description".into(),
         toml::Value::String(
-            "Pi palette projection; native layout and model presentation remain authoritative"
-                .into(),
+            "Pi colors and shaded transcript surfaces; native input and ownership".into(),
         ),
     );
     metadata.insert("terminal".into(), toml::Value::String(appearance.into()));
@@ -203,9 +202,46 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
     for &(pi, native) in PROJECTION {
         native_colors.insert(native.into(), palette[pi].clone());
     }
-    // Keep every Pi color inspectable/usable as an explicitly namespaced role;
-    // this does not pretend that Pi-only chrome has a native layout equivalent.
+    // Pi colors must not inherit Octet's model wash, syntax backgrounds or shimmer.
+    for (token, value) in [
+        ("prompt_wash", toml::Value::Boolean(false)),
+        ("margin_markers", toml::Value::Boolean(false)),
+        ("thinking_spinner", toml::Value::Boolean(true)),
+        ("splash_compact", toml::Value::Boolean(true)),
+        ("assistant_msg_text", palette["text"].clone()),
+        ("model_assistant", palette["text"].clone()),
+        ("model_accent", palette["accent"].clone()),
+        ("md_code_bg", toml::Value::String("default".into())),
+        ("md_code_inline_bg", toml::Value::String("default".into())),
+    ] {
+        native_colors.insert(token.into(), value);
+    }
+    // Keep every Pi color inspectable/usable as an explicitly namespaced role.
     let mut roles = toml::Table::new();
+    // UserMessageComponent and ToolExecutionComponent use full-width fills with
+    // one-cell padding. AssistantMessageComponent deliberately has no fill.
+    // Keep explicit default backgrounds after the native required-surface pass.
+    for (role, foreground, background) in [
+        ("surface.user", "userMessageText", Some("userMessageBg")),
+        ("surface.assistant", "text", None),
+        ("surface.reasoning", "thinkingText", None),
+        ("surface.tool", "toolOutput", Some("toolPendingBg")),
+        ("surface.shell", "toolOutput", Some("toolPendingBg")),
+    ] {
+        roles.insert(
+            role.into(),
+            toml::Value::Table(toml::Table::from_iter([
+                ("foreground".into(), palette[foreground].clone()),
+                (
+                    "background".into(),
+                    background.map_or_else(
+                        || toml::Value::String("default".into()),
+                        |token| palette[token].clone(),
+                    ),
+                ),
+            ])),
+        );
+    }
     for (token, value) in palette {
         let mut role = toml::Table::new();
         role.insert(
@@ -223,6 +259,45 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
     native.insert("metadata".into(), toml::Value::Table(metadata));
     native.insert("colors".into(), toml::Value::Table(native_colors));
     native.insert("roles".into(), toml::Value::Table(roles));
+    native.insert(
+        "model".into(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "use_lab_color".into(),
+            toml::Value::Boolean(false),
+        )])),
+    );
+    native.insert(
+        "layout".into(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "transcript_inset".into(),
+            toml::Value::Integer(0),
+        )])),
+    );
+    let mut surfaces = toml::Table::new();
+    for (kind, chrome) in [
+        ("user", "band"),
+        ("tool", "band"),
+        ("shell", "band"),
+        ("assistant", "plain"),
+        ("reasoning", "plain"),
+    ] {
+        surfaces.insert(
+            kind.into(),
+            toml::Value::Table(toml::Table::from_iter([
+                ("chrome".into(), toml::Value::String(chrome.into())),
+                (
+                    "padding".into(),
+                    toml::Value::Integer(i64::from(kind != "reasoning")),
+                ),
+                ("narrow_chrome".into(), toml::Value::String(chrome.into())),
+                (
+                    "narrow_padding".into(),
+                    toml::Value::Integer(i64::from(kind != "reasoning")),
+                ),
+            ])),
+        );
+    }
+    native.insert("surfaces".into(), toml::Value::Table(surfaces));
     let output = toml::to_string(&native).context("cannot encode native Pi palette")?;
     ensure!(
         output.len() <= MAX_BYTES,
@@ -319,7 +394,7 @@ fn resolve<'a>(mut value: &'a Value, vars: &'a Map<String, Value>) -> anyhow::Re
 }
 
 #[cfg(test)]
-pub(super) fn fixture(name: &str, accent: &str) -> Value {
+pub(crate) fn fixture(name: &str, accent: &str) -> Value {
     let colors = TOKENS
         .iter()
         .map(|&token| (token.to_owned(), Value::String("primary".into())))

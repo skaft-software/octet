@@ -990,7 +990,7 @@ fn block_node(
     collapsed: &HashMap<String, bool>,
     transformed_markdown: Option<&str>,
 ) -> Option<Node> {
-    match block {
+    let node = match block {
         TranscriptBlock::User { text, .. } => {
             // Tone::User retains the model-adaptive prompt wash. Octet's own
             // role avoids omp.user's private right-aligned bubble layout: the
@@ -1161,7 +1161,15 @@ fn block_node(
             &format!("octet {version} is available"),
             "muted",
         )),
-    }
+    };
+    node.map(|mut node| {
+        if shell.theme.is_pi_theme()
+            && matches!(block, TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
+        {
+            node.p = Some(node.p.unwrap_or_default().set("frame", "card"));
+        }
+        node
+    })
 }
 
 fn text_node(identity: u64, text: &str, token: &str) -> Node {
@@ -1240,6 +1248,31 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     let age = run.elapsed_at(now).as_millis() as u64;
     let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
     node.p = Some(node.p.unwrap_or_default().role("omp.working"));
+    if shell.theme.is_pi_theme() {
+        let children = node.c.as_mut().expect("working row");
+        children[0] = Node::new(
+            "work.spin",
+            Kind::Text,
+            Props::new().text(
+                "spans",
+                vec![Span::styled(
+                    super::surface_frame::spinner_glyph(
+                        shell.theme.unicode(),
+                        shell.event_spinner_frame,
+                    ),
+                    "accent",
+                )],
+            ),
+        );
+        children[1] = Node::new(
+            "work.label",
+            Kind::Text,
+            Props::new().text(
+                "spans",
+                vec![Span::styled(sanitize_for_terminal(label), "muted")],
+            ),
+        );
+    }
     if reduce_motion || !shell.theme.capabilities().animation {
         node.c.as_mut().expect("working row")[0] = Node::new(
             "work.spin",
@@ -1314,7 +1347,7 @@ fn composer(shell: &ShellState) -> Node {
         &shell.reasoning
     };
     let mut children = Vec::new();
-    if !shell.startup_pending {
+    if !shell.startup_pending && !shell.theme.is_pi_theme() {
         children.push(Node::new("composer.rule", Kind::Rule, Props::new()));
     }
     if let Some((used, total)) = shell
@@ -1336,6 +1369,9 @@ fn composer(shell: &ShellState) -> Node {
                 .set("thresholds", json!({"warn":0.6,"bad":0.85}))
                 .set("title", format!("Context: {used} of {total} tokens")),
         ));
+    }
+    if !shell.startup_pending && shell.theme.is_pi_theme() {
+        children.push(Node::new("composer.rule", Kind::Rule, Props::new()));
     }
     children.push(Node::with_children(
         "composer.line",
@@ -1371,6 +1407,9 @@ fn composer(shell: &ShellState) -> Node {
         // Register and focus the genuine draft immediately. Only its resolved
         // chrome waits for the same ready frame as the welcome and transcript.
         return Node::with_children("composer", Kind::Col, Props::new(), children);
+    }
+    if shell.theme.is_pi_theme() {
+        children.push(Node::new("composer.rule.bottom", Kind::Rule, Props::new()));
     }
     let mut controls = vec![
         Node::with_children(
@@ -1980,6 +2019,14 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
     }
     spans
 }
+
+#[cfg(test)]
+#[path = "pi_experience_native_tests.rs"]
+mod pi_experience_native_tests;
+
+#[cfg(test)]
+#[path = "report_document_native_tests.rs"]
+mod report_document_native_tests;
 
 #[cfg(test)]
 #[path = "tern_tests.rs"]

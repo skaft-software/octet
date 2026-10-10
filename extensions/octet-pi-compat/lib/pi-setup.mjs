@@ -452,8 +452,8 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   for (const kind of RESOURCE_KINDS) {
     const files = [...maps[kind]].filter(([, value]) => value.enabled).sort((a, b) => a[1].rank - b[1].rank).map(([path]) => path);
     const limit = kind === 'extensions' ? MAX_EXTENSIONS : MAX_RESOURCE_ENTRIES;
-    if (files.length > limit) diagnostic(ctx, `Pi setup has ${files.length} ${kind}; only the first ${limit} are mirrored`);
-    setup[kind === 'extensions' ? kind : `${kind}Paths`] = files.slice(0, limit);
+    if (files.length > limit) diagnostic(ctx, `Pi setup has ${files.length} ${kind}; ${kind === 'themes' ? 'at most' : 'only the first'} ${limit} are mirrored${kind === 'themes' ? ' with later-stem precedence preserved' : ''}`);
+    setup[kind === 'extensions' ? kind : `${kind}Paths`] = kind === 'themes' ? limitThemes(files, limit) : files.slice(0, limit);
   }
   const keybindings = join(resolvedAgentDir, 'keybindings.json');
   if (regularFile(keybindings, ctx, 'keybindings.json')) setup.keybindingsPath = keybindings;
@@ -478,11 +478,21 @@ export function resolveThemeFile(themePaths, selection, diagnostics = []) {
   return undefined;
 }
 
+// Preserve native later-stem precedence when a path budget cuts discovery.
+// No JSON parsing: even an invalid winner must suppress its lower shadow.
+function limitThemes(files, limit) {
+  if (files.length <= limit) return files;
+  const stem = path => basename(path).replace(/\.(json|toml)$/i, '');
+  const winners = new Map(files.map(path => [stem(path), path]));
+  const admitted = new Set([...new Set([...winners.values(), ...files])].slice(0, limit));
+  return files.filter(path => admitted.has(path) && admitted.has(winners.get(stem(path))));
+}
+
 // Also accepts directly configured roots. No linked/oversized palettes escape
 // through this public helper after discovery's own checks.
 export function themeCandidates(paths, diagnostics = []) {
   const ctx = { diagnostics, scanned: 0 };
   const files = [...new Set(paths.flatMap(path => collect(path, 'themes', ctx, { required: true })))];
   if (files.length > MAX_RESOURCE_ENTRIES) diagnostic(ctx, `themes: exceeds the ${MAX_RESOURCE_ENTRIES}-path mirror budget; remaining palettes skipped`);
-  return files.slice(0, MAX_RESOURCE_ENTRIES);
+  return limitThemes(files, MAX_RESOURCE_ENTRIES);
 }

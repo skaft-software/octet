@@ -2422,6 +2422,24 @@
     "reasoning": false,
     "tool_call": false
   },
+  "huggingface/MiniMaxAI/MiniMax-M1-80k": {
+    "limit": {
+      "context": 1000000,
+      "output": 80000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax M1 80K",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
   "huggingface/MiniMaxAI/MiniMax-M2": {
     "limit": {
       "context": 204800,
@@ -2800,6 +2818,25 @@
         ]
       }
     ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "huggingface/Qwen/Qwen3-VL-30B-A3B-Instruct": {
+    "limit": {
+      "context": 131072,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3 VL 30B A3B Instruct",
+    "reasoning": false,
     "structured_output": true,
     "tool_call": true
   },
@@ -3861,6 +3898,24 @@
     "reasoning": true,
     "reasoning_options": [],
     "tool_call": true
+  },
+  "huggingface/zai-org/AutoGLM-Phone-9B-Multilingual": {
+    "limit": {
+      "context": 65536,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "AutoGLM Phone 9B Multilingual",
+    "reasoning": false,
+    "tool_call": false
   },
   "huggingface/zai-org/GLM-4.5": {
     "limit": {
@@ -12463,7 +12518,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16000
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -12551,7 +12606,7 @@
         "text"
       ]
     },
-    "name": "R1 0528",
+    "name": "DeepSeek R1 0528",
     "reasoning": true,
     "reasoning_options": [],
     "structured_output": true,
@@ -13899,7 +13954,7 @@
         "type": "toggle"
       }
     ],
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/inclusionai/ling-3.0-flash-sante": {
@@ -15063,7 +15118,7 @@
         "text"
       ]
     },
-    "name": "Kimi K2 0905",
+    "name": "Kimi K2 Instruct 0905",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -15074,7 +15129,7 @@
     },
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 98304
     },
     "modalities": {
       "input": [
@@ -17860,24 +17915,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen-plus-2025-07-28": {
-    "limit": {
-      "context": 1000000,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen Plus 0728",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen2.5-vl-72b-instruct": {
     "limit": {
       "context": 128000,
@@ -17899,8 +17936,8 @@
   },
   "openrouter/qwen/qwen3-14b": {
     "limit": {
-      "context": 131072,
-      "output": 16384
+      "context": 40960,
+      "output": 36864
     },
     "modalities": {
       "input": [
@@ -17918,29 +17955,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-235b-a22b": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 235B-A22B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/qwen/qwen3-235b-a22b-2507": {
@@ -17963,8 +17977,8 @@
   },
   "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
     "limit": {
-      "context": 131072,
-      "output": 117964
+      "context": 128000,
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -17982,7 +17996,7 @@
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "limit": {
-      "context": 131072,
+      "context": 40960,
       "output": 16384
     },
     "modalities": {
@@ -18021,25 +18035,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-30b-a3b-thinking-2507": {
-    "limit": {
-      "context": 81920,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 30B A3B Thinking 2507",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-32b": {
     "limit": {
       "context": 131072,
@@ -18061,29 +18056,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-8b": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 8B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/qwen/qwen3-coder": {
@@ -18158,69 +18130,10 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-coder-plus": {
-    "limit": {
-      "context": 1000000,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Coder Plus",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-max": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Max",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-max-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Max Thinking",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18238,7 +18151,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18273,26 +18186,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-vl-235b-a22b-thinking": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 235B A22B Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "limit": {
       "context": 262144,
@@ -18315,7 +18208,7 @@
   "openrouter/qwen/qwen3-vl-30b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18332,29 +18225,10 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-vl-32b-instruct": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 32B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-8b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18367,26 +18241,6 @@
     },
     "name": "Qwen3 VL 8B Instruct",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-vl-8b-thinking": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 8B Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
     "structured_output": true,
     "tool_call": true
   },
@@ -18443,7 +18297,7 @@
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -18593,7 +18447,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -18656,29 +18510,6 @@
       ]
     },
     "name": "Qwen3.6 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3.6-max-preview": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.6 Max Preview",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -20221,7 +20052,7 @@
   "openrouter/z-ai/glm-4.6": {
     "limit": {
       "context": 204800,
-      "output": 16384
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -20736,7 +20567,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -21118,7 +20949,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [

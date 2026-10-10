@@ -9,7 +9,7 @@ use super::reasoning_render::render_reasoning_on_surface_with_rainbow;
 use super::surface_frame::{
     decorate_surface_content_suffix, decorate_surface_with_frame, event_margin_marker_with_frame,
 };
-use super::surface_layout::{compile_surface_plan_for_render, surface_roles};
+use super::surface_layout::compile_surface_plan_for_render;
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
     render_diff_only, render_tool_failure_reason, tool_diff, tool_display_label, tool_grid_label,
@@ -224,7 +224,7 @@ pub(super) fn render_block_planned_with_rainbow(
         plan.chrome,
         ThemeSurfaceChrome::Card | ThemeSurfaceChrome::Band
     )
-    .then(|| theme.semantic_style(surface_roles(plan.kind).0).background)
+    .then(|| theme.semantic_style(plan.content_role).background)
     .filter(|background| *background != Color::Default);
     let collapsed_reasoning = matches!(
         block,
@@ -368,7 +368,14 @@ pub(super) fn render_block_planned_with_rainbow(
                 let label = if quiet_summary {
                     theme.fg("muted", &tool)
                 } else {
-                    theme.bold(&theme.fg("foreground", &tool))
+                    theme.bold(&theme.fg(
+                        if theme.is_pi_theme() {
+                            "tool_title"
+                        } else {
+                            "foreground"
+                        },
+                        &tool,
+                    ))
                 };
                 let label_width = visible_width(&tool);
                 let text = match panel.display.value.as_deref() {

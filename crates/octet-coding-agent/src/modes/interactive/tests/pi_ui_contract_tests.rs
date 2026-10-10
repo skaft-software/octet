@@ -266,7 +266,12 @@ export default function(pi) {
         "Pi accepts but does not display placeholder"
     );
     let trace = directory.path().join("trace.jsonl");
-    pump_until(&mut app, &mut shell, |_| trace.exists()).await;
+    // The adapter creates the file before writing the record. Existence alone
+    // is not a publication barrier, particularly during a loaded suite run.
+    pump_until(&mut app, &mut shell, |_| {
+        std::fs::read_to_string(&trace).is_ok_and(|text| text.trim() == r#"{"cancelled":true}"#)
+    })
+    .await;
     assert_eq!(
         std::fs::read_to_string(trace).unwrap().trim(),
         r#"{"cancelled":true}"#

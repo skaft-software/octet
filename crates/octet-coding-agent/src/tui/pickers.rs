@@ -1241,7 +1241,7 @@ where
         input,
         &request.prompt,
         request.detail.as_deref(),
-        request.destructive,
+        request.technical_detail.as_deref(),
         request.default,
     )
     .await
@@ -1262,7 +1262,7 @@ where
         input,
         &prompt,
         request.detail.as_deref(),
-        request.destructive,
+        None,
         request.default,
     )
     .await
@@ -1273,38 +1273,47 @@ async fn confirmation_prompt_picker<S>(
     input: &mut S,
     prompt: &str,
     detail: Option<&str>,
-    destructive: bool,
+    technical_detail: Option<&str>,
     default: bool,
 ) -> anyhow::Result<bool>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let (items, decisions) = if default {
-        (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
-    } else {
-        (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
-    };
-    // The detail is shared approval evidence, not per-choice metadata. The
-    // panel renderer displays one bounded copy while keeping the two actions
-    // independently selectable.
-    let shared_detail = detail.map(str::to_owned);
-    let descriptions = vec![shared_detail.clone(), shared_detail];
-    let title = if destructive {
-        format!("Action requires approval · {prompt}")
-    } else {
-        prompt.to_owned()
-    };
-    let selected = pick_list(
-        shell,
-        input,
-        OrdinarySurfaceMetadata::new(title),
-        items,
-        descriptions,
-        0,
-        PanelAction::Confirmation,
-    )
-    .await?;
-    Ok(selected.map(|index| decisions[index]).unwrap_or(false))
+    loop {
+        let (mut items, decisions) = if default {
+            (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
+        } else {
+            (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
+        };
+        if technical_detail.is_some() {
+            items.push("Technical details".into());
+        }
+        let descriptions = vec![detail.map(str::to_owned); items.len()];
+        let selected = pick_list(
+            shell,
+            input,
+            OrdinarySurfaceMetadata::new(prompt),
+            items,
+            descriptions,
+            0,
+            PanelAction::Confirmation,
+        )
+        .await?;
+        if selected == Some(2) {
+            read_only_document(
+                shell,
+                input,
+                "Technical details · Esc to return",
+                technical_detail.unwrap().into(),
+            )
+            .await?;
+            if shell.close_requested() {
+                return Ok(false);
+            }
+            continue;
+        }
+        return Ok(selected.map(|index| decisions[index]).unwrap_or(false));
+    }
 }
 
 /// Build a human-facing label from the same cached metadata boundary used by

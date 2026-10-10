@@ -2,7 +2,7 @@
 //! No synthetic reverse RPC peer, external provider call, or fabricated host snapshot.
 //! Execution acceptance scripts inference on loopback while keeping the real App/Agent.
 #![cfg(unix)]
-use super::pi_contract_support::{command, pi_app};
+use super::pi_contract_support::{command, pi_app, pi_non_resource_app};
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -39,8 +39,8 @@ export default pi => {
 };
 "#,
     );
-    assert!(!app.executable_extensions.has_resource_consumer_processes());
-    assert!(!app.resource_paths_pending());
+    assert!(app.executable_extensions.has_resource_consumer_processes());
+    assert!(app.resource_paths_pending());
     assert!(app.executable_extensions.has_pending_session_starts());
     let mut shell = InteractiveShell::test_shell();
     let result = command(&mut app, &mut shell, "probe").await;
@@ -87,12 +87,14 @@ export default pi => {
 };
 "#,
     );
-    assert!(!app.executable_extensions.has_resource_consumer_processes());
-    assert!(!app.resource_paths_pending());
+    assert!(app.executable_extensions.has_resource_consumer_processes());
+    assert!(app.resource_paths_pending());
     assert!(app.executable_extensions.has_pending_session_starts());
     let mut shell = InteractiveShell::test_shell();
     let first = command(&mut app, &mut shell, "probe").await;
     let second = command(&mut app, &mut shell, "probe").await;
+    assert!(!app.resource_paths_pending());
+    assert!(!app.executable_extensions.has_pending_session_starts());
     app.executable_extensions.shutdown().await;
     first.unwrap();
     second.unwrap();
@@ -114,7 +116,7 @@ export default pi => {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_non_resource_headless_start_settles_once_without_loading_resources() {
-    let (directory, mut app) = pi_app(
+    let (directory, mut app) = pi_non_resource_app(
         r#"
 import { appendFileSync } from 'node:fs';
 export default pi => pi.on('session_start', () => {
@@ -152,7 +154,7 @@ async fn native_pi_non_resource_start_worker_failure_blocks_admission() {
     use crate::extensions::resource_paths::consumer_tests::hold_session_start;
 
     for headless in [false, true] {
-        let (directory, mut app) = pi_app(
+        let (directory, mut app) = pi_non_resource_app(
             r#"
 import { appendFileSync } from 'node:fs';
 export default pi => {

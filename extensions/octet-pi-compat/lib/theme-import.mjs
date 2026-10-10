@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { constants, closeSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, opendirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { backgroundTokens, piThemeToNativeToml, readPiTheme } from './theme-palette.mjs';
+import { piThemeToNativeToml, readPiTheme } from './theme-palette.mjs';
 import { colorToHex, parseColor } from './theme-colors.mjs';
 
 const maxThemes = 64;
@@ -53,11 +53,10 @@ export function planThemeImport({ paths, selection, thinkingLevel = 'medium', ou
       // Preserve the current Pi editor border, not the native model accent. This
       // is a snapshot of the configured thinking level; runtime level switching
       // and Pi's terminal-derived system palette remain host integration work.
-      let toml = base + `composer_border = ${JSON.stringify(nativeColor(palette.colors[thinkingTokens[thinkingLevel] ?? 'thinkingOff']))}\n`
-        + 'prompt_wash = false\n';
-      for (const [token, value] of Object.entries(palette.colors)) {
-        toml += `\n[roles."extension.pi.${token}"]\n${backgroundTokens.includes(token) ? 'background' : 'foreground'} = ${JSON.stringify(nativeColor(value))}\n`;
-      }
+      // The shared projection already owns every namespaced Pi role. Insert
+      // the snapshot into its colors table, not into the last emitted role.
+      const toml = base.replace('\n[colors]\n', '\n[colors]\n'
+        + `composer_border = ${JSON.stringify(nativeColor(palette.colors[thinkingTokens[thinkingLevel] ?? 'thinkingOff']))}\n`);
       if (Buffer.byteLength(toml) > 262144) throw new Error('native theme exceeds 256 KiB');
       const imported = { name, selector, source: path, path: join(output, 'themes', selector + '.json'),
         nativePath: join(output, 'themes', selector + '.toml'), json: JSON.stringify(palette, null, 2) + '\n', toml };

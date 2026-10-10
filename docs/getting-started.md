@@ -47,9 +47,10 @@ package automatically.
 
 ### Intentional source checkout: macOS or GNU/Linux
 
-This is the available lane for the candidate under test. Install
-Rust 1.88+ and [ripgrep](https://github.com/BurntSushi/ripgrep), then build and
-run the binary by its full path:
+This is the available lane for the candidate under test. Install Rust 1.88+,
+then build and run the binary by its full path. Content search prefers
+[ripgrep](https://github.com/BurntSushi/ripgrep) when available and otherwise
+uses `grep`; installing ripgrep is optional:
 
 ```sh
 cargo build --release --locked -p octet-coding-agent --bins

@@ -1036,6 +1036,10 @@ fn activity_shimmer_label(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
+    // Pi's loader moves the spinner, not a model-colored sweep through its label.
+    if theme.is_pi_theme() {
+        return theme.fg("muted", label);
+    }
     let static_label = || theme.bold(&theme.model_fg(reasoning.model_lab, label));
     let Some((baseline, sweep)) = activity_shimmer_palette(theme, reasoning) else {
         return static_label();
