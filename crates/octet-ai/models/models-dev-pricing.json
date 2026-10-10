@@ -3437,16 +3437,16 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 22800,
+    "cache_read": 9900,
     "cache_write_5m": 0,
-    "input": 22800,
+    "input": 9900,
     "output": 1280000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 13700,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 13700,
+    "input": 6000,
     "output": 1280000,
     "reasoning": null
   },
@@ -5614,10 +5614,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 9600,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 10960,
-    "output": 1536000,
+    "input": 6000,
+    "output": 1280000,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -5637,7 +5637,7 @@
   "openrouter/~moonshotai/kimi-latest": {
     "cache_read": 300000,
     "cache_write_5m": 0,
-    "input": 600000,
+    "input": 550000,
     "output": 15000000,
     "reasoning": null
   },

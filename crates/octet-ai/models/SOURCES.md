@@ -375,6 +375,24 @@ provider inventory changed. Direct DeepSeek schedule pricing remains unverified
 and excluded. These are reviewed metadata projections, not live inference or
 provider certification; future supported projection changes require review again.
 
+The following pre-push live check found four further OpenRouter quote changes,
+not new routes or capability/name changes. All outputs were regenerated from
+another retained 5,375,257-byte response, SHA-256
+`b423b29eb9e95b4dd5edb0e7d1ded9533008fb62858bee99f4963e049f1bf7e8`.
+Record counts and the DeepSeek exclusion remain unchanged. The exact new
+input/output/cache-read rates, in microdollars per million tokens, are:
+
+| OpenRouter model | Input | Output | Cache read |
+| --- | ---: | ---: | ---: |
+| `deepseek/deepseek-v4-flash` | 9,900 | 1,280,000 | 9,900 |
+| `deepseek/deepseek-v4-flash-0731` | 6,000 | 1,280,000 | 6,000 |
+| `~deepseek/deepseek-v4-flash-latest` | 6,000 | 1,280,000 | 6,000 |
+| `~moonshotai/kimi-latest` | 550,000 | 15,000,000 | 300,000 |
+
+Cache-write rates remain zero in the source and reasoning rates remain absent.
+The earlier Pro golden assertions do not change. A live quote can change again;
+this review does not bypass the next release freshness gate.
+
 ## GPT-6 contract review (2026-09-23)
 
 The public [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
