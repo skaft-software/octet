@@ -51,6 +51,30 @@ test('real tree callback carries its live leaf and append waits for a known nati
   peer.send({ jsonrpc: '2.0', id: call.id, result: { entry_id: 'durable-tree-state', head: 'durable-tree-state', successor: null } });
   assert.equal((await request.response).result.session_operation.action, 'continue'); await peer.close();
 });
+test('tree summary preparation and committed summary retain native provenance', async t => {
+  const peer = launch(t, [operations], { hold: ['session/append_entry'] }); await peer.init(['session_entries']); await peer.start();
+  const summary = { id: 'summary', parent: 'kept', timestamp_unix_ms: 1235,
+    value: { type: 'branch_summary', summary: 'Actual abandoned-branch handoff', from_entry: 'old', details: { readFiles: ['read.rs'], modifiedFiles: ['write.rs'] } } };
+  const expected = { id: 'summary', parentId: 'kept', timestamp: new Date(1235).toISOString(), type: 'branch_summary',
+    summary: summary.value.summary, fromId: 'old', details: summary.value.details };
+  assert.deepEqual(translateSessionEntries([summary])[0], expected);
+  const before = await peer.request('hook/run', operation(peer, 'session_before_tree', {
+    kind: 'before_tree', target_id: 'kept', old_head: 'old', preparation: {
+      common_ancestor_id: 'kept', entries_to_summarize: [entry], user_wants_summary: true, custom_instructions: 'Keep decisions.\nDo not invent metrics.' }
+  }, 'summary')).response;
+  assert.ok(before.result, JSON.stringify(before));
+  assert.equal(before.result.session_operation.action, 'cancel');
+  const notice = await peer.wait(frame => frame.method === 'notification' && frame.params.message.startsWith('tree-preparation:'));
+  assert.deepEqual(JSON.parse(notice.params.message.slice('tree-preparation:'.length)), {
+    targetId: 'kept', oldLeafId: 'old', commonAncestorId: 'kept', entriesToSummarize: translateSessionEntries([entry]),
+    userWantsSummary: true, customInstructions: 'Keep decisions.\nDo not invent metrics.'
+  });
+  const request = peer.request('hook/run', operation(peer, 'session_tree', { kind: 'tree', old_head: 'old', new_head: 'summary', summary_entry: summary }));
+  const call = await peer.wait(frame => frame.method === 'session/append_entry');
+  assert.deepEqual(call.params.data, { old: 'old', current: 'summary', summary: expected, fromExtension: false });
+  peer.send({ jsonrpc: '2.0', id: call.id, result: { entry_id: 'durable-tree-state', head: 'durable-tree-state', successor: null } });
+  assert.equal((await request.response).result.session_operation.action, 'continue'); await peer.close();
+});
 test('session mirrors without an extension namespace retain canonical messages', () => {
   assert.equal(translateSessionEntries([entry])[0].message.content[0].text, 'kept text');
 });

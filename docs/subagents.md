@@ -18,7 +18,7 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
   and default to the parent session's settings (an unlimited parent stays
   unlimited).
 - **Scoped.** The default tool grant is the parent's full standard scope
-  (`read`, `search`, `edit`, `write`, `bash`); `tools: ["read", "search"]`
+  (`read`, `edit`, `write`, `bash`); `tools: ["read"]`
   narrows a worker to hard read-only. Workers inherit cwd, environment, sandbox,
   approval policy, and extension policy — a shared filesystem is **not**
   isolation.

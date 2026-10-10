@@ -77,7 +77,7 @@ use self::renderer_runtime::{render_loop, RenderCommand, SharedState};
 use self::shell_chrome::responsive_identity;
 use self::shell_chrome::shell_chrome;
 use self::status_telemetry::{
-    output_tokens_per_second, status_telemetry, styled_extension_output, styled_status_text,
+    output_tokens_per_second, status_telemetry, styled_extension_output,
     usage_cache_hit_rate_basis_points,
 };
 #[cfg(test)]
@@ -425,11 +425,6 @@ fn activity_group_label(
             group.read_files,
             if group.read_files == 1 { "" } else { "s" }
         ),
-        crate::hydrate::ToolActivityKind::Explore if group.searches > 0 => format!(
-            "Searched {} time{}",
-            group.searches,
-            if group.searches == 1 { "" } else { "s" }
-        ),
         crate::hydrate::ToolActivityKind::Explore => format!(
             "Ran {} Command{}",
             group.commands,
@@ -465,14 +460,7 @@ fn activity_group_label(
             }
         ),
     };
-    if group.read_files > 0 && group.searches > 0 {
-        label.push_str(&format!(
-            " · {} search{}",
-            group.searches,
-            if group.searches == 1 { "" } else { "es" }
-        ));
-    }
-    if group.commands > 0 && (group.read_files > 0 || group.searches > 0) {
+    if group.commands > 0 && group.read_files > 0 {
         label.push_str(&format!(
             " · {} command{}",
             group.commands,
@@ -987,6 +975,9 @@ pub(crate) enum PanelAction {
     SelectSession(Vec<std::path::PathBuf>),
     /// Select a thinking level.
     SelectThinking(Vec<crate::config::ThinkingLevel>),
+    /// Select a settings menu destination or an explicit preference value.
+    /// Entries align with raw select-list indices, including the Back row.
+    SelectSettings(Vec<crate::commands::SettingsCommand>),
     /// Select a terminal theme without suspending an active run.
     SelectTheme {
         keys: Vec<String>,
@@ -1005,6 +996,8 @@ pub(crate) enum PanelAction {
     ProviderSetup(Vec<String>),
     /// Drive the enhanced session browser without copying its row data.
     SessionPicker,
+    /// Navigate the same session by durable entry ID, including inactive branches.
+    SessionTree(Vec<octet_agent::EntryId>),
     /// Drive the user-message fork browser without copying its row data.
     MessagePicker,
     /// Navigate a read-only transcript document.
@@ -1707,7 +1700,13 @@ fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool 
         return true;
     }
 
-    if moving_up && state.editor.cursor() == 0 && !state.prompt_history.is_empty() {
+    let at_first_visual_row = if moving_up && !state.prompt_history.is_empty() {
+        let geometry = composer_editor_geometry(state, state.size.0);
+        state.composer_editor_projection(geometry).cursor_row() == 0
+    } else {
+        false
+    };
+    if at_first_visual_row {
         let draft = capture_prompt_history_draft(state);
         let index = state.prompt_history.len() - 1;
         state.prompt_history_navigation = Some(PromptHistoryNavigation { index, draft });
@@ -2978,7 +2977,28 @@ impl ShellState {
     }
 
     fn animation_block_is_addressable(&self, index: usize) -> bool {
+        let spaced_activity = matches!(self.transcript.get(index),
+            Some(TranscriptBlock::Reasoning(reasoning))
+                if !reasoning.finished
+                    && !reasoning.reasoning_expanded
+                    && (!self.verbose_tools
+                        || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+        );
         if self.render_threaded && !self.application_viewport_requested {
+            if spaced_activity {
+                if let (Some(top), Some(geometry), Some(id)) = (
+                    self.native_animation_viewport_top.get(),
+                    self.render_geometry.as_ref(),
+                    self.transcript_commit_ids.get(index),
+                ) {
+                    if let Some(block) = geometry.blocks.iter().find(|block| block.id == *id) {
+                        return block.start
+                            + block.surface.transition_rows
+                            + block.surface.leading_rows
+                            >= top;
+                    }
+                }
+            }
             return self
                 .transcript_commit_ids
                 .get(index)
@@ -2989,11 +3009,23 @@ impl ShellState {
         let Some(top) = self.native_animation_viewport_top.get() else {
             return true;
         };
-        self.transcript_cache
-            .borrow()
-            .block_starts
-            .get(index)
-            .is_none_or(|start| *start >= top)
+        let cache = self.transcript_cache.borrow();
+        cache.block_starts.get(index).is_none_or(|start| {
+            // Live event spacing precedes the animated label. Its breathing
+            // row may already be in saved history while the label is still
+            // addressable; that decorative row must not stop the live clock.
+            let label_offset = if spaced_activity {
+                let geometry = cache.block_geometries[index];
+                geometry.transition_rows + geometry.leading_rows
+            } else {
+                0
+            };
+            start.saturating_add(label_offset) >= top
+        })
+    }
+
+    pub(super) fn extension_footer_replaces_status(&self) -> bool {
+        self.theme.is_pi_theme() && !self.extension_ui.footer.is_empty() && self.panel.is_none()
     }
 
     fn has_active_event_dot(&self) -> bool {
@@ -3040,7 +3072,7 @@ impl ShellState {
     /// on the label makes `Working` and `Thinking` one continuous sweep, while
     /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        reasoning.is_shimmering_activity()
+        !self.theme.is_pi_theme() && reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -3330,6 +3362,22 @@ fn render_user_prompt(
     theme: &OctetTheme,
     width: u16,
 ) -> Vec<String> {
+    if theme.is_pi_theme() {
+        let document = parse_markdown(&sanitize_for_terminal(text));
+        let lines = renderer
+            .render(&document, width)
+            .lines
+            .into_iter()
+            .map(|line| {
+                if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+                    line.plain
+                } else {
+                    line.styled
+                }
+            })
+            .collect();
+        return finish_transcript_block(lines);
+    }
     let marker_glyph = sanitize_for_terminal(prompt_marker(theme));
     let marker_width = visible_width(&marker_glyph);
     let inner_width = width
@@ -5256,10 +5304,11 @@ impl InteractiveShell {
             return;
         }
         if matches!(&action, EditAction::Up | EditAction::Down) {
+            let autocomplete_visible = self.extension_autocomplete_displayed();
             let mut state = self.state.borrow_mut();
-            // Only a visible host path menu claims arrows. An extension result
-            // and modal input keep their existing keyboard ownership.
-            if normal_editor_focused(&state) && state.extension_autocomplete.is_none() {
+            // Only visible completion menus claim arrows; stale or empty results
+            // must not disable ordinary editor/history navigation.
+            if normal_editor_focused(&state) && !autocomplete_visible {
                 let count = input_path_suggestions(&state).len();
                 if count > 0
                     && !shell_chrome(&state, state.size.0, Instant::now())
@@ -5274,7 +5323,7 @@ impl InteractiveShell {
                     };
                     return;
                 }
-                if !state.run.is_active() && navigate_prompt_history(&mut state, &action) {
+                if navigate_prompt_history(&mut state, &action) {
                     return;
                 }
             }
@@ -5514,6 +5563,16 @@ impl InteractiveShell {
         retire_file_index(&mut state);
         state.workspace = Some(root);
         state.refresh_tool_displays();
+        // An early startup draft may already contain a mention. Its first scan
+        // could not start before the workspace existed; resume it without
+        // requiring another edit or moving the user's caret.
+        if state.startup_pending
+            && state.editor.cursor() == state.editor.text().len()
+            && composer::active_mention(state.editor.text())
+                .is_some_and(|query| !composer::is_path_query(query))
+        {
+            request_file_index_scan(&mut state);
+        }
     }
 
     /// Replace the immutable prompt-template autocomplete snapshot after a
@@ -6897,6 +6956,19 @@ impl InteractiveShell {
         );
     }
 
+    /// Show an Octet-owned fact report with structured headings and bold labels.
+    /// Values are terminal-sanitized and Markdown-escaped, never markup authority.
+    pub fn show_report_facts(
+        &mut self,
+        title: impl Into<String>,
+        purpose: impl Into<String>,
+        text: String,
+    ) {
+        let title = title.into();
+        let source = report_document::facts_markdown(&title, &text);
+        self.show_report_markdown(title, purpose, &source);
+    }
+
     /// Open this binary's bundled release notes as a read-only rich document.
     /// This report never becomes transcript, session, or provider input.
     pub fn show_changelog(&mut self) {
@@ -6924,23 +6996,6 @@ impl InteractiveShell {
         self.show_report(
             OrdinarySurfaceMetadata::with_purpose(title, purpose),
             ReportBody::Markdown(Arc::new(parse_markdown(&source)), source),
-        );
-    }
-
-    /// Styled report text must already have been terminal-sanitized at its
-    /// producing boundary. Only octet-owned theme SGR is retained while wrapping.
-    pub fn show_styled_report_text(
-        &mut self,
-        title: impl Into<String>,
-        purpose: impl Into<String>,
-        text: String,
-    ) {
-        self.show_report(
-            OrdinarySurfaceMetadata::with_purpose(title, purpose),
-            ReportBody::Text {
-                text: text.into(),
-                styled: true,
-            },
         );
     }
 
@@ -6997,15 +7052,14 @@ impl InteractiveShell {
     }
 
     pub fn show_status_text_with_telemetry(&mut self, text: String) {
-        let (theme, text) = {
+        let text = {
             let state = self.state.borrow();
-            let text = format!("{text}\n\n{}", status_telemetry(&state, Instant::now()));
-            (state.theme.clone(), text)
+            format!("{text}\n\n{}", status_telemetry(&state, Instant::now()))
         };
-        self.show_styled_report_text(
+        self.show_report_facts(
             "Status",
             "Review active model, session, and safety diagnostics",
-            styled_status_text(&theme, &text),
+            text,
         );
     }
 
@@ -7191,6 +7245,15 @@ impl InteractiveShell {
         self.state.borrow().panel.is_some()
     }
 
+    /// Check ordinary-panel ownership without exposing or retaining a state borrow.
+    pub(crate) fn panel_action_matches(&self, matches: impl FnOnce(&PanelAction) -> bool) -> bool {
+        let state = self.state.borrow();
+        match state.panel.as_ref() {
+            Some(Panel::SelectList { action, .. }) => matches(action),
+            _ => false,
+        }
+    }
+
     /// Original item index of the highlighted select-list row, after filtering.
     pub(crate) fn highlighted_panel_index(&self) -> Option<usize> {
         let state = self.state.borrow();
@@ -7360,6 +7423,18 @@ impl InteractiveShell {
         let mut state = self.state.borrow_mut();
         if let Some(Panel::SessionPicker { picker }) = state.panel.as_mut() {
             picker.surface.lifecycle = lifecycle;
+        }
+    }
+
+    /// Pi tree navigation restores a selected prompt only into an empty draft.
+    /// Existing text or attachment chips always remain user-owned.
+    pub(crate) fn prefill_empty_editor(&mut self, text: String) {
+        let empty = {
+            let state = self.state.borrow();
+            state.editor.text().is_empty() && state.ledger.is_empty()
+        };
+        if empty {
+            self.prefill_editor(text);
         }
     }
 
@@ -7789,13 +7864,58 @@ impl InteractiveShell {
                                             | KeyModifiers::SUPER,
                                     ) =>
                             {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.push(c);
-                                // The match set changed; restart at the top.
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             KeyCode::Backspace if !confirmation && key.modifiers.is_empty() => {
+                                let previous = matches!(panel_action, PanelAction::SessionTree(_))
+                                    .then(|| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .get(*selected)
+                                        .copied()
+                                    })
+                                    .flatten();
                                 filter.pop();
-                                *selected = 0;
+                                *selected = previous
+                                    .and_then(|index| {
+                                        filtered_indices_for_action(
+                                            items,
+                                            descriptions,
+                                            &action,
+                                            filter,
+                                        )
+                                        .iter()
+                                        .position(|candidate| *candidate == index)
+                                    })
+                                    .unwrap_or(0);
                             }
                             _ => {}
                         }
@@ -8229,7 +8349,38 @@ impl InteractiveShell {
         state.invalidate_rich_text();
     }
 
+    /// Terminal protocol colors cannot touch the draft or modal input owner.
+    /// Repaint only the generated Pi palette, keeping every transcript source.
+    pub(crate) fn terminal_theme_handler(&self) -> crate::tui::terminal::ThemeColorHandler {
+        let state = self.state.clone();
+        let render = self.render_tx.clone();
+        std::sync::Arc::new(move |colors| {
+            let mut state = state.borrow_mut();
+            let generated = matches!(
+                state.theme.source(),
+                crate::tui::theme::ThemeSource::CompiledPi
+            ) && state.theme.capabilities().color
+                != crate::tui::terminal::ColorDepth::None;
+            if colors == state.theme.terminal_colors() {
+                return generated;
+            }
+            state.theme = state.theme.clone().with_terminal_colors(colors);
+            if generated {
+                state.theme_epoch = state.theme_epoch.wrapping_add(1);
+                state.invalidate_rich_text();
+            }
+            drop(state);
+            if generated {
+                if let Some(tx) = render.lock().expect("render sender poisoned").as_ref() {
+                    let _ = tx.try_send(renderer_runtime::RenderCommand::Render);
+                }
+            }
+            generated
+        })
+    }
+
     pub fn set_theme(&mut self, mut theme: OctetTheme) {
+        theme = theme.with_terminal_colors(self.state.borrow().theme.terminal_colors());
         // Native terminal history cannot be recoloured in place. Materialize a
         // deferred resume before the swap so the replay below includes every
         // persisted tool card, not just the first-paint tail.
@@ -8554,6 +8705,7 @@ mod remote_ui;
 mod renderer_geometry;
 mod renderer_model;
 mod renderer_runtime;
+mod report_document;
 // Keep the built-in implementation unchanged; compose cached remote regions at
 // the existing shell chrome seam rather than introducing another renderer.
 mod shell_chrome {
@@ -8652,7 +8804,8 @@ mod viewport {
 mod builtin_welcome_card;
 mod welcome_card {
     pub(super) use super::builtin_welcome_card::{
-        restart_welcome_animation, welcome_placeholder_rows, welcome_row_budget,
+        restart_welcome_animation, welcome_placeholder_rows, welcome_placeholder_separator_rows,
+        welcome_row_budget,
     };
     pub(super) use super::remote_ui::render_welcome_card;
 }

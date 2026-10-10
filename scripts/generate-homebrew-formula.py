@@ -254,7 +254,6 @@ class Octet < Formula
   homepage "{REPOSITORY_URL}"
   version "{version}"
   depends_on :macos
-  depends_on "ripgrep"
 
   on_arm do
     url "{REPOSITORY_URL}/releases/download/{tag}/{arm_name}"

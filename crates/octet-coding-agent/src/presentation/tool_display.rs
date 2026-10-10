@@ -110,26 +110,6 @@ pub fn summarize_tool_with_workspace(
             changed_path: None,
             value: Some("JavaScript".into()),
         },
-        "search" => {
-            let path = display_path(string_arg(args, "path").unwrap_or("workspace"), workspace);
-            let query = string_arg(args, "query").unwrap_or("pattern");
-            let full = format!("searching {path} for {query}");
-            let compact_path = compact_path(&path);
-            let compact = format!("searching {compact_path}");
-            ToolDisplay {
-                active: full.clone(),
-                success: format!("searched {path} for {query}"),
-                failure: full,
-                compact_active: compact.clone(),
-                compact_success: format!("searched {compact_path}"),
-                compact_failure: compact,
-                plain_tag: "search",
-                label: "search".to_owned(),
-                shell_command: None,
-                changed_path: None,
-                value: None,
-            }
-        }
         "edit" => path_tool(args, "updating", "updated", "updating", "edit", workspace),
         "write" => path_tool(args, "writing", "wrote", "writing", "write", workspace),
         // `exec` is retained only as a renderer for pre-rename sessions.

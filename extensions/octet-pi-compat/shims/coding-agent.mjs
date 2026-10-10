@@ -20,8 +20,8 @@ export const getMarkdownTheme = () => ({
   bold: theme.bold, italic: theme.italic, strikethrough: theme.strikethrough, underline: theme.underline,
 });
 // Named imports resolve to explicit refusals instead of any SDK fallback.
-export { createAgentSession, AgentSession, SessionManager, createCodingTools, codingTools, readTool, bashTool, editTool, writeTool, searchTool,
-  createReadTool, createBashTool, createEditTool, createWriteTool, createSearchTool,
+export { createAgentSession, AgentSession, SessionManager, createCodingTools, codingTools, readTool, bashTool, editTool, writeTool,
+  createReadTool, createBashTool, createEditTool, createWriteTool,
   DefaultResourceLoader, SettingsManager, createGrepTool, createFindTool, createLsTool } from './child-sdk.mjs';
 export class ModelRegistry { constructor() { unsupported('ModelRegistry', 'use the host-owned ctx.modelRegistry'); } }
 export class AuthStorage { constructor() { unsupported('AuthStorage', 'provider credentials remain host-owned'); } }

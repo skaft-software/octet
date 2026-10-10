@@ -440,16 +440,15 @@ to preserve the action name within the label cap. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
-Terse compiled-default Bash headers retain two command-preview rows, wrapping
-at whitespace where possible and hard-wrapping oversized graphemes by terminal
-cell width; file themes retain their prior three-row limit. An exact hidden-row
-count follows. The full command remains available through disclosure and semantic
-copy. Retained output uses concise UI-collapse counts distinct from irrecoverable
-capture-byte loss. The
-command preview is independent of the output-tail budget.
+Bash headers retain the complete command in both disclosure modes and all themes,
+wrapping at whitespace where possible and hard-wrapping oversized graphemes by
+terminal cell width. Semantic copy preserves the command. Collapsed output keeps
+both its head and tail within the visual-row budget, with an exact omitted-middle
+count distinct from irrecoverable capture-byte loss. Local-shell output remains
+tail-only. The command is independent of the output budget.
 
 Ctrl+O toggles the global disclosure mode for retained reasoning, compaction,
-search output, Bash commands, Bash/local-shell output, and edit/write diffs.
+retained tool output, Bash/local-shell output, and edit/write diffs.
 `/verbose [on|off]` controls the same mode. Expansion cannot recover capture bytes that the tool
 already discarded.
 

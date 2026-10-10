@@ -1077,12 +1077,8 @@ impl DelegationManager {
                     "effective extension child tool scope changed after spawn admission".into(),
                 ));
             }
-            let scope_note = if policy
-                .tools
-                .iter()
-                .all(|tool| matches!(tool.as_str(), "read" | "search"))
-            {
-                "Only the listed read/search tools are installed; mutation, shell, and collaboration tools are unavailable."
+            let scope_note = if policy.tools.iter().all(|tool| tool == "read") {
+                "Only the read tool is installed; mutation, shell, and collaboration tools are unavailable."
             } else {
                 "The listed standard file and shell tools are installed for this task; collaboration tools are unavailable. Mutating tools remain subject to the inherited approval policy; host policy is authoritative."
             };

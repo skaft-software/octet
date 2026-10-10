@@ -16,9 +16,6 @@ pub(crate) const PRIMARY_TEXT_GUTTER: u16 = 2;
 /// as an additional application-level margin.
 const BASE_COMPOSER_PADDING: u16 = 1;
 
-/// Queued steering is a pending-state hint, not a second transcript.
-pub(crate) const MAX_STEERING_PREVIEW_ROWS: usize = 2;
-
 /// Approval consequences remain bounded while leaving room for the selected
 /// action at every usable terminal height.
 pub(crate) const MAX_APPROVAL_DETAIL_ROWS: usize = 3;

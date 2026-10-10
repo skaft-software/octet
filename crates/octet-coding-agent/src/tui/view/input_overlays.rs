@@ -503,27 +503,33 @@ pub(super) fn render_input_suggestions(
     render_path_suggestions(state, width, max_rows)
 }
 
-fn steering_preview_text(state: &ShellState, message: &str) -> String {
-    let marker = if state.theme.unicode() {
-        " ↵ "
-    } else {
-        " / "
-    };
-    super::sanitize_for_terminal(message).replace('\n', marker)
-}
-
-fn clipped_steering_content(state: &ShellState, content: &str, width: usize) -> String {
-    let suffix = if state.theme.unicode() {
-        " …"
-    } else {
-        " ..."
-    };
-    let suffix_width = visible_width(suffix);
-    if width <= suffix_width {
-        return truncate_to_width(suffix.trim_start(), width, Some(""));
+pub(super) fn pending_message_texts(state: &ShellState) -> Vec<String> {
+    let mixed = !state.steering_queue.is_empty() && !state.follow_up_queue.is_empty();
+    let mut texts = Vec::new();
+    if !state.pending_controls.is_empty() {
+        texts.push(super::sanitize_for_terminal(
+            &state.pending_controls.join("; "),
+        ));
     }
-    let body = truncate_to_width(content, width - suffix_width, Some(""));
-    format!("{}{suffix}", body.trim_end())
+    for (kind, text) in state
+        .steering_queue
+        .iter()
+        .map(|entry| ("Steering", entry.display.as_str()))
+        .chain(
+            state
+                .follow_up_queue
+                .iter()
+                .map(|entry| ("Follow-up", entry.composed.transcript_text.as_str())),
+        )
+    {
+        let text = super::sanitize_for_terminal(text);
+        texts.push(if mixed {
+            format!("{kind}: {text}")
+        } else {
+            text
+        });
+    }
+    texts
 }
 
 /// Namespaced binding the compiled default declares for restoring a queued
@@ -604,7 +610,6 @@ pub(super) fn render_pending_steering(
     {
         return Vec::new();
     }
-    let max_rows = max_rows.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
     let count =
         state.steering_queue.len() + state.follow_up_queue.len() + state.pending_controls.len();
     let label = if !state.pending_controls.is_empty() {
@@ -659,45 +664,41 @@ pub(super) fn render_pending_steering(
     }
 
     let elbow = activity_elbow(&state.theme);
-    let plain_prefix = format!("{ACTIVITY_DETAIL_INDENT}{elbow} ");
     let prefix = format!(
         "{ACTIVITY_DETAIL_INDENT}{} ",
         state.theme.model_fg(state.model_lab, elbow)
     );
-    let hidden = count.saturating_sub(1);
-    let hidden_suffix = if hidden == 0 {
-        String::new()
-    } else {
-        format!("{}+{hidden} more", semantic_separator(&state.theme))
-    };
-    let available = usize::from(width)
-        .saturating_sub(visible_width(&plain_prefix))
-        .max(1);
-    let preview_budget = available.saturating_sub(visible_width(&hidden_suffix));
-    let controls = state.pending_controls.join("; ");
-    let display = if !controls.is_empty() {
-        controls.as_str()
-    } else {
-        state
-            .steering_queue
-            .first()
-            .map(|entry| entry.display.as_str())
-            .unwrap_or_else(|| state.follow_up_queue[0].composed.transcript_text.as_str())
-    };
-    let preview = steering_preview_text(state, display);
-    let preview = if visible_width(&preview) > preview_budget {
-        clipped_steering_content(state, &preview, preview_budget)
-    } else {
-        preview
-    };
-    lines.push(fit_line(
-        &format!(
-            "{prefix}{}{}",
-            state.theme.fg("muted", &preview),
-            state.theme.fg("muted", &hidden_suffix),
-        ),
-        width,
-    ));
+    let continuation = format!("{ACTIVITY_DETAIL_INDENT}  ");
+    let mut content = Vec::new();
+    for text in pending_message_texts(state) {
+        content.extend(
+            super::wrap_hanging(
+                &state.theme.fg("muted", &text),
+                &prefix,
+                &continuation,
+                width,
+            )
+            .into_iter()
+            .map(|row| fit_line(&row, width)),
+        );
+    }
+    let budget = max_rows - 1;
+    if content.len() > budget {
+        let hidden = content.len() - budget.saturating_sub(1);
+        content.truncate(budget.saturating_sub(1));
+        let ellipsis = if state.theme.unicode() { "…" } else { "..." };
+        content.push(fit_line(
+            &format!(
+                "{continuation}{}",
+                subdued_text(
+                    &state.theme,
+                    &format!("{ellipsis} {hidden} queued rows hidden")
+                )
+            ),
+            width,
+        ));
+    }
+    lines.extend(content);
     lines
 }
 

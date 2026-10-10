@@ -1036,6 +1036,10 @@ fn activity_shimmer_label(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
+    // Pi's loader moves the spinner, not a model-colored sweep through its label.
+    if theme.is_pi_theme() {
+        return theme.fg("muted", label);
+    }
     let static_label = || theme.bold(&theme.model_fg(reasoning.model_lab, label));
     let Some((baseline, sweep)) = activity_shimmer_palette(theme, reasoning) else {
         return static_label();
@@ -1179,7 +1183,7 @@ fn thinking_hint_fits_inline(theme: &OctetTheme, status: &str, width: u16) -> bo
         && visible_width(status) + visible_width(reasoning_inline_hint(theme)) <= usize::from(width)
 }
 
-fn collapsed_reasoning_lines_sized(
+pub(super) fn collapsed_reasoning_lines_sized(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
     shimmer_frame: usize,

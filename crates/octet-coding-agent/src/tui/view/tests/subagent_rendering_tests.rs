@@ -580,10 +580,14 @@ fn a_new_prompt_shows_the_working_indicator_immediately() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert!(
-        rows.last().is_some_and(|row| row.contains("Working")),
-        "the new turn's status row must be the transcript tail: {rows:?}"
+    let working = rows.iter().position(|row| row.contains("Working")).unwrap();
+    assert_eq!(
+        working + 2,
+        rows.len(),
+        "the status slot must be the transcript tail: {rows:?}"
     );
+    assert!(rows[working - 1].is_empty(), "{rows:?}");
+    assert!(rows[working + 1].is_empty(), "{rows:?}");
 }
 
 #[test]

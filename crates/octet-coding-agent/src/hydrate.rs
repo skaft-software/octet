@@ -314,7 +314,7 @@ pub(crate) enum ToolActivityKind {
 impl ToolActivityKind {
     pub(crate) fn for_name(name: &str) -> Option<Self> {
         match name {
-            "read" | "search" | "bash" | "exec" => Some(Self::Explore),
+            "read" | "bash" | "exec" => Some(Self::Explore),
             "edit" | "write" => Some(Self::Edit),
             "web_search" => Some(Self::WebSearch),
             "web_fetch" => Some(Self::WebFetch),
@@ -331,7 +331,6 @@ impl ToolActivityKind {
 pub(crate) struct ToolActivityGroup {
     pub(crate) member_ids: Vec<ToolCallId>,
     pub(crate) read_files: usize,
-    pub(crate) searches: usize,
     pub(crate) commands: usize,
     pub(crate) edited_files: usize,
     pub(crate) web_searches: usize,
@@ -375,7 +374,6 @@ impl ToolActivityGroup {
                     }
                 }
             }
-            "search" => self.searches += 1,
             "bash" | "exec" => self.commands += 1,
             "web_search" => self.web_searches += 1,
             "web_fetch" => self.web_fetches += 1,
@@ -401,7 +399,6 @@ impl ToolActivityGroup {
                 }
             }
         }
-        self.searches += other.searches;
         self.commands += other.commands;
         self.web_searches += other.web_searches;
         self.web_fetches += other.web_fetches;
@@ -779,6 +776,7 @@ fn active_branch_tail_from<'a>(
             &entry.value,
             EntryValue::Message(_)
                 | EntryValue::Compaction { .. }
+                | EntryValue::BranchSummary { .. }
                 | EntryValue::ResponsesCompaction { .. }
         ) {
             displayable_entries = displayable_entries.saturating_add(1);
@@ -812,6 +810,7 @@ fn active_branch_tail_from<'a>(
                 &entry.value,
                 EntryValue::Message(_)
                     | EntryValue::Compaction { .. }
+                    | EntryValue::BranchSummary { .. }
                     | EntryValue::ResponsesCompaction { .. }
             ) {
                 break;
@@ -993,6 +992,23 @@ fn hydrate_entries_with_image_budget(
                     active_model = Some(model_name.clone());
                 }
             }
+            EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            } => {
+                // A branch handoff is not compaction or a user-authored prompt.
+                // Reuse the ordinary custom-message surface without inventing
+                // extension ownership or reviving abandoned conversation.
+                items.push(TranscriptItem::CustomMessage {
+                    id: entry.id.clone(),
+                    timestamp_unix_ms: entry.timestamp_unix_ms,
+                    content: octet_agent::session::CustomMessageContent::Text(summary.clone()),
+                    custom_type: "octet:branch-summary".into(),
+                    text: summary.clone(),
+                    details: Some(serde_json::json!({"fromId": from_entry.0, "details": details})),
+                });
+            }
             EntryValue::Compaction { summary, .. } => {
                 items.push(TranscriptItem::CompactionMarker {
                     summary: summary.clone(),
@@ -1093,9 +1109,9 @@ mod tests {
                 call("r2", "read"),
                 call("b1", "bash"),
                 AssistantPart::Text("analysis".into()),
-                call("s1", "search"),
+                call("s1", "bash"),
                 call("e1", "edit"),
-                call("s2", "search"),
+                call("s2", "bash"),
                 call("b2", "exec"),
                 call("r3", "read"),
             ],
@@ -1108,18 +1124,12 @@ mod tests {
             groups[0].member_ids,
             ["r1", "r2", "b1"].map(|id| ToolCallId(id.into()))
         );
-        assert_eq!(
-            (groups[0].read_files, groups[0].searches, groups[0].commands),
-            (2, 0, 1)
-        );
+        assert_eq!((groups[0].read_files, groups[0].commands), (2, 1));
         assert_eq!(
             groups[1].member_ids,
             ["s2", "b2", "r3"].map(|id| ToolCallId(id.into()))
         );
-        assert_eq!(
-            (groups[1].read_files, groups[1].searches, groups[1].commands),
-            (1, 1, 1)
-        );
+        assert_eq!((groups[1].read_files, groups[1].commands), (1, 2));
     }
 
     #[test]
@@ -1175,7 +1185,6 @@ mod tests {
             content: vec![
                 call("r1", "read", "src/a.rs"),
                 call("r2", "read", "src/a.rs"),
-                call("s1", "search", ""),
                 call("b1", "bash", ""),
                 call("e1", "edit", "src/b.rs"),
                 call("w1", "write", "src/b.rs"),
@@ -1188,10 +1197,7 @@ mod tests {
         };
         let groups = tool_activity_groups(&message);
         assert_eq!(groups.len(), 2);
-        assert_eq!(
-            (groups[0].read_files, groups[0].searches, groups[0].commands),
-            (1, 1, 1)
-        );
+        assert_eq!((groups[0].read_files, groups[0].commands), (1, 1));
         assert_eq!(groups[0].file_paths, ["src/a.rs"]);
         assert_eq!(groups[1].edited_files, 2);
         assert_eq!(groups[1].file_paths, ["src/b.rs", "src/c.rs"]);
@@ -1395,6 +1401,32 @@ mod tests {
         let (items, truncated) = hydrate_transcript_tail(&session, 100).unwrap();
         assert!(!truncated);
         assert_eq!(items.len(), 100);
+    }
+
+    #[test]
+    fn resumed_branch_summary_is_visible_and_counts_toward_the_transcript_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let kept = session.append(user("kept prompt")).unwrap();
+        let abandoned = session.append(user("abandoned work")).unwrap();
+        let summary = "# Branch handoff\n\nKeep the exact sentinel.";
+        let head = session
+            .branch_with_summary(Some(kept), summary.into(), Default::default())
+            .unwrap();
+        drop(session);
+
+        let resumed = Session::open(path).unwrap();
+        let (items, truncated) = hydrate_transcript_tail(&resumed, 1).unwrap();
+        assert!(truncated);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            TranscriptItem::CustomMessage { id, custom_type, text, .. }
+                if id == &head && custom_type == "octet:branch-summary" && text == summary
+        ));
+        assert!(!format!("{:?}", hydrate_transcript(&resumed).unwrap()).contains("abandoned work"));
+        assert!(resumed.entry(&abandoned).is_some());
     }
 
     #[test]

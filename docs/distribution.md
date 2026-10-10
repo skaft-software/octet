@@ -1,7 +1,7 @@
 # Distribution channels
 
 Octet 0.9.0 is a **source candidate, not a published release**. Its canonical
-GitHub tag, native/executable-bundle release assets and all four npm
+GitHub tag, native/executable-bundle release assets and all five npm
 packages are unavailable. Use the source-build route in
 [installation](installation.md). The commands below describe publication
 contracts and planned post-publication installation, not currently usable
@@ -12,7 +12,7 @@ release](https://github.com/skaft-software/octet/releases/tag/v0.8.2) records it
 signed assets and public-install verification once approved. See the
 [candidate release notes](releases/v0.9.0.md) for scope and remaining
 qualification. The
-planned npm channel is `@skaft/octet@0.9.0` (launcher plus three signed platform
+planned npm channel is `@skaft/octet@0.9.0` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels.
 
@@ -62,18 +62,18 @@ The release workflows don't publish every source package automatically:
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
 | Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
-| npm CLI | `release-octet.yml` with `publish_npm=true` | Four `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all four. Disabled by default. |
+| npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
-| Python and TypeScript SDK registries | Not provided by the CLI release workflow | The four-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
+| Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
 Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
 canonical release commit. Its metadata generator requires that ref, and the
 protected environment must admit the tag without removing required reviewers.
 
-Cargo can build the published canonical tag's exact source (Rust 1.88+ and
-ripgrep):
+Cargo can build the published canonical tag's exact source (Rust 1.88+;
+ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
 cargo install --locked --git https://github.com/skaft-software/octet --tag v0.9.0 --bins octet-coding-agent
@@ -83,7 +83,7 @@ The public `v0.9.0` tag does not exist yet; it must exist before you use this co
 `cargo install octet` and registry-based `cargo install octet-coding-agent`
 aren't the supported Cargo path.
 
-The planned npm channel has four `@skaft/octet*` packages (launcher plus three
+The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
 and registry provenance verification. **0.9.0 is not published to npm.** Only
 after verified publication, pin the version to reproduce one exact release:
@@ -118,10 +118,10 @@ The Homebrew formula is generated from the signed `OCTET_RELEASE_METADATA.json`
 that the protected binary-release workflow produces, and nothing in the process
 reads a mutable `latest` or the release API. The proposed tap is
 `skaft-software/homebrew-tap`, publishing the `octet` formula. It installs only
-`octet` and `octet-host`, declares
-`ripgrep`, has no Linux runtime, and doesn't run an npm lifecycle hook, invoke
-Cargo or build from source. To check a formula generated from local release
-assets:
+`octet` and `octet-host`, does not require or install ripgrep, has no Linux
+runtime, and doesn't run an npm lifecycle hook, invoke Cargo or build from
+source. Content search prefers `rg` when available, otherwise `grep`. To check
+a formula generated from local release assets:
 
 ```sh
 scripts/test-homebrew-formula.sh
@@ -177,8 +177,8 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 ## Other channels
 
 The planned v0.9.0 version-pinned shell installer targets macOS arm64 and x64 and
-GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms and would
-publish as `@skaft/octet@0.9.0`. See the [npm release
+GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
+Windows x86-64 and would publish as `@skaft/octet@0.9.0`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

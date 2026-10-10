@@ -4,7 +4,7 @@ use sexy_tui_rs::{CommitCursor, CommitPosition, PinnedFrame};
 
 use super::bash_render::bash_output_changes_when_expanded;
 use super::tool_render::tool_diff;
-use super::{ShellState, ToolPanel, TranscriptBlock, COMPACT_EXEC_OUTPUT_ROWS};
+use super::{ShellState, ToolPanel, TranscriptBlock};
 
 pub(super) const FINAL_COMMIT_SEGMENT: u64 = u64::MAX;
 
@@ -120,12 +120,6 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
         "bash" | "exec" => {
             panel.display.shell_command.is_some() && bash_output_changes_when_expanded(panel)
         }
-        "search" if !panel.is_error => panel
-            .output
-            .lines()
-            .filter(|line| !line.trim().is_empty() && *line != "(no output)")
-            .nth(COMPACT_EXEC_OUTPUT_ROWS)
-            .is_some(),
         // Rendering determines diff truncation after width-dependent wrap.
         // A recognized diff is therefore kept atomic conservatively.
         "edit" | "write" if !panel.is_error => tool_diff(panel).is_some(),
@@ -315,7 +309,9 @@ mod tests {
     use crate::presentation::summarize_tool;
     use octet_ai::ToolCallId;
 
-    use super::super::{AssistantBlock, CompactionBlock, ShellOutput, ToolPanel};
+    use super::super::{
+        AssistantBlock, CompactionBlock, ShellOutput, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS,
+    };
 
     #[test]
     fn exploration_summary_is_not_committed_before_failure_settles() {
@@ -325,7 +321,6 @@ mod tests {
         state.start_activity_group(crate::hydrate::ToolActivityGroup {
             member_ids: vec![read.clone(), bash.clone()],
             read_files: 1,
-            searches: 0,
             commands: 1,
             file_paths: vec!["file.rs".into()],
             ..Default::default()
@@ -407,21 +402,6 @@ mod tests {
         assert!(!finalized_block_rows_are_stable(&short_bash));
         assert!(!finalized_block_rows_are_stable(&long_bash));
         assert!(!finalized_block_rows_are_stable(&failed_bash));
-
-        let short_search = finalized_tool(
-            "search",
-            serde_json::json!({"query": "needle", "path": "."}),
-            &five_lines,
-            false,
-        );
-        let long_search = finalized_tool(
-            "search",
-            serde_json::json!({"query": "needle", "path": "."}),
-            &six_lines,
-            false,
-        );
-        assert!(finalized_block_rows_are_stable(&short_search));
-        assert!(!finalized_block_rows_are_stable(&long_search));
 
         let diff = finalized_tool(
             "edit",

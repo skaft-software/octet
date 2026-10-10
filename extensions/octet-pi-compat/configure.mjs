@@ -5,11 +5,14 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { hookEvents } from './lib/api.mjs';
 import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
 import { locateInstalledPi } from './lib/installed-pi.mjs';
 import { PI_VERSION } from './lib/pi-modules.mjs';
-import { discoverPiSetup } from './lib/pi-setup.mjs';
+import { discoverPiSetup, resolveThemeFile } from './lib/pi-setup.mjs';
+import { readPiTheme } from './lib/theme-palette.mjs';
+import { reviewedSourceHashes } from './lib/runtime.mjs';
 import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
 
 // Importing a factory executes arbitrary user code. Never perform implicit
@@ -43,16 +46,18 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [] }) {
+export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false }) {
   if (!reviewed) throw new Error('Factory execution requires --reviewed (review every entrypoint and its imports first)');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
-  if (!extensions.length || extensions.length > 64) throw new Error('Supply 1..64 explicitly reviewed entrypoints');
+  if ((!extensions.length && !mirrorPiSetup) || extensions.length > 64) throw new Error('Supply 1..64 explicitly reviewed entrypoints');
   extensions = extensions.map(p => realpathSync(resolve(p)));
   if (new Set(extensions).size !== extensions.length) throw new Error('Duplicate entrypoint');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed catalog`);
+  piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
+  const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
   const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: join(output, '.cache') });
   if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
   const skippedAtCapture = captured.stderr.split('\n').filter(line => line.startsWith('[pi-compat] skipped '));
@@ -66,17 +71,19 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   // channels up front; callbacks remain local and initially inert. Provider
   // wire hooks are an exception: while subscribed, the host refuses
   // extension-registered (host stream transport) providers. Resource discovery
-  // also requires a complete native consumer. Reserve it for imported themes
-  // or captured callbacks; late factory subscriptions must reconfigure.
+  // also requires a complete native consumer. Every configured bridge reserves
+  // it so current enabled Pi palettes refresh at startup and reload.
   const captureOnly = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response', 'resources_discover']);
   const subscribed_hooks = [...new Set(Object.values(hookEvents))]
-    .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover' && themePaths.length).sort();
+    .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover').sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
+  if (entrypoint_sources && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
   const config = { extensions, entrypoint_sha256, registrations, subscribed_hooks,
+    ...(mirrorPiSetup ? { mirror_pi_setup: true, entrypoint_sources } : {}),
     ...(Object.keys(routes).length ? { extension_runtimes: routes } : {}),
     ...(piAgentDir ? { pi_agent_dir: piAgentDir } : {}),
-    ...(piTheme ? { pi_theme: { name: piTheme.name, path: piTheme.path, native_name: piTheme.selector, native_path: piTheme.nativePath } } : {}),
+    ...(!mirrorPiSetup && piTheme ? { pi_theme: { name: piTheme.name, path: piTheme.path, native_name: piTheme.selector, native_path: piTheme.nativePath } } : {}),
     ...(themePaths.length ? { pi_theme_paths: themePaths } : {}) };
   const quoted = value => JSON.stringify(value);
   const list = values => `[${values.map(quoted).join(', ')}]`;
@@ -102,54 +109,39 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   mkdirSync(output, { recursive: true, mode: 0o700 });
   writeFileSync(join(output, 'bridge.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   writeFileSync(join(output, 'extension.toml'), manifest, { mode: 0o600 });
-  return { output, registrations };
+  return { output, registrations, config };
 }
 
-// Mirror mode: one reviewed `--from-pi --mirror` opt-in. The generated bridge
-// carries no frozen entrypoint list, entrypoint hashes or registration catalog;
-// the adapter rediscovers this machine's Pi setup at startup and reports the
-// actual catalogs through the host's dynamic-negotiation features. Nothing here
-// writes the Pi setup, the octet configuration or the extension list.
+// Mirror resources remain read-only and dynamic. Executable sources, routes and
+// static registrations are captured at explicit review, just like snapshots.
+// New/changed factories need a fresh review, never an expanded startup grant.
 const providerWireHooks = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']);
 export const MIRROR_SUBSCRIBED_HOOKS = Object.freeze([...new Set(Object.values(hookEvents))]
   .filter(hook => !providerWireHooks.has(hook)).sort());
 
-export function configureMirror({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log }) {
+export async function configureMirror({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, projectTrusted = false, activeNativeTools = new Map() }) {
   if (!reviewed) throw new Error('Mirroring your Pi setup runs its enabled factories with your permissions; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed mirror`);
   checkThemeImportOutput(output, overwrite);
   const agentDir = resolve(env.OCTET_PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
-  const setup = discoverPiSetup({ agentDir, env, cwd });
-  const config = {
-    mirror_pi_setup: true,
-    pi_agent_dir: agentDir,
-    extensions: [],
-    subscribed_hooks: MIRROR_SUBSCRIBED_HOOKS,
-  };
-  const runner = join(root, 'runner.mjs');
-  const quoted = value => JSON.stringify(value);
-  const list = values => `[${values.map(quoted).join(', ')}]`;
-  const manifest = [
-    'name = "octet-pi-compat"', 'version = "0.1.0"', 'api_version = "0.4"',
-    'description = "Reviewed Pi setup mirror; Rust owns the agent and terminal"', '',
-    '[entrypoint]', `command = ${quoted(realpathSync(process.execPath))}`,
-    `args = ${list([runner, '--config', join(output, 'bridge.json')])}`, '',
-    '# The enabled Pi setup factories run with normal OS authority. Declarations are consent metadata, not a sandbox.',
-    '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true',
-    'system_prompt = true', ...(providerCredentials ? ['provider_credentials = true'] : []), '',
-    '[contributes]', 'tools = []', 'commands = []',
-    `hooks = ${list(MIRROR_SUBSCRIBED_HOOKS)}`, 'tool_renderers = []',
-    'notifications = true', 'confirmations = true', 'providers = true', '',
-  ].join('\n');
-  mkdirSync(output, { recursive: true, mode: 0o700 });
-  writeFileSync(join(output, 'bridge.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  writeFileSync(join(output, 'extension.toml'), manifest, { mode: 0o600 });
+  const setup = discoverPiSetup({ agentDir, env, cwd, projectTrusted: projectTrusted === true });
+  const themePath = resolveThemeFile(setup.themesPaths, setup.defaultTheme, setup.diagnostics);
+  // Native TOML palettes are resolved by the host; JSON helpers also see the
+  // chosen Pi palette during review, before any factory/helper is imported.
+  const piTheme = themePath?.endsWith('.json') ? { name: readPiTheme(themePath).name, path: themePath } : undefined;
+  const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: agentDir }, piAgentDir: agentDir, piTheme, activeNativeTools };
+  const routed = await routeExtensions(setup.extensions, options);
+  const refused = routed.filter(result => !result.route);
+  if (refused.length) throw new Error(`mirror review refused factories (no partial import):\n${refused.map(result => `${result.entry}: ${result.error}`).join('\n').slice(0, 4096)}`);
+  const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,
+    extensions: routed.map(result => result.entry), routes: Object.fromEntries(routed.map(result => [result.entry, result.route])) });
+  const { config } = result;
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
   log(`  Mirrored Pi setup at ${agentDir}: ${setup.extensions.length} extensions, ${setup.skillsPaths.length} skill paths, ${setup.promptsPaths.length} prompt paths, ${setup.themesPaths.length} theme paths`);
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
-  return { output, setup, config };
+  return { ...result, setup, config, routed };
 }
 // The user's enabled Pi extensions, resolved by the installed Pi 1.0.2's own
 // package manager exactly as Pi would load them. Read-only: settings are
@@ -167,12 +159,11 @@ export async function piExtensions(options = {}) {
 }
 
 const builtinTools = new Set(BUILTIN_TOOL_NAMES);
-// First-party octet extensions keep their tool names when a Pi extension
-// registers the same one; test/import.test.mjs pins this to ../release-catalog.txt.
+// Known first-party manifest names; presence alone never decides ownership.
+// test/import.test.mjs pins this list to ../release-catalog.txt.
 export const FIRST_PARTY_EXTENSIONS = Object.freeze(['octet-codemode', 'octet-computer-use', 'octet-mcp', 'octet-subagents', 'octet-web-search']);
 // Installed first-party extensions live next to this adapter (bundles, source
 // checkouts) or in the user's octet extension directory.
-const defaultFirstPartyRoots = env => [resolve(root, '..'), join(env.HOME || homedir(), '.octet', 'extensions')];
 // Maps each tool an installed first-party extension declares to its owner.
 // Reads at most one bounded manifest per first-party name and root.
 export function firstPartyTools(roots) {
@@ -187,11 +178,11 @@ export function firstPartyTools(roots) {
   }
   return owners;
 }
-async function probe(entry, route, { cwd, env, owners = new Map(), piTheme }) {
-  const dir = piTheme ? mkdtempSync(join(tmpdir(), 'octet-pi-probe-')) : undefined;
+async function probe(entry, route, { cwd, env, owners = new Map(), piAgentDir, piTheme }) {
+  const dir = piTheme || piAgentDir ? mkdtempSync(join(tmpdir(), 'octet-pi-probe-')) : undefined;
   try {
     const args = [join(root, 'runner.mjs'), '--pi-runtime', route, '--inspect',
-      ...(dir ? ['--config', captureConfig(dir, [entry], {}, { piTheme })] : [entry])];
+      ...(dir ? ['--config', captureConfig(dir, [entry], {}, { piAgentDir, piTheme })] : [entry])];
     return await new Promise(done => {
       const child = spawn(process.execPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '', stdout = '', overflow = false;
@@ -208,8 +199,8 @@ async function probe(entry, route, { cwd, env, owners = new Map(), piTheme }) {
         if (code !== 0 || overflow) return done({ ok: false, error: overflow ? 'registration output exceeds limit' : stderr.trim().split('\n')[0]?.replace(/^\[pi-compat startup\] /, '') || `exit ${code}` });
         try {
           const metadata = JSON.parse(stdout).result;
-          const owned = metadata.tools.filter(tool => owners.has(tool.name)).map(tool => `${tool.name} is provided by the first-party octet extension ${owners.get(tool.name)}`);
-          done(owned.length ? { ok: false, conflict: true, error: `turned off: ${owned.join('; ')}` } : { ok: true });
+          const owned = metadata.tools.filter(tool => owners.has(tool.name)).map(tool => `${tool.name} is owned by the active native extension ${owners.get(tool.name)}`);
+          done(owned.length ? { ok: false, conflict: true, error: `active native tool collision: ${owned.join('; ')}; choose one owner and review again (the factory's unrelated registrations were not discarded)` } : { ok: true });
         } catch (error) { done({ ok: false, error: `invalid registration output: ${error.message}` }); }
       });
     });
@@ -218,18 +209,21 @@ async function probe(entry, route, { cwd, env, owners = new Map(), piTheme }) {
 
 // Chooses each extension's route: octet's emulated path when it loads there,
 // otherwise the installed Pi; an extension that loads on neither is skipped.
-export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piTheme, firstPartyRoots = defaultFirstPartyRoots(env) } = {}) {
+export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map() } = {}) {
   if (!Array.isArray(extensions) || extensions.length > 64) throw new Error('Supply at most 64 entrypoints');
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) throw new Error('concurrency must be 1..64');
-  const results = new Array(extensions.length), owners = firstPartyTools(firstPartyRoots);
+  // Only an authoritative selected/active owner catalog can establish a
+  // collision. An installed manifest, even first-party, is not activation.
+  if (!(activeNativeTools instanceof Map)) throw new Error('activeNativeTools must be a selected native tool-owner Map');
+  const results = new Array(extensions.length), owners = activeNativeTools;
   let next = 0;
   const worker = async () => {
     while (next < extensions.length) {
       const index = next++, entry = extensions[index];
-      const emulated = await probe(entry, 'shims', { cwd, env, owners, piTheme });
+      const emulated = await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
       if (emulated.ok) { results[index] = { entry, route: 'shims' }; continue; }
-      const viaPi = installed && !emulated.conflict ? await probe(entry, 'installed', { cwd, env, owners, piTheme }) : emulated;
-      results[index] = viaPi.ok ? { entry, route: 'installed' } : { entry, route: null, error: viaPi.error };
+      const viaPi = installed && !emulated.conflict ? await probe(entry, 'installed', { cwd, env, owners, piAgentDir, piTheme }) : emulated;
+      results[index] = viaPi.ok ? { entry, route: 'installed' } : { entry, route: null, error: viaPi.error, ...(viaPi.conflict ? { disposition: 'review_required' } : {}) };
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, extensions.length) }, worker));
@@ -245,10 +239,8 @@ const label = entry => {
 };
 
 // One step from an installed Pi 1.0.2 setup to a configured bridge.
-export async function configureFromPi({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false }) {
-  // Mirror mode records the reviewed opt-in instead of freezing a capture: the
-  // adapter rediscovers this machine's Pi setup at startup.
-  if (mirror) return configureMirror({ output, reviewed, overwrite, providerCredentials, cwd, env, log });
+export async function configureFromPi({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false, projectTrusted = false, activeNativeTools = new Map() }) {
+  if (mirror) return configureMirror({ output, reviewed, overwrite, providerCredentials, cwd, env, log, projectTrusted, activeNativeTools });
   if (!reviewed) throw new Error('Loading your Pi extensions runs their code with your permissions, as in Pi; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -261,15 +253,18 @@ export async function configureFromPi({ output, reviewed, overwrite = false, pro
   const themeImport = planThemeImport({ output, paths: enabledPaths(resolved.themes), selection: settingsManager.getThemeSetting(),
     thinkingLevel: settingsManager.getDefaultThinkingLevel(), builtinDir: join(install.packages['coding-agent'].dir, 'dist/modes/interactive/theme') });
   checkThemeImportOutput(output, overwrite, themeImport.themes);
-  const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: piAgentDir }, piAgentDir, piTheme: themeImport.selected };
+  const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: piAgentDir }, piAgentDir, piTheme: themeImport.selected, activeNativeTools };
   const routed = await routeExtensions(extensions, options);
+  const collisions = routed.filter(result => result.disposition === 'review_required');
+  if (collisions.length) throw new Error(collisions.map(result => `${result.entry}: ${result.error}`).join('\n'));
   let accepted = routed.filter(r => r.route);
-  // Extensions that load alone can still collide (a duplicate command name);
-  // drop the later one and capture again, as Pi keeps the first registration.
+  // Ordinary failures can be isolated, but an active registration collision
+  // needs an explicit owner choice, not loss of the factory's other commands.
   while (accepted.length) {
     const routes = Object.fromEntries(accepted.map(r => [r.entry, r.route]));
     const captured = capture(accepted.map(r => r.entry), routes, options);
     const skippedLines = captured.stderr.split('\n').filter(line => line.startsWith('[pi-compat] skipped '));
+    if (skippedLines.some(line => line.includes('duplicate registration'))) throw new Error(`active registration collision; choose one owner and review again (no partial import):\n${skippedLines.join('\n').slice(0, 4096)}`);
     if (captured.status === 0 && !skippedLines.length) break;
     const skipped = new Set(skippedLines.map(line => line.slice('[pi-compat] skipped '.length).split(': ')[0]));
     for (const r of accepted) if (skipped.has(realpathSync(r.entry))) { r.route = null; r.error = skippedLines.find(l => l.includes(r.entry))?.split(': ').slice(1).join(': ') ?? 'skipped'; }

@@ -77,7 +77,7 @@ export default pi => {{
     let optional = root_path.join("optional.mjs");
     std::fs::write(
         &optional,
-        "export default pi => { pi.registerCommand('discard', {handler(){}}); pi.registerShortcut('alt+shift+z', {handler(){}}); };", 
+        "export default pi => { pi.registerCommand('discard', {handler(){}}); pi.registerShortcut('alt+shift+z', {handler(){}}); };",
     ).unwrap();
     let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../extensions/octet-pi-compat")

@@ -115,8 +115,9 @@ This checkout targets the octet 0.9.0 candidate. Check `octet --version`, and us
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
-On macOS or GNU/Linux, install Rust 1.88+ and
-[ripgrep](https://github.com/BurntSushi/ripgrep). From the source checkout:
+On macOS or GNU/Linux, install Rust 1.88+.
+[ripgrep](https://github.com/BurntSushi/ripgrep) is optional: content search
+prefers `rg` when available and falls back to `grep`. From the source checkout:
 
 ```sh
 cargo build --release --locked -p octet-coding-agent --bins

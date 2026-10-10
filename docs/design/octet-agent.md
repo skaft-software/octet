@@ -276,7 +276,7 @@ classification and explicit policy admission, admitting contiguous,
 model-ordered waves of exact `Pure`, `WorkspaceRead`, or `HostRead` calls from
 `Parallel` tools and, while the broker is `UnsafeHost` so that no call can
 prompt, exact `HostProcess` calls from `ParallelProcess` tools: one
-self-contained shell command or `search` each, as Pi overlaps them. `HostRead`
+self-contained shell command each, as Pi overlaps them. `HostRead`
 is eligible for these live waves but remains non-replayable. A wave holds up to
 one observation per CPU the process may use, at least four and at most the
 32-call turn limit (`Agent::set_parallel_read_wave_width` pins it); process
@@ -429,7 +429,7 @@ with total capacity never below concurrent capacity. The first-party
 `octet-subagents` service that the coding product actually uses is stricter: its
 children sit exactly one level below the root and are bounded to eight active
 children per parent with thirty-two retained records per resource owner, and a
-worker inherits the parent's full standard tool scope (`read`, `search`,
+worker inherits the parent's full standard tool scope (`read`,
 `edit`, `write`, `bash`) unless the spawn narrows it. A semaphore and ancestry
 checks enforce those limits independently of model behavior; an idle worker is
 reserved as `Pending` before a follow-up is published so concurrent follow-ups

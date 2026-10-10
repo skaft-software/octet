@@ -115,10 +115,10 @@ const MAX_EXTENSION_COST_MICRODOLLARS: u64 = 50_000_000;
 /// Optional hard worker wall clock up to 24 hours; `None` runs without a
 /// wall-clock kill (workers can still be interrupted or stopped).
 const MAX_EXTENSION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
-/// Standard tools an extension child may hold. Read/search workers are the
+/// Standard tools an extension child may hold. Read-only workers are the
 /// conservative default; edit/write/bash workers inherit the parent session's
 /// approval policy through the shared effect broker.
-const EXTENSION_CHILD_TOOLS: [&str; 5] = ["read", "search", "edit", "write", "bash"];
+const EXTENSION_CHILD_TOOLS: [&str; 4] = ["read", "edit", "write", "bash"];
 /// Host-reserved names installed by V2 collaboration overlays.
 pub const COLLABORATION_TOOL_NAMES: [&str; 6] = [
     "spawn_agent",

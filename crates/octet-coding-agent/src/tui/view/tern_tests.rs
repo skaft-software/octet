@@ -85,6 +85,152 @@ fn walk(nodes: &[Node], visit: &mut impl FnMut(&Node)) {
 }
 
 #[test]
+fn native_startup_registers_an_unframed_editable_draft_until_atomic_ready_frame() {
+    let (mut shell, mut surface, output) = setup(16);
+    shell.set_size(96, 18);
+    shell.state.borrow_mut().startup_pending = true;
+    shell.state.borrow_mut().context_estimate = Some((1234, 131072));
+    shell.state.native().lock().unwrap().accepting_input = true;
+    let handler = shell.tern_input_handler();
+    let assert_pending = |surface: &TernSurface, draft: &str| {
+        assert!(surface.sent.main.is_empty());
+        assert!(surface.sent.layer.is_empty());
+        assert_eq!(surface.sent.focus.as_deref(), Some("composer.editor"));
+        let editor = find_node(&surface.sent.dock, "composer.editor").unwrap();
+        let props = editor.p.as_ref().unwrap().as_map();
+        assert_eq!(props["text"], draft);
+        assert_eq!(props["readonly"], false);
+        assert_eq!(props["placeholder"], "");
+        for hidden in ["composer.rule", "composer.context", "composer.bar"] {
+            assert!(find_node(&surface.sent.dock, hidden).is_none());
+        }
+        walk(&surface.sent.dock, &mut |node| {
+            assert_ne!(node.k, Kind::Rule)
+        });
+    };
+
+    surface.flush(&shell.state).unwrap();
+    assert_pending(&surface, "");
+    assert!(output.last_frame()["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| op == &json!(["focus", "composer.editor"])));
+    assert_eq!(
+        focus_target(&shell.state.borrow()).as_deref(),
+        Some("composer.editor")
+    );
+    handler(Incoming::Event(Event::Edit {
+        sf: SURFACE.into(),
+        id: "composer.editor".into(),
+        from: 0,
+        to: 0,
+        text: "early 🦀 draft".into(),
+        cursor: "early 🦀 draft".encode_utf16().count(),
+        len: 0,
+    }));
+    assert_eq!(shell.pending(), "early 🦀 draft");
+    surface.flush(&shell.state).unwrap();
+    assert_pending(&surface, "early 🦀 draft");
+    for (width, height) in [(46, 8), (120, 40), (96, 18)] {
+        surface
+            .observe(&Incoming::Event(Event::Resize {
+                sf: Some(SURFACE.into()),
+                cols: width,
+                cell: None,
+                visible: Some(true),
+            }))
+            .unwrap();
+        shell.set_size(width, height);
+        surface.flush(&shell.state).unwrap();
+        assert_pending(&surface, "early 🦀 draft");
+        assert!(output.last_frame()["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|op| op == &json!(["focus", "composer.editor"])));
+    }
+    shell.set_identity("cerebras", "cerebras/gemma-4-31b", "off");
+    shell.set_workspace(std::path::PathBuf::from("/startup-fixture/workspace"));
+    surface.flush(&shell.state).unwrap();
+    assert_pending(&surface, "early 🦀 draft");
+    shell.finish_startup();
+    surface.flush(&shell.state).unwrap();
+    assert!(find_node(&surface.sent.main, "welcome").is_some());
+    for visible in [
+        "composer.rule",
+        "composer.context",
+        "composer.bar",
+        "composer.model",
+    ] {
+        assert!(find_node(&surface.sent.dock, visible).is_some());
+    }
+    let ready = output.last_frame().to_string();
+    for together in [
+        "welcome",
+        "composer.rule",
+        "composer.bar",
+        "cerebras/gemma-4-31b",
+    ] {
+        assert!(
+            ready.contains(together),
+            "ready frame missing {together}: {ready}"
+        );
+    }
+    assert_eq!(shell.pending(), "early 🦀 draft");
+    assert_eq!(surface.sent.focus.as_deref(), Some("composer.editor"));
+    assert_eq!(output.messages("o").len(), 1);
+    assert!(output.messages("x").is_empty());
+}
+
+#[test]
+fn native_startup_setup_credentials_and_errors_keep_their_input_owners() {
+    let (mut shell, mut surface, _) = setup(16);
+    shell.state.borrow_mut().startup_pending = true;
+    shell.error("Setup needs an endpoint".into());
+    for secret in [false, true] {
+        shell.begin_tool_input("Credential/setup fixture", secret);
+        surface.flush(&shell.state).unwrap();
+        assert!(surface.sent.main.is_empty());
+        assert!(find_node(&surface.sent.dock, "error").is_some());
+        assert_eq!(
+            surface.sent.focus,
+            super::super::tern_prompt::focus(&shell.state.borrow())
+        );
+        assert!(surface
+            .sent
+            .layer
+            .iter()
+            .any(|node| node.k == Kind::Overlay));
+        assert!(find_node(&surface.sent.dock, "composer.rule").is_none());
+        let editor = find_node(&surface.sent.dock, "composer.editor").unwrap();
+        assert_eq!(editor.p.as_ref().unwrap().as_map()["readonly"], true);
+        shell.end_tool_input();
+    }
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Choose terminal appearance"),
+        items: vec!["Auto".into(), "Dark".into()],
+        descriptions: vec![None; 2],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::ProviderSetup(vec!["Auto".into(), "Dark".into()]),
+    });
+    surface.flush(&shell.state).unwrap();
+    assert!(surface.sent.main.is_empty());
+    assert_eq!(
+        surface.sent.focus,
+        super::super::tern_picker::focus(&shell.state.borrow())
+    );
+    assert!(surface.sent.focus.is_some());
+    assert!(find_node(&surface.sent.dock, "error").is_some());
+    assert!(find_node(&surface.sent.dock, "composer.rule").is_none());
+    shell.close_panel();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(surface.sent.focus.as_deref(), Some("composer.editor"));
+    assert!(find_node(&surface.sent.dock, "error").is_some());
+}
+
+#[test]
 fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
     let (shell, mut surface, _) = setup(2);
     shell.state.borrow_mut().editor.set_text("/");

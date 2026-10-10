@@ -5974,7 +5974,7 @@ fn agent_spawn_requires_host_policy_and_defaults_tokens_to_parent_inheritance() 
         "message": "inspect safely",
         "idempotency_key": "inspect-1",
         "policy": {
-            "tools": ["read", "search"],
+            "tools": ["read"],
             "max_depth": 1,
             "max_concurrent_children": 2,
             "max_turns": 8,
@@ -5999,7 +5999,7 @@ fn agent_spawn_requires_host_policy_and_defaults_tokens_to_parent_inheritance() 
     assert!(invalid
         .validate()
         .unwrap_err()
-        .contains("duplicate-free subset of read, search, edit, write, and bash"));
+        .contains("duplicate-free subset of read, edit, write, and bash"));
 
     let mut elevated = policy.clone();
     elevated.tools = vec!["read".into(), "bash".into()];

@@ -12,6 +12,17 @@ const SESSION_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[cfg(test)]
 mod session_tests;
+#[cfg(test)]
+mod tree_tests;
+
+/// Result of a durable tree navigation at the idle session boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreeNavigationResult {
+    /// Selected user/custom message text, returned without resubmission.
+    pub editor_text: Option<String>,
+    /// Durable abandoned-branch summary created at the target parent.
+    pub summary_entry: Option<EntryId>,
+}
 
 fn session_operation_error(error: SessionOperationError) -> AgentError {
     match error {
@@ -246,7 +257,10 @@ impl ContextCapacityCache {
             let Some(entry) = session.entry(id) else {
                 return false;
             };
-            if matches!(entry.value, EntryValue::Compaction { .. }) {
+            if matches!(
+                entry.value,
+                EntryValue::Compaction { .. } | EntryValue::BranchSummary { .. }
+            ) {
                 return false;
             }
             appended.push(entry);
@@ -292,7 +306,9 @@ impl ContextCapacityCache {
             };
             if matches!(
                 entry.value,
-                EntryValue::Compaction { .. } | EntryValue::ResponsesCompaction { .. }
+                EntryValue::Compaction { .. }
+                    | EntryValue::ResponsesCompaction { .. }
+                    | EntryValue::BranchSummary { .. }
             ) {
                 return false;
             }
@@ -552,6 +568,16 @@ impl CompactionContext<'_> {
             summary_request_guard.finish(false);
             summary_guard.finish(false);
             return Ok(None);
+        }
+        if response
+            .message
+            .content
+            .iter()
+            .any(|part| matches!(part, AssistantPart::ToolCall(_)))
+        {
+            return Err(AgentError::IncompleteResponse {
+                stop_reason: "tool-free summary attempted to call a tool".into(),
+            });
         }
         let text = assistant_text(&response).ok_or_else(|| AgentError::IncompleteResponse {
             stop_reason: "compaction summary was empty or whitespace-only".to_owned(),
@@ -1664,8 +1690,6 @@ impl Agent {
 
     /// Navigate an existing session tree at the host's idle boundary. Before
     /// hooks may veto; the after-event follows the real synced head record.
-    /// Summary-producing navigation requires a separate durable record contract
-    /// and is not silently emulated by an invented user/assistant message.
     pub async fn navigate_session_tree(
         &mut self,
         target: Option<EntryId>,
@@ -1682,6 +1706,7 @@ impl Agent {
         let before = SessionOperation::BeforeTree {
             target_id: target.clone(),
             old_head: old_head.clone(),
+            preparation: None,
         };
         match run_session_operation_hooks(
             &mut self.session,
@@ -1721,6 +1746,7 @@ impl Agent {
             &SessionOperation::Tree {
                 old_head,
                 new_head: target,
+                summary_entry: None,
             },
             &cancellation,
             SESSION_OPERATION_TIMEOUT,
@@ -1732,6 +1758,224 @@ impl Agent {
             )
         })?;
         Ok(())
+    }
+
+    /// Navigate a selected tree entry, optionally carrying only the branch
+    /// being left into a durable summary. User/custom entries select their
+    /// parent and return their text to the editor; selecting the head is a no-op.
+    /// Failure before commit never moves the head. A post-commit hook failure
+    /// explicitly reports that navigation is already durable and must not retry.
+    pub async fn navigate_session_tree_with_summary(
+        &mut self,
+        target: EntryId,
+        summarize: bool,
+        custom_instructions: Option<&str>,
+        cancellation: CancellationToken,
+        on_event: impl FnMut(AgentEvent),
+    ) -> Result<TreeNavigationResult, AgentError> {
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let old_head = self.session.head();
+        if old_head.as_ref() == Some(&target) {
+            return Ok(TreeNavigationResult::default());
+        }
+        let selected = self
+            .session
+            .entry(&target)
+            .ok_or_else(|| SessionError::UnknownEntry(target.clone()))?;
+        let (new_parent, editor_text) = match &selected.value {
+            EntryValue::Message(Message::User(user))
+                if !user
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, UserPart::ToolResult(_))) =>
+            {
+                let text = user
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                (selected.parent.clone(), Some(text))
+            }
+            _ => (Some(target.clone()), None),
+        };
+        let instructions = custom_instructions
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if instructions.is_some_and(|text| {
+            text.len() > 16 * 1024
+                || text
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        }) {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "invalid branch summary instructions".into(),
+            ));
+        }
+        self.cache_warmer
+            .cancel(&mut self.session, "session tree navigation")?;
+        let branch = session_operation_branch(&self.session).map_err(session_operation_error)?;
+        let source_ids = branch.iter().map(|entry| &entry.id).collect::<HashSet<_>>();
+        let mut common_ancestor_id = Some(target.clone());
+        while let Some(id) = common_ancestor_id.as_ref() {
+            if source_ids.contains(id) {
+                break;
+            }
+            common_ancestor_id = self
+                .session
+                .entry(id)
+                .expect("validated session ancestry")
+                .parent
+                .clone();
+        }
+        let span_start = common_ancestor_id.as_ref().map_or(0, |id| {
+            branch
+                .iter()
+                .position(|entry| &entry.id == id)
+                .expect("shared source ancestor")
+                + 1
+        });
+        let entries_to_summarize = branch[span_start..].to_vec();
+        let mut messages = Vec::new();
+        let mut inherited = crate::compaction::CompactionDetails::default();
+        for entry in &entries_to_summarize {
+            match &entry.value {
+                EntryValue::Message(message) => messages.push(message.clone()),
+                EntryValue::BranchSummary {
+                    summary, details, ..
+                } => {
+                    messages.push(crate::session::branch_summary_message(summary));
+                    inherited
+                        .read_files
+                        .extend(details.read_files.iter().cloned());
+                    inherited
+                        .modified_files
+                        .extend(details.modified_files.iter().cloned());
+                }
+                EntryValue::Compaction {
+                    summary,
+                    snapcompact,
+                    details,
+                    ..
+                } => {
+                    let text = snapcompact.as_ref().map_or(summary.as_str(), |checkpoint| {
+                        checkpoint.source_text.as_str()
+                    });
+                    messages.push(Message::User(UserMessage {
+                        content: vec![UserPart::Text(format!(
+                            "[summary of earlier conversation]\n{text}"
+                        ))],
+                    }));
+                    inherited
+                        .read_files
+                        .extend(details.read_files.iter().cloned());
+                    inherited
+                        .modified_files
+                        .extend(details.modified_files.iter().cloned());
+                }
+                _ => {}
+            }
+        }
+        let preparation = crate::compaction::prepare_branch_handoff(messages, &inherited);
+        let before = SessionOperation::BeforeTree {
+            target_id: Some(target),
+            old_head: old_head.clone(),
+            preparation: Some(crate::compaction::TreeNavigationPreparation {
+                common_ancestor_id,
+                entries_to_summarize,
+                user_wants_summary: summarize,
+                custom_instructions: instructions.map(str::to_owned),
+            }),
+        };
+        match run_session_operation_hooks(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            &before,
+            &cancellation,
+            SESSION_OPERATION_TIMEOUT,
+        )
+        .await
+        .map_err(session_operation_error)?
+        {
+            SessionOperationDecision::Continue => {}
+            SessionOperationDecision::Cancel => {
+                return Err(AgentError::InvalidCompactionPolicy(
+                    "tree navigation cancelled by extension".into(),
+                ))
+            }
+            SessionOperationDecision::ReplaceCompaction { .. } => {
+                unreachable!("driver validates event-specific decisions")
+            }
+        }
+        let revision =
+            SessionSourceRevision::capture(&self.session).map_err(session_operation_error)?;
+        let summary = if summarize && !preparation.messages.is_empty() {
+            Some(
+                self.summarize_branch_with_instructions(
+                    &preparation,
+                    instructions,
+                    cancellation.clone(),
+                    on_event,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        revision
+            .validate_tree(&self.session)
+            .map_err(session_operation_error)?;
+        let summary_entry = match summary {
+            Some(summary) => Some(self.session.branch_with_summary_from(
+                new_parent,
+                old_head.clone().expect("nonempty source span has a head"),
+                summary,
+                preparation.details,
+            )?),
+            None => {
+                match new_parent {
+                    Some(id) => self.session.checkout(id)?,
+                    None => self.session.checkout_root()?,
+                }
+                None
+            }
+        };
+        let committed_head = self.session.head();
+        let committed_summary = summary_entry.as_ref().map(|id| {
+            self.session
+                .entry(id)
+                .expect("summary just committed")
+                .clone()
+        });
+        run_session_operation_hooks(
+            &mut self.session,
+            &self.extensions.session_operation_hooks,
+            &SessionOperation::Tree {
+                old_head,
+                new_head: committed_head.clone(),
+                summary_entry: committed_summary,
+            },
+            &cancellation,
+            SESSION_OPERATION_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            AgentError::InvalidCompactionPolicy(format!(
+                "tree navigation committed at {}; post-commit session hook failed; do not retry",
+                committed_head.as_ref().map_or("root", |id| id.0.as_str()),
+            ))
+        })?;
+        Ok(TreeNavigationResult {
+            editor_text,
+            summary_entry,
+        })
     }
 
     /// Runs a tool-free summary through the same cancellable retry, hard-budget,
@@ -1768,14 +2012,31 @@ impl Agent {
         cancellation: CancellationToken,
         on_event: impl FnMut(AgentEvent),
     ) -> Result<String, AgentError> {
+        self.summarize_branch_with_instructions(preparation, None, cancellation, on_event)
+            .await
+    }
+
+    async fn summarize_branch_with_instructions(
+        &mut self,
+        preparation: &crate::compaction::BranchHandoffPreparation,
+        instructions: Option<&str>,
+        cancellation: CancellationToken,
+        on_event: impl FnMut(AgentEvent),
+    ) -> Result<String, AgentError> {
         let model = self
             .compaction_model
             .clone()
             .unwrap_or_else(|| self.model.clone());
+        let system = instructions.map_or_else(
+            || SUMMARIZATION_SYSTEM_PROMPT.to_owned(),
+            |instructions| {
+                format!("{SUMMARIZATION_SYSTEM_PROMPT}\n\nAdditional focus: {instructions}")
+            },
+        );
         let summary = self
             .summary_call(
                 &model,
-                SUMMARIZATION_SYSTEM_PROMPT,
+                &system,
                 vec![crate::compaction::build_branch_handoff_message(preparation)],
                 SUMMARY_OUTPUT_TOKENS,
                 crate::events::ProviderOperation::BranchSummary,

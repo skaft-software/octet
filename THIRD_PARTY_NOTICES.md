@@ -20,6 +20,12 @@ port of Pi's TUI architecture.
 - License: MIT
 - [License text](third_party/licenses/PI-MIT.txt)
 
+The built-in `pi` theme natively ports Pi 1.0.2's MIT-licensed system-theme
+recipe and contrast solver, pinned to `cd32f7725fdbddbaecdff5b1e68491563394e0ca`.
+Its color conversions reuse the existing Pi perceptual-color port. Upstream
+source hashes, an offline oracle and independent test vectors are retained in
+`crates/octet-coding-agent/src/tui/theme/pi/`. No Node runtime is needed to use it.
+
 The optional `extensions/octet-pi-compat` package uses the pinned
 `@earendil-works/pi-tui` 1.0.2 MIT-licensed component/utilities library inside
 its separate Node process. It does not install, import, or execute Pi's

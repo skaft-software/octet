@@ -81,7 +81,11 @@ withdraw stale contributions before another provider request or resource command
 Nothing is written to config, installation metadata or durable sessions.
 
 Authorized App frontends now wire startup, reload, retirement, and atomic
-publication. Native-host/preflight construction stays default-off; Mode or
+publication. A contributor admitted after the first interactive frame activates
+the existing consumer and provider guard exactly once. Early prompt-hook attachment
+also completes resource publication before input transformation or provider use;
+readiness does not wait for an unadmitted process. Native-host/preflight
+construction stays default-off; Mode or
 factory registration alone never supplies the consumer capability. Retained
 startup outcome records host-attempt completion, not remote execution settlement.
 Actual-process and App tests cover these paths; this does not establish full Pi

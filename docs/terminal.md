@@ -146,6 +146,12 @@ opts into the bounded semantic viewport, captures the wheel and drag selection,
 and lets a resumed session load newest-first. Explicit CLI choices take precedence
 over configured mouse policy.
 
+This is **not Pi-style fullscreen by default**. A `pi` theme changes presentation,
+not viewport ownership. `--mouse app` is an explicit primary-screen viewport
+choice, not an alternate-screen/fullscreen switch. Native Tern surfaces negotiate
+their own layout; their large pickers and report overlays do not change the
+ordinary ANSI launch default.
+
 With capture on (`--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release

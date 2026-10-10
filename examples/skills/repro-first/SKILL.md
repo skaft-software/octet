@@ -4,7 +4,6 @@ description: Diagnose a runtime failure from a minimal reproduction before propo
 version: 0.1.0
 required-tools:
   - read
-  - search
   - bash
 tags:
   - debugging

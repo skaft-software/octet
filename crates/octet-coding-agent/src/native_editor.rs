@@ -644,7 +644,7 @@ impl Editor {
         let slash = prefix.trim_start().starts_with('/') && !prefix.contains('\n');
         let symbol = symbol_context(prefix, &self.triggers);
         let force = if explicit_tab {
-            !(slash && !prefix.trim_start().contains(' '))
+            !slash || prefix.trim_start().contains(' ')
         } else {
             self.menu.as_ref().is_some_and(|menu| menu.force)
         };

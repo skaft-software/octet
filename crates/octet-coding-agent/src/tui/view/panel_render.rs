@@ -470,7 +470,13 @@ fn select_list_uses_stacked_rows(
 ) -> bool {
     (action.is_model_picker()
         && PresentationLayout::new(&state.theme, width).picker == PickerLayout::Stacked
-        || action.subagent_panel().is_some()
+        || (action.subagent_panel().is_some()
+            || matches!(
+                action,
+                PanelAction::SelectSettings(_)
+                    | PanelAction::SelectExtension(_)
+                    | PanelAction::ProviderSetup(_)
+            ))
             && PresentationLayout::new(&state.theme, width).picker != PickerLayout::Columns)
         && available_rows
             >= if action.model_provider_groups().is_some() {
@@ -541,14 +547,31 @@ fn render_panel_item(
     };
     let available = usize::from(width).saturating_sub(visible_width(&prefix));
     let ellipsis = state.theme.glyph("ellipsis");
-
-    if stacked {
-        let label = sexy_tui_rs::truncate_to_width(&item, available, Some(ellipsis));
-        let label = if is_selected {
+    let menu_labels = matches!(
+        state.panel.as_ref(),
+        Some(Panel::SelectList {
+            action: PanelAction::SelectSettings(_)
+                | PanelAction::SelectExtension(_)
+                | PanelAction::ProviderSetup(_),
+            ..
+        })
+    );
+    let style_label = |label: String| {
+        if is_selected {
             state.theme.bold(&state.theme.fg("model_accent", &label))
+        } else if menu_labels {
+            state.theme.bold(&label)
         } else {
             label
-        };
+        }
+    };
+
+    if stacked {
+        let label = style_label(sexy_tui_rs::truncate_to_width(
+            &item,
+            available,
+            Some(ellipsis),
+        ));
         let mut lines = vec![fit_line(&format!("{prefix}{label}"), width)];
         let detail_prefix = format!("{inset}  ");
         let detail_width = usize::from(width).saturating_sub(visible_width(&detail_prefix));
@@ -582,11 +605,7 @@ fn render_panel_item(
     } else {
         sexy_tui_rs::truncate_to_width(&item, available, Some(ellipsis))
     };
-    let label = if is_selected {
-        state.theme.bold(&state.theme.fg("model_accent", &label))
-    } else {
-        label
-    };
+    let label = style_label(label);
 
     let mut line = format!("{prefix}{label}");
     if let (Some(label_width), Some(description)) = (label_width, description) {

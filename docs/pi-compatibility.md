@@ -44,10 +44,12 @@ octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compa
 
 Setup uses Pi's resolver, tries each factory on octet's emulated path, then tries
 the installed-Pi fallback if loading fails. It prints the chosen route or a skip
-reason for every entry. Broken factories and conflicting registrations are
-skipped. Reviewed builtin overrides receive exact manifest grants and require
-native `builtin_tool_overrides_v1` admission; first-party ownership conflicts
-remain refused. Unsupported tool-schema constraints cause an explicit skip, not
+reason for every entry. Broken factories are reported. Registration collisions
+require an explicit owner choice and fresh review; setup refuses a partial import
+rather than silently discarding a factory's other commands. Installed native
+manifests alone do not establish active ownership. Reviewed builtin overrides
+receive exact manifest grants and require native `builtin_tool_overrides_v1`
+admission. Unsupported tool-schema constraints cause an explicit skip, not
 constraint removal. Supported patterns are enforced. Loading is not proof that an extension's commands, hooks or UI work.
 Failing lifecycle observation callbacks are reported and isolated; permission/veto
 hooks and failed host mutations still fail closed. Replace `node` with `bun` to
@@ -59,8 +61,13 @@ import credentials, change Pi settings, or enable the bridge. It snapshots enabl
 Pi palettes as native `pi-*` themes and makes the selected palette this session's
 startup preference; explicit `--theme`/`OCTET_THEME` wins. Saved settings are not
 rewritten. Pi helper/remote-component colors use the imported snapshot; later
-native theme changes are not yet synchronized to those components. Missing
-packages are not installed. The Pi install location is recorded, so a different
+native theme changes are not yet synchronized to those components. While enabled,
+the bridge also exposes current enabled Pi themes in `/theme` at startup and
+`/reload`, even without mirror mode. This read-only palette discovery does not
+expand executable grants or change Pi/Octet settings. Invalid or over-budget
+palettes are diagnosed; disabling the extension withdraws them. The built-in
+`pi` theme is Pi 1.0's default system palette and works without the bridge.
+Missing packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
 <a id="mirror-your-pi-setup"></a>
@@ -76,9 +83,11 @@ node configure.mjs --reviewed --from-pi --mirror \
 octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compat
 ```
 
-`--mirror` records the opt-in (the Pi agent directory and one advertised hook
-set) rather than capturing the current entrypoints. At session startup the
-adapter discovers the Pi setup **read-only** and activates its equivalents
+`--mirror` captures reviewed entrypoints, bounded literal-relative import hashes,
+routes and static commands/tools/shortcuts/flags, and records the Pi agent directory.
+New or changed executable sources/static registrations require fresh configuration
+and review; startup never silently expands the executable grant. Resources are
+rediscovered **read-only** at startup and activate their equivalents
 through Octet's native machinery: the enabled Pi factories load through the
 adapter, and Pi skills, prompt templates, themes, `keybindings.json`, the global
 context file and the selected model become native session resources. Discovery
@@ -93,12 +102,18 @@ user's Octet-only setup, and re-enabling or `/reload` is idempotent. Mirror mode
 runs the Pi setup's enabled factories with your OS permissions whenever the
 extension starts, so it is the same explicit-review decision as `--from-pi`.
 The mapping is item-by-item: Pi `settings.json` (theme, default
-provider/model, package/resource path lists), the user and project
+provider/model and `defaultThinkingLevel`, package/resource path lists), user
 `extensions|skills|prompts|themes` directories, installed managed npm package
-resources, `keybindings.json` and the global context file. Deliberate
-boundaries: Pi `models.json` HTTP providers and Pi `defaultThinkingLevel` are
-not applied, Pi resource pattern filters are refused with a diagnostic, and
-`auth.json`, sessions and trust state are never read. Mirror mode refuses a
+resources, `keybindings.json` and the global context file. Project `.pi` resources
+require authoritative host workspace trust; it defaults to false, independently
+of factory review. Scoped/versioned npm references resolve only to an existing
+matching installed identity. Supported bounded exact/glob selectors and resource
+empty lists retain their selection semantics; unsupported patterns are diagnosed
+rather than broadened. Explicit invocation model/thinking choices win over these
+session-only defaults; unavailable defaults warn without silently lowering effort
+or changing half the model/thinking pair. Deliberate boundaries: Pi `models.json`
+HTTP providers and managed git packages remain unsupported, and `auth.json`,
+sessions and trust state are never read. Mirror mode refuses a
 factory that needs a hook outside the advertised set instead of silently
 leaving it inert.
 

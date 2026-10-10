@@ -412,7 +412,29 @@ configure({output, extensions: [root + '/factory.mjs'], reviewed: true, cwd: roo
     );
     let theme_path = root.join("extensions/octet-pi-compat/themes/pi-import-proof.toml");
     let imported = std::fs::read(&theme_path).unwrap();
-    assert!(String::from_utf8_lossy(&imported).contains("composer_border = \"#c792ea\""));
+    let source = std::str::from_utf8(&imported).unwrap();
+    let native: toml::Value =
+        toml::from_str(source).expect("import must produce unique native tables");
+    assert_eq!(
+        native["colors"]["composer_border"].as_str(),
+        Some("#c792ea")
+    );
+    // Exercise the actual native parser, not just strings in the snapshot.
+    for depth in [
+        crate::tui::terminal::ColorDepth::None,
+        crate::tui::terminal::ColorDepth::Ansi16,
+        crate::tui::terminal::ColorDepth::TrueColor,
+    ] {
+        let theme = crate::tui::theme::test_theme_source_with(
+            source,
+            crate::tui::terminal::TerminalCapabilities::test(true, true, depth),
+            crate::tui::theme::TerminalBackground::Dark,
+        );
+        assert!(
+            theme.is_pi_theme(),
+            "imports retain the Pi presentation policy"
+        );
+    }
     for explicit in [false, true] {
         let mut config = crate::extensions::tests::executable_extension_config(
             &workspace,

@@ -694,6 +694,8 @@ impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiChromeRequest);
 
 #[cfg(test)]
+pub(crate) mod pi_fixture;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod ui_transport_tests;

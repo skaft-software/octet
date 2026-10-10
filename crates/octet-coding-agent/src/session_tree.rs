@@ -2,22 +2,43 @@
 
 use std::collections::{HashMap, HashSet};
 
-use octet_agent::{Entry, EntryValue, Session};
+use octet_agent::{Entry, EntryId, EntryValue, Session};
+use octet_ai::{AssistantPart, Message, ToolResultPart, UserPart};
 
 // Keep deep histories linear in output size and bounded in per-frame storage.
 // Beyond this level, explicit depth and parent IDs preserve every fork edge.
 const MAX_VISIBLE_ANCESTORS: usize = 16;
 
+/// One durable node. Selection retains the entry ID, never a filtered row index.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionTreeRow {
+    pub entry_id: EntryId,
+    pub label: String,
+    pub preview: String,
+}
+
 /// Render the durable entry forest in append order while making forks and the
-/// selected branch visible. Session replay has already validated parent links,
-/// so this formatter can stay presentation-only and never alter persistence.
+/// selected branch visible. Session replay has already validated parent links.
 pub(crate) fn render_session_tree(session: &Session) -> String {
-    let entries = session.entries();
     let mut output = String::from("Session branch tree (* = active head, + = active branch):\n");
-    if entries.is_empty() {
+    let rows = session_tree_rows(session);
+    if rows.is_empty() {
         output.push_str("  (empty session)");
         return output;
     }
+    for row in rows {
+        output.push_str(&row.label);
+        output.push('\n');
+    }
+    output.push_str("\nUse /tree to navigate this session; /fork creates a new session file.");
+    output
+}
+
+/// Every durable entry, including inactive siblings and non-message markers.
+/// Deep ancestry is bounded visually, with explicit depth/parent identifiers.
+pub(crate) fn session_tree_rows(session: &Session) -> Vec<SessionTreeRow> {
+    let entries = session.entries();
+    let mut rows = Vec::with_capacity(entries.len());
 
     let by_id = entries
         .iter()
@@ -51,6 +72,7 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
         .collect::<Vec<_>>();
 
     while let Some(frame) = stack.pop() {
+        let mut output = String::new();
         for has_next_sibling in
             &frame.ancestor_has_next_sibling[..frame.depth.min(MAX_VISIBLE_ANCESTORS)]
         {
@@ -81,7 +103,11 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
             )
             .expect("writing to a String");
         }
-        output.push('\n');
+        rows.push(SessionTreeRow {
+            entry_id: entry.id.clone(),
+            label: output,
+            preview: entry_preview(entry),
+        });
 
         let mut next_ancestors = frame.ancestor_has_next_sibling;
         if frame.depth < MAX_VISIBLE_ANCESTORS {
@@ -98,8 +124,7 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
         }
     }
 
-    output.push_str("\nUse /checkout <entry-id> to select an earlier point and fork from it.");
-    output
+    rows
 }
 
 #[derive(Debug)]
@@ -133,10 +158,27 @@ fn active_branch_indices(
 }
 
 fn entry_kind(entry: &Entry) -> &'static str {
+    if entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.custom_message.as_ref())
+        .is_some()
+    {
+        return "custom-message";
+    }
     match &entry.value {
+        EntryValue::Message(Message::User(user))
+            if user
+                .content
+                .iter()
+                .any(|part| matches!(part, UserPart::ToolResult(_))) =>
+        {
+            "tool"
+        }
         EntryValue::Message(octet_ai::Message::User(_)) => "user",
         EntryValue::Message(octet_ai::Message::Assistant(_)) => "assistant",
         EntryValue::Compaction { .. } => "compaction",
+        EntryValue::BranchSummary { .. } => "branch-summary",
         EntryValue::ResponsesTurn { .. } => "responses-turn",
         EntryValue::ResponsesCompaction { .. } => "responses-compaction",
         EntryValue::ResponsesReasoning { .. } => "responses-reasoning",
@@ -149,6 +191,82 @@ fn entry_kind(entry: &Entry) -> &'static str {
     }
 }
 
+fn entry_preview(entry: &Entry) -> String {
+    let text = if let Some(custom) = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.custom_message.as_ref())
+    {
+        custom.text()
+    } else if let Some(text) = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.display_text.as_ref())
+    {
+        text.clone()
+    } else {
+        match &entry.value {
+            EntryValue::Message(Message::User(user)) => user
+                .content
+                .iter()
+                .map(|part| match part {
+                    UserPart::Text(text) => text.clone(),
+                    UserPart::Media(_) => "[media]".into(),
+                    UserPart::ToolResult(result) => format!(
+                        "{}{}: {}",
+                        result.tool_call_id.0,
+                        if result.is_error { " (error)" } else { "" },
+                        result
+                            .content
+                            .iter()
+                            .map(|part| match part {
+                                ToolResultPart::Text(text) => text.as_str(),
+                                ToolResultPart::Media(_) => "[media]",
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            EntryValue::Message(Message::Assistant(assistant)) => assistant
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    AssistantPart::Text(text) => Some(text.clone()),
+                    AssistantPart::ToolCall(call) => Some(format!("[tool: {}]", call.name)),
+                    AssistantPart::Media(_) => Some("[media]".into()),
+                    AssistantPart::Reasoning(_) | AssistantPart::ProviderMetadata(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            EntryValue::Compaction { summary, .. } | EntryValue::BranchSummary { summary, .. } => {
+                summary.clone()
+            }
+            EntryValue::Config {
+                model, reasoning, ..
+            } => format!(
+                "{} {}",
+                model.as_deref().unwrap_or(""),
+                reasoning.as_deref().unwrap_or("")
+            ),
+            EntryValue::PromptTemplateSelected { name, .. } => name.clone(),
+            EntryValue::SkillActivated { descriptor, .. } => descriptor.id.to_string(),
+            EntryValue::SkillResourceRead { resource_path, .. } => resource_path.clone(),
+            EntryValue::SkillDeactivated { skill_id, .. } => skill_id.to_string(),
+            _ => String::new(),
+        }
+    };
+    // Inert bounded text only: neither ANSI nor multi-line content owns a row.
+    crate::tui::view::sanitize_for_terminal(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +277,64 @@ mod tests {
             reasoning: None,
             reasoning_mode: None,
         }
+    }
+
+    #[test]
+    fn picker_rows_include_inactive_tools_custom_messages_and_summaries_with_inert_previews() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("previews.jsonl")).unwrap();
+        let root = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("original prompt".into())],
+            })))
+            .unwrap();
+        let tool = session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("read-1".into()),
+                    content: vec![ToolResultPart::Text("tool output\nsecond line".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            })))
+            .unwrap();
+        session.checkout(root.clone()).unwrap();
+        let custom = session
+            .append_with_metadata(
+                EntryValue::Message(Message::User(octet_ai::UserMessage {
+                    content: vec![UserPart::Text("canonical custom content".into())],
+                })),
+                Some(octet_agent::EntryMetadata {
+                    custom_message: Some(octet_agent::session::CustomMessage {
+                        custom_type: "review".into(),
+                        content: octet_agent::session::CustomMessageContent::Text(
+                            "custom preview".into(),
+                        ),
+                        display: true,
+                        details: None,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let summary = session
+            .branch_with_summary(
+                Some(root.clone()),
+                "branch handoff preview".into(),
+                Default::default(),
+            )
+            .unwrap();
+        let rows = session_tree_rows(&session);
+        assert_eq!(rows.len(), session.entries().len());
+        let find = |id: &EntryId| rows.iter().find(|row| &row.entry_id == id).unwrap();
+        assert!(find(&root).label.contains("└─+"));
+        assert!(find(&tool).label.contains("tool"));
+        assert_eq!(find(&tool).preview, "read-1: tool output second line");
+        assert_eq!(find(&custom).preview, "custom preview");
+        assert!(find(&custom).label.contains("custom-message"));
+        assert!(find(&summary).label.contains("*"));
+        assert!(find(&summary).label.contains("branch-summary"));
+        assert_eq!(find(&summary).preview, "branch handoff preview");
     }
 
     #[test]
@@ -194,7 +370,7 @@ mod tests {
                     "   │  └─  {}  config\n",
                     "   └─+ {}  config\n",
                     "      └─* {}  config\n",
-                    "\nUse /checkout <entry-id> to select an earlier point and fork from it."
+                    "\nUse /tree to navigate this session; /fork creates a new session file."
                 ),
                 root.0, abandoned.0, abandoned_leaf.0, selected.0, head.0
             )

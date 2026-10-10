@@ -86,7 +86,11 @@ async fn fragments_and_burst(master: &mut std::fs::File, input: &mut TerminalInp
         })
     );
     let burst = b"\x1b[<64;31;11M".repeat(192);
-    master.write_all(&burst).unwrap();
+    // A PTY may hold less than the whole burst (notably on macOS). Feed it
+    // concurrently so a blocking write cannot prevent the sole reader from
+    // draining it. Keep the full burst and every event assertion.
+    let mut writer = master.try_clone().unwrap();
+    let feed = std::thread::spawn(move || writer.write_all(&burst));
     for _ in 0..192 {
         assert!(matches!(
             input.next().await.unwrap().unwrap(),
@@ -98,6 +102,7 @@ async fn fragments_and_burst(master: &mut std::fs::File, input: &mut TerminalInp
             })
         ));
     }
+    feed.join().unwrap().unwrap();
 }
 
 async fn drag_and_keyboard(master: &mut std::fs::File, input: &mut TerminalInput) {

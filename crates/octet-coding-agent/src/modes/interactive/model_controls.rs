@@ -22,7 +22,7 @@ pub(super) fn queue_labels(queue: &VecDeque<PendingIdleAction>) -> Vec<String> {
                     format!("thinking {} · idle", reasoning_label(reasoning))
                 }
                 PendingIdleAction::ChangeThinkingLevel(level) => {
-                    format!("thinking {level:?} · idle")
+                    format!("thinking {} · idle", level.label())
                 }
                 PendingIdleAction::PersistThinkingPreference(_)
                 | PendingIdleAction::SyncTheme(_)

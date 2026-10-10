@@ -31,9 +31,9 @@ test('tool prompt metadata maps verbatim to the negotiated tool catalog, not the
   const output = join(directory, 'octet-pi-compat');
   const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
   const peer = launch(t, [entry], { config: join(output, 'bridge.json') });
-  // Declare the reviewed hook surface; no resource callback requires a consumer.
+  // Declare the reviewed hook surface, including configured palette discovery.
   peer.metadata.hooks = registrations.hooks;
-  const result = await peer.init(['tool_prompt_metadata_v1', 'session_entries', 'pipeline_hooks_v1']);
+  const result = await peer.init(['tool_prompt_metadata_v1', 'session_entries', 'pipeline_hooks_v1', 'resource_paths_v1']);
   assert.ok(result.protocol.features.includes('tool_prompt_metadata_v1'));
   assert.deepEqual(result.tools, peer.metadata.tools);
   for (const [i, expected] of definitions.entries()) {

@@ -59,6 +59,10 @@ pub struct ExtensionResourcePaths {
     /// invocation has no explicit model choice; never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<ExtensionDefaultModel>,
+    /// Optional exact portable Pi thinking preference. Session-only; explicit
+    /// invocation reasoning and the native model's supported levels take priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_thinking_level: Option<String>,
 }
 
 impl ExtensionResourcePaths {
@@ -108,6 +112,16 @@ impl ExtensionResourcePaths {
             if !bounded(&selection.provider) || !bounded(&selection.model) {
                 return Err(ExtensionRuntimeError::Protocol(
                     "invalid resource_paths_v1 default_model".into(),
+                ));
+            }
+        }
+        if let Some(level) = &self.default_thinking_level {
+            if !matches!(
+                level.as_str(),
+                "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            ) {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "invalid resource_paths_v1 default_thinking_level; use off, minimal, low, medium, high, xhigh, or max".into(),
                 ));
             }
         }
@@ -317,6 +331,59 @@ mod tests {
             ..Default::default()
         };
         assert!(paths.validate().is_err());
+    }
+
+    #[test]
+    fn default_thinking_wire_is_optional_strict_and_bounded() {
+        let empty = serde_json::to_value(ExtensionResourcePaths::default()).unwrap();
+        assert!(empty.get("default_thinking_level").is_none());
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let reply: ResourcePathsReply = serde_json::from_value(serde_json::json!({
+                "resource_paths": {"default_thinking_level": level}
+            }))
+            .unwrap();
+            reply.resource_paths.validate().unwrap();
+            assert_eq!(
+                reply.resource_paths.default_thinking_level.as_deref(),
+                Some(level)
+            );
+            assert_eq!(
+                serde_json::to_value(reply.resource_paths).unwrap()["default_thinking_level"],
+                level
+            );
+        }
+        for level in [
+            "", "on", "ultra", "MAX", " max", "max\n", "x-high", "min", "maximum",
+        ] {
+            let paths = ExtensionResourcePaths {
+                default_thinking_level: Some(level.into()),
+                ..Default::default()
+            };
+            assert!(paths.validate().is_err(), "{level:?}");
+        }
+        let oversized = ExtensionResourcePaths {
+            default_thinking_level: Some("x".repeat(4097)),
+            ..Default::default()
+        };
+        assert!(oversized.validate().is_err());
+        for value in [
+            serde_json::json!(123),
+            serde_json::json!(["max"]),
+            serde_json::json!({"level": "max"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ResourcePathsReply>(serde_json::json!({
+                    "resource_paths": {"default_thinking_level": value}
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ResourcePathsReply>(serde_json::json!({
+                "resource_paths": {"default_thinkingLevel": "max"}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

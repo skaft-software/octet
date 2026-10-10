@@ -53,9 +53,6 @@ pub fn use_windows_keybindings(platform: &str, wsl: bool) -> bool {
 #[must_use]
 pub fn default_definitions(platform: &str, wsl: bool) -> Vec<KeybindingDefinition> {
     let windows = use_windows_keybindings(platform, wsl);
-    // Platform-specific tree bindings were withdrawn with `/tree`; this
-    // helper still keys the remaining Windows-only defaults.
-    let _darwin = platform == "darwin";
 
     BASE_DEFINITIONS
         .iter()
@@ -494,6 +491,7 @@ pub const KEYBINDING_NAME_MIGRATIONS: &[(&str, &str)] = &[
     ("dequeue", "app.message.dequeue"),
     ("pasteImage", "app.clipboard.pasteImage"),
     ("newSession", "app.session.new"),
+    ("tree", "app.session.tree"),
     ("fork", "app.session.fork"),
     ("resume", "app.session.resume"),
     ("toggleSessionPath", "app.session.togglePath"),
@@ -685,7 +683,8 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("app.message.dequeue", &["alt+up"], "Restore queued messages"),
     ("app.clipboard.pasteImage", &["ctrl+v"], "Paste image from clipboard (text fallback)"),
     ("app.session.new", &[], "Start a new session"),
-    ("app.session.fork", &[], "Fork current session"),
+    ("app.session.tree", &[], "Open session tree"),
+    ("app.session.fork", &[], "Fork a new session file"),
     ("app.session.resume", &[], "Resume a session"),
     ("app.session.togglePath", &["ctrl+p"], "Toggle session path display"),
     ("app.session.toggleSort", &["ctrl+s"], "Toggle session sort mode"),
@@ -833,6 +832,24 @@ mod tests {
             KeybindingsManager::with_platform("linux", false, BTreeMap::new())
                 .matches(&escape, "app.interrupt")
         );
+    }
+
+    #[test]
+    fn tree_is_configurable_and_unbound_by_default_like_pi() {
+        for platform in ["darwin", "linux", "win32"] {
+            let manager = KeybindingsManager::with_platform(platform, false, BTreeMap::new());
+            assert!(manager.has_definition("app.session.tree"));
+            assert!(manager.get_keys("app.session.tree").is_empty());
+        }
+        let raw = serde_json::from_str(r#"{"tree":"ctrl+r"}"#).unwrap();
+        let (migrated, changed) = migrate_keybindings_config(&raw);
+        assert!(changed);
+        let manager =
+            KeybindingsManager::with_platform("linux", false, to_keybindings_config(&migrated));
+        assert!(manager.matches(
+            &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            "app.session.tree"
+        ));
     }
 
     #[test]

@@ -417,7 +417,7 @@ fn tool_schema_reserve_is_positive_and_deterministic() {
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["read", "edit", "write", "bash", "search"]);
+    assert_eq!(names, vec!["read", "edit", "write", "bash"]);
     let default_reserve = tool_schema_reserve(&definitions);
     assert!(default_reserve > 0);
     assert_eq!(default_reserve, tool_schema_reserve(&definitions));
@@ -426,7 +426,7 @@ fn tool_schema_reserve_is_positive_and_deterministic() {
     all_core.load(&CoreTools);
     let all_core_definitions = all_core.tool_definitions();
     #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut expected_all = vec!["read", "edit", "write", "bash", "search"];
+    let mut expected_all = vec!["read", "edit", "write", "bash"];
     #[cfg(windows)]
     expected_all.push("powershell");
     assert_eq!(
@@ -440,7 +440,7 @@ fn tool_schema_reserve_is_positive_and_deterministic() {
     // while the registered core set is a superset of the coding default.
     let narrowed = definitions
         .iter()
-        .filter(|definition| definition.name != "search")
+        .filter(|definition| definition.name != "write")
         .cloned()
         .collect::<Vec<_>>();
     assert!(tool_schema_reserve(&narrowed) < default_reserve);

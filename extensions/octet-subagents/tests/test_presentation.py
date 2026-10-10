@@ -25,7 +25,7 @@ class PresentationTests(unittest.TestCase):
             profile="explore",
             requested_model="inherit",
             effective_model="claude-sonnet-test",
-            tools=("read", "search"),
+            tools=("read",),
             state=state,
             phase="searching",
             created_at_ms=1_700_000_000_000,
@@ -105,21 +105,21 @@ class PresentationTests(unittest.TestCase):
         self.assertIn(worker.summary, detail["body"])
         self.assertEqual(node["references"][0]["kind"], "session")
         self.assertEqual(detail["title"], "parent > fixture-worker")
-        self.assertIn("read-only [read, search]", detail["body"])
+        self.assertIn("read-only [read]", detail["body"])
         self.assertIn("shared", detail["body"].lower())
         self.assertIn("no session ceiling", detail["body"])
 
     def test_full_tool_scope_is_reported_as_granted_mutation(self):
         worker = self.worker(
             "running",
-            tools=("read", "search", "edit", "write", "bash"),
+            tools=("read", "edit", "write", "bash"),
         )
         snapshot = build_snapshot(
             [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_001_000
         )
         detail = snapshot["collection"]["detail"]
         self.assertIn(
-            "granted mutation scope [read, search, edit, write, bash]", detail["body"]
+            "granted mutation scope [read, edit, write, bash]", detail["body"]
         )
         self.assertIn("shared", detail["body"].lower())
         self.assertIn("no session ceiling", detail["body"])
@@ -185,9 +185,9 @@ class PresentationTests(unittest.TestCase):
                     agent_id="agent-%d" % index,
                     agent_path="/root/worker-%d" % index,
                     name="worker-%d" % index,
-                    current_tool="search",
+                    current_tool="read",
                     phase="using search",
-                    recent_tools=[{"name": "search", "args": "pattern=private", "finished_at_ms": None}],
+                    recent_tools=[{"name": "read", "args": "path=private", "finished_at_ms": None}],
                 )
                 snapshot = build_snapshot(
                     [worker], selected_agent_id=worker.agent_id, now_ms=1_700_000_010_000
@@ -290,8 +290,8 @@ class PresentationTests(unittest.TestCase):
             cost_microdollars=1200,
             recent_tools=[
                 {
-                    "name": "search",
-                    "args": "pattern=spawn_agent path=crates",
+                    "name": "bash",
+                    "args": "command=rg spawn_agent crates",
                     "started_at_ms": 1_700_000_001_000,
                     "finished_at_ms": 1_700_000_002_000,
                     "error": False,
@@ -329,7 +329,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(activity["metrics"]["cost_microdollars"], 1200)
         detail = snapshot["collection"]["detail"]["body"]
         self.assertIn("Recent tool activity", detail)
-        self.assertIn("[ok] search pattern=spawn_agent path=crates", detail)
+        self.assertIn("[ok] bash command=rg spawn_agent crates", detail)
         self.assertIn("[running] read path=crates/octet-agent/src/delegation.rs", detail)
 
     def test_error_tool_activity_is_inspector_only_without_hiding_worker_failure(self):

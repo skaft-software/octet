@@ -144,6 +144,10 @@ fn assert_config_unchanged(root: &Path) {
 }
 
 fn app(root: &Path, resident: bool) -> App {
+    app_with_runner(root, resident, false)
+}
+
+fn app_with_runner(root: &Path, resident: bool, direct_runner: bool) -> App {
     use std::os::unix::fs::PermissionsExt as _;
 
     let mcp_config = root.join("mcp.json");
@@ -175,20 +179,86 @@ export default pi => {{
 }};
 "#, json!(server))).unwrap();
     let extensions = root.join("extensions");
-    let capture = std::process::Command::new("node")
-        .arg(adapter.join("configure.mjs"))
-        .args(["--reviewed", "--output"])
-        .arg(extensions.join("octet-pi-compat"))
-        .arg(entry)
-        .current_dir(&workspace)
-        .env("PI_OFFLINE", "1")
-        .output()
+    if direct_runner {
+        // This test deliberately uses the actual unconfigured runner catalog,
+        // not a configured bridge with its palette consumer stripped away.
+        let runner = adapter.join("runner.mjs");
+        let capture = std::process::Command::new("node")
+            .arg(&runner)
+            .arg("--inspect")
+            .arg(&entry)
+            .current_dir(&workspace)
+            .env("PI_OFFLINE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            capture.status.success(),
+            "{}",
+            String::from_utf8_lossy(&capture.stderr)
+        );
+        let frame: serde_json::Value = serde_json::from_slice(&capture.stdout).unwrap();
+        let metadata = &frame["result"];
+        assert!(!metadata["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hook| hook == "resources_discover"));
+        let commands: Vec<_> = metadata["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command["name"].as_str().unwrap())
+            .collect();
+        let output = extensions.join("octet-pi-compat");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(
+            output.join("extension.toml"),
+            format!(
+                r#"name = "octet-pi-compat"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "node"
+args = {args}
+[capabilities]
+filesystem = "unrestricted"
+process = true
+network = true
+system_prompt = true
+[contributes]
+tools = {tools}
+commands = {commands}
+hooks = {hooks}
+tool_renderers = {renderers}
+notifications = true
+confirmations = true
+providers = true
+"#,
+                args = json!([runner, entry]),
+                tools = metadata["tools"],
+                commands = json!(commands),
+                hooks = metadata["hooks"],
+                renderers = metadata["tool_renderers"],
+            ),
+        )
         .unwrap();
-    assert!(
-        capture.status.success(),
-        "{}",
-        String::from_utf8_lossy(&capture.stderr)
-    );
+    } else {
+        let capture = std::process::Command::new("node")
+            .arg(adapter.join("configure.mjs"))
+            .args(["--reviewed", "--output"])
+            .arg(extensions.join("octet-pi-compat"))
+            .arg(&entry)
+            .current_dir(&workspace)
+            .env("PI_OFFLINE", "1")
+            .env("OCTET_PI_AGENT_DIR", root.join("pi-agent"))
+            .output()
+            .unwrap();
+        assert!(
+            capture.status.success(),
+            "{}",
+            String::from_utf8_lossy(&capture.stderr)
+        );
+    }
     // Capture is inert with respect to MCP startup.
     assert!(!workspace.join("calls.jsonl").exists());
     assert!(!workspace.join("starts.jsonl").exists());
@@ -336,7 +406,7 @@ async fn pi_mcp_native_headless_drain_starts_without_resource_discovery_once() {
     }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let mut app = app(&root, true);
+    let mut app = app_with_runner(&root, true, true);
     assert!(!app.executable_extensions.has_resource_consumer_processes());
     assert!(!app.resource_paths_pending());
     assert!(

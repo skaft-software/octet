@@ -1,14 +1,484 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] - Release candidate
 
+This is an unreleased source candidate: everything below is in this checkout, not
+in a published package. The [release notes](docs/releases/v0.9.0.md) record scope
+and known limitations.
+
+### Added
+
+- Pi compatibility notifications now identify their originating extension via the negotiated `notification_source_v1` contract; info notices omit redundant severity while warnings and errors retain it.
+- `OCTET_TRACE_REMOTE_UI_LIFECYCLE=1` opts into timestamped remote UI mount, retirement,
+  and stale-operation traces carrying the session, process instance, generation, and surface.
+- Pi 1.0.2 custom UI keybinding facades now implement `getEffectiveConfig()` from
+  Octet's live native keybinding snapshot, including user overrides and reloads.
+  `getDefinition`, `getConflicts` and `getUserBindings` remain unavailable because
+  the host does not provide their source metadata; mutating operations remain
+  unsupported because keybindings are host-owned.
+- **Bring your Pi setup with you.** Enabling the optional
+  [octet-pi-compat](extensions/octet-pi-compat/README.md) adapter imports a
+  reviewed Pi 1.0.2 setup — extensions, installed packages, skills, prompt
+  templates, themes, keybindings, the global context file and the selected
+  model — and disabling it returns exactly to your octet-only setup. `--mirror`
+  re-reads the Pi setup read-only at every startup instead of freezing one
+  import. Pi is Mario Zechner's coding agent; the adapter is an independent
+  implementation of Pi 1.0.2's public extension API.
+- **More of Pi's extension API.** Tool call and tool result hooks can rewrite
+  arguments and results, custom messages support `steer`, `followUp` and
+  `nextTurn` delivery, `newSession`/`fork`/`switchSession`/`reload` replace the
+  session safely, reviewed commands contribute argument completions to the
+  composer, imported Pi palettes become selectable native themes, reviewed
+  builtin tool replacements are admitted per grant, and `onTerminalInput`
+  handlers see raw terminal input after native reserved keys and the slash
+  popup, but before a composer slot editor.
+- **Installed-Pi fallback (experimental).** `--pi-runtime installed` resolves
+  imports the adapter's shims lack from your managed Pi 1.0.2 install. The
+  [27-row ledger](docs/pi-extension-api.md) marks which rows that covers; they
+  stay partial.
+- **Credential-scoped Pi model registry.** The optional Pi 1.0.2 bridge withholds
+  `getApiKeyAndHeaders` unless reviewed configuration explicitly grants
+  `provider_credentials`; each request resolves only its exact native provider/model.
+  Credential values are omitted from status and diagnostics, and unrepresentable
+  request-signing credentials remain refused.
+- **Cache warming.** `off`, `streaming` (default) and `idle` policies refresh
+  billable provider prompt caches, with `/cache-warming`, and opt-in cache-miss
+  notices. Live savings are not claimed.
+- **Inference measurements.** `/status` and telemetry separate server-reported
+  generation timing from billing; client-side estimates are labelled and never
+  used for accounting. See [inference measurements](docs/inference-metrics.md).
+- **Tern native rendering.** In a Tern pane, octet draws its transcript,
+  composer and context meter with Tern's native components; `--tern auto|on|off`
+  controls negotiation.
+- **A real-binary end-to-end suite.** `scripts/e2e/run.sh` drives a built octet
+  through disposable PTY sessions against a loopback mock provider, prints
+  PASS/FAIL per check, and covers resume, long-session scroll, mouse
+  selection/copy, themes, busy commands, steering, follow-up and Pi compat.
+- **Mistral Large 4.** Mistral's `mistral-large-4` route (public preview, 524,288
+  context, 262,144 output tokens, text and image input) is selectable on Mistral
+  direct and on OpenCode Zen; OpenRouter discovers its
+  `mistralai/mistral-large-4-0` listing with the route's own rates. Each route
+  starts at `high` reasoning — the only enabled level Mistral documents besides
+  `none` — and still accepts an explicit `--reasoning` choice.
+
+### Changed
+
+- Permanently removed the native Search tool, its schemas, registration and SDK
+  exports. The core coding surface is `read`, `edit`, `write` and `bash`;
+  repository content search uses `rg` through `bash`. Independent shell calls
+  can still overlap reads under full access. Still retains its quiet **Explored**
+  activity grouping and Ctrl+O disclosure; PowerShell stays explicit-only.
+- The default coding prompt asks for the requested change plus one relevant
+  check, then stops: no extra harnesses, no `git diff`, and no further
+  verification unless the user asks. The diff-review and honest-reporting
+  bullets stay.
+- With no reasoning preference, octet uses the endpoint's declared default level
+  (`effort.default_level` for DeepSeek) instead of choosing a level itself;
+  `max` stays selectable whenever the endpoint declares it. That default is only
+  the fallback: this run's `--model`/`--reasoning` flag, then the model and level
+  saved in the session or in `~/.octet/config.toml`, still win across a restart.
+- A launch that already names its model no longer waits for a cold provider
+  inventory: the cached inventory and the pinned model record carry the first
+  turn while `GET /v1/models` refreshes in the background. Model pickers and
+  first-run setup still wait for the endpoint.
+- The Harbor evaluation adapter no longer forces `--reasoning max` for every
+  run; pass `--agent-kwarg reasoning=<level>` to pin an effort level. See
+  [the adapter notes](evaluation/harbor/README.md).
+- **The live models.dev refresh no longer materializes the whole catalog.** The
+  published `api.json` is about 5 MiB across more than two hundred providers, and
+  building one value tree for all of it peaked near 60 MiB on a first run. Only
+  the providers whose records octet reads are built now, and the extracted
+  records are unchanged.
+- Model and thinking changes submitted while a run is active are queued in the
+  UI and applied at the next safe request boundary instead of being silently
+  refused.
+- The interactive TUI starts fullscreen by default (`mouse = "app"`, the
+  alternate-screen viewport that captures the mouse). `mouse = "auto"` or
+  `--mouse auto` keeps inline native scrollback. Capture keeps every decoded
+  wheel/touchpad event, and app-owned selection copy follows the painted
+  transcript across scroll, wrap and chrome.
+- A custom Pi editor occupies one composer slot with native chrome and a single
+  native slash popup. Editor submissions use native idle/busy admission, a
+  refusal preserves the component's paste and undo state, and `Ctrl+G` keeps the
+  editor mounted instead of unmounting it.
+- Pi imports resolve through Pi 1.0.2's module table with the versions Pi 1.0.2
+  ships (jiti 2.7.0, TypeBox 1.3.27, pi-tui 1.0.2), and `octet migrate pi`
+  describes Pi 1.0.2.
+- `/hotkeys` prints grouped key/description tables with readable key names.
+- Removed the packaged Serve application, its web client and the macOS/iOS
+  Apple companions, the `serve` cargo feature and its embedded host, the `web`
+  CI lane, and the deprecated `octet-browse` bundle. The extension release
+  workflow (still named `release-serve.yml`) stays for first-party extension
+  bundles, and the other six first-party bundles are unchanged. Computer use
+  drives your own browser.
+
+### Fixed
+
+- Pi images work on the real host, including nested `ctx.executeTool` results,
+  and Pi's `agent_settled` event fires once after `agent_end`.
+- Pi footers and widgets can ask whether the active model uses OAuth; the host
+  answers from its actual authentication resolver without reading or
+  refreshing credentials, and unclassified resolvers refuse the query instead
+  of guessing from an endpoint name.
+- Ordered Pi hook callbacks settle before their response, so a second ordered
+  callback cannot overlap a cancelled one.
+- Pi session replacement commits parent linkage and writable setup against the
+  replacement session, including requests made during a busy turn.
+- A Pi completion query that arrives immediately after initialize is served
+  instead of refused.
+- `/theme <advertised built-in name>` resolves through the same resolver as
+  startup and the picker.
+- Pointer selection copies the painted row across scroll, wrapped Markdown and
+  chrome instead of an adjacent row.
+- Presentation-only renderer requests no longer read session history, so the
+  real-adapter renderer keeps its latency margin under load.
+- After an explicit Python runtime setup, `/extensions setup` starts the
+  extension that failed cold start without a restart.
+- Extension-process crashes found by the real-package matrix (`extension stdout
+  closed`, lens and permission-system startup refusals) are fixed, and
+  recoverable callback failures are reported once as bounded `[Extension
+  issues]` diagnostics.
+- Inherited failures in hook/lifecycle delivery, the MCP host-access replay
+  check, activity/steering PTY contracts, headless before-prompt tool snapshots
+  and the API 0.1 conformance wire are repaired, and the inherited clippy lint
+  debt is cleared.
+- The native linux packager no longer requires tracked private workstation
+  records in the public documentation inventory.
+- A cancelled extension request — an expired Pi `input` hook, an interrupted
+  turn, or an extension-reported `request cancelled` — now retires only the
+  remote UI surfaces that request created. A mounted Pi custom editor or footer
+  survives it instead of disappearing until `/reload`, and the extension keeps
+  its session resource owner for later mounts.
+- Pi notices sourced from a specific Pi extension drop the bridge's own digest
+  heading, so a sourced notice renders as `[Termdraw] message` or
+  `[Termdraw Error] message` instead of `[Termdraw] [Extension issues]: …`.
+
+### Known limitations
+
+- **Native-backed Pi editor is phase 2.** Pi's editor suites are preserved as an
+  upstream test corpus, and custom editors already render in the composer slot,
+  but a native-backed editor facade with synchronous native editing operations
+  and full upstream editor parity are not implemented.
+- **Pi compatibility is a bounded sample, not parity.** The adapter targets
+  Pi 1.0.2's public extension API; arbitrary third-party packages, private Pi
+  internals and the Pi CLI/SDK are not targets. The recorded 2026-10-06 matrix
+  of 34 real packages has 7 passing, 12 failing with Octet-side errors, 11
+  needing prerequisites the test machine did not have, and 4 that are not
+  extension factories. Later adapter repairs have not been re-measured against
+  that matrix.
+- **Nothing is published.** Windows and macOS binaries are built by CI and were
+  not built or smoke-tested here; only the linux x86-64 packaging path was
+  exercised locally, without signing. There is no 0.9.0 tag, release asset or npm
+  package.
+- **Live services are not exercised.** Provider, subscription and audio
+  acceptance use a loopback mock provider; no paid model, live credential or
+  physical display path is part of this candidate's evidence.
+- **No performance comparison is published.** Historical pre-rename measurements
+  in [benchmark evidence](docs/assets/evidence/README.md) are explicitly not
+  octet results.
+
+## [0.8.2] - 2026-09-30
+
+See [release notes](docs/releases/v0.8.2.md) for candidate scope, availability,
+and qualification limits. The date identifies this candidate, not a publication
+receipt.
+
+- Sign in to paid plans without a long-lived API key, the way Codex sign-in
+  already works. `--login grok`, `--login kimi`, `--login meta`, and
+  `--login openrouter` each run the provider's own OAuth grant and store one
+  owner-private credential under `~/.octet/credentials/`;
+  `--logout <provider>` removes only that credential. Grok, Kimi, and Meta use a
+  device code and honor `--headless`, so they work over SSH; OpenRouter's browser
+  login asks you to paste the redirect URL your browser lands on. Each is a
+  separate provider from the same vendor's API-key preset
+  (`xai-subscription/…` alongside `xai/…`), so signing in never replaces a key you
+  configured, and a provider's models appear only while you are signed in.
+  Meta's grant is two steps — the device flow yields an identity token, which is
+  exchanged for a short-lived API key — and OpenRouter mints a durable key that
+  octet never renews. Refresh-token rotation is serialized within and across
+  octet processes and re-checks the credential after taking the cross-process
+  lock, so two concurrent launches cannot spend the same single-use token.
+  Anthropic (Claude Pro/Max) is deliberately not included: it needs a request-path
+  change in the Anthropic Messages codec before a privately resolved OAuth
+  credential would receive the beta headers a subscription token requires.
+  `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` are unchanged.
+
+- Restore complete canonical native history after dimension changes and
+  canonical mutations above the old viewport, using synchronized clear/replay
+  instead of saved snapshots that could omit accepted rows. Settle resize bursts,
+  reuse height-only wrapping, and promote threaded reading anchors before width
+  reflow. Resize epochs cover away-and-back changes and final/suspend flushes.
+  Ordinary appends and visible-row diffs are unchanged. Structural replay scales
+  with history and can reset the native reading position; PageUp/`--mouse app`
+  remain a separate bounded semantic viewport.
+
+- Keep the startup welcome static, budget it for the actual pane height, and
+  reserve fresh-start composer geometry before model admission. Draft edits and
+  update hints no longer drive decorative historical replay. Position the native
+  hardware cursor inside the synchronized frame; active-run animations remain.
+
+- Keep edit and write diffs out of model-visible tool results. An edit or write
+  now returns one concise line (`ok`, path, verb, and content hash) and carries
+  its unified diff in the durable result metadata that the model never sees and
+  that session replay does not turn into context. Tool cards render the same
+  diffs from that channel, so the UI is unchanged, and sessions recorded before
+  this change still show their diffs. Stale-file detection, exact-match
+  reporting, and diff resource evidence are unchanged. Bound the serialized
+  metadata, including JSON escaping, and validate the result before committing
+  the file so a successful mutation cannot be reported as a metadata failure.
+
+- Retain Meta's initial device identity across API-key minting and renewal;
+  hold subscription refresh locks across credential replacement on Windows as
+  well as Unix. Omit unrecognized OAuth error codes from diagnostics rather
+  than reflecting credential-shaped provider text.
+- Protect live cache-read, cache-write and effective reasoning prices against
+  zeroing or greater-than-tenfold drops, just like input and output prices.
+- Re-anchor active status rows after history reflow so `Working` shimmer and its
+  elapsed clock continue after a narrow-to-wide resize. Use revision-fenced
+  painted viewport/active-heading geometry so visible clocks keep self-waking
+  after tall tool progress contracts, without requiring resize or more output.
+- Complete default macOS computer-use setup with a checksum- and Developer
+  ID-verified signed host in octet-owned state when needed. Target cursor moves
+  with the current driver's exact-window contract, and reopen setup with a fresh
+  transport-owned session identity.
+- Refresh and review all four models.dev snapshots together: 921 pricing routes,
+  402 names and 943 capability routes. Direct DeepSeek schedule pricing remains
+  excluded; public metadata does not establish live inference acceptance.
+
+- Add GPT-6.1 Sol on OpenAI API keys and ChatGPT (Codex) sign-in. On Codex it
+  leads the fallback model list, starts at low reasoning, and offers Ultra only
+  when the account advertises it; its window is 272K by default and up to 872K
+  where the plan allows. On the API it offers low through max reasoning, a
+  1.05M-token context, 128K output tokens, and long-context pricing above 272K
+  input tokens.
+- Send Codex discovery compatibility client version `0.159.2`. The live
+  backend withheld GPT-6.1 Sol from `0.156.1`, which 0.8.0 introduced along
+  with cache schema 8 without a changelog entry. Cached Codex inventories
+  refresh once (cache schema 10), so GPT-6.1 Sol and its contracts appear
+  without waiting for the cache to expire. An inventory entry with unusable
+  reasoning metadata is now left out and named in a startup warning instead
+  of discarding the whole inventory, and the offline fallback lists GPT-6 Sol
+  and GPT-6 Luna alongside GPT-6.1 Sol and GPT-6 Astra.
+- Sign in to ChatGPT (Codex) through the browser. `octet --login codex` and the
+  in-app ChatGPT sign-in open OpenAI's authorization page (PKCE) and receive the
+  callback only on `127.0.0.1:1455`, or on the registered fallback port `1457`
+  when 1455 is busy, then show a self-contained octet signed-in page.
+  `octet --login codex` asks which method to use; the device code remains the
+  default over SSH, with `--headless`, without a browser opener, or when both
+  ports are busy. If OpenAI issues a limited localhost-only credential through
+  the browser, octet stores nothing and finishes with a device code.
+- Replace executable-extension trust with On/off plus Host authority. Full
+  access (the default) still runs enabled extensions without a grant. Safe mode
+  and the other controlled policies now start an enabled extension whose exact
+  source has host authority: a `trusted_extensions` entry (unchanged format),
+  `--trust-extension`, or an explicit `--extension-dir`. Before, they never
+  started executable extensions. Granted code runs with your OS permissions
+  outside the tool-effect broker. `/extensions` shows each row's host authority,
+  offers Grant and Revoke with a confirmation, and asks for a grant when you
+  enable an extension in safe mode. The native-host protocol still never starts
+  extension processes.
+
+- One ambiguous provider failure no longer disables hard cost ceilings for the
+  rest of the session; the attempt is charged its admitted worst case. Missing
+  bounds or prices still fail closed for the affected ceiling.
+- Keep models.dev names, prices and capability records current between
+  releases. An interactive session refreshes them in the background at most
+  every six hours, revalidating with the ETag, and caches them at
+  `~/.octet/cache/models-dev/metadata.json`; `--offline` skips the refresh.
+  Records go through the snapshot refresh's extraction and are checked against
+  the built-in snapshot: a price may not become zero or fall more than tenfold,
+  and a route new to octet needs non-zero input and output prices. A record
+  that fails keeps the built-in data, which stays the fallback. A cache from
+  another octet version is ignored, and nothing waits on the network at
+  startup.
+
+- Set up and configure every extension from `/extensions`.
+  Choosing an extension opens its options menu (a disabled one is enabled
+  first), which shows its state and offers only what applies. Actions show
+  their steps live and can be cancelled with Esc; confirmations, choices, and
+  hidden key entry appear in place, and destructive actions ask first.
+  - **Computer use**: Set up computer use does the whole setup (driver, signed
+    macOS host when needed, cursor themes, GNOME helper, permission check,
+    optional Jev); also Check status,
+    Jev keys, and the jev-use recipe with its jobs.
+  - **Web search**: Brave Search or SearXNG, a new SearXNG endpoint change, and
+    Brave log-out.
+  - **Subagents**: enable or disable orchestration; runtime worker inspection
+    and control stay in `/subagents`, not extension configuration.
+  - **MCP**: a full server manager. A guided form adds a server; each server
+    can be shown, refreshed, restarted, stopped, enabled or disabled, edited,
+    or removed. Edits are validated like a launch before `~/.octet/mcp.json` is
+    replaced, and apply live without restarting the other servers.
+  Extensions answer the new `menu/collect` request (`contributes.menu = true`,
+  `ext.menu` in the Python SDK); others get an entry per declared command.
+  Other extension commands are no longer typed after the slash in the terminal
+  UI, and typing one names the extension to open instead. `/subagents` remains
+  a runtime command: bare, list and status open the live roster, including
+  mid-run; `/subagents stop <name-or-id|all>` uses the bounded owner-bound stop
+  queue. Other worker operations wait for idle. Slash completion follows the
+  first-party extension's live registration. Menu actions may run for up to 30 minutes instead of the 30-second
+  request deadline, so long installs finish.
+- Report why model discovery was rejected. A provider's HTTP error now names
+  its status and the provider's own message, bounded and with
+  credential-shaped tokens masked, instead of only "model discovery request
+  was rejected"; an Anthropic key that needs `anthropic-workspace-id` now
+  says so (#454).
+- Mask the home directory as `~` in the TUI workspace footer on every platform,
+  including native Windows. Use the platform home and its canonical path rather
+  than only `HOME`, so Windows verbatim paths and symlinked homes do not expose
+  the username. This changes display only; workspace and tool paths are unchanged.
+- Fix deleting sessions from the `/resume` picker. Its default delete binding
+  was Ctrl+D, which closes octet from every surface, so it quit octet instead,
+  and Mac keyboards have no forward Delete key. Ctrl+X (or Delete) now asks for
+  a confirmation that names the session, then moves it to the store's
+  recoverable trash (#458).
+- Serialize concurrent conditional writes to the same file on Linux and
+  macOS. Parallel writers, such as delegated workers editing one file, could
+  have a write land while it reported a conflict, or lose a committed write
+  into a leftover `.octet-tmp-*` file. Writers now hold an advisory lock on
+  the target from the unchanged check through the exchange. The wait is
+  bounded at 2 s, after which the write falls back to the unlocked checks.
+  Displacing exactly the observed file now counts as success.
+- Raise the minimum supported Rust version from 1.86 to 1.88 for the
+  workspace and `octet-serve`. The rust-minor-patch updates that #444 held
+  back need it: `image` 0.25.10, `globset` 0.4.20, `ignore` 0.4.33, and
+  `wiremock` 0.6.5. CI, the Windows job, the production-panic audit and the
+  `octet-serve` release jobs now pin Rust 1.88.0; octet release binaries are
+  still built with Rust 1.97.1. Source builds need Rust 1.88 or newer.
+- Fix inflated TUI throughput for hidden reasoning and buffered responses. Use
+  request-to-completion timing and label the latest-turn rate as end-to-end,
+  not server generation speed (#462).
+- Attribute built-in OpenRouter requests to `octet coding agent` at
+  `https://octet.skaft.org`, with the `cli-agent` category, using fixed public
+  request headers. Cover Chat Completions and Batch API requests without adding
+  attribution to unrelated providers or changing explicit header overrides.
+- Link the npm launcher and native platform packages to the same octet homepage.
 - Publish the v0.8.1 npm channel: `@skaft/octet` plus `@skaft/octet-darwin-arm64`,
   `@skaft/octet-darwin-x64`, and `@skaft/octet-linux-x64-gnu`, built from the
   verified immutable release assets with trusted publishing and registry
   provenance. Install with `npm install -g @skaft/octet`, or pin
-  `@skaft/octet@0.8.1` to reproduce one exact release. README, installation,
-  getting-started, and release docs document the npm lane alongside the native
-  installer.
+  `@skaft/octet@0.8.1` to reproduce one exact release.
+  README, installation, distribution, getting-started, and release docs now lead
+  with the npm lane.
+- Omit the redundant `computer_use_` prefix from TUI labels so
+  computer-use actions remain distinguishable within the label width cap.
+- Computer-use setup builds the Cua Driver runtime from a
+  Python 3.10+ interpreter even when the bundle runs on macOS's Xcode Python
+  3.9. Setup failures, including a missing compatible Python, are now reported
+  as actionable errors instead of `internal error` (#457).
+- Fix computer use hanging on native Windows when run inside octet. Its driver
+  probes inherited the extension's protocol stdin, and on Windows a child that
+  shares that pipe can stall at startup. The options menu then fell back after
+  5 s to a bare command list with an argument prompt, and **Check status**
+  failed with `internal error`. Every first-party extension subprocess now gets
+  its own stdin, and a repository test enforces it. A driver check that cannot
+  run is reported as a failing self-check with its reason, a failed
+  computer-use action names its error, and a bare `computer-use` command checks
+  status as its default.
+- The computer-use options menu now shows what each action reported. Setup,
+  **Check status**, the Jev actions and the jev-use actions returned a
+  tool-shaped result, and the menu's result document renders only a `text`
+  field, so a completed action showed just "<label> finished" with no report.
+  Every menu command now returns rendered text; the agent tools keep the
+  structured content.
+- Stop querying the terminal background (OSC 11) on native Windows. The console
+  host delivers the reply as key records, and Windows Terminal's reply reached
+  the composer as typed text. Auto uses its neutral fallback there.
+- The queued-message hint names Alt+Q on Windows and WSL, the key their key set
+  binds to restore a queued message, instead of Alt+Up, which does nothing
+  there.
+- Computer use requires `cua-driver` 0.30.2 or newer. macOS 11
+  and 12, which pip used to resolve silently to 0.11.0, and other unsupported
+  systems now get a clear error that names the supported platforms.
+- Make octet and `octet-computer-use` work on Linux desktops: Omarchy
+  (Arch + Hyprland), Sway, GNOME, and KDE on Wayland, and any X11 session. The
+  TUI now copies through `wl-copy`, `xclip`, or `xsel` alongside OSC 52, matching
+  the existing Linux paste helpers. Extensions may declare the Linux
+  desktop-identity and compositor variables (`XDG_CURRENT_DESKTOP`,
+  `XDG_SESSION_DESKTOP`, `DESKTOP_SESSION`, `KDE_FULL_SESSION`,
+  `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `XDG_STATE_HOME`). Computer use reads
+  Linux display-session readiness instead of macOS grants, enables the driver's
+  native Wayland backend, shows the model-colored agent cursor, and provisions
+  even without `python3-venv`. See the new [Linux setup](docs/linux.md) guide.
+- Build native Windows x64 (`x86_64-pc-windows-gnu`) binaries again: the
+  interactive crate did not compile for Windows. A new Windows CI job builds
+  `octet.exe` and `octet-host.exe`, checks the host hello handshake, runs the
+  Windows terminal, ConPTY, workspace, Python SDK and computer-use suites, and
+  uploads an unsigned pull-request test artifact. Nothing is published; see
+  [Windows](docs/windows.md).
+- Run the interactive frontend in native Windows Terminal and conhost. Both
+  export no `TERM`, so PowerShell and cmd sessions always fell back to plain
+  output. The console is now detected directly (Windows Terminal: Unicode,
+  truecolor, italics, links; conhost: ASCII, 256 colors; mintty pipes and
+  redirected streams stay plain). Frames reach the console in one
+  `WriteConsoleW` call, delayed end-of-line wrapping keeps full-width rows from
+  shifting later frames, and console close, `Ctrl+Break`, logoff and shutdown
+  restore the console through the coordinated shutdown path.
+- Stop a Windows terminal's background-colour reply from leaking into the
+  composer: crossterm reports a key-up for every synthesized key-down, which
+  flushed an unconfirmed reply prefix as typed text.
+- Start Python extensions on Windows through `py -3` or `python.exe` from
+  `PATH`; Windows cannot run a script by its `#!` line. The Python SDK now
+  frames stdio as exact UTF-8 with LF on every platform instead of the
+  Windows code page and CRLF.
+- Run the interactive `!` command through Git Bash on Windows with Job Object
+  cleanup, matching the bash tool, instead of requiring `sh` on `PATH`.
+- Publish new files on Windows through the directory-relative native rename
+  (`NtSetInformationFile`) instead of the Win32 wrapper, which documents its
+  name as a NUL-terminated path. New private files failed to publish on the
+  Windows runner with `ERROR_INVALID_PARAMETER`.
+- Start extensions and open sessions from an elevated Windows session: the
+  host's artifact store (its temporary root and per-generation scratch) and the
+  workspace session directory are now created owned by the current user,
+  instead of adopting directories an elevated process creates owned by the
+  Administrators group.
+- Replace existing files on Windows through pin, then displace, then publish:
+  the target is pinned (deny write/delete sharing while holding `DELETE`),
+  re-verified, renamed aside to `.octet-old-*`, and the staged file is
+  published with a no-replace rename. This unblocks the `edit` tool and every
+  rewrite of existing private state (session metadata, auth stores, model
+  caches) beyond first-run writes; see [Windows](docs/windows.md).
+- Make the source-only `octet-snap-compact` extension launchable and actually
+  tested. Its `extension.py` entrypoint is committed non-executable while every
+  released extension's entrypoint is `100755`, so a fresh checkout could not
+  start the extension; the mode now matches the README. Its suite also built the
+  renderer into `renderer/target/`, which the host's bounded source walk rejects
+  as unverified, so the build now targets a temporary directory like the README
+  documents. Because the renderer needs Rust 1.96 against octet's 1.86 MSRV, the
+  suite skips on older toolchains instead of failing, and CI runs it from a new
+  `extensions/source-catalog.txt` under a 1.96 toolchain. The extension remains
+  unpublished: only its README ships in a release.
+- Condense picker chrome for a denser read: the model picker omits
+  `in —`/`out —` when pricing is unknown (subscription/OAuth models now show
+  only `272K ctx · vision`), and the resume picker hides `re:<pattern>` /
+  `"phrase"` hints until the filter actually uses them.
+- Attribute extension source-digest work and startup handshakes separately in
+  `OCTET_STARTUP_TRACE`; do not hash disabled or untrusted extension source trees.
+  Reuse tool definitions, the initial extension host-state projection, and
+  resumed configuration during app construction. Latest-session lookup scans
+  candidates without a full sort, and application-owned resume hydrates a
+  viewport-scaled tail. Defer OSC 11 background-color detection until after
+  the first ready frame, repainting only if the detected theme changes.
+- Size the runtime's worker pool to the machine (`available_parallelism()`, at
+  least 2) instead of 2 threads, and run parallel read-only tool calls in waves
+  of one per CPU, from 4 to 32, instead of 4. `Agent::set_parallel_read_wave_width`
+  pins the width.
+- Say plainly in the README, `--help` and `/status` that the default full
+  access has no sandbox and no approvals, and that `--safe-mode` asks before
+  every bash call and file change but is not a sandbox.
+- Fix a crash (a reentrant `RefCell` borrow) when hovering over or clicking the
+  scrollbar with the threaded renderer (#461).
+- Keep `Working` visible while tools run (#463).
+- Honour a request's `NO_PROXY` when a lower-case `no_proxy` is also set: a
+  proxy overlay now replaces both letter cases of each variable it sets.
+- Extend Still's quiet activity grouping to web search/fetch, MCP, and
+  computer-use calls, with concise family summaries. Delegations keep their
+  existing subagent presentation; `Ctrl+O` still reveals individual call details.
+- Split the five largest source files into focused modules, with no change in
+  behaviour: `agent.rs` (12.6K lines), `extension_process.rs` (18K) and
+  `delegation.rs` (8.6K) in `octet-agent`, and `extensions.rs` (7.9K) and
+  `extensions/serve.rs` (9.3K) in `octet-coding-agent`. Public items keep their
+  paths through re-exports.
 
 ## [0.8.1] - 2026-09-27
 

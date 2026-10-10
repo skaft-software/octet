@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { configure, configureFromPi, FIRST_PARTY_EXTENSIONS, firstPartyTools, routeExtensions } from '../configure.mjs';
 import { inspect, launch, root } from './helper.mjs';
+import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
 
 function temporary(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'octet-pi-import-')));
@@ -16,17 +17,17 @@ function entry(dir, name, source) {
   const file = join(dir, name + '.ts'); writeFileSync(file, source); return file;
 }
 // Synthetic managed install: deterministic routing tests, not Pi resolver parity.
-function install(dir, entries) {
+function install(dir, entries, settings = entries) {
   const agent = join(dir, 'agent'); mkdirSync(join(agent, 'install'), { recursive: true });
   writeFileSync(join(agent, 'install/current-version'), '1.0.2\n');
-  writeFileSync(join(agent, 'settings.json'), JSON.stringify(entries));
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify(settings));
   const sources = {
     'pi-coding-agent': `import {readFileSync} from 'node:fs';
 export const parseSkillBlock = text => ({text});
 export const createReadTool = cwd => ({name:'read',async execute(){return {content:[{type:'text',text:'installed read'}]};}});
-export class SettingsManager { static create(cwd, agentDir) { return {cwd, agentDir, getThemeSetting(){}, getDefaultThinkingLevel(){}}; } }
+export class SettingsManager { static create(cwd, agentDir) { const settings = JSON.parse(readFileSync(agentDir+'/settings.json','utf8')); return {cwd, agentDir, getThemeSetting(){return settings.theme;}, getDefaultThinkingLevel(){return settings.defaultThinkingLevel;}}; } }
 export class DefaultPackageManager { constructor(options) { this.options = options; }
-async resolve() { return {extensions:JSON.parse(readFileSync(this.options.agentDir+'/settings.json','utf8')), themes:[]}; } }`,
+async resolve() { const settings = JSON.parse(readFileSync(this.options.agentDir+'/settings.json','utf8')); return {extensions:Array.isArray(settings)?settings:settings.resolvedExtensions, themes:settings.resolvedThemes??[]}; } }`,
     'pi-ai': 'export {};', 'pi-tui': 'export {};', 'pi-agent-core': 'export {};',
   };
   for (const [name, source] of Object.entries(sources)) {
@@ -74,7 +75,7 @@ test('deferred direct Pi tool execution routes to installed Pi, but child-only d
   assert.ok(readFileSync(helper, 'utf8').includes('builtinRead.execute'));
 });
 
-test('a Pi tool owned by an installed first-party octet extension turns that Pi extension off', async t => {
+test('installed manifests do not establish ownership; active native collisions require review', async t => {
   const dir = temporary(t);
   const octetExtensions = join(dir, 'octet-extensions');
   for (const [name, tools] of [['octet-web-search', '["web_search", "web_fetch"]'], ['octet-computer-use', '[\n  "computer_use",\n]'], ['not-first-party', '["other_tool"]']]) {
@@ -86,8 +87,11 @@ test('a Pi tool owned by an installed first-party octet extension turns that Pi 
   const clashing = entry(dir, 'clashing', `export default pi => pi.registerTool({name:'web_search',label:'search',description:'pi search',parameters:{type:'object'},async execute(){return {content:[]};}});`);
   const other = entry(dir, 'other', `export default pi => pi.registerTool({name:'other_tool',label:'other',description:'kept',parameters:{type:'object'},async execute(){return {content:[]};}});`);
   const routed = await routeExtensions([clashing, other], { cwd: dir, firstPartyRoots: [octetExtensions], env: { ...process.env, OCTET_PI_AGENT_DIR: install(dir, []) } });
-  assert.deepEqual(routed.map(r => r.route), [null, 'shims']);
-  assert.match(routed[0].error, /web_search is provided by the first-party octet extension octet-web-search/);
+  assert.deepEqual(routed.map(r => r.route), ['shims', 'shims']);
+  const active = await routeExtensions([clashing, other], { cwd: dir, activeNativeTools: owners, env: { ...process.env, OCTET_PI_AGENT_DIR: install(dir, []) } });
+  assert.deepEqual(active.map(r => r.route), [null, 'shims']);
+  assert.equal(active[0].disposition, 'review_required');
+  assert.match(active[0].error, /web_search is owned by the active native extension octet-web-search.*choose one owner/);
 });
 
 test('the first-party list matches the release catalog, minus the Pi bridge itself', () => {
@@ -103,12 +107,17 @@ test('from-Pi setup requires review, excludes disabled entries, records routes a
   const agent = install(dir, [{ path: good, enabled: true }, { path: fallback, enabled: true }, { path: later, enabled: true }, { path: '/not/executed.ts', enabled: false }]);
   const output = join(dir, 'octet-pi-compat'), options = { output, cwd: dir, env: { ...process.env, OCTET_PI_AGENT_DIR: agent } };
   await assert.rejects(configureFromPi(options), /--reviewed/);
+  const conflictingSettings = readFileSync(join(agent, 'settings.json'), 'utf8');
+  await assert.rejects(configureFromPi({ ...options, reviewed: true, log() {} }), /active registration collision.*choose one owner.*no partial import/);
+  assert.equal(existsSync(join(output, 'extension.toml')), false);
+  assert.equal(existsSync(join(output, 'bridge.json')), false);
+  assert.equal(readFileSync(join(agent, 'settings.json'), 'utf8'), conflictingSettings);
+  // Resolve the synthetic owner conflict explicitly, then exercise the import.
+  writeFileSync(join(agent, 'settings.json'), JSON.stringify([{ path: good, enabled: true }, { path: fallback, enabled: true }, { path: '/not/executed.ts', enabled: false }]));
   const settingsBefore = readFileSync(join(agent, 'settings.json'), 'utf8');
-  const logs = [];
-  const result = await configureFromPi({ ...options, reviewed: true, log: line => logs.push(line) });
-  assert.deepEqual(result.routed.map(r => r.route), ['shims', 'installed', null]);
+  const result = await configureFromPi({ ...options, reviewed: true, log() {} });
+  assert.deepEqual(result.routed.map(r => r.route), ['shims', 'installed']);
   assert.deepEqual(result.registrations.commands.map(c => c.name), ['good', 'fallback']);
-  assert.ok(logs.some(line => /skipped.*duplicate registration good/.test(line)));
   const config = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
   assert.equal(config.pi_agent_dir, agent);
   assert.deepEqual(config.extension_runtimes, { [good]: 'shims', [fallback]: 'installed' });
@@ -152,11 +161,11 @@ test('runtime isolation preserves reviewed shortcut IDs and rejects unrelated me
   const first = entry(dir, 'first', `export default pi => {if(process.env.FAIL_FIRST==='1') throw new Error('skip first'); pi.registerShortcut('ctrl+x',{handler(){}});};`);
   const second = entry(dir, 'second', `export default pi => {pi.registerShortcut('ctrl+y',{handler(){}}); pi.registerCommand('good',{description:process.env.CHANGE_SECOND==='1'?'changed':'reviewed',handler(){}});};`);
   const output = join(dir, 'octet-pi-compat');
-  const { registrations } = configure({ output, reviewed: true, extensions: [first, second] });
+  const { registrations } = configure({ output, reviewed: true, extensions: [first, second], piAgentDir: join(dir, 'agent') });
   const config = join(output, 'bridge.json');
   const peer = launch(t, [first, second], { config, env: { FAIL_FIRST: '1' } });
   peer.metadata.hooks = registrations.hooks;
-  const initialized = await peer.init(['shortcuts', 'lifecycle_events', 'session_entries']);
+  const initialized = await peer.init(['shortcuts', 'lifecycle_events', 'session_entries', 'resource_paths_v1']);
   assert.deepEqual(initialized.shortcuts, registrations.shortcuts);
   const skippedShortcut = await peer.request('shortcut/execute', { name: registrations.shortcuts[0].name, context: peer.context() }).response;
   assert.match(skippedShortcut.error.message, /unknown shortcut/);
@@ -165,7 +174,7 @@ test('runtime isolation preserves reviewed shortcut IDs and rejects unrelated me
   await peer.close();
   const changed = launch(t, [first, second], { config, env: { FAIL_FIRST: '1', CHANGE_SECOND: '1' } });
   changed.metadata.hooks = registrations.hooks;
-  await assert.rejects(changed.init(['shortcuts', 'lifecycle_events', 'session_entries']), /reviewed registration metadata changed/);
+  await assert.rejects(changed.init(['shortcuts', 'lifecycle_events', 'session_entries', 'resource_paths_v1']), /reviewed registration metadata changed/);
   await changed.close();
 });
 
@@ -173,4 +182,38 @@ test('unknown Pi event subscriptions are inert without requiring an unavailable 
   const dir = temporary(t);
   const good = entry(dir, 'unknown', `export default pi => { const off=pi.on('future_pi_event',()=>{throw new Error('not emitted');}); off(); pi.registerCommand('good',{handler(){}}); };`);
   assert.deepEqual(inspect([good]).commands.map(c => c.name), ['good']);
+});
+
+test('from-Pi non-mirror bridges discover new live palettes without changing the imported selected snapshot', async t => {
+  const dir = temporary(t), factory = entry(dir, 'theme-factory', 'export default pi => pi.registerCommand("theme-fixture", {handler(){}});');
+  const first = join(dir, 'agent/themes/first.json'), second = join(dir, 'agent/themes/second.json'), third = join(dir, 'agent/themes/third.json');
+  const settings = { theme: 'first', extensions: [factory], resolvedExtensions: [{ path: factory, enabled: true }], resolvedThemes: [{ path: first, enabled: true }, { path: second, enabled: true }] };
+  const agent = install(dir, [], settings);
+  mkdirSync(join(agent, 'themes'), { recursive: true });
+  const palette = (name, accent = '#123456') => ({ name, appearance: 'dark', colors: Object.fromEntries([
+    ...foregroundTokens.map(token => [token, accent]), ...backgroundTokens.map(token => [token, '']),
+  ]) });
+  writeFileSync(first, JSON.stringify(palette('first'))); writeFileSync(second, JSON.stringify(palette('second')));
+  const output = join(dir, 'octet-pi-compat');
+  const result = await configureFromPi({ output, reviewed: true, cwd: dir, env: { ...process.env, OCTET_PI_AGENT_DIR: agent }, log() {} });
+  const bridgePath = join(output, 'bridge.json'), bridgeBefore = readFileSync(bridgePath, 'utf8');
+  const bridge = JSON.parse(bridgeBefore), snapshotBefore = readFileSync(bridge.pi_theme.path, 'utf8');
+  assert.equal(bridge.mirror_pi_setup, undefined);
+  assert.deepEqual(result.registrations.events, []);
+  const peer = launch(t, [factory], { config: bridgePath, metadata: result.registrations, cwd: dir });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const discover = reason => peer.request('hook/run', { hook: 'resources_discover', payload: { cwd: dir, reason }, context: peer.context({ native_theme: { name: 'Still', foreground: { accent: '#ff0000' } } }) }).response;
+  const startup = (await discover('startup')).result.resource_paths;
+  assert.deepEqual(startup.theme_paths, [first, second, ...bridge.pi_theme_paths]);
+  assert.equal(startup.default_theme, bridge.pi_theme.native_path);
+  assert.deepEqual(startup.skill_paths, []); assert.deepEqual(startup.prompt_paths, []);
+  settings.theme = 'third'; writeFileSync(join(agent, 'settings.json'), JSON.stringify(settings));
+  writeFileSync(first, JSON.stringify(palette('first', '#abcdef')));
+  rmSync(second); writeFileSync(third, JSON.stringify(palette('third')));
+  const reload = (await discover('reload')).result.resource_paths;
+  assert.deepEqual(reload.theme_paths, [first, third, ...bridge.pi_theme_paths]);
+  assert.equal(reload.default_theme, bridge.pi_theme.native_path);
+  assert.equal(readFileSync(bridge.pi_theme.path, 'utf8'), snapshotBefore);
+  assert.equal(readFileSync(bridgePath, 'utf8'), bridgeBefore);
+  await peer.close();
 });

@@ -110,6 +110,28 @@ pub(super) fn welcome_placeholder_rows(
     )
 }
 
+/// Mirror whether the admitted welcome's last row needs a chrome seam. The
+/// neutral placeholder's own empty rows are geometry, not semantic whitespace.
+pub(super) fn welcome_placeholder_separator_rows(
+    state: &ShellState,
+    width: u16,
+    composer_rows: usize,
+) -> usize {
+    let max_rows = welcome_row_budget_for_composer(state, width, composer_rows);
+    if state.overlay.is_some() || max_rows == 0 {
+        return 0;
+    }
+    let width = PresentationLayout::new(&state.theme, width).content_width;
+    let (logo_rows, _, text_width) = splash_geometry(state, width);
+    usize::from(
+        max_rows < 7
+            || pi_startup(state)
+            || text_width < 10
+            || max_rows < logo_rows + 2
+            || state.theme.role_rgb("splash_box").is_some(),
+    )
+}
+
 fn welcome_content_rows(state: &ShellState, width: u16, max_rows: usize) -> usize {
     if state.overlay.is_some() || max_rows == 0 {
         return 0;
@@ -588,6 +610,45 @@ mod tests {
                         assert!(render_welcome_content(&state, 80, budget).is_empty());
                     }
                     state.overlay = None;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn placeholder_seam_matches_the_admitted_welcome_without_materializing_it() {
+        for theme in [
+            crate::tui::theme::test_theme(),
+            crate::tui::theme::test_theme_from_source("startup = 'pi'\n"),
+            crate::tui::theme::test_theme_from_source(include_str!(
+                "../../../../../examples/themes/Cards.toml"
+            )),
+            crate::tui::theme::test_theme_from_source(include_str!(
+                "../../../../../examples/themes/Still.toml"
+            )),
+        ] {
+            let shell = InteractiveShell::test_shell_with_theme(theme);
+            let mut state = shell.state.borrow_mut();
+            state.startup_card_started_at = Some(Instant::now());
+            for width in [1, 7, 24, 48, 80, 160] {
+                for height in [0, 3, 8, 18, 40] {
+                    state.size = (width, height);
+                    for composer_rows in [1, 4, 8] {
+                        let budget = welcome_row_budget_for_composer(&state, width, composer_rows);
+                        let rendered = render_welcome_card(&state, width, budget, Instant::now());
+                        let expected = usize::from(rendered.last().is_some_and(|line| {
+                            !sexy_tui_rs::strip_terminal_sequences(line)
+                                .trim()
+                                .is_empty()
+                        }));
+                        reset_placeholder_work_counts();
+                        assert_eq!(
+                            welcome_placeholder_separator_rows(&state, width, composer_rows),
+                            expected,
+                            "width={width} height={height} composer={composer_rows}"
+                        );
+                        assert_eq!(placeholder_work_counts(), (0, 0));
+                    }
                 }
             }
         }

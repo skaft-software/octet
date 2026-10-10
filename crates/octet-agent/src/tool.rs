@@ -37,7 +37,7 @@ pub enum ToolConcurrency {
     Sequential,
     /// Calls may execute concurrently with other parallel-safe calls.
     Parallel,
-    /// A self-contained native process (one shell command, one search) that
+    /// A self-contained native process (one shell command) that
     /// may overlap the other overlappable calls of the same model response, as
     /// Pi runs them, but only while the effect policy admits host processes
     /// without approval. Unlike [`Parallel`](Self::Parallel) it is never
@@ -48,7 +48,7 @@ pub enum ToolConcurrency {
 
 /// A tool the model can call.
 ///
-/// Core tools (`read`, `search`, `edit`, `write`, `bash`) and third-party tools
+/// Core tools (`read`, `edit`, `write`, `bash`) and third-party tools
 /// implement the same trait and register through the same
 /// [`ExtensionHost::tool`](crate::ExtensionHost::tool) method — nothing is
 /// hardcoded into the agent loop.
@@ -400,6 +400,9 @@ pub struct ToolConfirmation {
     pub prompt: String,
     /// Optional consequence or scope detail.
     pub detail: Option<String>,
+    /// Optional broker diagnostics for an explicit technical-details view.
+    /// Ephemeral presentation only; not a serialized tool or extension field.
+    pub technical_detail: Option<String>,
     /// Stronger UI treatment for potentially destructive actions.
     pub destructive: bool,
     /// Suggested choice when a frontend can represent a default.
@@ -481,6 +484,10 @@ impl std::fmt::Debug for ToolConfirmation {
             .debug_struct("ToolConfirmation")
             .field("prompt", &self.prompt)
             .field("detail", &self.detail.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "technical_detail",
+                &self.technical_detail.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("destructive", &self.destructive)
             .field("default", &self.default)
             .finish_non_exhaustive()
@@ -792,10 +799,32 @@ impl ToolProgressSink {
         destructive: bool,
         default: bool,
     ) -> bool {
+        self.confirmation_with_technical_detail(prompt, detail, None, destructive, default)
+            .await
+    }
+
+    /// Broker-owned separation of human scope from technical diagnostics. Refuse
+    /// oversized requests rather than clipping any approval evidence silently.
+    pub(crate) async fn confirmation_with_technical_detail(
+        &self,
+        prompt: String,
+        detail: Option<String>,
+        technical_detail: Option<String>,
+        destructive: bool,
+        default: bool,
+    ) -> bool {
+        let bytes = prompt
+            .len()
+            .saturating_add(detail.as_ref().map_or(0, String::len))
+            .saturating_add(technical_detail.as_ref().map_or(0, String::len));
+        if bytes > MAX_PROGRESS_CHUNK_BYTES {
+            return false;
+        }
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.send_one(ToolProgress::Confirmation(ToolConfirmation {
             prompt,
             detail,
+            technical_detail,
             destructive,
             default,
             reply: Arc::new(std::sync::Mutex::new(Some(reply))),

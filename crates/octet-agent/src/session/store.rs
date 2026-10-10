@@ -380,6 +380,18 @@ impl Session {
                         }
                     }
                     match &entry.value {
+                        EntryValue::BranchSummary {
+                            summary, details, ..
+                        } => {
+                            // from_entry is provenance, not a parent reference;
+                            // a branch-only fork deliberately omits its source.
+                            validate_branch_summary(summary, details).map_err(|error| {
+                                SessionError::Corrupt {
+                                    line: line_no,
+                                    message: error.to_string(),
+                                }
+                            })?;
+                        }
                         EntryValue::Compaction { first_kept, .. } => {
                             if !index.contains_key(first_kept) {
                                 return Err(SessionError::Corrupt {

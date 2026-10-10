@@ -163,6 +163,22 @@ class SourceDistributionVersionTests(unittest.TestCase):
 
 
 class ReleaseToolchainTests(unittest.TestCase):
+    def test_workspace_tests_have_separate_build_and_execution_budgets(self):
+        ci = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
+        job = ci.split("\n  test:\n", 1)[1].split("\n  windows:\n", 1)[0]
+        command = "cargo test --workspace --all-targets --all-features --profile ci-test --locked"
+        build = "\n        run: " + command + " --no-run\n"
+        execute = "\n        run: " + command + "\n"
+        self.assertIn(build, job)
+        self.assertIn(execute, job)
+        self.assertLess(job.index(build), job.index(execute))
+        # Cold compilation must not consume the existing test execution budget.
+        for name, run in (("Build workspace test binaries", build),
+                          ("Run workspace tests", execute)):
+            self.assertIn("      - name: " + name + "\n"
+                          "        timeout-minutes: 15" + run, job)
+        self.assertIn('          OCTET_PTY_TRACE: "1"', job)
+
     def test_workspace_packaging_installs_its_explicit_toolchain(self):
         ci = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
         quality = ci.split("\n  quality:\n", 1)[1].split("\n  first-party-extension-tests:\n", 1)[0]
@@ -222,7 +238,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.assertIn(f"distribution target is **{version}**", text)
         self.assertIn("source candidate, not a published release", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus three signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
         self.assertIn(f"**{version} is not published to npm.**", text)
 
 

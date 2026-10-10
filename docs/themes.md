@@ -28,14 +28,14 @@ shows each file stem and its optional metadata name and description, and typing
 filters it. Selecting a file previews it, and confirming saves its file stem
 (for example `theme = "mine"`) in your user config, leaving other settings
 intact. `/theme mine` (or `/theme mine.toml`) picks a discovered, valid file
-directly, and `/theme Cards` and `/theme Still` pick the built-in file themes
+directly; `/theme Cards`, `/theme Still` and `/theme pi` pick the built-ins
 described below. Cancelling restores the active theme without touching your
 config or session. The first-run picker still shows only Auto, Light and Dark.
 
 Discovery goes global, then trusted project, then explicit path, and the later
 one wins. When two files share a stem, only the winner shows, even if it's
 invalid. Files that fail bounded reads or schema validation are left out of the
-list. The stems `auto`, `light`, `dark`, `default`, `Cards` and `Still` are
+list. The stems `auto`, `light`, `dark`, `default`, `Cards`, `Still` and `pi` are
 reserved for built-in selectors and never show up as file choices.
 
 `--theme` and `OCTET_THEME` take the built-in choices, or a named file at
@@ -163,6 +163,43 @@ point:
 cp examples/themes/octet-default.toml ~/.octet/themes/mine.toml
 ```
 
+### pi
+
+`pi` reproduces Pi 1.0's default **system** palette, pinned to Pi 1.0.2
+(`cd32f7725fdbddbaecdff5b1e68491563394e0ca`), not the older `dark.json` theme.
+It is built into the Rust binary and needs neither Node nor the Pi extension:
+
+```console
+octet --theme pi
+OCTET_THEME=pi octet
+```
+
+The palette uses the terminal's background, foreground and complete 16-color
+palette when reported. Pi's contrast curves preserve palette hues and cap chroma
+so muted themes stay muted. With only a background, it uses Pi's default color
+families; with no reported colors or known appearance, it uses ANSI/default
+colors and faint neutral text without inventing panel fills. Known light/dark
+appearance without RGB uses black/white reference backgrounds. Model switches
+do not recolor the Pi palette or replace its prompt fill with Octet's model wash.
+Pi presentation uses full-width, one-cell-padded prompt and tool fills, unboxed
+assistant text, and an 80 ms braille spinner beside a non-shimmering working
+label (ASCII fallback without Unicode; reduced motion keeps a static native
+marker). Completed tool fills use the palette's success/error colors. Imported
+Pi JSON and newly generated adapter snapshots use the same presentation policy.
+Tern requests native tool cards and rules around the real editor; its renderer
+still owns pixels, fonts and widget padding. Octet keeps its controls, settings
+and input ownership, so this is not a cell-for-cell copy of Pi's UI. Reviewed
+extension footers can replace stock footer chrome; selecting a palette does not
+activate those extensions or import your Pi setup.
+
+Interactive Unix terminals are queried without delaying readiness. The existing
+single input owner consumes OSC 10/11/4 replies, including late and fragmented
+replies; only all 16 palette slots establish a complete palette. Focus return
+refreshes the active `pi` palette. Native Windows, non-TTY and no-color output
+keep the no-query policy; an explicit `OCTET_COLOR_SCHEME` skips querying too.
+Tern receives separately resolved light/dark palettes with Pi's thinking colors.
+The `pi` stem is reserved and cannot be shadowed by a local theme file.
+
 ### Cards
 
 `examples/themes/Cards.toml` is compiled into every release as the built-in
@@ -282,6 +319,16 @@ rather than starting with a broken shell.
 
 ## Pi JSON themes
 
+An enabled, reviewed `octet-pi-compat` contributes your existing enabled Pi
+palettes to `/theme` at startup and `/reload`, including user themes and already
+installed package themes. This works without `--mirror`; enabling palettes does
+not execute additional Pi factories or activate their skills, models or settings.
+Project `.pi` resources still require workspace trust. Disabling or retiring the
+extension withdraws its paths; explicit Octet theme paths and selections retain
+precedence. Discovery never writes Pi settings. Malformed, linked, oversized or
+filtered themes are omitted with diagnostics, and the shared 64-path resource
+budget is enforced. See [Pi setup](pi-compatibility.md#bring-your-pi-extensions).
+
 The native loader also accepts bounded Pi JSON themes in the same discovery
 roots. It resolves hex colors, ANSI indices, terminal-default empty strings,
 variable references and optional-token fallbacks into native semantic roles.
@@ -290,9 +337,11 @@ pinned Pi 1.0.2 implementation (commit
 `cd32f7725fdbddbaecdff5b1e68491563394e0ca`), including OKLCH gamut mapping.
 For example, `oklch(62% 0.1 200)` and `okhsl(250 60% 55%)` work directly or
 through variable references, without the Node adapter or a conversion step.
-Malformed colors and out-of-range channels are rejected. Native geometry,
-model accents and rendering remain native; HTML export colors are validated
-but not rendered. This is not full Pi theme fidelity.
+Malformed colors and out-of-range channels are rejected. Pi prompt/tool fills,
+static status labels and namespaced colors are preserved without model-accent
+recoloring, including normalized snapshots. HTML export colors are validated
+but not rendered. This does not reproduce arbitrary extension renderers, settings
+menus, or an unreviewed user's package setup.
 
 JSON and TOML share trust, no-follow, size, reserved-name and later-root-wins
 rules. Directory entries are ordered lexically, so a same-stem TOML file wins

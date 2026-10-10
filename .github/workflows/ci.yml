@@ -73,6 +73,8 @@ jobs:
           python3 -m py_compile scripts/provider-acceptance.py scripts/generate-octet-release-metadata.py scripts/create-octet-npm-manifest.py scripts/verify-octet-npm.py scripts/verify-octet-npm-provenance.py scripts/generate-homebrew-formula.py
           python3 scripts/test_provider_acceptance.py
           python3 scripts/test_release_serve_trust.py
+          python3 scripts/test_release_source_qualification.py
+          python3 scripts/test_windows_release_surface.py
           python3 scripts/test_repository_identity.py
           python3 scripts/test-packaged-docs.py
           version="v$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -217,8 +219,13 @@ jobs:
           fi
           rg --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-      - run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+      # Cold compilation has its own bound; retain the full execution budget.
+      - name: Build workspace test binaries
         timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
+      - name: Run workspace tests
+        timeout-minutes: 15
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
         env:
           OCTET_PTY_TRACE: "1"
       # `cargo test --all-targets` builds examples only as test harnesses.

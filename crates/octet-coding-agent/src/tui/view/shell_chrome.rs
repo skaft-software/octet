@@ -21,6 +21,18 @@ pub(super) struct ShellChrome {
     pub(super) transcript_rows: usize,
 }
 
+impl ShellChrome {
+    /// Transcript spacing and chrome breathing room share one physical seam.
+    /// Inspect the canonical tail, including when a lazy update has no rows.
+    pub(super) fn separator_rows(transcript_tail: Option<&String>) -> usize {
+        usize::from(transcript_tail.is_some_and(|line| {
+            !sexy_tui_rs::strip_terminal_sequences(line)
+                .trim()
+                .is_empty()
+        }))
+    }
+}
+
 pub(super) fn responsive_identity(state: &ShellState, width: u16) -> String {
     let wordmark = state.theme.bold(
         &state
@@ -264,10 +276,24 @@ fn shell_chrome_with_composer_rows(
             .saturating_add(extension_below.len()),
     );
 
-    let panel = if state.transcript_search_active() {
-        state.transcript_search_panel(width, remaining)
+    // A short native transcript stays above the picker rather than becoming
+    // viewport padding. Budget those actual rows before growing the panel;
+    // long history still leaves the picker its ordinary viewport-sized window.
+    let panel_limit = if state.panel.is_some() && !state.transcript_search_active() {
+        let transcript = state.rendered_transcript(width);
+        let retained_rows = transcript.len() + ShellChrome::separator_rows(transcript.last());
+        if retained_rows < remaining {
+            remaining - retained_rows
+        } else {
+            remaining
+        }
     } else {
-        render_panel_with_limit(state, width, remaining)
+        remaining
+    };
+    let panel = if state.transcript_search_active() {
+        state.transcript_search_panel(width, panel_limit)
+    } else {
+        render_panel_with_limit(state, width, panel_limit)
     };
     remaining = remaining.saturating_sub(panel.len());
 
@@ -283,8 +309,9 @@ fn shell_chrome_with_composer_rows(
     }
     remaining = remaining.saturating_sub(suggestions.len());
 
-    // Pending steering is a compact preview, never a second transcript.
-    let pending_limit = remaining.min(crate::tui::layout::MAX_STEERING_PREVIEW_ROWS);
+    // Wrap queued messages in the available chrome, retaining transcript space
+    // and the composer instead of letting a long queue push either off-screen.
+    let pending_limit = remaining.saturating_sub(3);
     let pending = render_pending_steering(state, width, pending_limit);
     remaining = remaining.saturating_sub(pending.len());
 
@@ -317,7 +344,57 @@ thread_local! {
 fn render_chrome_composer(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
     #[cfg(test)]
     CHROME_COMPOSER_RENDERS.set(CHROME_COMPOSER_RENDERS.get() + 1);
-    crate::tui::composer_surface::render_composer_surface(state, width, now)
+    let mut lines = crate::tui::composer_surface::render_composer_surface(state, width, now);
+    if !state.startup_pending {
+        return lines;
+    }
+
+    // Keep the real editor projection and ready geometry, but do not paint a
+    // half-loaded composer. Rules, fills and embedded metadata resolve in the
+    // same frame as the welcome and footer; draft input never waits for them.
+    let footer_rows = usize::from(crate::tui::composer_surface::status_footer_visible(
+        state, width,
+    ));
+    let content_end = lines.len().saturating_sub(footer_rows);
+    let chrome = state
+        .theme
+        .resolve::<String>("composer")
+        .unwrap_or_default();
+    let chrome = chrome.trim();
+    if width >= 12 || (width >= 3 && chrome == "topline") {
+        lines[0].clear();
+        if width >= 12 && chrome != "topline" {
+            lines[content_end - 1].clear();
+        }
+    }
+    let border = state.theme.role_rgb("composer_border").unwrap_or_else(|| {
+        state
+            .theme
+            .model_rgb(state.model_lab)
+            .unwrap_or((128, 128, 128))
+    });
+    let vertical = state.theme.rgb_fg(border, state.theme.glyph("vertical"));
+    let inset = crate::tui::layout::PresentationLayout::new(&state.theme, width).inset;
+    let left_border = format!("{}{vertical} ", " ".repeat(usize::from(inset)));
+    let right_border = format!(" {vertical}");
+    for line in &mut lines[..content_end] {
+        if width >= 12 && chrome == "framed" {
+            if let Some(content) = line.strip_prefix(&left_border) {
+                *line = format!("{}{content}", " ".repeat(visible_width(&left_border)));
+            }
+            if let Some(content) = line.strip_suffix(&right_border) {
+                *line = format!("{content}{}", " ".repeat(visible_width(&right_border)));
+            }
+        }
+        // Strip presentation styles without stripping the trusted hardware
+        // cursor token. Credential/setup text remains in its existing slot.
+        *line = line
+            .split(sexy_tui_rs::CURSOR_MARKER)
+            .map(sexy_tui_rs::strip_terminal_sequences)
+            .collect::<Vec<_>>()
+            .join(sexy_tui_rs::CURSOR_MARKER);
+    }
+    lines
 }
 
 /// Before launch readiness, setup is a transient surface in either mouse mode.
@@ -344,7 +421,9 @@ pub(super) fn render_startup_surface(
         } else if reserved > 0 && !chrome.header.is_empty() {
             lines[reserved - 1] = chrome.header.remove(0);
         }
-        append_chrome(&mut lines, chrome, 0);
+        let separator_rows =
+            super::welcome_card::welcome_placeholder_separator_rows(state, width, composer_rows);
+        append_chrome(&mut lines, chrome, separator_rows);
         lines.truncate(usize::from(state.size.1));
         return lines;
     }
@@ -370,22 +449,15 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.extension_below);
 }
 
-pub(super) fn append_chrome(
-    lines: &mut Vec<String>,
-    chrome: ShellChrome,
-    stable_prefix_rows: usize,
-) {
+pub(super) fn append_chrome(lines: &mut Vec<String>, chrome: ShellChrome, separator_rows: usize) {
     // The default terminal-owned mode follows logical content height. Padding
     // a short frame to terminal height would pin the composer to the bottom and
     // create a large dead zone below the transcript. Once the frame naturally
     // grows past the viewport, sexy-tui moves committed rows into native
     // scrollback.
-    // `lines` may be only a lazy suffix, so its retained prefix still decides
-    // whether the transcript owns the single breathing row before chrome.
-    let complete_transcript_rows = stable_prefix_rows.saturating_add(lines.len());
-    if complete_transcript_rows > 0 {
-        lines.push(String::new());
-    }
+    // The caller measures the canonical/projected transcript tail, not just
+    // this lazy suffix. A reserved Working blank already supplies this seam.
+    lines.extend(std::iter::repeat_n(String::new(), separator_rows));
     lines.extend(chrome.header);
     lines.extend(chrome.error);
     lines.extend(chrome.pending);
@@ -420,10 +492,41 @@ mod tests {
         builtin_welcome_card as welcome, InteractiveShell, Panel, ShellOverlay,
     };
 
+    #[test]
+    fn native_chrome_combines_the_canonical_blank_with_its_separator() {
+        let shell = InteractiveShell::test_shell();
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, 80, Instant::now());
+        for (transcript, expected_separator) in [
+            (Vec::new(), 0),
+            (vec![String::from("Working")], 1),
+            (vec![String::from("Working"), String::new()], 0),
+            (
+                vec![String::from("Working"), String::from("\x1b[2m  \x1b[0m")],
+                0,
+            ),
+        ] {
+            let separator = ShellChrome::separator_rows(transcript.last());
+            assert_eq!(separator, expected_separator);
+            let mut full = transcript.clone();
+            append_chrome(&mut full, chrome.clone(), separator);
+            assert_eq!(
+                full.len(),
+                transcript.len() + separator + shell_chrome_rows(&chrome)
+            );
+            let mut lazy = Vec::new();
+            append_chrome(&mut lazy, chrome.clone(), separator);
+            let mut reconstructed = transcript;
+            reconstructed.extend(lazy);
+            assert_eq!(reconstructed, full);
+        }
+    }
+
     // Reference the pre-fast-path geometry through the actual welcome painter,
     // not through the new row-count calculation.
     fn materialized_startup_reference(state: &ShellState, width: u16) -> Vec<String> {
-        let mut chrome = shell_chrome(state, width, Instant::now());
+        let (mut chrome, composer_rows) =
+            shell_chrome_with_composer_rows(state, width, Instant::now());
         let reserved = welcome::render_welcome_card(
             state,
             width,
@@ -437,7 +540,9 @@ mod tests {
         } else if reserved > 0 && !chrome.header.is_empty() {
             lines[reserved - 1] = chrome.header.remove(0);
         }
-        append_chrome(&mut lines, chrome, 0);
+        let separator_rows =
+            welcome::welcome_placeholder_separator_rows(state, width, composer_rows);
+        append_chrome(&mut lines, chrome, separator_rows);
         lines.truncate(usize::from(state.size.1));
         lines
     }
@@ -478,6 +583,57 @@ mod tests {
                             assert_eq!(welcome::placeholder_work_counts(), (0, 0));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn startup_composer_hides_themed_chrome_without_rewriting_draft_or_cursor_geometry() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        use crate::tui::theme::{test_theme_source_with, TerminalBackground};
+        use sexy_tui_rs::{strip_terminal_sequences, CURSOR_MARKER};
+
+        for chrome in ["boxed", "framed", "shaded", "topline"] {
+            for depth in [ColorDepth::TrueColor, ColorDepth::None] {
+                let theme = test_theme_source_with(
+                    &format!("[colors]\ncomposer = '{chrome}'\ncomposer_bg = '#202020'\n[layout]\ntranscript_inset = 2\n"),
+                    TerminalCapabilities::test(true, true, depth),
+                    TerminalBackground::Dark,
+                );
+                let shell = InteractiveShell::test_shell_with_theme(theme);
+                for width in [11, 46, 96] {
+                    let mut state = shell.state.borrow_mut();
+                    state.size = (width, 18);
+                    let draft = if width < 12 {
+                        "│─"
+                    } else {
+                        "typed │ ─ draft"
+                    };
+                    state.editor.set_text(draft);
+                    state.startup_pending = true;
+                    let pending = shell_chrome(&state, width, Instant::now()).composer;
+                    let text = strip_terminal_sequences(&pending.join("\n"));
+                    assert!(text.contains(draft), "{chrome} {width}: {text}");
+                    assert_eq!(text.matches('│').count(), 1, "extra side rails: {text}");
+                    assert_eq!(text.matches('─').count(), 1, "extra rules: {text}");
+                    assert!(pending
+                        .iter()
+                        .all(|line| !line.replace(CURSOR_MARKER, "").contains('\x1b')));
+                    let cursor = |lines: &[String]| {
+                        lines
+                            .iter()
+                            .enumerate()
+                            .find_map(|(row, line)| {
+                                line.split_once(CURSOR_MARKER)
+                                    .map(|(before, _)| (row, visible_width(before)))
+                            })
+                            .unwrap()
+                    };
+                    state.startup_pending = false;
+                    let ready = shell_chrome(&state, width, Instant::now()).composer;
+                    assert_eq!(pending.len(), ready.len());
+                    assert_eq!(cursor(&pending), cursor(&ready), "{chrome} {width}");
                 }
             }
         }

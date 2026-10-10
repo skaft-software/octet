@@ -107,7 +107,15 @@ fn debug_is_hidden_but_parses_and_reports_every_rendered_line() {
 
 #[test]
 fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
-    assert_eq!(parse("/settings"), Command::Settings(SettingsCommand::Show));
+    assert_eq!(parse("/settings"), Command::Settings(SettingsCommand::Menu));
+    assert_eq!(
+        parse(" /settings  \n"),
+        Command::Settings(SettingsCommand::Menu)
+    );
+    assert_eq!(
+        parse("/settings show"),
+        Command::Settings(SettingsCommand::Show)
+    );
     assert_eq!(
         parse("/settings theme"),
         Command::Settings(SettingsCommand::Theme(None))
@@ -117,8 +125,24 @@ fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
         Command::Settings(SettingsCommand::Theme(Some("light".into())))
     );
     assert_eq!(
+        parse("/settings images"),
+        Command::Settings(SettingsCommand::Images(None))
+    );
+    assert_eq!(
+        parse("/settings images on"),
+        Command::Settings(SettingsCommand::Images(Some(true)))
+    );
+    assert_eq!(
         parse("/settings images off"),
         Command::Settings(SettingsCommand::Images(Some(false)))
+    );
+    assert_eq!(
+        parse("/settings default model"),
+        Command::Settings(SettingsCommand::DefaultModel(None))
+    );
+    assert_eq!(
+        parse("/settings default reasoning"),
+        Command::Settings(SettingsCommand::DefaultReasoning(None))
     );
     assert_eq!(
         parse("/settings default model custom/alpha-model"),
@@ -147,7 +171,22 @@ fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
         parse("/settings images maybe"),
         Command::Unknown(_)
     ));
-    assert!(matches!(parse("/settings bogus"), Command::Unknown(_)));
+    for malformed in [
+        "/settings bogus",
+        "/settings show extra",
+        "/settings menu",
+        "/settings images on extra",
+        "/settings theme dark extra",
+        "/settings default model id extra",
+        "/settings default reasoning high extra",
+        "/settings transport extra",
+        "/settings padding extra",
+    ] {
+        assert!(
+            matches!(parse(malformed), Command::Unknown(_)),
+            "{malformed}"
+        );
+    }
 
     assert_eq!(
         parse("/scoped-models"),
@@ -345,7 +384,7 @@ fn scoped_scope_targets_toggle_move_and_persist_in_requested_order() {
 }
 
 #[test]
-fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() {
+fn settings_text_reports_effective_values_without_claiming_saved_defaults() {
     let surface = SettingsSurface {
         default_model: Some("gpt-4o-mini".into()),
         reasoning: "high".into(),
@@ -357,8 +396,8 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     };
     let text = settings_text(&surface);
     for expected in [
-        "Default model      gpt-4o-mini",
-        "Default reasoning  high",
+        "Configured model   gpt-4o-mini",
+        "Active reasoning   high",
         "Theme              dark",
         "Transport          websocket-preferred (declared by the codex route; not a user preference)",
         "Inline images      on",
@@ -367,7 +406,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     ] {
         assert!(text.contains(expected), "missing {expected:?} in {text}");
     }
-    // Unset defaults are named, never rendered as an empty value.
+    // An unset launch model is named, never claimed to be a saved preference.
     let empty = SettingsSurface {
         default_model: None,
         reasoning: "off".into(),
@@ -379,7 +418,7 @@ fn settings_text_reports_defaults_theme_transport_images_and_no_trust_default() 
     };
     let text = settings_text(&empty);
     assert!(
-        text.contains("Default model      (chosen at startup or by the session)"),
+        text.contains("Configured model   (chosen at startup or by the session)"),
         "{text}"
     );
     assert!(text.contains("Theme              auto"), "{text}");
@@ -615,6 +654,7 @@ fn every_discovered_builtin_has_an_executable_parser_route() {
         let invocation = match command.name {
             "name" => "/name release audit".to_owned(),
             "export" => "/export audit.md".to_owned(),
+            "import" => "/import audit.jsonl".to_owned(),
             name => format!("/{name}"),
         };
         assert!(

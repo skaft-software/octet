@@ -1319,15 +1319,15 @@ class Extension:
             isinstance(tools, (str, bytes, bytearray))
             or not isinstance(tools, Sequence)
             or not tools
-            or len(tools) > 5
+            or len(tools) > 4
             or any(not isinstance(tool, str) for tool in tools)
             or len(set(tools)) != len(tools)
             or any(
-                tool not in {"read", "search", "edit", "write", "bash"} for tool in tools
+                tool not in {"read", "edit", "write", "bash"} for tool in tools
             )
         ):
             raise ValueError(
-                "agent tools must be a duplicate-free subset of read, search, edit, write, and bash"
+                "agent tools must be a duplicate-free subset of read, edit, write, and bash"
             )
         integer_limits = {
             "max_depth": (max_depth, 1, 1),

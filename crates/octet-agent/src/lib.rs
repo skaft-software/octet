@@ -109,6 +109,7 @@ pub mod tools;
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
     PreparedSteering, RequestContextEstimate, Run, RunControl, RunOutput, SteeringReceipt,
+    TreeNavigationResult,
 };
 pub use artifact::{
     ArtifactError, ArtifactGenerationSettlement, ArtifactId, ArtifactPublication, ArtifactSource,
@@ -284,4 +285,4 @@ pub use tool::{
     ToolPromptContribution, MAX_PROGRESS_CHUNK_BYTES, MAX_TOOL_METADATA_BYTES,
     MAX_TOOL_STRUCTURED_CONTENT_BYTES,
 };
-pub use tools::{BashTool, CoreTools, EditTool, ReadTool, SearchTool, WriteTool};
+pub use tools::{BashTool, CoreTools, EditTool, ReadTool, WriteTool};

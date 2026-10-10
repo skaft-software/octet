@@ -1,10 +1,8 @@
 //! The default coding prompt's verification contract, against the real binary.
 //!
-//! The measured cost of octet's old default was ~1.17 self-check calls per task
-//! (git status/diff plus ad-hoc `/tmp` harnesses) against 0.14 for an agent whose
-//! prompt says to stop after the change. This suite runs the real CLI against a
-//! loopback provider and reads the system message the model actually receives:
-//! one requested change, one relevant check, then stop.
+//! Runs the real CLI against a loopback provider and checks the XML-wrapped
+//! rules the model receives: inspect the diff, run relevant checks, investigate
+//! failures, and report observed results without claiming unrun checks passed.
 
 #![cfg(unix)]
 #![allow(missing_docs)]
@@ -94,23 +92,35 @@ async fn system_message(root: &Path, server: &MockServer) -> String {
 }
 
 #[tokio::test]
-async fn default_prompt_asks_for_one_check_then_stops() {
+async fn default_prompt_preserves_behavioral_rules() {
     let (root, server) = fixture().await;
     let system = system_message(root.path(), &server).await;
-    assert!(
-        system.contains("After the change and its check, stop"),
-        "the default prompt must stop after one check: {system}"
-    );
-    assert!(
-        !system.contains("Inspect the resulting diff and run the relevant tests"),
-        "the default prompt must not ask for the extra diff inspection: {system}"
-    );
-    assert!(
-        system.contains("no extra harnesses, no `git diff`"),
-        "the stop rule must name the extra work it forbids: {system}"
-    );
-    assert!(
-        system.contains("Never claim an unrun check passed"),
-        "dropping the extra verification must not drop honest reporting: {system}"
-    );
+    let rules = system
+        .split_once("<rules>\n")
+        .and_then(|(_, rest)| rest.split_once("\n</rules>"))
+        .map(|(rules, _)| rules)
+        .expect("the default prompt has an XML-wrapped rules section");
+    for instruction in [
+        "answer, investigate, review, or plan without edits unless asked to change or implement",
+        "For implementation, do the work; don't stop at analysis",
+        "Inspect relevant code/context before editing",
+        "Work without prompting until complete or blocked",
+        "unless the user authorized the action and scope",
+        "Don't expand or reduce the requested scope",
+        "While workers run, respect path ownership",
+        "never switch branches, reset, rebase, stash, or clean",
+        "Stale hashes or unexpected changes mean another writer; stop editing that path",
+        "Be concise and direct. Lead with the outcome",
+        "Don't dump large file contents unless asked",
+        "Inspect the diff and run relevant tests/checks/builds",
+        "Investigate failures; don't bypass them",
+        "Report observed results, not assumptions; don't claim unrun checks passed",
+        "Separate existing failures from regressions",
+        "If blocked, finish independent parts and report what remains",
+    ] {
+        assert!(
+            rules.contains(instruction),
+            "missing {instruction}: {system}"
+        );
+    }
 }

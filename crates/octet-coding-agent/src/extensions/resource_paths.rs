@@ -177,6 +177,7 @@ impl ResourceLoader {
             keybindings: std::collections::BTreeMap::new(),
             context: Vec::new(),
             default_model: None,
+            default_thinking_level: None,
             diagnostics: vec![diagnostic],
         })
     }
@@ -206,6 +207,7 @@ impl ResourceLoader {
         // nothing outside discovery can grant them a workspace path.
         let no_explicit: Vec<PathBuf> = Vec::new();
         let mut default_model = None;
+        let mut default_thinking_level = None;
         let mut fences = Vec::new();
         for contribution in batch.contributions {
             let process = contribution.process;
@@ -271,6 +273,9 @@ impl ResourceLoader {
             // resolves it against its own catalog.
             if default_model.is_none() {
                 default_model = contribution.paths.default_model.clone();
+            }
+            if default_thinking_level.is_none() {
+                default_thinking_level = contribution.paths.default_thinking_level.clone();
             }
             if let Some(preferred) = contribution.paths.default_theme {
                 let path = PathBuf::from(preferred);
@@ -420,6 +425,7 @@ impl ResourceLoader {
             keybindings,
             context,
             default_model,
+            default_thinking_level,
             diagnostics,
         })
     }
@@ -440,6 +446,8 @@ pub(crate) struct LoadedResourcePaths {
     pub(crate) context: Vec<(PathBuf, String)>,
     /// First contributed Pi-shaped default route, unresolved.
     pub(crate) default_model: Option<octet_agent::extension_process::ExtensionDefaultModel>,
+    /// First contributed exact portable thinking preference, unresolved.
+    pub(crate) default_thinking_level: Option<String>,
     pub(crate) diagnostics: Vec<String>,
 }
 
@@ -513,6 +521,9 @@ fn admit_path(
 
 #[cfg(all(test, unix))]
 pub(crate) mod consumer_tests;
+#[cfg(all(test, unix))]
+#[path = "resource_paths/native_defaults_tests.rs"]
+mod native_defaults_tests;
 #[cfg(all(test, unix))]
 #[path = "resource_paths/pi_app_tests.rs"]
 mod pi_app_tests;

@@ -10,10 +10,26 @@ octet --safe-mode --tools read --no-context-files --offline
 
 This allows read only, skips context files and optional discovery, and keeps
 approvals on. It isn't a network sandbox: inference still contacts your
-provider. Use OS isolation for untrusted work. Content search needs the default
-`unsafe_host` effect policy (`octet --tools read,search --no-context-files
---offline`), because `search` runs ripgrep as a native child and the controlled
-policies that `--safe-mode` selects deny a non-`bash` host process.
+provider. Use OS isolation for untrusted work. Content search uses `bash`,
+subject to the same process and approval policy as other commands. Always prefer
+`rg` (ripgrep) when it is available on `PATH`; otherwise use `grep`. Ripgrep is
+optional, not a startup prerequisite. There is no separate native search tool,
+and octet does not rewrite shell commands or translate rg options into grep
+options. Use the chosen program's own flags, and bound the search to the intended
+files or directories. For example:
+
+```sh
+if command -v rg >/dev/null 2>&1; then
+  rg -F -n -- 'needle' src
+else
+  grep -R -F -n -- 'needle' src
+fi
+```
+
+The default agent instructions and bash tool description carry this preference.
+`octet doctor` reports missing ripgrep as optional rather than failing because
+it is absent. If neither program is installed, install one before requesting
+content searches; other enabled tools do not depend on them.
 
 ## Built-in tools
 
@@ -23,19 +39,16 @@ policies that `--safe-mode` selects deny a non-`bash` host process.
 | `edit` | Exact replacements that detect stale file content. | On |
 | `write` | Creates or replaces whole files. | On |
 | `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On |
-| `search` | Ripgrep search of the workspace. | On |
 
 A tool you turn off is never advertised to the model. Having a tool isn't
 permission to use it. When the model batches calls in one response, reads run
-together, and under full access `bash` commands and `search` run together with
+together, and under full access independent `bash` commands run together with
 them. File changes, extension tools and anything that could ask for approval
-run one at a time, and results reach the model in the order it asked. `search`
-runs ripgrep as a native child, so `--no-process`/`--no-shell` remove it from
-the surface as well, and controlled effect policies deny its process calls.
+run one at a time, and results reach the model in the order it asked.
 
 | To do this | Use |
 | --- | --- |
-| Allow only some tools, or exclude some | `--tools read,search` or `--exclude-tools bash` |
+| Allow only some tools, or exclude some | `--tools read` or `--exclude-tools bash` |
 | Block file changes | `--no-edit` (turns off `edit` and `write`) |
 | Block whole-file writes | `--no-write` |
 | Block commands | `--no-process` or `--no-shell` |
@@ -51,8 +64,7 @@ effect policy, tool exclusions or approvals. `on` retains direct tools; `only`
 advertises composition tools while ordinary tools stay nested-only.
 
 Nested core `read` returns unnumbered bounded `content` with path/hash/line and
-continuation metadata. `search` returns ordered `matches` with path, line, text,
-context/clipping flags, `total` and `truncated`. `bash` returns independently
+continuation metadata. `bash` returns independently
 bounded raw `stdout`/`stderr` (up to 1 MiB source bytes each, additionally bounded
 by JSON encoding), exit status, byte counts and completeness/truncation flags.
 Direct tool text stays unchanged. Schema-less tools resolve to text, not
@@ -104,6 +116,17 @@ Full-access launches default to `allow_external_paths = true`. Set it to `false`
 to keep the built-in file tools inside the workspace. That doesn't contain shell
 commands or extension processes. `--safe` is a hidden alias for `--safe-mode`,
 and `--yolo` and its settings and environment forms are no longer accepted.
+
+## Approval prompts
+
+Interactive broker approvals ask in plain language, such as **Run this command?**
+or **Write this file?**, with a bounded command/path preview. **Technical details**
+opens a read-only view of the effect classification, exact-intent digest and
+argument projection. Opening or scrolling that view never grants permission;
+Escape returns to the decision with Deny selected for broker requests. Ctrl+C,
+dropping an unanswered request or ending its run denies it. An omission marker
+means the preview is incomplete; the approval still binds the complete intent,
+not the displayed prefix. The combined request remains bounded to 8 KiB.
 
 <a id="shell-selection"></a>
 

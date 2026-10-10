@@ -134,6 +134,8 @@ fn record_unknown_attempt(session: &mut Session) -> Result<(), SessionError> {
 }
 
 #[cfg(test)]
+mod branch_summary;
+#[cfg(test)]
 mod branching;
 #[cfg(test)]
 mod context;

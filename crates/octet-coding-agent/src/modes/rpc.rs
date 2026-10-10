@@ -472,6 +472,16 @@ impl<'a> RpcSessionProjection<'a> {
                     value.insert("details".into(), details);
                 }
             }
+            EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            } => {
+                value.insert("type".into(), Value::String("branch_summary".into()));
+                value.insert("summary".into(), Value::String(summary.clone()));
+                value.insert("fromId".into(), Value::String(from_entry.0.clone()));
+                value.insert("details".into(), json!(details));
+            }
             other => {
                 let custom_type = match other {
                     EntryValue::Config { .. } => "octet:config",
@@ -483,8 +493,10 @@ impl<'a> RpcSessionProjection<'a> {
                     EntryValue::ResponsesCompaction { .. } => "octet:responses-compaction",
                     EntryValue::ResponsesReasoning { .. } => "octet:responses-reasoning",
                     EntryValue::ResponsesSteering { .. } => "octet:responses-steering",
-                    EntryValue::Message(_) | EntryValue::Compaction { .. } => {
-                        unreachable!("message and compaction entries are handled above")
+                    EntryValue::Message(_)
+                    | EntryValue::Compaction { .. }
+                    | EntryValue::BranchSummary { .. } => {
+                        unreachable!("message and summary entries are handled above")
                     }
                 };
                 value.insert("type".into(), Value::String("custom".into()));

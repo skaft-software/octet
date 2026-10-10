@@ -14,7 +14,10 @@ TERMINAL_BENCH_DATASET = "terminal-bench/terminal-bench-2-1@6"
 # This is the subscription route used by the v0.6.2 Codex login flow. A caller
 # can still pass an API-backed model explicitly with Harbor's -m option.
 DEFAULT_MODEL = "gpt-5.6-sol"
-DEFAULT_REASONING = "max"
+# No effort level is forced: octet resolves the endpoint's declared default
+# when no preference is given, and a caller that wants an exact effort passes
+# `--agent-kwarg reasoning=<level>` (still recorded in invocation.json).
+DEFAULT_REASONING: str | None = None
 DEFAULT_PROVIDER_ENV = ("OPENAI_API_KEY",)
 
 DEFAULT_BINARY_SOURCE = "/usr/local/bin/ygg"

@@ -26,7 +26,10 @@ use crate::tui::theme_reload::{
 use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
 
 mod discovery;
+mod pi;
 mod terminal_colors;
+use crate::tui::terminal::TerminalThemeColors;
+use pi::{pi_theme_for, pi_theme_with_colors};
 
 pub use discovery::compiled_file_theme_names;
 pub(crate) use discovery::{
@@ -71,6 +74,9 @@ pub use crate::tui::theme_schema::{
 /// Stable name for octet's compiled-in default theme and legacy selectors.
 pub const DEFAULT_THEME_NAME: &str = "default";
 
+/// Pi 1.0's terminal-adaptive default, implemented natively without the bridge.
+pub const PI_THEME_NAME: &str = "pi";
+
 /// Stable selector for the compiled-in `Cards` theme. The file is embedded at
 /// build time from `examples/themes/Cards.toml` and validated by
 /// `cards_example_theme_is_valid_for_every_background_profile`, so the shipped
@@ -100,6 +106,7 @@ type CompiledFileTheme = fn(TerminalCapabilities, TerminalBackground) -> anyhow:
 const COMPILED_FILE_THEMES: &[(&str, CompiledFileTheme)] = &[
     (CARDS_THEME_NAME, cards_theme_for),
     (STILL_THEME_NAME, still_theme_for),
+    (PI_THEME_NAME, pi_theme_for),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +116,8 @@ pub enum ThemeSource {
     CompiledCards,
     /// The compiled-in `Still` theme, embedded from `examples/themes/Still.toml`.
     CompiledStill,
+    /// Pi 1.0's generated system palette, independent of extension enablement.
+    CompiledPi,
     File(PathBuf),
 }
 
@@ -394,6 +403,8 @@ pub struct OctetTheme {
     // Already validated, bounded source; native palettes resolve both variants
     // from the same snapshot, without rereading a changed file during paint.
     native_source: Option<std::sync::Arc<str>>,
+    // Owned by the shared input stream; retained across selection and reload.
+    terminal_colors: TerminalThemeColors,
 }
 
 /// Semantic roles rendered as thinking prose. Code, diff, and syntax roles
@@ -654,7 +665,29 @@ impl OctetTheme {
             },
             source: ThemeSource::CompiledDefault,
             native_source: None,
+            terminal_colors: TerminalThemeColors::default(),
         }
+    }
+
+    pub(crate) fn terminal_colors(&self) -> TerminalThemeColors {
+        self.terminal_colors
+    }
+
+    /// Carry terminal observations through previews, selection and reload. Only
+    /// Pi's generated theme consumes them; other themes retain their own colors.
+    pub(crate) fn with_terminal_colors(mut self, colors: TerminalThemeColors) -> Self {
+        if matches!(self.source, ThemeSource::CompiledPi) && colors != self.terminal_colors {
+            self = pi_theme_with_colors(
+                self.capabilities,
+                self.background,
+                colors.foreground,
+                colors.background,
+                colors.palette,
+            )
+            .expect("compiled Pi recipe must remain valid");
+        }
+        self.terminal_colors = colors;
+        self
     }
 
     pub fn capabilities(&self) -> TerminalCapabilities {
@@ -674,6 +707,11 @@ impl OctetTheme {
         matches!(self.source, ThemeSource::CompiledDefault)
     }
 
+    /// The shared JSON projection retains this role in files and snapshots too.
+    pub(crate) fn is_pi_theme(&self) -> bool {
+        self.semantic_styles.contains_key("extension.pi.accent")
+    }
+
     #[allow(dead_code)]
     pub fn source(&self) -> &ThemeSource {
         &self.source
@@ -685,7 +723,8 @@ impl OctetTheme {
             ThemeSource::File(path) => Some(path),
             ThemeSource::CompiledDefault
             | ThemeSource::CompiledCards
-            | ThemeSource::CompiledStill => None,
+            | ThemeSource::CompiledStill
+            | ThemeSource::CompiledPi => None,
         }
     }
 
@@ -752,6 +791,9 @@ impl OctetTheme {
     /// stable role names and never need access to octet's private application
     /// state or raw terminal escape sequences.
     pub fn apply_semantic_role(&self, role: &str, text: &str) -> String {
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
         self.inner.apply_style(self.semantic_style(role), text)
     }
 
@@ -815,6 +857,8 @@ impl OctetTheme {
             }
             ThemeSource::CompiledCards => cards_theme_for(self.capabilities, self.background),
             ThemeSource::CompiledStill => still_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledPi => pi_theme_for(self.capabilities, self.background)
+                .map(|theme| theme.with_terminal_colors(self.terminal_colors)),
             ThemeSource::File(path) => {
                 load_theme_path_for(path, self.capabilities, self.background)
             }
@@ -831,6 +875,27 @@ impl OctetTheme {
         if capabilities.color != ColorDepth::None {
             capabilities.color = ColorDepth::TrueColor;
         }
+        if matches!(self.source, ThemeSource::CompiledPi) {
+            let same_profile =
+                self.background == background && self.terminal_colors.background.is_some();
+            let (foreground, canvas) = if same_profile {
+                (
+                    self.terminal_colors.foreground,
+                    self.terminal_colors.background,
+                )
+            } else if background == TerminalBackground::Light {
+                (Some((0, 0, 0)), Some((255, 255, 255)))
+            } else {
+                (Some((229, 229, 231)), Some((0, 0, 0)))
+            };
+            return pi_theme_with_colors(
+                capabilities,
+                background,
+                foreground,
+                canvas,
+                self.terminal_colors.palette,
+            );
+        }
         let Some(source) = &self.native_source else {
             return Ok(default_theme_for(background, capabilities));
         };
@@ -845,6 +910,9 @@ impl OctetTheme {
     }
 
     pub fn fg(&self, token: &str, text: &str) -> String {
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
         if let Some(style) = self.semantic_styles.get(token) {
             return self.inner.apply_style(*style, text);
         }
@@ -857,6 +925,9 @@ impl OctetTheme {
     /// Resolve the accent colour of a specific model family. `None` uses the
     /// active theme token; a concrete lab remains stable across model switches.
     pub(crate) fn model_rgb(&self, lab: Option<ModelLab>) -> Option<(u8, u8, u8)> {
+        if self.is_pi_theme() {
+            return self.role_rgb("model_accent");
+        }
         let Some(lab) = lab else {
             return self.role_rgb("model_accent");
         };
@@ -1969,6 +2040,9 @@ fn apply_model_lab_for(theme: &mut OctetTheme, lab: ModelLab, background: Termin
 }
 
 pub(crate) fn apply_model_lab(theme: &mut OctetTheme, lab: ModelLab) {
+    if theme.is_pi_theme() {
+        return;
+    }
     let background = theme.background;
     apply_model_lab_for(theme, lab, background);
 }

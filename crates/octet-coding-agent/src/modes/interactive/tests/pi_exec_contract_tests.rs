@@ -84,18 +84,27 @@ impl crate::extensions::ExtensionConfirmationHandler for ExecPicker {
     fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
         Some(&mut self.shell)
     }
-    fn confirm<'a>(
+    fn confirm_effect<'a>(
         &'a mut self,
         _extension: &'a str,
-        request: &'a octet_agent::extension_process::ConfirmationRequest,
+        request: &'a octet_agent::tool::ToolConfirmation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + 'a>> {
         assert!(request
-            .detail
+            .technical_detail
             .as_deref()
             .unwrap()
             .contains("complete intent sha256"));
+        assert!(!request.detail.as_deref().unwrap().contains("sha256"));
+        assert!(request.detail.as_deref().unwrap().contains("Command:"));
         self.prompts += 1;
         Box::pin(std::future::ready(Ok(self.approved)))
+    }
+    fn confirm<'a>(
+        &'a mut self,
+        _extension: &'a str,
+        _request: &'a octet_agent::extension_process::ConfirmationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + 'a>> {
+        panic!("exact effects must reach confirm_effect, not action-level consent")
     }
 }
 

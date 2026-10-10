@@ -114,16 +114,33 @@ export const nativeTokenProjection = Object.freeze({
 
 /** Return an explicitly labeled, partial native TOML projection, never masquerading as Pi JSON.
  * The caller must choose a reviewed destination and use native discovery/admission.
- * Layout, host model accents, terminal queries, HTML export and unmapped Pi roles are NOT reproduced.
+ * Shaded transcript surfaces and namespaced Pi colors are preserved. Native input,
+ * HTML export and extension-rendered chrome still require their own integration.
  */
 export function piThemeToNativeToml(input) {
   const palette = parsePiTheme(input);
   plain(palette.name, 'native theme name', 80);
   const native = value => value === '' ? 'default' : typeof value === 'number' ? `index:${value}` : colorToHex(parseColor(value));
   const lines = ['# Partial palette projection from Pi JSON; not Pi theme format.', '[metadata]',
-    `name = ${JSON.stringify(palette.name)}`, 'description = "Pi palette projection; layout and unmapped roles are not reproduced"',
+    `name = ${JSON.stringify(palette.name)}`, 'description = "Pi colors and shaded transcript surfaces; native input and ownership"',
     `terminal = ${JSON.stringify(palette.appearance ?? 'any')}`, 'adaptive = false', '', '[colors]'];
   for (const [pi, octet] of Object.entries(nativeTokenProjection)) lines.push(`${octet} = ${JSON.stringify(native(palette.colors[pi]))}`);
+  lines.push('prompt_wash = false', 'margin_markers = false', 'thinking_spinner = true', 'splash_compact = true',
+    `assistant_msg_text = ${JSON.stringify(native(palette.colors.text))}`, `model_assistant = ${JSON.stringify(native(palette.colors.text))}`,
+    `model_accent = ${JSON.stringify(native(palette.colors.accent))}`, 'md_code_bg = "default"', 'md_code_inline_bg = "default"',
+    '', '[model]', 'use_lab_color = false', '', '[layout]', 'transcript_inset = 0');
+  for (const [kind, fg, bg] of [
+    ['user', 'userMessageText', 'userMessageBg'], ['assistant', 'text', null], ['reasoning', 'thinkingText', null],
+    ['tool', 'toolOutput', 'toolPendingBg'], ['shell', 'toolOutput', 'toolPendingBg'],
+  ]) {
+    const chrome = ['user', 'tool', 'shell'].includes(kind) ? 'band' : 'plain';
+    const padding = kind === 'reasoning' ? 0 : 1;
+    lines.push('', `[roles."surface.${kind}"]`, `foreground = ${JSON.stringify(native(palette.colors[fg]))}`,
+      `background = ${JSON.stringify(bg ? native(palette.colors[bg]) : 'default')}`, '', `[surfaces.${kind}]`,
+      `chrome = "${chrome}"`, `padding = ${padding}`, `narrow_chrome = "${chrome}"`, `narrow_padding = ${padding}`);
+  }
+  for (const token of tokens) lines.push('', `[roles."extension.pi.${token}"]`,
+    `${backgroundTokens.includes(token) ? 'background' : 'foreground'} = ${JSON.stringify(native(palette.colors[token]))}`);
   const toml = lines.join('\n') + '\n';
   bounded(toml, 'native theme TOML', maxBytes);
   return Object.freeze({ sourceFormat: 'pi-theme-json', format: 'octet-theme-toml', toml,

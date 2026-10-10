@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Theme, createThemeFromJson, loadThemeFromPath, theme } from '../lib/theme.mjs';
@@ -75,6 +75,18 @@ test('native conversion labels TOML honestly, preserves index/default colors, an
   assert.deepEqual(converted.unmappedExport, ['pageBg']);
   assert.throws(() => parsePiTheme(converted.toml), /not native TOML/);
   input.name = 'n'.repeat(81); assert.throws(() => piThemeToNativeToml(input), /bounds_exceeded native theme name/);
+});
+
+test('adapter snapshots preserve the native Pi presentation contract', async () => {
+  const colors = Object.fromEntries([...foregroundTokens, ...backgroundTokens].map(token => [token, '#00aaff']));
+  Object.assign(colors, { text: '#ddeeff', userMessageText: '#ddeeff', userMessageBg: '#223344',
+    toolPendingBg: '#182838', toolSuccessBg: '#183828', toolErrorBg: '#381828' });
+  const converted = piThemeToNativeToml({ name: 'Pi presentation QA', appearance: 'dark', colors });
+  assert.equal(converted.toml, await readFile(new URL('./fixtures/pi-native-layout.toml', import.meta.url), 'utf8'));
+  assert.match(converted.toml, /thinking_spinner = true/);
+  assert.match(converted.toml, /\[roles\."extension\.pi\.accent"\]/);
+  assert.match(converted.toml, /\[surfaces\.user\]\nchrome = "band"\npadding = 1/);
+  assert.match(converted.toml, /\[surfaces\.reasoning\]\nchrome = "plain"\npadding = 0/);
 });
 
 test('Theme facade renders pinned color/style methods without acquiring the terminal or mutating the host palette', () => {

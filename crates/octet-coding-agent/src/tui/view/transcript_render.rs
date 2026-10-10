@@ -9,12 +9,11 @@ use super::reasoning_render::render_reasoning_on_surface_with_rainbow;
 use super::surface_frame::{
     decorate_surface_content_suffix, decorate_surface_with_frame, event_margin_marker_with_frame,
 };
-use super::surface_layout::{compile_surface_plan, surface_roles};
+use super::surface_layout::compile_surface_plan_for_render;
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
-    render_compact_tool_output, render_diff_only, render_tool_failure_reason, tool_diff,
-    tool_display_label, tool_grid_label, tool_value_indent, tool_value_indent_width,
-    without_redundant_tool_lead,
+    render_diff_only, render_tool_failure_reason, tool_diff, tool_display_label, tool_grid_label,
+    tool_value_indent, tool_value_indent_width, without_redundant_tool_lead,
 };
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
@@ -135,7 +134,7 @@ pub(super) fn render_assistant_update_planned(
         }
         _ => return None,
     };
-    let plan = compile_surface_plan(previous, block, theme, outer_width);
+    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, show_reasoning);
     let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
@@ -198,7 +197,7 @@ pub(super) fn render_block_planned_with_rainbow(
     rainbow_strength: u16,
     subagents_running: bool,
 ) -> RenderedTranscriptBlock {
-    let plan = compile_surface_plan(previous, block, theme, outer_width);
+    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, verbose_tools);
     let still_grouping = theme
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false);
@@ -225,14 +224,14 @@ pub(super) fn render_block_planned_with_rainbow(
         plan.chrome,
         ThemeSurfaceChrome::Card | ThemeSurfaceChrome::Band
     )
-    .then(|| theme.semantic_style(surface_roles(plan.kind).0).background)
+    .then(|| theme.semantic_style(plan.content_role).background)
     .filter(|background| *background != Color::Default);
     let collapsed_reasoning = matches!(
         block,
         TranscriptBlock::Reasoning(reasoning)
             if !reasoning.reasoning_expanded && !verbose_tools
     );
-    let lines = match block {
+    let mut lines = match block {
         TranscriptBlock::User {
             text,
             model_lab,
@@ -369,7 +368,14 @@ pub(super) fn render_block_planned_with_rainbow(
                 let label = if quiet_summary {
                     theme.fg("muted", &tool)
                 } else {
-                    theme.bold(&theme.fg("foreground", &tool))
+                    theme.bold(&theme.fg(
+                        if theme.is_pi_theme() {
+                            "tool_title"
+                        } else {
+                            "foreground"
+                        },
+                        &tool,
+                    ))
                 };
                 let label_width = visible_width(&tool);
                 let text = match panel.display.value.as_deref() {
@@ -442,13 +448,6 @@ pub(super) fn render_block_planned_with_rainbow(
                     "bash" | "exec" if compact_bash => output_lines.extend(
                         render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
                     ),
-                    "search" if !panel.is_error => output_lines.extend(render_compact_tool_output(
-                        panel,
-                        theme,
-                        nested_width,
-                        verbose_tools,
-                        "",
-                    )),
                     "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
                         output_lines.extend(render_diff_only(
                             panel,
@@ -556,6 +555,12 @@ pub(super) fn render_block_planned_with_rainbow(
             lines,
             geometry: SurfaceGeometry::default(),
         };
+    }
+    if plan.event_spacing && matches!(block, TranscriptBlock::Reasoning(_)) {
+        // All themes reserve the same two-row live status slot. Thinking may
+        // replace Working's blank with its disclosure detail; inline-hint
+        // themes keep that slot blank instead. Promotion never moves composer.
+        lines.resize(lines.len().max(2), String::new());
     }
     let prompt_color = match block {
         TranscriptBlock::User { prompt_color, .. } => prompt_color

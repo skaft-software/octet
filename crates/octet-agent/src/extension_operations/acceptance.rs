@@ -460,44 +460,27 @@ async fn pi_fixture(directory: &tempfile::TempDir) -> ExtensionProcess {
         include_str!("pi-observer.mjs"),
     )
     .unwrap();
-    // Use the adapter's actual reviewed registration capture, including its
-    // exact schemas, optional prompt metadata, flags and hooks. An empty or
-    // hand-maintained manifest is not the contract for an unchanged Pi factory.
-    let bundle = directory.path().join("octet-pi-compat");
-    let captured = tokio::time::timeout(
-        Duration::from_secs(20),
-        tokio::process::Command::new("node")
-            .arg(root.join("configure.mjs"))
-            .arg("--reviewed")
-            .arg("--output")
-            .arg(&bundle)
-            .arg(&factory)
-            .arg(directory.path().join("pi-observer.mjs"))
-            .current_dir(directory.path())
-            .env("HOME", directory.path())
-            .kill_on_drop(true)
-            .output(),
+    // Capture the real factory catalog, including exact schemas, optional
+    // prompt metadata, flags and hooks. This raw Agent has no App resource
+    // consumer: do not use an App-generated bridge or enable its feature merely
+    // to pass registration. No captured factory registration is removed.
+    let manifest_path = crate::extension_process::pi_fixture::capture(
+        directory.path(),
+        &[factory, directory.path().join("pi-observer.mjs")],
     )
-    .await
-    .expect("Pi registration capture timed out")
-    .expect("D11 requires local Node and adapter dependencies");
-    assert!(
-        captured.status.success(),
-        "Pi capture failed: {}",
-        String::from_utf8_lossy(&captured.stderr)
-    );
+    .await;
+    let bundle = directory.path().join("octet-pi-compat");
     let reviewed: Value =
         serde_json::from_slice(&std::fs::read(bundle.join("bridge.json")).unwrap()).unwrap();
     let expected_tools: Vec<crate::extension_process::ToolDefinition> =
         serde_json::from_value(reviewed["registrations"]["tools"].clone()).unwrap();
-    let manifest_path = bundle.join("extension.toml");
     let mut manifest = ExtensionManifest::load(&manifest_path).unwrap();
     evidence(
         "pi-reviewed-registration",
         json!({
             "config":reviewed,
             "manifest":std::fs::read_to_string(&manifest_path).unwrap(),
-            "capture_stdout":String::from_utf8_lossy(&captured.stdout),
+            "boundary":"raw factory capture; not generated-App-bridge or resource-consumer acceptance",
         }),
     );
     manifest.entrypoint.env.insert(
@@ -520,6 +503,7 @@ async fn pi_fixture(directory: &tempfile::TempDir) -> ExtensionProcess {
     let process = ExtensionProcess::start(descriptor, config)
         .await
         .expect("D11 requires real local Node/Pi adapter");
+    assert!(!process.supports_feature(crate::extension_process::EXTENSION_FEATURE_RESOURCE_PATHS));
     assert_eq!(
         process.tool_definitions(),
         expected_tools,

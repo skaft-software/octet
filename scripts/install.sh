@@ -1159,8 +1159,8 @@ else
 fi
 if ! command -v rg >/dev/null 2>&1; then
     printf '%s\n' \
-        "Note: octet also requires ripgrep (rg)." \
-        "Install it with 'brew install ripgrep' on macOS or your Linux package manager." >&2
+        "Note: ripgrep (rg) is optional; content search uses grep when rg is unavailable." \
+        "For preferred search performance, install ripgrep with Homebrew on macOS or your Linux package manager." >&2
 fi
 if [ "$path_present" = false ]; then
     printf 'Restart your shell, or run:\n  export PATH="%s:$PATH"\n' "$install_directory" >&2

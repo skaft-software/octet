@@ -133,16 +133,16 @@ async fn pi_matrix_key_and_package_helpers_use_real_host_bindings() {
           const dir = getPackageDir();
           if (!existsSync(join(dir, 'package.json'))) throw Error('not a package root');
           if (!existsSync(getReadmePath())) throw Error('no readme beside the package');
-          // Pi 1.0.2's own keybinding-hint helpers. This fixture's host
-          // publishes no keybinding snapshot, so a lookup must refuse instead of
-          // inventing a key, while the binding-independent form still formats.
+          // The configured resource phase publishes the real shell binding
+          // snapshot. Known actions must report it; unbound actions still
+          // refuse rather than falling back to Pi's process-local defaults.
           if (typeof keyText !== 'function' || typeof keyHint !== 'function' || typeof rawKeyHint !== 'function') throw Error('missing hint helper');
           if (!rawKeyHint('ctrl+x', 'close').includes('close')) throw Error('raw hint');
-          try { keyText('app.exit'); throw Error('host unexpectedly published a binding'); }
+          const exit = keyText('app.exit');
+          if (!keyHint('app.exit', 'quit').includes('quit')) throw Error('host hint');
+          try { keyText('app.fixture.unbound'); throw Error('invented host binding'); }
           catch (error) { if (!/host binding not supplied/.test(error.message)) throw error; }
-          try { keyHint('app.exit', 'quit'); throw Error('host unexpectedly published a binding'); }
-          catch (error) { if (!/host binding not supplied/.test(error.message)) throw error; }
-          pi.appendEntry('matrix-helpers', {packageRoot:true, keys:true});
+          pi.appendEntry('matrix-helpers', {packageRoot:true, keys:true, exit, missingKeyRefused:true});
         }});
         "#,
     );
@@ -152,9 +152,22 @@ async fn pi_matrix_key_and_package_helpers_use_real_host_bindings() {
     app.executable_extensions.shutdown().await;
     result.unwrap();
     let reopened = Session::open_read_only(&path).unwrap();
-    assert!(reopened.entries().iter().any(|entry| reopened
-        .extension_entry(&entry.id, "octet-pi-compat")
-        .is_some_and(|entry| entry.entry_type == "matrix-helpers")));
+    let proof = reopened
+        .entries()
+        .iter()
+        .find_map(|entry| {
+            reopened
+                .extension_entry(&entry.id, "octet-pi-compat")
+                .filter(|entry| entry.entry_type == "matrix-helpers")
+        })
+        .unwrap();
+    let bindings = shell.extension_keybindings();
+    assert_eq!(
+        proof.data["exit"],
+        bindings.get("app.exit").unwrap().join("/")
+    );
+    assert_eq!(proof.data["packageRoot"], true);
+    assert_eq!(proof.data["missingKeyRefused"], true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

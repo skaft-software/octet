@@ -761,13 +761,11 @@ async fn failed_script_usage_is_billed_durably_and_cannot_reset_the_next_script_
 #[tokio::test]
 async fn core_tools_keep_programmatic_results_under_hard_session_ceilings() {
     use crate::tools::{
-        BashTool, EditTool, PowerShellTool, ReadTool, SearchTool, ShellSessionEnvironment,
-        WriteTool,
+        BashTool, EditTool, PowerShellTool, ReadTool, ShellSessionEnvironment, WriteTool,
     };
     let shell = BashTool::with_session_environment(ShellSessionEnvironment::default);
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadTool),
-        Arc::new(SearchTool),
         Arc::new(BashTool),
         Arc::new(EditTool),
         Arc::new(WriteTool),

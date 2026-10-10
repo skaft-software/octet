@@ -23,6 +23,7 @@ fn base() -> Cli {
         mode: None,
         print: false,
         continue_: false,
+        resume_picker: false,
         resume: None,
         fork: None,
         model: None,
@@ -271,7 +272,14 @@ fn extension_flags_parse_types_defaults_inverses_and_help() {
 
 #[test]
 fn extension_flags_reject_static_and_cross_extension_collisions() {
-    for reserved in ["workspace", "help", "version"] {
+    for reserved in [
+        "workspace",
+        "help",
+        "version",
+        "continue",
+        "resume",
+        "thinking",
+    ] {
         let static_collision = register_extension_flags(vec![(
             "fixture".to_owned(),
             extension_flag(reserved, ExtensionFlagType::String, serde_json::json!(".")),
@@ -386,6 +394,25 @@ fn runtime_flag_parser_bypasses_only_true_early_exit_invocations() {
     assert!(!uses_runtime_extension_flag_parser(&os(&[
         "octet", "migrate"
     ])));
+}
+
+#[test]
+fn runtime_flag_scans_preserve_session_short_forms_and_thinking_values() {
+    let os = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    for selector in ["-r", "-c"] {
+        let prompt = os(&["octet", selector, "--thinking", "max", "initial prompt"]);
+        assert!(uses_runtime_extension_flag_parser(&prompt));
+        assert!(!invocation_has_top_level_subcommand(&prompt, &[]));
+        let command = os(&["octet", selector, "--thinking", "max", "doctor"]);
+        assert!(!uses_runtime_extension_flag_parser(&command));
+        assert!(invocation_has_top_level_subcommand(&command, &[]));
+    }
+    let alias_value = os(&["octet", "--thinking", "doctor", "initial prompt"]);
+    assert!(uses_runtime_extension_flag_parser(&alias_value));
+    assert!(!invocation_has_top_level_subcommand(&alias_value, &[]));
+    let literal = os(&["octet", "-r", "--", "doctor"]);
+    assert!(uses_runtime_extension_flag_parser(&literal));
+    assert!(!invocation_has_top_level_subcommand(&literal, &[]));
 }
 
 #[test]
@@ -977,6 +1004,188 @@ fn continue_sets_resume_selector_and_interactive_mode() {
 }
 
 #[test]
+fn resume_short_form_keeps_prompts_positional_and_opens_the_picker() {
+    let directory = cwd();
+    for arguments in [
+        vec!["octet", "-r"],
+        vec!["octet", "-r", "initial prompt"],
+        vec!["octet", "initial prompt", "-r"],
+        vec!["octet", "-r", "--", "--literal-prompt"],
+    ] {
+        let cli = Cli::try_parse_from(arguments.clone()).unwrap();
+        assert!(cli.resume_picker);
+        assert!(cli.resume.is_none());
+        let expected_prompt = arguments
+            .iter()
+            .copied()
+            .find(|argument| matches!(*argument, "initial prompt" | "--literal-prompt"));
+        assert_eq!(cli.message.as_deref(), expected_prompt);
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(config.resume, ResumeSelector::Resume(None));
+        assert_eq!(config.mode, Mode::Interactive);
+        assert_eq!(config.initial_prompt.as_deref(), expected_prompt);
+    }
+    let cli = Cli::try_parse_from(["octet", "-r", "initial prompt", "next prompt"]).unwrap();
+    assert_eq!(cli.message.as_deref(), Some("initial prompt"));
+    assert_eq!(cli.additional_messages, ["next prompt"]);
+    assert!(cli.resume.is_none());
+    assert!(!Cli::try_parse_from(["octet"]).unwrap().resume_picker);
+}
+
+#[test]
+fn continue_short_form_preserves_the_initial_prompt_and_selector() {
+    let directory = cwd();
+    for selector in ["-c", "--continue"] {
+        let cli = Cli::try_parse_from(["octet", selector, "initial prompt"]).unwrap();
+        assert!(cli.continue_);
+        assert!(!cli.resume_picker);
+        assert_eq!(cli.message.as_deref(), Some("initial prompt"));
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(config.resume, ResumeSelector::Continue);
+        assert_eq!(config.mode, Mode::Interactive);
+        assert_eq!(config.initial_prompt.as_deref(), Some("initial prompt"));
+    }
+}
+
+#[test]
+fn resume_short_form_preserves_explicit_frontend_modes() {
+    let directory = cwd();
+    for (options, expected) in [
+        (
+            vec!["--mode", "interactive", "initial prompt"],
+            Mode::Interactive,
+        ),
+        (
+            vec!["-p", "initial prompt"],
+            Mode::Print {
+                prompt: "initial prompt".into(),
+            },
+        ),
+        (
+            vec!["--mode", "json", "initial prompt"],
+            Mode::Print {
+                prompt: "initial prompt".into(),
+            },
+        ),
+        (vec!["--mode", "rpc"], Mode::Rpc),
+    ] {
+        let mut arguments = vec!["octet", "-r"];
+        arguments.extend(options);
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(config.resume, ResumeSelector::Resume(None));
+        assert_eq!(config.mode, expected);
+        assert_eq!(
+            config.initial_prompt.as_deref(),
+            matches!(expected, Mode::Interactive).then_some("initial prompt")
+        );
+    }
+}
+
+#[test]
+fn native_resume_still_accepts_an_optional_id() {
+    let directory = cwd();
+    for (arguments, expected_id, expected_prompt) in [
+        (vec!["octet", "--resume"], None, None),
+        (
+            vec!["octet", "--resume", "--", "initial prompt"],
+            None,
+            Some("initial prompt"),
+        ),
+        (
+            vec!["octet", "--resume", "session-id"],
+            Some("session-id"),
+            None,
+        ),
+        (
+            vec!["octet", "--resume=session-id", "initial prompt"],
+            Some("session-id"),
+            Some("initial prompt"),
+        ),
+        (
+            vec!["octet", "--resume", "session-id", "initial prompt"],
+            Some("session-id"),
+            Some("initial prompt"),
+        ),
+    ] {
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        assert!(!cli.resume_picker);
+        assert!(cli.resume.is_some());
+        assert_eq!(cli.message.as_deref(), expected_prompt);
+        let config = config_with_empty_global(cli, directory.path()).unwrap();
+        assert_eq!(
+            config.resume,
+            ResumeSelector::Resume(expected_id.map(str::to_owned))
+        );
+        assert_eq!(config.mode, Mode::Interactive);
+        assert_eq!(config.initial_prompt.as_deref(), expected_prompt);
+    }
+}
+
+#[test]
+fn session_selectors_conflict_in_both_orders_including_flattened_options() {
+    let selectors: &[&[&[&str]]] = &[
+        &[&["-r"]],
+        &[&["-c"], &["--continue"]],
+        &[&["--resume"], &["--resume", "session-id"]],
+        &[&["--fork"], &["--fork", "session-id"]],
+        &[&["--session-id", "session-id"]],
+        &[&["--no-session"]],
+    ];
+    for (index, left) in selectors.iter().enumerate() {
+        for right in &selectors[index + 1..] {
+            for first in *left {
+                for second in *right {
+                    for (first, second) in [(first, second), (second, first)] {
+                        let mut arguments = vec!["octet"];
+                        arguments.extend_from_slice(first);
+                        arguments.extend_from_slice(second);
+                        let error = Cli::try_parse_from(arguments.clone()).unwrap_err();
+                        assert_eq!(
+                            error.kind(),
+                            clap::error::ErrorKind::ArgumentConflict,
+                            "{arguments:?}: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn session_short_forms_and_thinking_are_visible_in_help() {
+    let mut command = Cli::command();
+    let help = command.render_long_help().to_string();
+    assert!(
+        help.lines().any(|line| line.trim_start().starts_with("-r")),
+        "{help}"
+    );
+    assert!(help.contains("-c, --continue"), "{help}");
+    assert!(help.contains("--resume [<ID>]"), "{help}");
+    assert!(
+        help.contains("without consuming the positional prompt"),
+        "{help}"
+    );
+    assert!(help.contains("thinking"), "{help}");
+    let picker = command
+        .get_arguments()
+        .find(|argument| argument.get_id() == "resume_picker")
+        .unwrap();
+    assert_eq!(picker.get_short(), Some('r'));
+    assert!(picker.get_long().is_none());
+    assert!(!picker.get_action().takes_values());
+    let reasoning = command
+        .get_arguments()
+        .find(|argument| argument.get_id() == "reasoning")
+        .unwrap();
+    assert!(reasoning
+        .get_visible_aliases()
+        .unwrap()
+        .contains(&"thinking"));
+}
+
+#[test]
 fn clap_parses_fork_and_rejects_resume_conflicts() {
     let parsed = Cli::try_parse_from(["octet", "--fork", "source-id"]).unwrap();
     assert_eq!(parsed.fork, Some(Some("source-id".into())));
@@ -1051,6 +1260,50 @@ fn reasoning_is_parsed_and_invalid_values_fail() {
     cli.workspace = Some(directory.path().into());
     cli.reasoning_mode = Some("turbo".into());
     assert!(config_with_empty_global(cli, directory.path()).is_err());
+}
+
+#[test]
+fn thinking_alias_preserves_reasoning_values_precedence_and_errors() {
+    let directory = cwd();
+    let global = directory.path().join("global.toml");
+    std::fs::write(&global, "reasoning = 'low'\n").unwrap();
+    for (level, expected) in [
+        ("off", octet_ai::ReasoningConfig::Off),
+        (
+            "max",
+            octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max),
+        ),
+        ("budget=2048", octet_ai::ReasoningConfig::Budget(2048)),
+    ] {
+        for option in ["--thinking", "--reasoning"] {
+            let cli = Cli::try_parse_from(["octet", option, level, "initial prompt"]).unwrap();
+            assert_eq!(cli.reasoning.as_deref(), Some(level));
+            assert_eq!(cli.message.as_deref(), Some("initial prompt"));
+            let config =
+                build_config_with_global_path(cli, directory.path(), Some(&global)).unwrap();
+            assert_eq!(config.reasoning.as_ref(), Some(&expected));
+            assert!(config.reasoning_explicit);
+        }
+    }
+    for option in ["--thinking", "--reasoning"] {
+        let cli = Cli::try_parse_from(["octet", option, "nonsense"]).unwrap();
+        assert_eq!(
+            config_with_empty_global(cli, directory.path())
+                .unwrap_err()
+                .to_string(),
+            "invalid reasoning setting \"nonsense\""
+        );
+    }
+    let missing_alias = Cli::try_parse_from(["octet", "--thinking"]).unwrap_err();
+    let missing_native = Cli::try_parse_from(["octet", "--reasoning"]).unwrap_err();
+    assert_eq!(missing_alias.kind(), missing_native.kind());
+    assert!(Cli::try_parse_from(["octet", "--thinking", "off", "--reasoning", "max"]).is_err());
+    let cli = Cli::try_parse_from(["octet", "--thinking=max"]).unwrap();
+    assert_eq!(cli.reasoning.as_deref(), Some("max"));
+    assert_eq!(
+        std::fs::read_to_string(global).unwrap(),
+        "reasoning = 'low'\n"
+    );
 }
 
 #[test]
@@ -1453,11 +1706,11 @@ fn no_edit_and_explicit_allowlists_match_the_provider_tool_surface() {
 
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
-    cli.tools = Some(vec!["read".into(), "search".into()]);
+    cli.tools = Some(vec!["read".into(), "bash".into()]);
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(
         config.tools.names().collect::<Vec<_>>(),
-        vec!["read", "search"]
+        vec!["bash", "read"]
     );
 }
 

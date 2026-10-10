@@ -2,14 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, mkdir, rm, realpath, symlink } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { configure } from '../configure.mjs';
 import { normalizeResourcePath } from '../lib/resources.mjs';
-import { root, launch, owner } from './helper.mjs';
+import { root, launch as launchAdapter, owner } from './helper.mjs';
+import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
+
+// Discovery now applies to ordinary bridges too. Never inventory the real
+// user's Pi home in synthetic resource-contract tests.
+function launch(t, extensions, options = {}) {
+  return launchAdapter(t, extensions, { ...options, env: { OCTET_PI_AGENT_DIR: join(root, 'test/fixtures/no-pi-agent'), ...options.env } });
+}
+const palette = name => ({ name, appearance: 'dark', colors: Object.fromEntries([
+  ...foregroundTokens.map(token => [token, '#ffffff']), ...backgroundTokens.map(token => [token, '']),
+]) });
 
 const fixture = join(root, 'test/fixtures/resources.ts'), second = join(root, 'test/fixtures/resources-second.ts');
 const empty = { resource_paths: { skill_paths: [], prompt_paths: [], theme_paths: [] } };
@@ -26,7 +36,7 @@ async function started(t, options = {}, extensions = [fixture]) {
   const peer = launch(t, extensions, options); await peer.init(['resource_paths_v1', 'session_entries']); await peer.start(); return peer;
 }
 async function directory(t) {
-  const dir = await mkdtemp(join(tmpdir(), 'octet-resource-paths-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'octet-resource-paths-')));
   t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
 
@@ -225,7 +235,7 @@ test('resources: configure captures declarations without discovery, requires neg
   const dir = await directory(t), output = join(dir, 'octet-pi-compat');
   const entry = join(dir, 'capture.ts');
   await writeFile(entry, `export default pi => { pi.on('resources_discover', () => { throw new Error('capture must not invoke discovery'); }); };\n`);
-  const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
+  const { registrations } = configure({ reviewed: true, output, piAgentDir: join(dir, 'agent'), extensions: [entry] });
   const { hookEvents } = await import('../lib/api.mjs');
   const wire = new Set(['before_provider_request', 'before_provider_headers', 'after_provider_response']); // reserved only when a factory registered them
   const subscribedHooks = [...new Set(Object.values(hookEvents))].filter(h => !wire.has(h)).sort();
@@ -252,22 +262,22 @@ test('resources: configure captures declarations without discovery, requires neg
   changed.metadata.hooks = registrations.hooks;
   await assert.rejects(changed.init(subscribedFeatures), /reviewed registration metadata changed/); await changed.close();
   const undeclaredEntry = join(dir, 'none.ts'); await writeFile(undeclaredEntry, 'export default pi => {};\n');
-  configure({ reviewed: true, output, extensions: [undeclaredEntry], overwrite: true });
+  configure({ reviewed: true, output, piAgentDir: join(dir, 'agent'), extensions: [undeclaredEntry], overwrite: true });
   const undeclared = launch(t, [undeclaredEntry], { config });
-  undeclared.metadata.hooks = subscribedHooks.filter(h => h !== 'resources_discover');
-  await undeclared.init(subscribedFeatures);
-  assert.match((await discover(undeclared).response).error.message, /unknown hook resources_discover/); await undeclared.close();
+  undeclared.metadata.hooks = subscribedHooks;
+  await undeclared.init(subscribedFeatures); await undeclared.start();
+  assert.deepEqual((await discover(undeclared).response).result, empty); await undeclared.close();
 });
 
-test('resources: configured core factory needs no resource consumer and uncaptured late subscriptions are refused', async t => {
+test('resources: configured ordinary bridges reserve the real palette consumer and permit late resource subscriptions', async t => {
   const dir = await directory(t), output = join(dir, 'octet-pi-compat');
   const entry = join(root, 'test/fixtures/core.ts');
-  const { registrations } = configure({ reviewed: true, output, extensions: [entry] });
-  assert.equal(registrations.hooks.includes('resources_discover'), false);
+  const { registrations } = configure({ reviewed: true, output, piAgentDir: join(dir, 'agent'), extensions: [entry] });
+  assert.equal(registrations.hooks.includes('resources_discover'), true);
   const peer = launch(t, [entry], { config: join(output, 'bridge.json') });
   peer.metadata.hooks = registrations.hooks;
-  const initialized = await peer.init(['session_entries']);
-  assert.equal(initialized.protocol.features.includes('resource_paths_v1'), false);
+  const initialized = await peer.init(['session_entries', 'resource_paths_v1']);
+  assert.equal(initialized.protocol.features.includes('resource_paths_v1'), true);
   assert.equal((await peer.call('ordinary').response).result.content[0].text, `${root}|false|host-value`);
   await peer.close();
 
@@ -275,14 +285,114 @@ test('resources: configured core factory needs no resource consumer and uncaptur
   await writeFile(lateEntry, `export default pi => {
     pi.registerCommand('late', { handler() { pi.on('resources_discover', () => ({ skillPaths: ['./skills'] })); } });
   };\n`);
-  const lateCapture = configure({ reviewed: true, output, extensions: [lateEntry], overwrite: true });
+  const lateCapture = configure({ reviewed: true, output, piAgentDir: join(dir, 'agent'), extensions: [lateEntry], overwrite: true });
   const late = launch(t, [lateEntry], { config: join(output, 'bridge.json') });
   late.metadata.hooks = lateCapture.registrations.hooks;
-  // Even an offered consumer cannot activate a hook absent from the reviewed capture.
+  // The generated manifest already reserves the real consumer, without
+  // inventing a factory callback or adding an event to its reviewed catalog.
+  assert.deepEqual(lateCapture.registrations.events, []);
   await late.init(['resource_paths_v1', 'session_entries', 'pipeline_hooks_v1']);
-  assert.match((await late.command('late').response).error.message, /native hook was not subscribed; configure again/);
-  assert.match((await discover(late).response).error.message, /unknown hook resources_discover/);
+  await late.start();
+  assert.ok((await late.command('late').response).result);
+  assert.deepEqual((await discover(late).response).result.resource_paths.skill_paths, [join(root, 'skills')]);
   await late.close();
+});
+
+for (const mirror of [false, true]) test(`resources: ${mirror ? 'mirror' : 'manual non-mirror'} palettes refresh before a full skill inventory within the shared budget`, async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  const first = join(agent, 'themes/first.json'), second = join(agent, 'themes/second.json'), third = join(agent, 'themes/third.json');
+  await writeFile(first, JSON.stringify(palette('first'))); await writeFile(second, JSON.stringify(palette('second')));
+  await writeFile(join(agent, 'settings.json'), JSON.stringify({ theme: 'first' }));
+  await writeFile(join(agent, 'keybindings.json'), '{}'); await writeFile(join(agent, 'AGENTS.md'), 'fixture context');
+  for (let i = 0; i < 64; i++) {
+    const skill = join(agent, `skills/skill-${String(i).padStart(2, '0')}`);
+    await mkdir(skill, { recursive: true }); await writeFile(join(skill, 'SKILL.md'), '# skill');
+  }
+  const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, mirrorPiSetup: mirror, cwd });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const startup = (await discover(peer).response).result.resource_paths;
+  assert.deepEqual(startup.theme_paths, [first, second]);
+  assert.equal(startup.default_theme, mirror ? first : undefined);
+  assert.equal(startup.skill_paths.length, mirror ? 60 : 0);
+  assert.equal(Object.entries(startup).filter(([key]) => key.endsWith('_paths')).reduce((n, [, paths]) => n + paths.length, 0), mirror ? 64 : 2);
+  await rm(second); await writeFile(third, JSON.stringify(palette('third')));
+  const reload = (await discover(peer, 'reload').response).result.resource_paths;
+  assert.deepEqual(reload.theme_paths, [first, third]);
+  assert.equal(reload.default_theme, mirror ? first : undefined);
+  if (mirror) await peer.waitStderr(/Pi skills: .*shared 64-path/);
+  await peer.close();
+});
+
+test('resources: live palettes take priority over old unselected import snapshots, never the selected snapshot', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(join(agent, 'themes'), { recursive: true }); await mkdir(join(cwd, 'snapshots'));
+  const live = [], snapshots = [];
+  for (let i = 0; i < 50; i++) {
+    const path = join(agent, `themes/live-${String(i).padStart(2, '0')}.json`);
+    await writeFile(path, JSON.stringify(palette(`live-${i}`))); live.push(path);
+  }
+  for (let i = 0; i < 20; i++) {
+    const path = join(cwd, `snapshots/pi-old-${String(i).padStart(2, '0')}.toml`);
+    await writeFile(path, `[metadata]\nname = "pi-old-${i}"\n`); snapshots.push(path);
+  }
+  const selected = snapshots.at(-1), entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  await writeFile(join(cwd, 'selected.json'), JSON.stringify(palette('old-19')));
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, cwd,
+    themePaths: snapshots, piTheme: { name: 'old-19', path: join(cwd, 'selected.json'), selector: 'pi-old-19', nativePath: selected } });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const paths = (await discover(peer).response).result.resource_paths;
+  assert.deepEqual(paths.theme_paths, [...live, ...snapshots.slice(0, 13), selected]);
+  assert.equal(paths.default_theme, selected); assert.equal(paths.theme_paths.length, 64);
+  await peer.waitStderr(/Pi themes: 6 paths exceeded/); await peer.close();
+});
+
+test('resources: safe exact palette files preserve malformed JSON for native validation with bounded filesystem diagnostics', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  const valid = join(agent, 'themes/valid.json'), broken = join(agent, 'themes/broken.json');
+  await writeFile(valid, JSON.stringify(palette('valid'))); await writeFile(broken, '{');
+  await writeFile(join(agent, 'themes/000-oversized.json'), 'x'.repeat(256 * 1024 + 1));
+  for (let i = 0; i < 40; i++) await symlink(valid, join(agent, `themes/a-linked-${i}.json`));
+  const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, cwd });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  // Real adapter wire evidence only, not selector/schema qualification. Rust
+  // owns validation after resolving winning roots, including malformed files.
+  assert.deepEqual((await discover(peer).response).result.resource_paths.theme_paths, [broken, valid]);
+  await peer.waitStderr(/further discovery diagnostics omitted/);
+  const diagnostics = peer.stderr().split('\n').filter(line => line.startsWith('[pi-compat] Pi setup'));
+  assert.equal(diagnostics.length, 33);
+  assert.ok(diagnostics.some(line => /symlinks/.test(line)));
+  assert.ok(diagnostics.some(line => /mirror limit/.test(line)));
+  await peer.close();
+});
+
+test('resources: palette budget retains a malformed later-stem winner instead of exposing its shadow', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  await mkdir(join(cwd, '.pi/themes'), { recursive: true });
+  // Pi discovery returns project paths before user paths; native admission
+  // retains its documented later-root precedence without validating JSON here.
+  const lower = join(cwd, '.pi/themes/p-00.json'), winner = join(agent, 'themes/p-00.json');
+  for (let i = 0; i < 64; i++) {
+    await writeFile(join(cwd, `.pi/themes/p-${String(i).padStart(2, '0')}.json`), JSON.stringify(palette(`p-${i}`)));
+  }
+  await writeFile(winner, '{invalid winning JSON');
+  const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, cwd });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start({ project_trusted: true });
+  const paths = (await discover(peer, 'startup', {}, peer.context({ project_trusted: true })).response).result.resource_paths.theme_paths;
+  assert.equal(paths.length, 64);
+  assert.ok(paths.includes(winner), 'native loader must validate the winning JSON, never a fallback');
+  assert.ok(!paths.includes(lower), 'resource budget cannot resurrect the shadowed lower root');
+  await peer.waitStderr(/Pi setup has 65 themes/);
+  await peer.close();
 });
 
 const repo = process.env.PI_REFERENCE_REPO;

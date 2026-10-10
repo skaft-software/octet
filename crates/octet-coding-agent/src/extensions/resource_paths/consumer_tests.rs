@@ -596,6 +596,15 @@ async fn failed_or_cancelled_start_never_discovers_even_after_late_terminal_repl
 /// Normal discovery/trust/activation and App construction. No Agent replacement
 /// and no low-level process/runtime flag injection in this fixture.
 pub(crate) fn configured_app(root: &Path, authorized: bool, start_processes: bool) -> App {
+    configured_app_with_timing(root, authorized, start_processes, false)
+}
+
+fn configured_app_with_timing(
+    root: &Path,
+    authorized: bool,
+    start_processes: bool,
+    deferred: bool,
+) -> App {
     let workspace = root.join("workspace");
     let extensions = root.join("extensions");
     let bundle = extensions.join("consumer-peer");
@@ -632,6 +641,11 @@ pub(crate) fn configured_app(root: &Path, authorized: bool, start_processes: boo
         } else {
             "src/extensions/resource_paths/consumer_fixture.py"
         });
+    let hooks = if deferred {
+        "[\"session_start\", \"resources_discover\", \"before_prompt\"]"
+    } else {
+        "[\"session_start\", \"resources_discover\"]"
+    };
     std::fs::write(
         bundle.join("extension.toml"),
         format!(
@@ -643,7 +657,7 @@ api_version = "0.4"
 command = "python3"
 args = [{script:?}, {root:?}]
 [contributes]
-hooks = ["session_start", "resources_discover"]
+hooks = {hooks}
 commands = ["release-start"]
 "#
         ),
@@ -658,7 +672,10 @@ commands = ["release-start"]
     config.theme = Some("consumer-proof".into());
     let boot = bootstrap(config).unwrap();
     let launch = resolve_launch_print(&boot, "configured-consumer").unwrap();
-    if authorized {
+    if authorized && deferred {
+        crate::app::bootstrap::build_app_first_frame_first(boot, launch, "BASE INSTRUCTIONS".into())
+            .unwrap()
+    } else if authorized {
         crate::app::bootstrap::build_app_with_resource_consumer(
             boot,
             launch,
@@ -668,6 +685,64 @@ commands = ["release-start"]
     } else {
         // Same Mode::Print: capability comes from constructor, not Mode.
         build_app(boot, launch, "BASE INSTRUCTIONS".into()).unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_frontend_attach_activates_resource_consumer_and_retirement_guard() {
+    for early_prompt in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut app = configured_app_with_timing(&root, true, true, true);
+        assert!(!app.resource_paths_pending());
+        assert!(app.executable_extensions.processes.is_empty());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            if early_prompt {
+                app.await_extension_prompt_hooks().await.unwrap();
+            } else {
+                while app.executable_extensions.startup_pending() {
+                    app.pump_extension_startup().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.resource_paths_pending(),
+            "newly attached contributor must publish"
+        );
+        let captures = Arc::new(Mutex::new(Vec::new()));
+        app.client.register_host_stream_transport(
+            app.model.endpoint.id.clone(),
+            Arc::new(Capture(captures.clone())),
+        );
+        assert!(
+            complete(&mut app).await.is_err(),
+            "unpublished resources fence requests"
+        );
+        assert!(captures.lock().unwrap().is_empty());
+        app.refresh_resource_paths_headless().await.unwrap();
+        assert!(app.config.theme_paths.contains(&root.join("themes")));
+        assert!(render(&app, "consumer-proof").is_ok());
+        assert!(!app.resource_paths_pending());
+        app.pump_extension_startup().await;
+        assert!(
+            !app.resource_paths_pending(),
+            "no duplicate activation or discovery"
+        );
+        complete(&mut app).await.unwrap();
+        assert_eq!(captures.lock().unwrap().len(), 1);
+        let calls = std::fs::read_to_string(root.join("consumer-calls.jsonl")).unwrap();
+        assert!(calls.find("session_start").unwrap() < calls.find("resources_discover").unwrap());
+        assert_eq!(calls.matches("resources_discover").count(), 1);
+        app.executable_extensions.processes[0].shutdown().await;
+        assert!(
+            complete(&mut app).await.is_err(),
+            "retirement revokes the new guard"
+        );
+        assert_eq!(captures.lock().unwrap().len(), 1);
+        app.executable_extensions.shutdown().await;
     }
 }
 

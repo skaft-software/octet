@@ -26,6 +26,7 @@ fn pi_app(factory: &str) -> (tempfile::TempDir, App) {
         .arg(&entry)
         .current_dir(&app.config.workspace)
         .env("PI_OFFLINE", "1")
+        .env("OCTET_PI_AGENT_DIR", directory.path().join("pi-agent"))
         .output()
         .expect("existing Node and local adapter dependencies are required");
     assert!(
@@ -63,6 +64,17 @@ fn pi_app(factory: &str) -> (tempfile::TempDir, App) {
         "{}",
         extensions.inspect_text()
     );
+    // The estimate fixture has no resource consumer. Preserve the actual App
+    // frontend offer through model/session rebuilds now that every configured
+    // bridge reserves palette discovery.
+    app.resource_paths = crate::app::resource_paths::ResourcePathConsumer::new(
+        &app.config,
+        &app.skills,
+        &app.prompts,
+        &extensions,
+        &mut host,
+        crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+    );
     app.executable_extensions = extensions;
     app.executable_extensions
         .activate_session_lifecycle_driver();
@@ -80,6 +92,7 @@ async fn probe_with_arguments(
     arguments: Vec<String>,
 ) -> anyhow::Result<String> {
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    resource_paths::refresh_resource_paths(app, shell, &mut input).await?;
     let dialogs = app.executable_extensions.lifecycle_snapshot();
     let mut frontend = InteractiveExtensionConfirmations {
         shell,

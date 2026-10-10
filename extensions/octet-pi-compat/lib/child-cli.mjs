@@ -1,8 +1,8 @@
 // Observed print/JSON CLI subset. Unknown argv is a refusal, never a silently
 // ignored Pi session/resource option or a fallback to an upstream Pi agent.
-import { createAgentSession, withChildHost, readTool, searchTool, bashTool, editTool, writeTool } from './children.mjs';
+import { createAgentSession, withChildHost, readTool, bashTool, editTool, writeTool } from './children.mjs';
 import { bounded, invalid, unsupported } from './errors.mjs';
-const TOOLS = { read: readTool, search: searchTool, bash: bashTool, edit: editTool, write: writeTool };
+const TOOLS = { read: readTool, bash: bashTool, edit: editTool, write: writeTool };
 export function parseChildArgv(argv) {
   if (!Array.isArray(argv) || argv.length > 128) invalid('child argv');
   let mode, print = false, prompt, model, provider, thinkingLevel, tools;
@@ -17,7 +17,7 @@ export function parseChildArgv(argv) {
     else if (arg === '--thinking') thinkingLevel = value();
     else if (arg === '--tools') {
       const names = value().split(',');
-      if (!names.length || names.some(name => !TOOLS[name])) unsupported('--tools', 'only exact native read, search, bash, edit, write descriptors are supported');
+      if (!names.length || names.some(name => !TOOLS[name])) unsupported('--tools', 'only exact native read, bash, edit, write descriptors are supported');
       tools = names.map(name => TOOLS[name]);
     } else if (arg === '--') {
       if (i + 2 !== argv.length || prompt !== undefined) invalid('exactly one child prompt is required');

@@ -3,7 +3,7 @@
 export * from '../shims/coding-agent.mjs';
 export {
   createAgentSession, AgentSession, SessionManager, DefaultResourceLoader, SettingsManager,
-  createCodingTools, codingTools, readTool, bashTool, editTool, writeTool, searchTool,
-  createReadTool, createBashTool, createEditTool, createWriteTool, createSearchTool,
+  createCodingTools, codingTools, readTool, bashTool, editTool, writeTool,
+  createReadTool, createBashTool, createEditTool, createWriteTool,
   createGrepTool, createFindTool, createLsTool,
 } from '../shims/child-sdk.mjs';

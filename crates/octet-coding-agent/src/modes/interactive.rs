@@ -74,6 +74,8 @@ use crate::tui::view::{
 mod extension_menu;
 mod model_controls;
 mod onboarding;
+mod session_tree_menu;
+mod settings_menu;
 
 use extension_menu::{
     authority_label, extension_options_menu, python_runtime_setup_available, set_extension_enabled,
@@ -260,6 +262,23 @@ where
     fn finish_progress(&mut self, _extension: &str) {
         self.shell.set_status_detail(String::new());
         self.shell.render();
+    }
+
+    fn confirm_effect<'a>(
+        &'a mut self,
+        _extension: &'a str,
+        request: &'a octet_agent::tool::ToolConfirmation,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+        let dialogs = self.dialogs;
+        Box::pin(present_host_dialog(dialogs, "confirm", async move {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    anyhow::bail!("shutdown requested while awaiting effect confirmation")
+                }
+                result = confirmation_picker(self.shell, self.input, request) => result,
+            }
+        }))
     }
 
     fn confirm<'a>(
@@ -525,11 +544,14 @@ pub enum PendingIdleAction {
     /// Save the active-run selection as the startup preference at the idle
     /// boundary. Key handling must never wait on config I/O.
     PersistThinkingPreference(String),
-    CycleThinking,
     PickModel,
     PickThinking,
     NewSession,
     ResumeSession(Option<String>),
+    Import(PathBuf),
+    /// Intent only: prepare and confirm a fresh snapshot under idle ownership.
+    Share,
+    Tree,
     Fork,
     Clone,
     Compact,
@@ -543,6 +565,8 @@ pub enum PendingIdleAction {
     // the reported defect, so the queue cannot even represent it.
     /// Extension management that owns the application (menu, reload, actions).
     Extensions(commands::ExtensionsSubcommand),
+    /// A menu leaf intent revalidated under fresh idle ownership and approval.
+    ExtensionMenuEffect(Box<extension_menu::Effect>),
     /// Worker commands that need the idle application owner (wait, reattach,
     /// inspect, and pane planning); live list and stop controls never queue here.
     Subagents(Vec<String>),
@@ -1086,14 +1110,14 @@ fn apply_goal_command(
     use octet_agent::GoalAction as DurableGoalAction;
 
     match command {
-        commands::GoalCommand::Help => shell.show_report_text(
+        commands::GoalCommand::Help => shell.show_report_facts(
             "Goal help",
             "Browse commands for the current session goal",
             "Goal commands\n\n/goal <objective>\n/goal status\n/goal pause\n/goal resume\n/goal clear"
                 .to_owned(),
         ),
         commands::GoalCommand::Status => match access.status_text() {
-            Ok(status) => shell.show_report_text(
+            Ok(status) => shell.show_report_facts(
                 "Goal status",
                 "Review the current session goal",
                 status,
@@ -1215,6 +1239,9 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         Command::CacheWarming(Some(mode)) => PendingIdleAction::CacheWarming(mode),
         Command::New => PendingIdleAction::NewSession,
         Command::Resume(id) => PendingIdleAction::ResumeSession(id),
+        Command::Import(path) => PendingIdleAction::Import(path),
+        Command::Share => PendingIdleAction::Share,
+        Command::Tree => PendingIdleAction::Tree,
         Command::Fork => PendingIdleAction::Fork,
         Command::Clone => PendingIdleAction::Clone,
         Command::Compact => PendingIdleAction::Compact,
@@ -1355,6 +1382,7 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
+        InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
         InputAction::Queue(_)
         | InputAction::Steer(_)
         | InputAction::Submit(_)
@@ -2255,6 +2283,7 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    extension_menu: extension_menu::Snapshot,
     cache_warming_status: octet_agent::CacheWarmingStatus,
     cache_warming_control: Option<RunControl>,
     /// The launch ordered cycling scope, rendered by `/scoped-models` mid-run.
@@ -2296,6 +2325,7 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            extension_menu: extension_menu::Snapshot::capture(app),
             cache_warming_status: app.agent.cache_warming_status(),
             cache_warming_control: None,
             model_scope: app.model_scope.clone(),
@@ -2438,6 +2468,9 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
         | Command::Reload
         | Command::New
         | Command::Resume(_)
+        | Command::Import(_)
+        | Command::Share
+        | Command::Tree
         | Command::Fork
         | Command::Clone
         | Command::CacheWarming(Some(_))
@@ -2448,11 +2481,14 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
         Command::Fast(value) => value.is_some(),
         Command::Extensions(sub) => !matches!(
             sub,
-            commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Inspect { .. }
+            commands::ExtensionsSubcommand::Menu
+                | commands::ExtensionsSubcommand::Status
+                | commands::ExtensionsSubcommand::Inspect { .. }
         ),
         Command::Settings(sub) => !matches!(
             sub,
-            commands::SettingsCommand::Show
+            commands::SettingsCommand::Menu
+                | commands::SettingsCommand::Show
                 | commands::SettingsCommand::Transport
                 | commands::SettingsCommand::Padding
                 | commands::SettingsCommand::Theme(None)
@@ -2505,6 +2541,26 @@ fn stage_active_thinking(
     true
 }
 
+/// Coalesce adjacent selections, not keystrokes, so an idle-only route still
+/// reflects every press immediately without filling the command queue.
+fn stage_idle_thinking(queue: &mut VecDeque<PendingIdleAction>, level: ThinkingLevel) -> bool {
+    let replaces = matches!(
+        queue.back(),
+        Some(
+            PendingIdleAction::ChangeThinking(_)
+                | PendingIdleAction::ChangeThinkingLevel(_)
+                | PendingIdleAction::ActiveThinkingSelection(_)
+        )
+    );
+    if !replaces && queue.len() >= MAX_PENDING_IDLE_ACTIONS {
+        return false;
+    }
+    // Resolve portable intent at its ordered boundary: an earlier model switch
+    // may replace this route's budget control with an effort control.
+    push_pending_action(queue, PendingIdleAction::ChangeThinkingLevel(level));
+    true
+}
+
 /// Channel admission is not application. On every terminal outcome, preserve a
 /// selection that never reached the durable response boundary for the idle owner.
 fn settle_active_thinking(
@@ -2535,7 +2591,11 @@ fn settle_active_thinking(
     model_controls::settle_active_controls(queue, &effective);
     let mut latest = None;
     for action in queue.iter_mut() {
-        if let PendingIdleAction::ActiveThinkingSelection(reasoning) = action {
+        if let PendingIdleAction::ChangeThinkingLevel(level) = action {
+            latest = Some((level.label().to_owned(), false));
+        } else if let PendingIdleAction::ChangeThinking(reasoning) = action {
+            latest = Some((reasoning_label(reasoning), false));
+        } else if let PendingIdleAction::ActiveThinkingSelection(reasoning) = action {
             let label = reasoning_label(reasoning);
             let applied = *reasoning == effective;
             latest = Some((label.clone(), applied));
@@ -2673,6 +2733,7 @@ async fn handle_active_command<S, F>(
     input: &mut S,
     queue: &mut VecDeque<PendingIdleAction>,
     quit_requested: &mut bool,
+    extension_menu: &mut extension_menu::State,
 ) -> anyhow::Result<()>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -2686,6 +2747,7 @@ where
     {
         anyhow::bail!("command queue is full; retry after the idle boundary");
     }
+    extension_menu.cancel();
     match command {
         Command::Status => {
             let mut status = shell.status_detail();
@@ -2723,7 +2785,7 @@ where
         Command::Hotkeys => show_hotkeys(shell),
         Command::Copy => copy_last_assistant(shell),
         Command::Session => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Session",
                 "Durable session facts",
                 format!(
@@ -2734,13 +2796,13 @@ where
             ),
             Err(error) => shell.error(format!("session report unavailable: {error}")),
         },
-        Command::Help(topic) => shell.show_report_text(
+        Command::Help(topic) => shell.show_report_facts(
             "Help",
             "Browse commands and keyboard shortcuts",
             commands::help_text(&inspection.workspace, topic.as_deref()),
         ),
         Command::Cost => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cost",
                 "Review session token usage and estimated cost",
                 commands::cost_text(&session, &inspection.model),
@@ -2748,7 +2810,7 @@ where
             Err(error) => shell.error(format!("cost report unavailable: {error}")),
         },
         Command::Cache => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cache",
                 "Review session cache accounting",
                 format!(
@@ -2760,7 +2822,7 @@ where
             Err(error) => shell.error(format!("cache report unavailable: {error}")),
         },
         Command::CacheWarming(None) => match inspection.read_only_session() {
-            Ok(session) => shell.show_report_text(
+            Ok(session) => shell.show_report_facts(
                 "Cache warming",
                 "Billable refresh policy",
                 inspection.cache_warming_text(&session),
@@ -2784,6 +2846,7 @@ where
             }
         }
         Command::Theme(requested) => apply_active_theme(shell, requested, queue)?,
+        // A template catalogue is resource-owned text, not a built-in fact grammar.
         Command::Prompt(None) => shell.show_report_text(
             "Prompts", "Available prompt templates", shell.prompt_templates_report(),
         ),
@@ -2791,7 +2854,7 @@ where
             shell.queue_follow_up(ComposedInput::from_text(format!("/{invocation}")));
             shell.notice("prompt template queued for expansion at the next idle boundary");
         }
-        Command::Context => shell.show_report_text(
+        Command::Context => shell.show_report_facts(
             "Context",
             "Review the estimated request context before the next turn",
             active_context_text(context, &inspection.model),
@@ -2852,13 +2915,12 @@ where
             None => shell.error("current session has no valid id".into()),
         },
         Command::Export(output) => match inspection.session_id() {
-            Some(id) => match crate::session_commands::export_portable(
+            Some(id) => match commands::export_for_frontend(
                 &inspection.sessions,
                 id,
-                output.map(PathBuf::from),
+                output,
                 &inspection.invocation_cwd,
-                false,
-                false,
+                if shell.theme().background() == TerminalBackground::Light { "light" } else { "dark" },
             ) {
                 Ok(report) => shell.show_overlay_text(format!(
                     "Exported {}\nRedacted {} potentially sensitive values{}",
@@ -2874,6 +2936,9 @@ where
             },
             None => shell.error("current session has no valid id".into()),
         },
+        Command::Extensions(commands::ExtensionsSubcommand::Menu) => {
+            extension_menu.open(inspection.extension_menu.clone(), shell);
+        }
         Command::Extensions(commands::ExtensionsSubcommand::Status) => {
             shell.show_overlay_text(extensions.inspect_text());
         }
@@ -2973,6 +3038,10 @@ where
         Command::Thinking(None) => open_active_thinking(shell, inspection),
         Command::Settings(sub) => {
             match sub {
+                commands::SettingsCommand::Menu => {
+                    let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
+                    shell.open_panel(settings_menu::root_panel(show_images));
+                }
                 commands::SettingsCommand::Show => {
                     let mut settings = inspection.settings.clone();
                     if let Some(config) = shell.runtime_config() {
@@ -2982,9 +3051,9 @@ where
                     if let Some(control) = &inspection.cache_warming_control {
                         settings.cache_warming = control.cache_warming_mode();
                     }
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Settings",
-                        "Effective display and default preferences",
+                        "Effective display, launch, and session settings",
                         commands::settings_text(&settings),
                     );
                 }
@@ -3019,7 +3088,7 @@ where
                 .collect::<Vec<_>>();
             available.sort();
             match sub {
-                commands::ScopedModelsCommand::Show => shell.show_report_text(
+                commands::ScopedModelsCommand::Show => shell.show_report_facts(
                     "Scoped models",
                     "Ordered model cycling scope",
                     commands::scoped_models_text(inspection.model_scope.as_deref(), &available),
@@ -3169,6 +3238,7 @@ where
         input,
         queue,
         quit_requested,
+        &mut extension_menu::State::default(),
     )
     .await?;
     Ok(true)
@@ -3320,7 +3390,8 @@ impl ActiveToolInteraction {
             ActiveToolRequest::Confirmation(request) => request
                 .prompt
                 .len()
-                .saturating_add(request.detail.as_ref().map_or(0, String::len)),
+                .saturating_add(request.detail.as_ref().map_or(0, String::len))
+                .saturating_add(request.technical_detail.as_ref().map_or(0, String::len)),
             ActiveToolRequest::Input(request, _) => request.prompt.len(),
         }
     }
@@ -3349,29 +3420,35 @@ impl ActiveToolInteraction {
     fn open(&self, shell: &mut InteractiveShell) {
         match &self.request {
             ActiveToolRequest::Confirmation(request) => {
-                let items = if request.default {
-                    vec!["Approve".into(), "Deny".into()]
-                } else {
-                    vec!["Deny".into(), "Approve".into()]
-                };
-                let title = if request.destructive {
-                    format!("Action requires approval · {}", request.prompt)
-                } else {
-                    request.prompt.clone()
-                };
-                shell.open_panel(Panel::SelectList {
-                    surface: OrdinarySurfaceMetadata::new(title),
-                    items,
-                    descriptions: vec![request.detail.clone(), request.detail.clone()],
-                    selected: 0,
-                    filter: String::new(),
-                    action: PanelAction::Confirmation,
-                });
+                Self::open_confirmation(request, shell);
             }
             ActiveToolRequest::Input(request, _) => {
                 shell.begin_tool_input(&request.prompt, request.secret)
             }
         }
+    }
+
+    fn open_confirmation(
+        request: &octet_agent::tool::ToolConfirmation,
+        shell: &mut InteractiveShell,
+    ) {
+        let mut items = if request.default {
+            vec!["Approve".into(), "Deny".into()]
+        } else {
+            vec!["Deny".into(), "Approve".into()]
+        };
+        if request.technical_detail.is_some() {
+            items.push("Technical details".into());
+        }
+        let descriptions = vec![request.detail.clone(); items.len()];
+        shell.open_panel(Panel::SelectList {
+            surface: OrdinarySurfaceMetadata::new(request.prompt.clone()),
+            items,
+            descriptions,
+            selected: 0,
+            filter: String::new(),
+            action: PanelAction::Confirmation,
+        });
     }
 
     fn input(&mut self, shell: &mut InteractiveShell, event: &Event) -> bool {
@@ -3381,14 +3458,29 @@ impl ActiveToolInteraction {
                     && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
                 let result = if cancelled {
                     shell.close_panel();
-                    Some(PanelResult::Cancel)
+                    Some((PanelResult::Cancel, PanelAction::Confirmation))
                 } else {
-                    shell.panel_input(event).map(|(result, _)| result)
+                    shell.panel_input(event)
                 };
-                let Some(result) = result else {
+                let Some((result, action)) = result else {
                     return false;
                 };
-                let confirmed = matches!(result, PanelResult::Confirm(index) if (index == 0) == request.default);
+                if matches!(action, PanelAction::ReadOnlyDocument) && !cancelled {
+                    Self::open_confirmation(request, shell);
+                    return false;
+                }
+                if matches!(result, PanelResult::Confirm(2)) {
+                    if let Some(detail) = &request.technical_detail {
+                        shell.open_panel(Panel::ReadOnlyDocument {
+                            title: "Technical details · Esc to return".into(),
+                            text: detail.clone().into(),
+                            styled: false,
+                            scroll_from_bottom: 0,
+                        });
+                        return false;
+                    }
+                }
+                let confirmed = matches!(result, PanelResult::Confirm(index) if index < 2 && (index == 0) == request.default);
                 request.respond(confirmed);
                 let notice = confirmation_notice(self.tool.as_deref(), confirmed);
                 if confirmed {
@@ -3681,6 +3773,8 @@ where
         std::collections::HashMap::<ToolCallId, (String, serde_json::Value)>::new();
     let mut assistant_message = AssistantMessageLifecycle::default();
     let mut interactions = VecDeque::<ActiveToolInteraction>::new();
+    let mut extension_menu = extension_menu::State::default();
+    let mut extension_collection: Option<extension_menu::OwnedCollection> = None;
     let mut subagents_open = false;
     let mut subagent_document = None::<String>;
     let mut subagent_refresh: Option<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> =
@@ -3702,6 +3796,12 @@ where
     modal_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if extension_menu.is_open()
+            && !shell.panel_action_matches(|action| extension_menu.owns_action(action))
+        {
+            extension_menu.cancel();
+            extension_collection = None;
+        }
         executable_extensions.sync_editor_autocomplete(shell);
         if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
             shell.render();
@@ -3722,6 +3822,11 @@ where
             }
         }
         if aborting || shell.close_requested() {
+            if extension_menu.is_open() {
+                extension_menu.cancel();
+                shell.close_panel();
+            }
+            extension_collection = None;
             clipboard = None;
             clipboard_gesture = None;
             clipboard_fallback = None;
@@ -3789,6 +3894,13 @@ where
                 )
                 .await;
                 return Ok(HostRunOutcome::shutdown());
+            }
+            result = futures_util::future::OptionFuture::from(extension_collection.as_mut().map(|collection| collection.future.as_mut())), if extension_collection.is_some() => {
+                extension_collection = None;
+                if let Some(completion) = result {
+                    extension_menu.complete(completion, executable_extensions, shell);
+                    shell.render();
+                }
             }
             result = futures_util::future::OptionFuture::from(reasoning_send.as_mut().map(|f| f.as_mut())), if reasoning_send.is_some() => {
                 reasoning_send = None;
@@ -4031,6 +4143,29 @@ where
                         continue;
                     }
                     if let Some((result, action)) = shell.panel_input(&event) {
+                        if extension_menu.owns_action(&action) {
+                            extension_collection = None;
+                            match result {
+                                PanelResult::Cancel => extension_menu.back(shell),
+                                PanelResult::Confirm(index) => {
+                                    let selection = extension_menu.select(index, executable_extensions, shell);
+                                    extension_collection = selection.collection;
+                                    if let Some(effect) = selection.effect {
+                                        if aborting || *quit_requested || shell.close_requested() {
+                                            shell.error("extension action not admitted while closing".into());
+                                        } else if pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
+                                            shell.error("command queue is full; extension unchanged".into());
+                                        } else {
+                                            push_pending_action(pending_actions, PendingIdleAction::ExtensionMenuEffect(Box::new(effect)));
+                                            shell.notice("extension action queued for the next idle boundary; approval and eligibility are checked there");
+                                        }
+                                    }
+                                }
+                                PanelResult::Select(_) => {}
+                            }
+                            shell.render();
+                            continue;
+                        }
                         match (result, action) {
                             (PanelResult::Confirm(index), PanelAction::SelectGroupedModel { models, .. }) => {
                                 if let Some(id) = models.get(index) {
@@ -4051,6 +4186,27 @@ where
                                     }
                                 }
                             }
+                            (PanelResult::Confirm(index), PanelAction::SelectSettings(commands)) => {
+                                if let Some(sub) = commands.get(index).cloned() {
+                                    let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
+                                    if !open_settings_destination(shell, &sub, &inspection.catalog, &inspection.model, inspection.subagents_available, show_images) {
+                                        let command = Command::Settings(sub);
+                                        if active_command_needs_idle_slot(&command) && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
+                                            shell.error("command queue is full; setting unchanged".into());
+                                        } else {
+                                            let context = run.context_snapshot();
+                                            if let Err(error) = handle_active_command(
+                                                shell, command, inspection, executable_extensions, &context,
+                                                goal_deadline, |principal: &str, reference: &str| {
+                                                    run.open_delegated_session_reference(principal, reference).map_err(Box::new)
+                                                }, input, pending_actions, quit_requested, &mut extension_menu,
+                                            ).await {
+                                                shell.error(format!("settings change failed: {error}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             (PanelResult::Confirm(index), PanelAction::SelectThinking(levels)) => {
                                 if let Some(level) = levels.get(index) {
                                     let reasoning = match requested_thinking_to_reasoning(*level,
@@ -4068,15 +4224,16 @@ where
                                             shell.render();
                                             continue;
                                         }
-                                        selected_reasoning = reasoning.clone();
-                                        pending_reasoning = Some(reasoning);
+                                        pending_reasoning = Some(reasoning.clone());
                                         pending_reasoning_announce = true;
-                                    } else if pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
+                                    } else if !stage_idle_thinking(pending_actions, *level) {
                                         shell.error("command queue is full; thinking unchanged".into());
-                                    } else {
-                                        push_pending_action(pending_actions, PendingIdleAction::ChangeThinking(reasoning));
-                                        shell.notice("thinking change queued for the next idle boundary");
+                                        shell.render();
+                                        continue;
                                     }
+                                    selected_reasoning = reasoning.clone();
+                                    shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
+                                        &format!("{} (queued)", reasoning_label(&reasoning)));
                                 } else if let Some(surface) = codex_context_surface(&inspection.model) {
                                     open_active_codex_context(shell, &surface);
                                 }
@@ -4337,7 +4494,11 @@ where
                             _ => false,
                         };
                         let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions);
-                        let replaces_thinking = live_thinking && pending_actions.iter().any(model_controls::is_active_thinking);
+                        let replaces_thinking = matches!(&parsed, Command::Thinking(Some(_))) && (
+                            (live_thinking && pending_actions.iter().any(model_controls::is_active_thinking))
+                            || matches!(pending_actions.back(), Some(PendingIdleAction::ChangeThinking(_)
+                                | PendingIdleAction::ChangeThinkingLevel(_) | PendingIdleAction::ActiveThinkingSelection(_)))
+                        );
                         if active_command_needs_idle_slot(&parsed) && !prompt_template && !live_subagent_control && !replaces_thinking && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
                             shell.error("command queue is full; draft and attachments retained".into());
                             shell.render();
@@ -4347,22 +4508,35 @@ where
                         if let Command::Thinking(Some(level)) = &command {
                             let requested = ThinkingLevel::parse(level).and_then(|level| requested_thinking_to_reasoning(
                                 level, &inspection.model, inspection.subagents_available,
-                            ));
+                            ).map(|reasoning| (level, reasoning)));
                             match requested {
                                 Err(error) => { shell.error(error.to_string()); shell.render(); continue; }
-                                Ok(reasoning) if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) => {
+                                Ok((_, reasoning)) if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) => {
                                     if !stage_active_thinking(pending_actions, &reasoning) {
                                         shell.error("command queue is full; thinking unchanged".into());
                                         shell.render();
                                         continue;
                                     }
                                     selected_reasoning = reasoning.clone();
+                                    shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
+                                        &format!("{} (queued)", reasoning_label(&reasoning)));
                                     pending_reasoning = Some(reasoning);
                                     pending_reasoning_announce = true;
                                     shell.render();
                                     continue;
                                 }
-                                Ok(_) => {}
+                                Ok((level, reasoning)) => {
+                                    if stage_idle_thinking(pending_actions, level) {
+                                        selected_reasoning = reasoning.clone();
+                                        shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
+                                            &format!("{} (queued)", reasoning_label(&reasoning)));
+                                        shell.notice("thinking change queued for the next idle boundary");
+                                    } else {
+                                        shell.error("command queue is full; thinking unchanged".into());
+                                    }
+                                    shell.render();
+                                    continue;
+                                }
                             }
                         }
                         let was_quit = matches!(command, Command::Exit);
@@ -4416,6 +4590,7 @@ where
                                 }
                             }
                         }
+                        extension_collection = None;
                         let context = run.context_snapshot();
                         if let Err(error) = handle_active_command(
                             shell,
@@ -4430,6 +4605,7 @@ where
                             input,
                             pending_actions,
                             quit_requested,
+                            &mut extension_menu,
                         )
                         .await
                         {
@@ -4501,43 +4677,32 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => {
-                        if inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions) {
-                            let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
-                            // Cycle from the latest user selection, including a
-                            // value whose control send is still in flight.
-                            match next_thinking_level(
-                                &levels,
-                                Some(&selected_reasoning),
-                                &inspection.model,
-                            ) {
-                                Ok(level) => match requested_thinking_to_reasoning(
-                                    level, &inspection.model, inspection.subagents_available,
-                                ) {
-                                    Ok(reasoning) => {
-                                        if !stage_active_thinking(pending_actions, &reasoning) {
-                                            shell.error("command queue is full; thinking unchanged".into());
-                                            shell.render();
-                                            continue;
-                                        }
-                                        selected_reasoning = reasoning.clone();
+                        let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
+                        let requested = next_thinking_level(&levels, Some(&selected_reasoning), &inspection.model)
+                            .and_then(|level| requested_thinking_to_reasoning(level, &inspection.model, inspection.subagents_available)
+                                .map(|reasoning| (level, reasoning)));
+                        match requested {
+                            Ok((level, reasoning)) => {
+                                let live = inspection.model.responses_features().reasoning_effort_updates
+                                    && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions);
+                                let staged = if live {
+                                    stage_active_thinking(pending_actions, &reasoning)
+                                } else {
+                                    stage_idle_thinking(pending_actions, level)
+                                };
+                                if staged {
+                                    selected_reasoning = reasoning.clone();
+                                    if live {
                                         pending_reasoning = Some(reasoning.clone());
                                         pending_reasoning_announce = false;
-                                        let label = reasoning_label(&reasoning);
-                                        shell.set_identity(
-                                            &inspection.model.endpoint.id.0,
-                                            &inspection.model.spec.id.0,
-                                            &format!("{label} (queued)"),
-                                        );
                                     }
-                                    Err(error) => shell.error(format!("thinking unchanged: {error}")),
-                                },
-                                Err(error) => shell.error(format!("thinking unchanged: {error}")),
+                                    shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
+                                        &format!("{} (queued)", reasoning_label(&reasoning)));
+                                } else {
+                                    shell.error("command queue is full; thinking unchanged".into());
+                                }
                             }
-                        } else if pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
-                            shell.error("command queue is full; thinking unchanged".into());
-                        } else {
-                            push_pending_action(pending_actions, PendingIdleAction::CycleThinking);
-                            shell.notice("thinking change queued for the next idle boundary");
+                            Err(error) => shell.error(format!("thinking unchanged: {error}")),
                         }
                         shell.render();
                     }
@@ -4570,7 +4735,12 @@ where
                     if matches!(&event, AgentEvent::TurnStarted) && inspection.model.responses_features().reasoning_effort_updates {
                         if let Ok(session) = inspection.read_only_session() {
                             if let Ok(Some((_, reasoning))) = session.responses_reasoning(&inspection.model.endpoint.id, &inspection.model.spec.id) {
-                                shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &reasoning_label(&reasoning));
+                                let display = if selected_reasoning == reasoning {
+                                    reasoning_label(&reasoning)
+                                } else {
+                                    format!("{} (queued)", reasoning_label(&selected_reasoning))
+                                };
+                                shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0, &display);
                                 if model_controls::acknowledge_response_boundary(pending_actions, &reasoning) {
                                     executable_extensions.refresh_host_state(&session, &inspection.model, &reasoning, &inspection.sessions);
                                     shell.set_pending_controls(model_controls::queue_labels(pending_actions));
@@ -4594,6 +4764,8 @@ where
                             shell.notice_error("interactive tool request denied while cancelling or at the pending-request limit");
                         } else {
                             if interactions.is_empty() {
+                                extension_menu.cancel();
+                                extension_collection = None;
                                 shell.close_panel(); shell.close_overlay();
                                 update_report_open = false;
                                 subagents_open = false; subagent_document = None;
@@ -4675,6 +4847,8 @@ where
                     }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
                     if run_finished {
+                        extension_menu.cancel();
+                        extension_collection = None;
                         settle_active_thinking(shell, inspection, pending_actions);
                         interactions.clear();
                         shell.close_panel();
@@ -4704,6 +4878,8 @@ where
                     }
                 }
                 None => {
+                    extension_menu.cancel();
+                    extension_collection = None;
                     settle_active_thinking(shell, inspection, pending_actions);
                     interactions.clear();
                     shell.close_panel();
@@ -4764,11 +4940,27 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
         .catalog
         .endpoint_label(&app.model.endpoint.id)
         .unwrap_or(&app.model.endpoint.id.0);
-    shell.set_identity(
-        endpoint_label,
-        &app.model.spec.id.0,
-        &crate::app::reasoning_label(&app.reasoning),
+    shell.set_thinking_cycle(
+        format!(
+            "{}:{}:{}",
+            app.agent.session().resource_owner_key(),
+            app.model.endpoint.id.0,
+            app.model.spec.id.0
+        ),
+        app_thinking_levels(app)
+            .into_iter()
+            .map(|level| {
+                requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
+                    .expect("advertised thinking choices are selectable")
+            })
+            .collect(),
+        &app.reasoning,
     );
+    let reasoning = shell.deferred_thinking().map_or_else(
+        || crate::app::reasoning_label(&app.reasoning),
+        |reasoning| format!("{} (queued)", crate::app::reasoning_label(reasoning)),
+    );
+    shell.set_identity(endpoint_label, &app.model.spec.id.0, &reasoning);
     // Registry/configured metadata overrides the conservative canonical-ID
     // fallback installed by `set_identity` and is cached until model switch.
     shell.set_model_theme(&app.model);
@@ -6852,10 +7044,55 @@ impl HostNotification {
     }
 }
 
+/// Apply the latest keyboard selection retained by an App-borrowing lifecycle wait.
+async fn apply_deferred_thinking<S>(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<App>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    if shell.deferred_thinking().is_none() {
+        return Ok(app);
+    }
+    // Rebinding to another model/session retires an old wait's selection.
+    update_status(shell, &app);
+    while let Some(reasoning) = shell.take_deferred_thinking() {
+        let selectable = app_thinking_levels(&app).into_iter().any(|level| {
+            requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
+                .is_ok_and(|choice| choice == reasoning)
+        });
+        if selectable {
+            app = select_thinking(app, shell, input, reasoning, None).await?;
+        } else {
+            shell.error("thinking unchanged: selected level is no longer available".into());
+            update_status(shell, &app);
+            shell.render();
+        }
+    }
+    Ok(app)
+}
+
 /// Apply a user thinking selection before saving its startup preference. Qualified
 /// Responses controls validate both the advertised choice and the host's
 /// observation runtime before committing a durable selection.
-async fn select_thinking<S>(
+fn select_thinking<'a, S>(
+    app: App,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut S,
+    reasoning: ReasoningConfig,
+    picker: Option<(ReasoningMode, ThinkingLevel)>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<App>> + 'a>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin + 'a,
+{
+    // Queued controls have several selection arms. Keep their rebuild-backed
+    // futures heap-owned so the idle dispatcher does not duplicate stack frames.
+    Box::pin(select_thinking_inner(app, shell, input, reasoning, picker))
+}
+
+async fn select_thinking_inner<S>(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -6876,69 +7113,96 @@ where
     if qualified {
         if let Err(error) = app.agent.set_reasoning(reasoning.clone()) {
             shell.error(format!("thinking unchanged: {error}"));
+            update_status(shell, &app);
+            shell.render();
             return Ok(app);
         }
         app.reasoning = app.agent.reasoning().clone();
     }
-    if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
-        crate::cli::persist_reasoning(&preference)
-    })
+    let transitioned = !qualified || mode.is_some_and(|mode| mode != app.reasoning_mode);
+    if transitioned {
+        // Advance the local cursor before borrowing App. A second press during
+        // rebuild must advance from this selection, not from the old effort.
+        shell.begin_thinking_selection(&reasoning);
+        shell.render();
+        let target = reasoning.clone();
+        let reconfig = match mode {
+            Some(mode) => Reconfig::ThinkingMode { mode, reasoning },
+            None => Reconfig::Thinking(reasoning),
+        };
+        app = transition(app, shell, input, reconfig).await?;
+        if app.reasoning != target {
+            return Ok(app);
+        }
+    }
+    // Repaint before preference I/O or extension configuration observers. The
+    // wait's input owner retains any later presses as one latest local choice.
+    update_status(shell, &app);
+    shell.render();
+    if let Some(Err(error)) = await_with_ctrl_c(
+        persist_configuration(Some(&mut app.executable_extensions), || {
+            crate::cli::persist_reasoning(&preference)
+        }),
+        shell,
+        input,
+    )
     .await
     {
         shell.error(format!("failed to save thinking preference: {error}"));
     }
     if let Some(mode) = mode {
-        if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
-            crate::cli::persist_reasoning_mode(mode)
-        })
+        if let Some(Err(error)) = await_with_ctrl_c(
+            persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_reasoning_mode(mode)
+            }),
+            shell,
+            input,
+        )
         .await
         {
             shell.error(format!("failed to save reasoning mode preference: {error}"));
         }
     }
-    if qualified && mode.is_none_or(|mode| mode == app.reasoning_mode) {
-        update_status(shell, &app);
+    if !transitioned {
         app.executable_extensions.notify_reasoning_selected_all();
-        return Ok(app);
     }
-    let reconfig = match mode {
-        Some(mode) => Reconfig::ThinkingMode { mode, reasoning },
-        None => Reconfig::Thinking(reasoning),
-    };
-    transition(app, shell, input, reconfig).await
+    Ok(app)
 }
 
-async fn transition<S>(
+fn transition<'a, S>(
     mut app: App,
-    shell: &mut InteractiveShell,
-    input: &mut S,
+    shell: &'a mut InteractiveShell,
+    input: &'a mut S,
     reconfig: Reconfig,
-) -> anyhow::Result<App>
+) -> Pin<Box<dyn Future<Output = anyhow::Result<App>> + 'a>>
 where
-    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    S: Stream<Item = std::io::Result<Event>> + Unpin + 'a,
 {
-    use octet_agent::extension_process::ExtensionHook;
-    let before = match &reconfig {
-        Reconfig::NewSession => Some(serde_json::json!({"reason":"new"})),
-        Reconfig::Resume(path) => {
-            Some(serde_json::json!({"reason":"resume","targetSessionFile":path}))
+    // All queued model/session/thinking arms share this heap-owned rebuild.
+    Box::pin(async move {
+        use octet_agent::extension_process::ExtensionHook;
+        let before = match &reconfig {
+            Reconfig::NewSession => Some(serde_json::json!({"reason":"new"})),
+            Reconfig::Resume(path) => {
+                Some(serde_json::json!({"reason":"resume","targetSessionFile":path}))
+            }
+            _ => None,
+        };
+        if let Some(payload) = before {
+            if cancel_session_change(
+                &mut app,
+                shell,
+                input,
+                ExtensionHook::SessionBeforeSwitch,
+                payload,
+            )
+            .await?
+            {
+                return Ok(app);
+            }
         }
-        _ => None,
-    };
-    if let Some(payload) = before {
-        if cancel_session_change(
-            &mut app,
-            shell,
-            input,
-            ExtensionHook::SessionBeforeSwitch,
-            payload,
-        )
-        .await?
-        {
-            return Ok(app);
-        }
-    }
-    transition_after_before(app, shell, input, reconfig).await
+        transition_after_before(app, shell, input, reconfig).await
+    })
 }
 
 async fn transition_after_before<S>(
@@ -7699,24 +7963,28 @@ async fn pick_session_path(
 }
 
 fn active_fork_messages(session: &Session) -> Vec<crate::tui::view::ForkMessage> {
-    let mut newest_first = Vec::new();
-    let mut cursor = session.head_ref();
-    while let Some(id) = cursor {
-        let Some(entry) = session.entry(id) else {
-            break;
-        };
-        newest_first.push(entry);
-        cursor = entry.parent.as_ref();
-    }
-    newest_first.reverse();
-
-    let mut messages = newest_first
-        .into_iter()
+    // Pi offers user boundaries from the entire durable tree, not just the
+    // active ancestry. Forking an abandoned prompt still creates a new file.
+    let mut messages = session
+        .entries()
+        .iter()
         .filter_map(|entry| {
             let octet_agent::EntryValue::Message(octet_ai::Message::User(user)) = &entry.value
             else {
                 return None;
             };
+            if entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.custom_message.as_ref())
+                .is_some()
+                || user
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, octet_ai::UserPart::ToolResult(_)))
+            {
+                return None;
+            }
             let text = user
                 .content
                 .iter()
@@ -7805,21 +8073,26 @@ async fn fork_session(
         shell.notice("No messages to fork from");
         return Ok(app);
     }
+    let whole_conversation_head = messages
+        .iter()
+        .find(|message| message.whole_conversation)
+        .map(|message| message.entry_id.clone());
     let Some((entry_id, text)) = message_picker(shell, input, messages).await? else {
         return Ok(app);
     };
+    let at = text.is_empty() && whole_conversation_head.as_ref() == Some(&entry_id);
     if cancel_session_change(
         &mut app,
         shell,
         input,
         octet_agent::extension_process::ExtensionHook::SessionBeforeFork,
-        serde_json::json!({"entryId":entry_id,"position":"before"}),
+        serde_json::json!({"entryId":entry_id,"position":if at { "at" } else { "before" }}),
     )
     .await?
     {
         return Ok(app);
     }
-    let session_id = fork_extension_session(&app, shell, input, Some(entry_id), false).await?;
+    let session_id = fork_extension_session(&app, shell, input, Some(entry_id), at).await?;
     let destination = app.sessions.path_by_id(&session_id)?;
     app = transition_after_before(app, shell, input, Reconfig::Fork(destination)).await?;
     shell.prefill_editor(text);
@@ -7954,10 +8227,21 @@ async fn apply_pending_actions(
                 }
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
-                let reasoning =
-                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
-                app = select_thinking(app, shell, input, reasoning, None).await?;
-                shell.notice("thinking change applied at the idle boundary");
+                match requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
+                {
+                    Ok(reasoning) => {
+                        let target = reasoning.clone();
+                        app = select_thinking(app, shell, input, reasoning, None).await?;
+                        if app.reasoning == target {
+                            shell.notice("thinking change applied at the idle boundary");
+                        }
+                    }
+                    Err(error) => {
+                        shell.error(format!("thinking unchanged: {error}"));
+                        update_status(shell, &app);
+                        shell.render();
+                    }
+                }
             }
             PendingIdleAction::PersistThinkingPreference(preference) => {
                 if let Err(error) =
@@ -7968,16 +8252,6 @@ async fn apply_pending_actions(
                 {
                     shell.error(format!("failed to save thinking preference: {error}"));
                 }
-            }
-            PendingIdleAction::CycleThinking => {
-                let level = next_thinking_level(
-                    &app_thinking_levels(&app),
-                    Some(&app.reasoning),
-                    &app.model,
-                )?;
-                let reasoning =
-                    requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
-                app = select_thinking(app, shell, input, reasoning, None).await?;
             }
             PendingIdleAction::NewSession => {
                 app = transition(app, shell, input, Reconfig::NewSession).await?;
@@ -8000,6 +8274,20 @@ async fn apply_pending_actions(
                     app = transition(app, shell, input, Reconfig::Resume(path)).await?;
                     shell.notice("queued session resumed");
                 }
+            }
+            PendingIdleAction::Import(path) => {
+                if let Some(destination) =
+                    session_tree_menu::import(&mut app, shell, input, path).await?
+                {
+                    app = transition(app, shell, input, Reconfig::Resume(destination)).await?;
+                    shell.notice("resumed the new imported session");
+                }
+            }
+            PendingIdleAction::Share => {
+                session_tree_menu::share(&mut app, shell, input).await?;
+            }
+            PendingIdleAction::Tree => {
+                session_tree_menu::navigate(&mut app, shell, input).await?;
             }
             PendingIdleAction::Fork => {
                 app = fork_session(app, shell, input).await?;
@@ -8078,6 +8366,10 @@ async fn apply_pending_actions(
                 arguments,
             } => {
                 run_typed_extension_command(&mut app, shell, input, owner, name, arguments).await?;
+                *goal_deadline = recovered_goal_deadline(&app)?;
+            }
+            PendingIdleAction::ExtensionMenuEffect(effect) => {
+                app = (*effect).apply(app, shell, input).await?;
                 *goal_deadline = recovered_goal_deadline(&app)?;
             }
             PendingIdleAction::Extensions(sub) => {
@@ -8973,6 +9265,95 @@ where
     })
 }
 
+/// Menu destinations are navigation only. Explicit slash-command None forms
+/// retain their existing report/toggle semantics outside this selection path.
+fn open_settings_destination(
+    shell: &mut InteractiveShell,
+    sub: &commands::SettingsCommand,
+    catalog: &octet_ai::ModelCatalog,
+    model: &Model,
+    subagents_available: bool,
+    show_images: bool,
+) -> bool {
+    use commands::SettingsCommand as Sub;
+    let panel = match sub {
+        Sub::Menu => settings_menu::root_panel(show_images),
+        Sub::Images(None) => settings_menu::images_panel(show_images),
+        Sub::DefaultModel(None) => {
+            let presentation = pickers::model_picker_presentation(catalog);
+            let choices = presentation
+                .labels
+                .into_iter()
+                .zip(presentation.ids)
+                .collect::<Vec<_>>();
+            settings_menu::default_model_panel(&choices)
+        }
+        Sub::DefaultReasoning(None) => settings_menu::default_reasoning_panel(
+            &supported_levels_with_subagents(model, subagents_available),
+        ),
+        _ => return false,
+    };
+    shell.open_panel(panel);
+    true
+}
+
+async fn settings_menu_interactively(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<Option<commands::SettingsCommand>> {
+    let mut destination = commands::SettingsCommand::Menu;
+    loop {
+        if !open_settings_destination(
+            shell,
+            &destination,
+            &app.catalog,
+            &app.model,
+            app.subagents_available(),
+            app.config.show_images,
+        ) {
+            return Ok(Some(destination));
+        }
+        shell.render();
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    shell.close_panel();
+                    shell.request_close();
+                    return Ok(None);
+                }
+                next = input.next() => next,
+            };
+            let Some(event) = next else {
+                shell.close_panel();
+                shell.request_close();
+                return Ok(None);
+            };
+            let event = event?;
+            if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+                shell.close_panel();
+                shell.request_close();
+                return Ok(None);
+            }
+            if let Some((result, PanelAction::SelectSettings(commands))) = shell.panel_input(&event)
+            {
+                shell.render();
+                match result {
+                    PanelResult::Confirm(index) => {
+                        if let Some(selected) = commands.get(index) {
+                            destination = selected.clone();
+                            break;
+                        }
+                    }
+                    PanelResult::Cancel | PanelResult::Select(_) => return Ok(None),
+                }
+            }
+            shell.render();
+        }
+    }
+}
+
 /// `/settings` at the idle boundary. Reports render immediately; mutations
 /// persist through the shared configuration writer and apply in-session.
 async fn apply_settings_command(
@@ -8982,10 +9363,19 @@ async fn apply_settings_command(
     sub: commands::SettingsCommand,
 ) -> anyhow::Result<()> {
     use commands::SettingsCommand as Sub;
+    let sub = if sub == Sub::Menu {
+        let Some(selected) = settings_menu_interactively(app, shell, input).await? else {
+            return Ok(());
+        };
+        selected
+    } else {
+        sub
+    };
     match sub {
-        Sub::Show => shell.show_report_text(
+        Sub::Menu => unreachable!("menu navigation returns only a selected effect or report"),
+        Sub::Show => shell.show_report_facts(
             "Settings",
-            "Effective display and default preferences",
+            "Effective display, launch, and session settings",
             commands::settings_text(&commands::SettingsSurface::capture(app)),
         ),
         Sub::Transport => shell.notice(format!(
@@ -9177,7 +9567,7 @@ async fn apply_scoped_models_command(
             .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
             .collect::<Vec<_>>();
         available.sort();
-        shell.show_report_text(
+        shell.show_report_facts(
             "Scoped models",
             "Ordered model cycling scope",
             commands::scoped_models_text(app.model_scope.as_deref(), &available),
@@ -9329,7 +9719,7 @@ async fn run_idle_command_inner(
         Command::Changelog => shell.show_changelog(),
         Command::Hotkeys => show_hotkeys(shell),
         Command::Copy => copy_last_assistant(shell),
-        Command::Session => shell.show_report_text(
+        Command::Session => shell.show_report_facts(
             "Session",
             "Durable session facts",
             format!(
@@ -9339,7 +9729,7 @@ async fn run_idle_command_inner(
             ),
         ),
         Command::Help(topic) => {
-            shell.show_report_text(
+            shell.show_report_facts(
                 "Help",
                 "Browse commands and keyboard shortcuts",
                 commands::help_text(&app.config.workspace, topic.as_deref()),
@@ -9351,12 +9741,12 @@ async fn run_idle_command_inner(
         Command::Context => {
             shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
         }
-        Command::Cost => shell.show_report_text(
+        Command::Cost => shell.show_report_facts(
             "Cost",
             "Review session token usage and estimated cost",
             commands::cost_text(app.agent.session(), &app.model),
         ),
-        Command::Cache => shell.show_report_text(
+        Command::Cache => shell.show_report_facts(
             "Cache",
             "Review session cache accounting",
             format!(
@@ -9376,7 +9766,7 @@ async fn run_idle_command_inner(
                     ));
                 }
             } else {
-                shell.show_report_text(
+                shell.show_report_facts(
                     "Cache warming",
                     "Billable refresh policy",
                     commands::app_cache_warming_text(&app),
@@ -9437,13 +9827,16 @@ async fn run_idle_command_inner(
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow::anyhow!("current session has no valid id"))?;
-            let report = crate::session_commands::export_portable(
+            let report = commands::export_for_frontend(
                 &app.sessions,
                 id,
-                output.map(std::path::PathBuf::from),
+                output,
                 &app.config.invocation_cwd,
-                false,
-                false,
+                if shell.theme().background() == TerminalBackground::Light {
+                    "light"
+                } else {
+                    "dark"
+                },
             )?;
             shell.show_overlay_text(format!(
                 "Exported {}\nRedacted {} potentially sensitive values{}",
@@ -9624,6 +10017,23 @@ async fn run_idle_command_inner(
                 .await?;
                 shell.notice("resumed session");
             }
+        }
+        Command::Import(path) => {
+            if let Some(destination) =
+                session_tree_menu::import(&mut app, shell, input, path).await?
+            {
+                app = boxed_idle_app_action(app, |app| {
+                    transition(app, shell, input, Reconfig::Resume(destination))
+                })
+                .await?;
+                shell.notice("resumed the new imported session");
+            }
+        }
+        Command::Share => {
+            session_tree_menu::share(&mut app, shell, input).await?;
+        }
+        Command::Tree => {
+            session_tree_menu::navigate(&mut app, shell, input).await?;
         }
         Command::Fork => {
             app = boxed_idle_app_action(app, |app| fork_session(app, shell, input)).await?;
@@ -10183,6 +10593,19 @@ async fn apply_detected_terminal_background_with_timeout<
 where
     S: Stream<Item = std::io::Result<E>> + Unpin,
 {
+    if matches!(
+        shell.theme().source(),
+        crate::tui::theme::ThemeSource::CompiledPi
+    ) {
+        if shell.theme().capabilities().color != crate::tui::terminal::ColorDepth::None
+            && !explicit_terminal_background_override()
+        {
+            // The ordinary input owner consumes these replies and repaints via
+            // its handler, including replies arriving after readiness.
+            let _ = crate::tui::terminal::query_terminal_theme_colors(input, false);
+        }
+        return false;
+    }
     if explicit_terminal_background_override()
         || TerminalThemeChoice::from_config(config)
             .and_then(TerminalThemeChoice::explicit_background)
@@ -10342,12 +10765,13 @@ where
         .and_then(|key| {
             let key = TerminalThemeChoice::parse(key)
                 .map(TerminalThemeChoice::key)
+                .or_else(|| compiled_file_theme_name(key))
                 .unwrap_or_else(|| key.strip_suffix(".toml").unwrap_or(key));
             choices.iter().position(|choice| choice.key() == key)
         })
         .unwrap_or(0);
     if let Some(ThemeSelection::File(_)) = choices.get(current) {
-        if previews[current].source_path() == original.source_path() {
+        if previews[current].source() == original.source() {
             previews[current] = original.clone();
         }
     }
@@ -10458,7 +10882,12 @@ where
             shell.theme().background(),
         ));
     }
-    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto)) {
+    if matches!(&choice, ThemeSelection::Builtin(TerminalThemeChoice::Auto))
+        || matches!(
+            shell.theme().source(),
+            crate::tui::theme::ThemeSource::CompiledPi
+        )
+    {
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
@@ -10598,7 +11027,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Session => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Session",
                         "Durable session facts",
                         commands::session_text(&session),
@@ -10610,7 +11039,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Help(topic) => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Help",
                         "Browse commands and keyboard shortcuts",
                         commands::help_text(&workspace, topic.as_deref()),
@@ -10618,7 +11047,7 @@ async fn run_interactive_without_model(
                     shell.render();
                 }
                 Command::Status => {
-                    shell.show_report_text(
+                    shell.show_report_facts(
                         "Status",
                         "Review the read-only session configuration",
                         "No model is configured. The session can be read, but prompts are disabled."
@@ -10784,6 +11213,12 @@ fn schedule_idle_responses_prewarm(app: &App, command: &Command) {
             | Command::Settings(_)
             | Command::ScopedModels(_)
             | Command::Bash(_)
+            | Command::Tree
+            | Command::Fork
+            | Command::Clone
+            | Command::Import(_)
+            | Command::Share
+            | Command::Export(_)
     ) {
         schedule_responses_prewarm(app);
     }
@@ -11340,7 +11775,8 @@ async fn run_interactive_once(
     let mut input = EventStream::new()
         .with_interceptors(shell.terminal_input_interceptors())
         .with_cede_flag(shell.terminal_input_parking())
-        .with_tern_handler(shell.tern_input_handler());
+        .with_tern_handler(shell.tern_input_handler())
+        .with_theme_color_handler(shell.terminal_theme_handler());
     if crate::cli::should_offer_theme_onboarding(&config)
         && shell.theme().capabilities().interactive
         && !config.plain
@@ -11531,6 +11967,7 @@ async fn run_interactive_once(
             shutdown_for_exit(&mut app, &mut shell).await;
             break;
         }
+        app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
         refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
         // Attach every extension handshake that settled while the loop was
         // idle. An attach can add tools, commands, skills, prompts, themes and
@@ -11833,6 +12270,9 @@ async fn run_interactive_once(
                             continue;
                         }
                     }
+                    // Prompt-hook admission may attach the first resource consumer
+                    // before the ordinary idle pump has observed it.
+                    refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
                 }
                 let transformed = await_with_ctrl_c(
                     app.executable_extensions.process_input(
@@ -11892,6 +12332,7 @@ async fn run_interactive_once(
                         continue;
                     }
                 };
+                app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
                 app.executable_extensions.refresh_host_state(
                     app.agent.session(),
                     &app.model,
@@ -11929,6 +12370,10 @@ async fn run_interactive_once(
                         continue;
                     }
                 };
+                // Prompt composition is another App-borrowing input wait. Drain
+                // its latest selection before admitting the request, not after a
+                // subsequent active-run selection has already been made.
+                app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
                 let pending_context_count = composition.pending_context_count;
                 for notification in composition.notifications {
                     shell.notice(notification);

@@ -22,14 +22,14 @@ V1 is deliberately bounded, with the parent's full standard tool scope as the de
 - depth one; a recursively admitted descendant is immediately interrupted when its host path/depth is observed;
 - four predefined profiles (`explore`, `review`, `test-analysis`, `research`);
 - per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit`, with host-resolved configured routes and reasoning;
-- requested tool scope is a non-empty duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`; the default grant is the full five-tool scope, and `tools: [read, search]` narrows a worker to hard read-only for pure investigations;
+- requested tool scope is a non-empty duplicate-free subset of `read`, `edit`, `write`, and `bash`; the default grant is the full four-tool scope, and `tools: [read]` narrows a worker to hard read-only for pure investigations; repository content search requires `bash`, which is not a hard read-only grant;
 - wall-time, turn, and cost ceilings are optional per spawn: when omitted they inherit the parent session's ceilings (an unlimited parent remains unlimited); explicit values are bounded to 5 s–24 h, 1–256 turns, and 1–50,000,000 microdollars; returned output is 512–16,384 bytes;
 - fresh child contexts use the selected model, bound inherited context/output limits by its capabilities, and inherit the optional session token ceiling exactly; an unlimited parent remains unlimited and the model-facing spawn schema has no separate token-budget field;
 - strict owner derivation from `tool/call.context.resource_owner`; no tool schema accepts an owner;
 - retry-safe spawn keys, bounded output/error retention, cooperative cancellation, explicit stop, continue (steer active / resume settled), an explicit parent wait/reattach surface, and session-scoped delegation (`orphaned` means *detached*, not dead);
 
 `edit`, `write`, and `bash` are part of the default grant; the `tools`
-argument narrows or restores any subset within the five-tool whitelist:
+argument narrows or restores any subset within the four-tool whitelist:
 network, browser, computer control, mailbox/team
 primitives, another agent primitive, and any other tool are rejected. The
 canonical child policy keeps repository content and task text as data, not
@@ -150,7 +150,7 @@ Launch a worker in the background by default:
   "provider": "inherit",
   "model": "inherit",
   "reasoning": "inherit",
-  "tools": ["read", "search"],
+  "tools": ["read"],
   "timeout_seconds": 300,
   "max_turns": 8,
   "max_output_bytes": 8192,

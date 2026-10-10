@@ -1043,6 +1043,60 @@ fn active_thinking_reserves_capacity_and_settles_once_without_claiming_delivery(
 }
 
 #[tokio::test]
+async fn active_management_roots_open_with_a_full_effect_queue_and_keep_the_draft() {
+    for command in [commands::parse("/settings"), commands::parse("/extensions")] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.prefill_editor("unsent multiline\ndraft".into());
+        let mut queue = VecDeque::from(vec![
+            PendingIdleAction::NewSession;
+            MAX_PENDING_IDLE_ACTIONS
+        ]);
+        let before = queue.clone();
+        let mut menu = extension_menu::State::default();
+        let mut extensions = crate::extensions::ExecutableExtensions::default();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let mut deadline = None;
+        let mut quit = false;
+        handle_active_command(
+            &mut shell,
+            command,
+            test_run_inspection(),
+            &mut extensions,
+            &octet_agent::ContextSnapshot::default(),
+            &mut deadline,
+            |_, _| Ok(None),
+            &mut input,
+            &mut queue,
+            &mut quit,
+            &mut menu,
+        )
+        .await
+        .unwrap();
+        assert!(shell.has_panel());
+        assert!(
+            !shell.has_overlay(),
+            "management navigation is not diagnostics"
+        );
+        assert_eq!(queue, before, "opening a root reserves no effect capacity");
+        assert_eq!(shell.pending(), "unsent multiline\ndraft");
+        assert!(!quit);
+        let (result, action) = shell
+            .panel_input(&Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        assert_eq!(result, PanelResult::Cancel);
+        if menu.owns_action(&action) {
+            menu.back(&mut shell);
+        }
+        assert!(!shell.has_panel());
+        assert_eq!(queue, before);
+        assert_eq!(shell.pending(), "unsent multiline\ndraft");
+    }
+}
+
+#[tokio::test]
 async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
     use crossterm::event::KeyEvent;
     for (command, tail, expected) in [
@@ -1051,6 +1105,11 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
         ("/theme", vec![KeyCode::Up, KeyCode::Enter], "light"),
         ("/theme", vec![KeyCode::Up, KeyCode::Esc], "dark"),
         ("/settings images on", vec![], "dark"),
+        (
+            "/settings",
+            vec![KeyCode::Down, KeyCode::Enter, KeyCode::Up, KeyCode::Enter],
+            "dark",
+        ),
     ] {
         let (server, started, release) = HeldApi::start(fast_response()).await;
         let mut model = scripted_model(&server.uri);
@@ -1140,7 +1199,7 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
             pending.len(),
             usize::from(command != "/theme" || expected != "dark")
         );
-        if command.contains("images") {
+        if command.contains("images") || command == "/settings" {
             assert!(shell.runtime_config().unwrap().show_images);
         }
         for report in [

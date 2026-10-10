@@ -39,8 +39,8 @@ use octet_agent::tools::{
         SummarizationAttempt, SummarizationDiagnostic, SummarizationFailure,
         SummarizationFailureKind, SummarizationOutcome, SummarizationRetryPolicy,
     },
-    BashCheckpointPublisher, BashTool, EditTool, PowerShellTool, ReadTool, SearchTool,
-    ShellSessionEnvironment, WriteTool, BASH_CHECKPOINT_MAX_BYTES,
+    BashCheckpointPublisher, BashTool, EditTool, PowerShellTool, ReadTool, ShellSessionEnvironment,
+    WriteTool, BASH_CHECKPOINT_MAX_BYTES,
 };
 // The durable checkpoint sink types below are only exercised by the Unix
 // subprocess cases that drive a real checkpointed bash run.
@@ -757,7 +757,7 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     use octet_agent::tool::collect_tool_prompt_contributions;
 
     let bash = BashTool;
-    let tools: Vec<&dyn Tool> = vec![&bash, &ReadTool, &EditTool, &WriteTool, &SearchTool];
+    let tools: Vec<&dyn Tool> = vec![&bash, &ReadTool, &EditTool, &WriteTool];
     let contributions = collect_tool_prompt_contributions(tools);
     let by_name = |name: &str| {
         contributions
@@ -772,11 +772,11 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
             .iter()
             .map(|contribution| contribution.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["bash", "read", "edit", "write", "search"]
+        vec!["bash", "read", "edit", "write"]
     );
     assert_eq!(
         by_name("bash").snippet,
-        "Execute bash commands (prefer rg/ripgrep for file and content search)"
+        "Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)"
     );
     assert_eq!(by_name("read").snippet, "Read file contents");
     assert_eq!(by_name("write").snippet, "Create or overwrite files");
@@ -815,11 +815,6 @@ fn tool_prompt_contributions_match_pi_snippets_and_guidelines() {
     // presentation intent, never a tool inventory, so it cannot widen an
     // allowlist.
     assert!(collect_tool_prompt_contributions(Vec::<&dyn Tool>::new()).is_empty());
-    assert_eq!(
-        SearchTool.prompt_snippet(),
-        Some("Search file contents with ripgrep (rg)"),
-        "only a host that enables search passes it to prompt assembly"
-    );
 }
 
 // ── 4.7 interval durable partial bash output checkpoints ─────────────────
@@ -1806,13 +1801,9 @@ async fn summarization_retries_are_distinct_from_compaction_failures_without_dup
 // ── registered built-in surface (maintainer decision) ────────────────────
 
 /// The model-visible built-in surface is exactly `read`/`write`/`edit`/`bash`
-/// plus the ripgrep-backed `search` (and the Windows-only opt-in `powershell`).
-///
-/// This is the regression guard that stops a Pi-parity pass from re-adding a
-/// dedicated `ls`/`find`/`grep` tool: filename discovery and content search are
-/// served by `rg`, through `search` or `bash`, matching the v0.7.6 release
-/// surface. `search` stays registered for embedders and explicit allowlists even
-/// though the coding product leaves it out of its default allowlist.
+/// (with Windows-only opt-in `powershell`). Filename discovery and content
+/// search use shell commands such as `rg` through `bash`; no separate native
+/// search, ls, find, or grep tool is registered, even for explicit allowlists.
 #[test]
 fn core_tools_register_exactly_the_narrow_maintainer_surface() {
     use octet_agent::extension::ExtensionHost;
@@ -1827,15 +1818,15 @@ fn core_tools_register_exactly_the_narrow_maintainer_surface() {
     names.sort();
 
     #[cfg(windows)]
-    let expected = vec!["bash", "edit", "powershell", "read", "search", "write"];
+    let expected = vec!["bash", "edit", "powershell", "read", "write"];
     #[cfg(not(windows))]
-    let expected = vec!["bash", "edit", "read", "search", "write"];
+    let expected = vec!["bash", "edit", "read", "write"];
 
     assert_eq!(
         names, expected,
         "the registered built-in tool surface changed"
     );
-    for withdrawn in ["ls", "find", "grep"] {
+    for withdrawn in ["search", "ls", "find", "grep"] {
         assert!(
             !names.iter().any(|name| name == withdrawn),
             "`{withdrawn}` must not be offered to the model"

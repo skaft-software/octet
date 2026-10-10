@@ -115,6 +115,41 @@
     "structured_output": true,
     "tool_call": true
   },
+  "anthropic/claude-haiku-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "anthropic/claude-opus-4-5": {
     "limit": {
       "context": 200000,
@@ -348,7 +383,7 @@
   },
   "anthropic/claude-sonnet-4-5": {
     "limit": {
-      "context": 1000000,
+      "context": 200000,
       "output": 64000
     },
     "modalities": {
@@ -374,7 +409,7 @@
   },
   "anthropic/claude-sonnet-4-5-20250929": {
     "limit": {
-      "context": 1000000,
+      "context": 200000,
       "output": 64000
     },
     "modalities": {
@@ -652,7 +687,7 @@
         "text"
       ]
     },
-    "name": "deepseek-ai/DeepSeek-V4.1-Flash-Fast",
+    "name": "DeepSeek V4.1 Flash Fast",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -2387,6 +2422,24 @@
     "reasoning": false,
     "tool_call": false
   },
+  "huggingface/MiniMaxAI/MiniMax-M1-80k": {
+    "limit": {
+      "context": 1000000,
+      "output": 80000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax M1 80K",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
   "huggingface/MiniMaxAI/MiniMax-M2": {
     "limit": {
       "context": 204800,
@@ -2765,6 +2818,25 @@
         ]
       }
     ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "huggingface/Qwen/Qwen3-VL-30B-A3B-Instruct": {
+    "limit": {
+      "context": 131072,
+      "output": 32768
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen3 VL 30B A3B Instruct",
+    "reasoning": false,
     "structured_output": true,
     "tool_call": true
   },
@@ -3826,6 +3898,24 @@
     "reasoning": true,
     "reasoning_options": [],
     "tool_call": true
+  },
+  "huggingface/zai-org/AutoGLM-Phone-9B-Multilingual": {
+    "limit": {
+      "context": 65536,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "AutoGLM Phone 9B Multilingual",
+    "reasoning": false,
+    "tool_call": false
   },
   "huggingface/zai-org/GLM-4.5": {
     "limit": {
@@ -8049,6 +8139,41 @@
     ],
     "tool_call": true
   },
+  "opencode/claude-haiku-5-5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/claude-opus-4-1": {
     "limit": {
       "context": 200000,
@@ -11183,6 +11308,40 @@
     ],
     "tool_call": true
   },
+  "opencode/step-5-preview-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "input": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Step 5 Preview Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/trinity-large-preview-free": {
     "limit": {
       "context": 131072,
@@ -11567,6 +11726,41 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/anthropic/claude-haiku-5.5": {
+    "limit": {
+      "context": 1000000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Claude Haiku 5.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
     "structured_output": true,
@@ -11989,30 +12183,6 @@
     "structured_output": false,
     "tool_call": true
   },
-  "openrouter/baidu/ernie-4.5-vl-424b-a47b": {
-    "limit": {
-      "context": 123000,
-      "output": 16000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "ERNIE 4.5 VL 424B A47B ",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/bytedance-seed/seed-1.6": {
     "limit": {
       "context": 262144,
@@ -12348,7 +12518,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16000
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -12436,7 +12606,7 @@
         "text"
       ]
     },
-    "name": "R1 0528",
+    "name": "DeepSeek R1 0528",
     "reasoning": true,
     "reasoning_options": [],
     "structured_output": true,
@@ -12468,7 +12638,7 @@
   "openrouter/deepseek/deepseek-v3.2": {
     "limit": {
       "context": 163840,
-      "output": 65536
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -13383,8 +13553,8 @@
         "text"
       ],
       "output": [
-        "image",
-        "text"
+        "text",
+        "image"
       ]
     },
     "name": "Nano Banana 2.1",
@@ -13784,10 +13954,10 @@
         "type": "toggle"
       }
     ],
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
-  "openrouter/inclusionai/ling-3.0-flash-sante:free": {
+  "openrouter/inclusionai/ling-3.0-flash-sante": {
     "limit": {
       "context": 262144,
       "output": 32768
@@ -13800,7 +13970,7 @@
         "text"
       ]
     },
-    "name": "Ling 3.0 Flash Sante (free)",
+    "name": "Ling 3.0 Flash Sante",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -14521,7 +14691,7 @@
         "text"
       ]
     },
-    "name": "Codestral 2508",
+    "name": "Codestral 25.08",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -14662,7 +14832,7 @@
   },
   "openrouter/mistralai/mistral-large-4-0": {
     "limit": {
-      "context": 524288,
+      "context": 1048576,
       "output": 262144
     },
     "modalities": {
@@ -14948,7 +15118,7 @@
         "text"
       ]
     },
-    "name": "Kimi K2 0905",
+    "name": "Kimi K2 Instruct 0905",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -14959,7 +15129,7 @@
     },
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 98304
     },
     "modalities": {
       "input": [
@@ -17745,24 +17915,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen-plus-2025-07-28": {
-    "limit": {
-      "context": 1000000,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen Plus 0728",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen2.5-vl-72b-instruct": {
     "limit": {
       "context": 128000,
@@ -17784,8 +17936,8 @@
   },
   "openrouter/qwen/qwen3-14b": {
     "limit": {
-      "context": 131072,
-      "output": 16384
+      "context": 40960,
+      "output": 36864
     },
     "modalities": {
       "input": [
@@ -17803,29 +17955,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-235b-a22b": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 235B-A22B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/qwen/qwen3-235b-a22b-2507": {
@@ -17848,8 +17977,8 @@
   },
   "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
     "limit": {
-      "context": 131072,
-      "output": 117964
+      "context": 128000,
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -17867,7 +17996,7 @@
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "limit": {
-      "context": 131072,
+      "context": 40960,
       "output": 16384
     },
     "modalities": {
@@ -17891,7 +18020,7 @@
   "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
     "limit": {
       "context": 262144,
-      "output": 32000
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17904,25 +18033,6 @@
     "name": "Qwen3 30B A3B Instruct 2507",
     "reasoning": false,
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-30b-a3b-thinking-2507": {
-    "limit": {
-      "context": 81920,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 30B A3B Thinking 2507",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/qwen/qwen3-32b": {
@@ -17946,29 +18056,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-8b": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 8B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
     "tool_call": true
   },
   "openrouter/qwen/qwen3-coder": {
@@ -18043,65 +18130,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-coder-plus": {
-    "limit": {
-      "context": 1000000,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Coder Plus",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-max": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Max",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-max-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Max Thinking",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
@@ -18123,7 +18151,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18158,26 +18186,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-vl-235b-a22b-thinking": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 235B A22B Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
     "limit": {
       "context": 262144,
@@ -18200,7 +18208,7 @@
   "openrouter/qwen/qwen3-vl-30b-a3b-thinking": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18217,29 +18225,10 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-vl-32b-instruct": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 32B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-8b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18252,26 +18241,6 @@
     },
     "name": "Qwen3 VL 8B Instruct",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3-vl-8b-thinking": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 VL 8B Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
     "structured_output": true,
     "tool_call": true
   },
@@ -18303,7 +18272,7 @@
   "openrouter/qwen/qwen3.5-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -18328,7 +18297,7 @@
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -18353,7 +18322,7 @@
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "limit": {
       "context": 262144,
-      "output": 81920
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18478,7 +18447,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -18541,29 +18510,6 @@
       ]
     },
     "name": "Qwen3.6 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/qwen/qwen3.6-max-preview": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.6 Max Preview",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -19083,7 +19029,7 @@
     "name": "Llama 3.1 Euryale 70B v2.2",
     "reasoning": false,
     "structured_output": true,
-    "tool_call": true
+    "tool_call": false
   },
   "openrouter/sao10k/l3.3-euryale-70b": {
     "limit": {
@@ -19139,6 +19085,37 @@
       ]
     },
     "name": "Step 3.7 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/stepfun/step-5-preview": {
+    "limit": {
+      "context": 1000000,
+      "input": 1000000,
+      "output": 64000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Step 5 Preview",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -20075,7 +20052,7 @@
   "openrouter/z-ai/glm-4.6": {
     "limit": {
       "context": 204800,
-      "output": 16384
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -20256,7 +20233,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20458,8 +20435,8 @@
   },
   "openrouter/~anthropic/claude-haiku-latest": {
     "limit": {
-      "context": 200000,
-      "output": 64000
+      "context": 1000000,
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -20476,6 +20453,16 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
     "structured_output": true,
@@ -20580,7 +20567,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20932,7 +20919,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20962,7 +20949,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [

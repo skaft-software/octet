@@ -289,6 +289,7 @@ pub(super) fn test_run_inspection() -> &'static ActiveRunInspection {
                 show_images: false,
                 cache_warming: octet_agent::CacheWarmMode::Streaming,
             },
+            extension_menu: extension_menu::Snapshot::default(),
             cache_warming_control: None,
             cache_warming_status: octet_agent::CacheWarmingStatus {
                 state: octet_agent::CacheWarmingState::Inactive,
@@ -342,6 +343,7 @@ pub(super) fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspectio
             show_images: false,
             cache_warming: octet_agent::CacheWarmMode::Streaming,
         },
+        extension_menu: extension_menu::Snapshot::default(),
         cache_warming_control: None,
         cache_warming_status: octet_agent::CacheWarmingStatus {
             state: octet_agent::CacheWarmingState::Inactive,
@@ -405,6 +407,7 @@ pub(super) async fn run_active_command_observing_deadline(
         &mut input,
         &mut queue,
         &mut quit_requested,
+        &mut extension_menu::State::default(),
     )
     .await
     .expect("active command");

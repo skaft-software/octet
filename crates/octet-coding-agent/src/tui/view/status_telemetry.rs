@@ -128,43 +128,9 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     lines.join("\n")
 }
 
-pub(super) fn styled_status_text(theme: &OctetTheme, text: &str) -> String {
-    let safe = sanitize_for_terminal(text);
-    let mut metadata = true;
-    safe.lines()
-        .map(|line| {
-            if line.is_empty() {
-                metadata = false;
-                return String::new();
-            }
-            if !metadata {
-                return line.to_owned();
-            }
-            let Some(separator) = line.find("  ") else {
-                return line.to_owned();
-            };
-            let label = &line[..separator];
-            let spacing_and_value = &line[separator..];
-            let spacing = spacing_and_value
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .collect::<String>();
-            let value = &spacing_and_value[spacing.len()..];
-            let value = if label == "Model" {
-                theme.bold(&theme.fg("model_accent", value))
-            } else {
-                value.to_owned()
-            };
-            format!("{}{}{}", theme.fg("model_accent", label), spacing, value)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use futures_util::StreamExt as _;
 
     #[test]
@@ -419,8 +385,8 @@ mod tests {
         .await
         .expect("the silent startup phase completes");
 
-        // 1. No startup chatter before readiness: no phase label, no notice, no
-        //    bootstrap trace line, no branding.
+        // 1. No half-loaded chrome or startup chatter before readiness: no
+        //    composer rails, phase label, notice, bootstrap trace or branding.
         let frames = recorded.borrow().clone();
         assert!(!frames.is_empty());
         for frame in &frames {
@@ -441,6 +407,7 @@ mod tests {
                 "codex",
                 "Codex context",
                 "notice",
+                "─",
             ] {
                 assert!(
                     !frame.contains(forbidden),
@@ -498,7 +465,18 @@ mod tests {
             ready_lines.iter().any(|line| line.contains(CURSOR_MARKER)),
             "the ready frame keeps a live composer cursor: {ready:?}"
         );
+        let rule = "─".repeat(96);
+        assert_eq!(
+            ready_lines
+                .iter()
+                .filter(|line| strip_terminal_sequences(line) == rule)
+                .count(),
+            2,
+            "both composer rails appear in the ready frame"
+        );
         for expected in [
+            "octet v",
+            "full access",
             "cerebras/gemma-4-31b",
             "/startup-fixture/workspace",
             "read-only onboarding notice",
@@ -521,29 +499,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn status_metadata_uses_the_model_accent_but_no_color_stays_plain() {
-        let mut theme = crate::tui::theme::test_theme();
-        crate::tui::theme::apply_model_lab(&mut theme, crate::tui::theme::ModelLab::Anthropic);
-        let styled = styled_status_text(
-            &theme,
-            "Provider       anthropic\nModel          claude\nReasoning      high\n\nSecurity model: trusted local agent",
-        );
-        assert!(styled.contains("38;2;169;99;76"), "{styled:?}");
-        assert!(styled.contains("Model"));
-        assert!(styled.contains("claude"));
-
-        let mut plain = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
-            true,
-            true,
-            ColorDepth::None,
-        ));
-        crate::tui::theme::apply_model_lab(&mut plain, crate::tui::theme::ModelLab::Anthropic);
-        let plain = styled_status_text(&plain, "Model          claude");
-        assert_eq!(plain, "Model          claude");
-        assert!(!plain.contains('\x1b'));
     }
 }
 

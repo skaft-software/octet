@@ -14,6 +14,16 @@ pub(super) struct InputDispatch {
     models: Vec<String>,
     cycle_target: Option<String>,
     generated_command: bool,
+    thinking_cycle: Option<ThinkingCycle>,
+}
+
+/// Local keyboard selection survives waits that temporarily borrow the App.
+/// It is not an acknowledgement from the provider or a second config store.
+struct ThinkingCycle {
+    owner: String,
+    choices: Vec<octet_ai::ReasoningConfig>,
+    selected: octet_ai::ReasoningConfig,
+    pending: Option<octet_ai::ReasoningConfig>,
 }
 
 impl InputDispatch {
@@ -24,11 +34,85 @@ impl InputDispatch {
             models: Vec::new(),
             cycle_target: None,
             generated_command: false,
+            thinking_cycle: None,
         }
     }
 }
 
 impl InteractiveShell {
+    pub(crate) fn set_thinking_cycle(
+        &mut self,
+        owner: String,
+        choices: Vec<octet_ai::ReasoningConfig>,
+        selected: &octet_ai::ReasoningConfig,
+    ) {
+        match self.input_dispatch.thinking_cycle.as_mut() {
+            Some(cycle) if cycle.owner == owner => {
+                cycle.choices = choices;
+                if cycle.pending.is_none() {
+                    cycle.selected = selected.clone();
+                }
+            }
+            _ => {
+                self.input_dispatch.thinking_cycle = Some(ThinkingCycle {
+                    owner,
+                    choices,
+                    selected: selected.clone(),
+                    pending: None,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn deferred_thinking(&self) -> Option<&octet_ai::ReasoningConfig> {
+        self.input_dispatch
+            .thinking_cycle
+            .as_ref()?
+            .pending
+            .as_ref()
+    }
+
+    pub(crate) fn take_deferred_thinking(&mut self) -> Option<octet_ai::ReasoningConfig> {
+        self.input_dispatch.thinking_cycle.as_mut()?.pending.take()
+    }
+
+    /// Publish the initiating selection before a rebuild yields input ownership.
+    /// It is already being applied, so only subsequent presses become deferred.
+    pub(crate) fn begin_thinking_selection(&mut self, reasoning: &octet_ai::ReasoningConfig) {
+        if let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() {
+            cycle.selected = reasoning.clone();
+        }
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        let label = crate::app::reasoning_label(reasoning);
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
+    pub(crate) fn cycle_thinking_during_wait(&mut self) {
+        let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() else {
+            return;
+        };
+        if cycle.choices.is_empty() {
+            self.error("no thinking levels are available".into());
+            return;
+        }
+        let next = cycle
+            .choices
+            .iter()
+            .position(|choice| choice == &cycle.selected)
+            .map_or(0, |index| (index + 1) % cycle.choices.len());
+        cycle.selected = cycle.choices[next].clone();
+        cycle.pending = Some(cycle.selected.clone());
+        let label = crate::app::reasoning_label(&cycle.selected);
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
     pub(super) fn reset_input_interaction(&mut self) {
         self.input_dispatch.jump_forward = None;
     }
@@ -372,28 +456,27 @@ impl InteractiveShell {
                     ("tui.editor.historyNext", false),
                 ] {
                     if bindings.matches(key, id) {
-                        if !active {
-                            let mut state = self.state.borrow_mut();
-                            if previous
-                                && state.prompt_history_navigation.is_none()
-                                && !state.prompt_history.is_empty()
-                            {
-                                let draft = capture_prompt_history_draft(&mut state);
-                                let index = state.prompt_history.len() - 1;
-                                state.prompt_history_navigation =
-                                    Some(PromptHistoryNavigation { index, draft });
-                                restore_prompt_history_entry(&mut state, index);
-                            } else {
-                                navigate_prompt_history(
-                                    &mut state,
-                                    &if previous {
-                                        EditAction::Up
-                                    } else {
-                                        EditAction::Down
-                                    },
-                                );
-                            }
+                        let mut state = self.state.borrow_mut();
+                        if previous
+                            && state.prompt_history_navigation.is_none()
+                            && !state.prompt_history.is_empty()
+                        {
+                            let draft = capture_prompt_history_draft(&mut state);
+                            let index = state.prompt_history.len() - 1;
+                            state.prompt_history_navigation =
+                                Some(PromptHistoryNavigation { index, draft });
+                            restore_prompt_history_entry(&mut state, index);
+                        } else {
+                            navigate_prompt_history(
+                                &mut state,
+                                &if previous {
+                                    EditAction::Up
+                                } else {
+                                    EditAction::Down
+                                },
+                            );
                         }
+                        drop(state);
                         self.render();
                         return InputAction::Ignore;
                     }
@@ -865,6 +948,31 @@ mod tests {
             InputAction::Ignore
         );
         assert_eq!(shell.pending(), "historic");
+    }
+
+    #[test]
+    fn dedicated_history_keys_preserve_active_run_and_original_caret() {
+        let mut shell = InteractiveShell::test_shell();
+        let _directory = configure(
+            &mut shell,
+            r#"{"tui.editor.historyPrevious":"ctrl+p","tui.editor.historyNext":"ctrl+n"}"#,
+        );
+        shell.on_prompt_submitted("previous");
+        shell.prefill_editor("unsent\nmultiline draft".into());
+        shell.state.borrow_mut().editor.set_cursor(10);
+        let run = shell.begin_run("background work");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('p'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "previous");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('n'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "unsent\nmultiline draft");
+        assert_eq!(shell.state.borrow().editor.cursor(), 10);
+        assert_eq!(shell.current_run_id(), Some(run));
     }
 
     #[test]

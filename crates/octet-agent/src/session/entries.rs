@@ -155,6 +155,16 @@ impl Session {
         metadata: Option<EntryMetadata>,
     ) -> Result<EntryId, SessionError> {
         match &value {
+            EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            } => {
+                validate_branch_summary(summary, details)?;
+                if self.entry(from_entry).is_none() {
+                    return Err(SessionError::UnknownEntry(from_entry.clone()));
+                }
+            }
             EntryValue::ResponsesTurn {
                 assistant,
                 model,
@@ -256,6 +266,7 @@ impl Session {
             | EntryValue::ResponsesTurn { .. }
             | EntryValue::ResponsesCompaction { .. } => {}
             EntryValue::Compaction { .. }
+            | EntryValue::BranchSummary { .. }
             | EntryValue::SkillActivated { .. }
             | EntryValue::SkillResourceRead { .. }
             | EntryValue::SkillDeactivated { .. } => *cache = None,
@@ -358,6 +369,65 @@ impl Session {
         *self.context_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
+    }
+
+    /// Select a target parent and append the abandoned branch's summary and
+    /// final head in one synced write. No intermediate checkout is persisted.
+    /// Validation or write failure leaves the selected branch unchanged.
+    pub fn branch_with_summary(
+        &mut self,
+        parent: Option<EntryId>,
+        summary: String,
+        details: crate::compaction::CompactionDetails,
+    ) -> Result<EntryId, SessionError> {
+        let from_entry = self.head.clone().ok_or(SessionError::EmptySession)?;
+        self.branch_with_summary_from(parent, from_entry, summary, details)
+    }
+
+    pub(crate) fn branch_with_summary_from(
+        &mut self,
+        parent: Option<EntryId>,
+        from_entry: EntryId,
+        summary: String,
+        details: crate::compaction::CompactionDetails,
+    ) -> Result<EntryId, SessionError> {
+        validate_branch_summary(&summary, &details)?;
+        if self.entry(&from_entry).is_none() {
+            return Err(SessionError::UnknownEntry(from_entry));
+        }
+        if let Some(id) = &parent {
+            if self.entry(id).is_none() {
+                return Err(SessionError::UnknownEntry(id.clone()));
+            }
+        }
+        let id = EntryId(format!("{:03}", self.next_id));
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| SessionError::Limit("session entry ID space is exhausted".into()))?;
+        let entry = Entry {
+            id: id.clone(),
+            parent,
+            metadata: None,
+            timestamp_unix_ms: Some(now_unix_millis()),
+            value: EntryValue::BranchSummary {
+                summary,
+                from_entry,
+                details,
+            },
+        };
+        let mut bytes = Vec::new();
+        write_json_line(&mut bytes, &SessionRecordRef::Entry(&entry))?;
+        self.write_head_record(&mut bytes, &id, &self.total_cost_microdollars)?;
+        self.persist(&bytes)?;
+        self.invocation_entries.record(&entry, &self.index, &[]);
+        self.index.insert(id.clone(), self.entries.len());
+        self.entries.push(entry);
+        self.head = Some(id.clone());
+        self.next_id = next_id;
+        *self.context_cache.get_mut() = None;
+        *self.responses_replay_cache.get_mut() = None;
+        Ok(id)
     }
 
     /// Copies exactly one committed ancestor chain into a new session file.

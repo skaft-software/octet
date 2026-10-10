@@ -9,7 +9,6 @@ class Octet < Formula
   homepage "https://github.com/skaft-software/octet"
   version "0.7.0"
   depends_on :macos
-  depends_on "ripgrep"
 
   on_arm do
     url "https://github.com/skaft-software/octet/releases/download/v0.7.0/octet-0.7.0-aarch64-apple-darwin.tar.gz"

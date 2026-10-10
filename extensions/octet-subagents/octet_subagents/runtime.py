@@ -117,8 +117,8 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "default": list(CHILD_TOOLS),
             "description": (
                 "Host-enforced tool whitelist for the child; defaults to the parent's full "
-                "standard scope [read, search, edit, write, bash]. Pass a subset such as "
-                "[read, search] to keep a worker read-only."
+                "standard scope [read, edit, write, bash]. Pass a subset such as "
+                "[read] to keep a worker read-only."
             ),
         },
         "timeout_seconds": {

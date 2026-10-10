@@ -213,6 +213,38 @@ jobs:
             exit 1
           fi
 
+          # Qualification must name the immutable source, not this workflow's
+          # tooling SHA or a PR merge ref. Never accept an older successful run
+          # after a newer failure, or an incomplete/skipped required lane.
+          ci_run=$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$source_commit" -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
+          if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
+            echo "no source-bound CI qualification run for $source_commit" >&2
+            exit 1
+          fi
+          ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+            --jq '[.head_sha, .status, .conclusion] | @tsv')
+          if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
+            echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+            exit 1
+          fi
+          ci_jobs=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | [.name, .conclusion] | @tsv')
+          for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
+            'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
+            extension-api-v03 msrv smoke-install; do
+            qualified=$(awk -F '\t' -v check="$check" \
+              '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
+            if [[ "$qualified" != yes ]]; then
+              echo "CI run $ci_run lacks a successful required lane: $check" >&2
+              exit 1
+            fi
+          done
+          echo "qualified immutable source $source_commit with CI run $ci_run"
+
           if [[ "$mode" != installer ]]; then
             if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then
               environment_name=stable-release-provider-acceptance
@@ -390,7 +422,8 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Verify release Rust compiler
         shell: pwsh
-        run: if ((rustc --version) -notmatch '1\\.97\\.1') { throw 'unexpected Rust compiler' }
+        run: |
+          if ((rustc --version) -notmatch '^rustc 1\.97\.1(?: |$)' -or $LASTEXITCODE -ne 0) { throw 'unexpected Rust compiler' }
       - name: Build and smoke-test native Windows binaries
         working-directory: source
         shell: pwsh
@@ -404,11 +437,51 @@ jobs:
           $request = '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}'
           $hello = $request | & "$release/octet-host.exe"
           if ($LASTEXITCODE -ne 0 -or $hello -notmatch '"type":"hello"') { throw 'Windows host smoke test failed' }
+      - name: Qualify native MSVC runtime and terminal
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC process qualification failed' }
+      - name: Package and qualify the MSVC archive
+        working-directory: source
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'target/x86_64-pc-windows-msvc/release'
           python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+          python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release-repeat" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows repeat packaging failed' }
+          $name = "octet-$env:VERSION-x86_64-pc-windows-msvc"
+          $archive = "$env:RUNNER_TEMP/octet-release/$name.zip"
+          if ((Get-FileHash $archive).Hash -ne (Get-FileHash "$env:RUNNER_TEMP/octet-release-repeat/$name.zip").Hash) { throw 'Windows archives differ' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/windows-packaged"
+          $package = Join-Path "$env:RUNNER_TEMP/windows-packaged" $name
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            if ((& "$package/octet.exe" --version) -ne "octet $env:VERSION" -or $LASTEXITCODE -ne 0) { throw 'Packaged Windows version failed' }
+            $request = '{"protocol_version":1,"request_id":"packaged-smoke","command":"hello"}'
+            $hello = $request | & "$package/octet-host.exe"
+            if ($LASTEXITCODE -ne 0 -or ($hello | ConvertFrom-Json).type -ne 'hello') { throw 'Packaged Windows host failed' }
+          } finally {
+            $env:PATH = $savedPath
+          }
+          # Test the exact executable extracted from the publishable ZIP.
+          $env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged MSVC ConPTY qualification failed' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: octet-core-x86_64-pc-windows-msvc
-          path: ${{ runner.temp }}/octet-*.zip
+          path: ${{ runner.temp }}/octet-release/*.zip
           if-no-files-found: error
           retention-days: 14
 

@@ -77,7 +77,7 @@ return results.filter(r => r.status === "fulfilled")
 ```
 
 Only tools actually enabled and allowed by the host are available. Core
-`read`, `search`, and `bash` expose structured programmatic results while their
+`read` and `bash` expose structured programmatic results while their
 ordinary direct presentation stays unchanged. Declared extension
 `output_schema` results are JSON; schema-less tools return text, **never
 implicitly parsed JSON**. Images/audio read by a nested tool are not implicitly
