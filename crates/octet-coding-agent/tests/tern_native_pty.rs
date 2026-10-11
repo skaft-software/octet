@@ -123,8 +123,8 @@ impl NativePty {
         fs::create_dir_all(&sessions).unwrap();
         if options.model {
             fs::write(&credentials, json!({"base_url":"http://127.0.0.1:9/v1/", "api_key":"", "api_name":"native-test", "headers":[], "models":[
-                {"api_name":"probe", "reasoning":true, "reasoning_values":["off","low","high"], "reasoning_default":"off"},
-                {"api_name":"alpha-model"}
+                {"api_name":"probe", "context_window": 32768, "reasoning":true, "reasoning_values":["off","low","high"], "reasoning_default":"off"},
+                {"api_name":"alpha-model", "context_window": 32768}
             ], "auto_discover":false}).to_string()).unwrap();
             fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
         }

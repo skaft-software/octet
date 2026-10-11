@@ -121,6 +121,11 @@ pub struct SetupCommand {
     /// a new setup in offline mode.
     #[arg(long, value_name = "ID", conflicts_with = "model")]
     pub manual_model: Option<String>,
+    /// Effective context limit, in tokens, for the selected model. Required
+    /// when the endpoint does not report one; it is stored as a user pin and
+    /// overrides any discovered value.
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub context_window: Option<u64>,
     /// Read a bearer credential from this environment variable at runtime. The
     /// variable value is never written to the custom provider registry.
     #[arg(long, value_name = "VAR", conflicts_with = "no_auth")]

@@ -1401,7 +1401,12 @@ pub(crate) fn run_cli(
     }
     let transaction = service.begin(draft)?;
     let prepared = if let Some(model) = command.manual_model.as_deref() {
-        service.prepare_manual(transaction, model)?
+        match command.context_window {
+            Some(context_window) => {
+                service.prepare_manual_with_context(transaction, model, context_window)?
+            }
+            None => service.prepare_manual(transaction, model)?,
+        }
     } else {
         let mut transaction = transaction;
         let discovered = service.discover(&mut transaction)?;
@@ -1412,7 +1417,13 @@ pub(crate) fn run_cli(
             .ok_or(ProviderSetupError::State(
                 ProviderSetupState::EmptyDiscovery,
             ))?;
-        service.prepare_discovered(transaction, selected)?
+        let selected = selected.to_owned();
+        match command.context_window {
+            Some(context_window) => {
+                service.prepare_discovered_with_context(transaction, &selected, context_window)?
+            }
+            None => service.prepare_discovered(transaction, &selected)?,
+        }
     };
     let authority = SetupAuthority::from_config(config);
     let review = prepared.receipt().render(Some(&authority));
@@ -1962,6 +1973,7 @@ mod tests {
             label: None,
             model: None,
             manual_model: None,
+            context_window: None,
             api_key_env: None,
             no_auth: false,
             replace: false,

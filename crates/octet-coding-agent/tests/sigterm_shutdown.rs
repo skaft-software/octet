@@ -143,7 +143,7 @@ impl PtyOctet {
         let credential = home.join(".octet/credentials/custom.json");
         std::fs::write(
             &credential,
-            r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[],"auto_discover":false}"#,
+            r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[{"api_name": "probe", "context_window": 32768}],"auto_discover":false}"#,
         )
         .expect("credential");
         let mut credential_permissions = std::fs::metadata(&credential)

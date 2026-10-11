@@ -68,7 +68,7 @@ try:
                     'auth': {'kind': 'none'},
                     'auto_discover': False,
                     'models': [{
-                        'api_name': model, 'context_window': 131072,
+                        'api_name': model, 'context_window': 131072, 'context_window_configured': True,
                         'max_output_tokens': output, 'tools': True, 'reasoning': False,
                     }],
                 }

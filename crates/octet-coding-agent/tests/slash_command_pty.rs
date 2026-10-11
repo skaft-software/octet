@@ -126,7 +126,7 @@ impl PtyOctet {
         fs::write(
             &credential,
             format!(
-                r#"{{"base_url":"{base_url}","api_key":"","api_name":"probe","headers":[],"models":[],"auto_discover":false}}"#
+                r#"{{"base_url":"{base_url}","api_key":"","api_name":"probe","headers":[],"models":[{{"api_name":"probe","context_window":32768}}],"auto_discover":false}}"#
             ),
         )
         .expect("custom-provider fixture");

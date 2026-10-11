@@ -278,7 +278,7 @@ impl Fixture {
                 "api_name": "probe",
                 "headers": [],
                 "auto_discover": false,
-                "models": [],
+                "models": [{"api_name": "probe", "context_window": 32768}],
             })
             .to_string(),
         )

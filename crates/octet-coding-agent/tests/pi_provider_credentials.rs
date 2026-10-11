@@ -50,7 +50,7 @@ async fn reviewed_pi_factory_resolves_one_model_credential_through_the_real_host
         json!({
             "base_url": format!("{}/v1/", server.uri()),
             "api_key": FIXTURE_SECRET, "api_name": "probe", "headers": [],
-            "auto_discover": false, "models": [{"api_name": "probe"}]
+            "auto_discover": false, "models": [{"api_name": "probe", "context_window": 32768}]
         })
         .to_string(),
     )

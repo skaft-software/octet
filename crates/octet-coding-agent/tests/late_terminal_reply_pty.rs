@@ -42,7 +42,7 @@ impl PtyOctet {
             let credentials = home.join(".octet/credentials/custom.json");
             fs::write(
                 &credentials,
-                r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[],"auto_discover":false}"#,
+                r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[{"api_name": "probe", "context_window": 32768}],"auto_discover":false}"#,
             )
             .unwrap();
             fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();

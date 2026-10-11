@@ -170,7 +170,7 @@ impl Fixture {
             "api_key": "",
             "api_name": "probe",
             "headers": [],
-            "models": [],
+            "models": [{"api_name": "probe", "context_window": 32768}],
             "auto_discover": false,
         });
         fs::write(&credential, record.to_string()).expect("custom-provider fixture");

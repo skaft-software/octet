@@ -207,9 +207,9 @@ impl Fixture {
                 "headers": [],
                 "auto_discover": false,
                 "models": [
-                    {"api_name": "probe"},
-                    {"api_name": "alpha-model"},
-                    {"api_name": "vision-probe", "vision": true},
+                    {"api_name": "probe", "context_window": 32768},
+                    {"api_name": "alpha-model", "context_window": 32768},
+                    {"api_name": "vision-probe", "context_window": 32768, "vision": true},
                 ],
             });
             let credential = home.join(".octet/credentials/custom.json");

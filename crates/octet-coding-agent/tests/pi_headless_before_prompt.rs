@@ -42,7 +42,7 @@ async fn headless_before_prompt_answers_pi_tool_snapshot_without_hook_timeout() 
         json!({
             "base_url": format!("{}/v1/", server.uri()),
             "api_key": "", "api_name": "probe", "headers": [],
-            "auto_discover": false, "models": [{"api_name": "probe"}]
+            "auto_discover": false, "models": [{"api_name": "probe", "context_window": 32768}]
         })
         .to_string(),
     )

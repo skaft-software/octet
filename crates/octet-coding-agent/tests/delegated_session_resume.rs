@@ -194,7 +194,7 @@ impl Fixture {
             "api_name": "probe",
             "headers": [],
             "auto_discover": false,
-            "models": [{"api_name": "probe"}],
+            "models": [{"api_name": "probe", "context_window": 32768}],
         });
         let credential = home.join(".octet/credentials/custom.json");
         std::fs::write(&credential, record.to_string()).unwrap();
