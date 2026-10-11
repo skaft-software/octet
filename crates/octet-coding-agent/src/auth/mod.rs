@@ -52,32 +52,35 @@ fn read_optional(
 }
 
 /// Bounded attempts for last-writer-wins model metadata caches.
-const MODEL_CACHE_WRITE_ATTEMPTS: u32 = 4;
+const MODEL_CACHE_WRITE_ATTEMPTS: u32 = 6;
 
 /// Persist a last-writer-wins model metadata cache with owner-only guarantees.
 ///
 /// Concurrent octet processes (a foreground launch, a background refresh or a
 /// delegated child) may publish the same cache at once. The secure writer
-/// rejects a target that changed underneath it; for a cache that only means a
-/// sibling published fresh metadata. Retry briefly, and if siblings keep
-/// winning, their publication supersedes this one. Every other refusal (an
-/// insecure object, a non-regular target, I/O) is still returned. Credentials
-/// must keep using the strict writer.
+/// rejects a target that changed underneath it, and on filesystems where a
+/// new file is published through a hard link it can briefly observe the
+/// sibling's second link. Both are transient, so retry briefly; every attempt
+/// re-validates the target from scratch. If siblings keep winning, their
+/// publication supersedes this one. A link or ownership problem that persists
+/// through every attempt is still returned, as is any other refusal.
+/// Credentials must keep using the strict writer.
 pub(crate) fn write_private_model_cache(
     path: &std::path::Path,
     bytes: &[u8],
     limit: usize,
 ) -> Result<(), octet_agent::secure_fs::SecureFileError> {
+    use octet_agent::secure_fs::SecureFileError;
     let mut attempt = 1;
     loop {
         match octet_agent::secure_fs::write_private_atomic(path, bytes, limit) {
-            Err(octet_agent::secure_fs::SecureFileError::Changed)
+            Err(SecureFileError::Changed | SecureFileError::InsecurePrivateObject(_))
                 if attempt < MODEL_CACHE_WRITE_ATTEMPTS =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt)));
                 attempt += 1;
             }
-            Err(octet_agent::secure_fs::SecureFileError::Changed) => return Ok(()),
+            Err(SecureFileError::Changed) => return Ok(()),
             result => return result,
         }
     }

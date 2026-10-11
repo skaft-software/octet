@@ -119,7 +119,12 @@ if mode == 'fetch-failed':
                     frames = bytes(data[resized_at:]).split(b"\r\x1b[J")[1:]
                     frames = [frame.split(b"\r")[0].split(b"\n")[0] for frame in frames]
                     assert any(b"Installing fixture" in frame for frame in frames), frames
-                    assert all(len(frame.decode()) <= 39 for frame in frames), frames
+                    # A frame rendered at the old width can still be in flight
+                    # when the resize is observed; every frame after the first
+                    # resized one must fit.
+                    fitted = next((i for i, frame in enumerate(frames) if frame and len(frame.decode()) <= 39), None)
+                    assert fitted is not None, frames
+                    assert all(len(frame.decode()) <= 39 for frame in frames[fitted:]), frames
             assert termios.tcgetattr(slave) == before
         finally:
             if child.poll() is None:
