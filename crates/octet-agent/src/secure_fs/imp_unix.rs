@@ -1323,22 +1323,7 @@ impl PreparedMutation {
                 return Err(SecureFileError::Cancelled);
             }
             if self.original.is_none() {
-                // Publishing a newly created file through a hard link is an
-                // atomic no-replace operation. A plain rename here would
-                // overwrite a target created after `unchanged()` returned.
-                match rustix::fs::linkat(
-                    &self.parent,
-                    &temp_name,
-                    &self.parent,
-                    &self.name,
-                    AtFlags::empty(),
-                ) {
-                    Ok(()) => {
-                        unlink_if_still_named(&self.parent, &temp_name, temporary_identity);
-                    }
-                    Err(Errno::EXIST) => return Err(SecureFileError::Changed),
-                    Err(error) => return Err(SecureFileError::Io(io_error(error))),
-                }
+                publish_new_no_replace(&self.parent, &temp_name, &self.name, temporary_identity)?;
             } else {
                 self.publish_existing(&temp_name, temporary_identity)?;
             }
@@ -1353,5 +1338,33 @@ impl PreparedMutation {
             }
         }
         result
+    }
+}
+
+/// Publish a newly created file without replacing a target that appeared after
+/// inspection. A plain rename would overwrite such a target. A no-replace
+/// rename publishes with a single link, so concurrent writers never observe
+/// the transient second link a hard-link publication leaves until its
+/// temporary name is removed; filesystems without it fall back to `linkat`.
+fn publish_new_no_replace(
+    parent: &OwnedFd,
+    temporary: &OsStr,
+    name: &OsStr,
+    temporary_identity: FileIdentity,
+) -> Result<(), SecureFileError> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    match rustix::fs::renameat_with(parent, temporary, parent, name, RenameFlags::NOREPLACE) {
+        Ok(()) => return Ok(()),
+        Err(Errno::EXIST) => return Err(SecureFileError::Changed),
+        Err(Errno::NOSYS | Errno::OPNOTSUPP | Errno::INVAL) => {}
+        Err(error) => return Err(SecureFileError::Io(io_error(error))),
+    }
+    match rustix::fs::linkat(parent, temporary, parent, name, AtFlags::empty()) {
+        Ok(()) => {
+            unlink_if_still_named(parent, temporary, temporary_identity);
+            Ok(())
+        }
+        Err(Errno::EXIST) => Err(SecureFileError::Changed),
+        Err(error) => Err(SecureFileError::Io(io_error(error))),
     }
 }

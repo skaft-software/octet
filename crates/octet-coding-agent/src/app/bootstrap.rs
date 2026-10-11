@@ -422,6 +422,8 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // effective limit on the next start. Version 12 adds provenance-scoped native
 // metadata, including separate maximum and loaded-instance context values.
 const CUSTOM_MODEL_CACHE_VERSION: u8 = 12;
+/// Provider inventory caches share the private-metadata write ceiling.
+const PROVIDER_INVENTORY_CACHE_WRITE_LIMIT: usize = 256 * 1024 * 1024;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -688,7 +690,12 @@ fn save_provider_inventory_cache(
         etag: None,
         checked_at: body.map(|_| inventory_checked_at()),
     };
-    crate::auth::write_private_atomic(path, &serde_json::to_vec(&cache)?, ".provider-models-")
+    crate::auth::write_private_model_cache(
+        path,
+        &serde_json::to_vec(&cache)?,
+        PROVIDER_INVENTORY_CACHE_WRITE_LIMIT,
+    )
+    .map_err(anyhow::Error::from)
 }
 
 fn cache_modified_is_stale(modified: std::time::SystemTime, refresh_interval: Duration) -> bool {
@@ -913,10 +920,10 @@ where
         };
         let _ = bootstrap_check(
             format!("inventory-write:{provider_id}"),
-            crate::auth::write_private_atomic(
+            crate::auth::write_private_model_cache(
                 path,
                 &serde_json::to_vec(&cache)?,
-                ".provider-models-",
+                PROVIDER_INVENTORY_CACHE_WRITE_LIMIT,
             ),
             |error| format!("warning: could not persist {provider_id} model metadata: {error}"),
         );

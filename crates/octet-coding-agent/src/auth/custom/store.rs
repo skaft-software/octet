@@ -706,7 +706,8 @@ impl CredentialStore {
     /// the credential itself.
     pub(crate) fn save_model_cache_for(&self, provider_id: &str, bytes: &[u8]) -> Result<()> {
         let path = self.model_cache_path_for(provider_id);
-        write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))
+        crate::auth::write_private_model_cache(&path, bytes, MAX_MODEL_CACHE_BYTES)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// A background refresh may publish only over the exact cache it observed

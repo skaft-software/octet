@@ -333,7 +333,8 @@ impl CredentialStore {
     pub(crate) fn save_model_cache(&self, bytes: &[u8]) -> Result<()> {
         let path = self.model_cache_path();
         prepare_private_parent(&path)?;
-        write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))
+        crate::auth::write_private_model_cache(&path, bytes, MAX_MODEL_CACHE_BYTES)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// Load model metadata only when the exact descriptor being read is fresh.
