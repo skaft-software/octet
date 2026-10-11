@@ -701,7 +701,7 @@ async fn deferred_frontend_attach_activates_resource_consumer_and_retirement_gua
                 app.await_extension_prompt_hooks().await.unwrap();
             } else {
                 while app.executable_extensions.startup_pending() {
-                    app.pump_extension_startup().await;
+                    app.pump_extension_startup().await.unwrap();
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
@@ -726,7 +726,7 @@ async fn deferred_frontend_attach_activates_resource_consumer_and_retirement_gua
         assert!(app.config.theme_paths.contains(&root.join("themes")));
         assert!(render(&app, "consumer-proof").is_ok());
         assert!(!app.resource_paths_pending());
-        app.pump_extension_startup().await;
+        app.pump_extension_startup().await.unwrap();
         assert!(
             !app.resource_paths_pending(),
             "no duplicate activation or discovery"
