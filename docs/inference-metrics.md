@@ -78,21 +78,36 @@ by every conversation codec/transport; there is no provider-name speed heuristic
   No response text, tokenizer files or provider payloads are retained.
 - Coalesce arrivals within a fixed 2-ms burst window. Retain at most 256 samples
   with deterministic decimation, plus first/final boundaries. Events are never
-  counted as tokens; the first chunk can contain many tokens.
-- Calibrate progress using terminal `output_tokens - reasoning_tokens` across
-  the whole observed visible output. This avoids a guessed characters/token
-  constant, but **assumes approximately representative bytes/token over the
-  fitted window**. Tool framing, unreported hidden output, rejected predictions
-  and changing text/token density can bias that assumption.
+  counted as tokens; the first chunk can contain many tokens. A large first
+  byte burst can still distort the global usage calibration even though it is
+  outside the fitted time baselines.
+- Calibrate progress using terminal `output_tokens - reasoning_tokens` across the
+  whole observed output. This avoids a guessed characters/token constant, but
+  assumes approximately representative bytes/token over the fitted window.
+  When the first burst contains more than twice the mean later-burst byte mass,
+  the estimate is suppressed as `unrepresentative_initial_burst`: its token
+  density is not observable and can dominate the calibration while fitted-slope
+  dispersion remains near zero. This conservative byte-mass guard does not prove
+  that smaller first-burst density shifts are harmless.
 - Fit the median of long-baseline pair slopes (at least one-quarter of observed
   progress and 62.5 ms apart). The intercept absorbs prefill/round-trip/first-chunk
-  delay. Differencing byte progress removes the first chunk's proportional token
-  mass instead of incorrectly dividing all tokens by first-to-last time. Final
-  usage, agent persistence and completion-tail delays are not fitting samples.
+  delay, but does **not** remove first-burst tokens from the global byte/token
+  calibration. Final usage, agent persistence and completion-tail delays are not
+  fitting samples.
 - Require at least 32 visible-usage tokens, eight arrival bursts and a 250-ms
   observed window. Reject pair-slope 10th-to-90th percentile dispersion above
   50%, local reader backpressure, media, deferred retrieval, and reasoning whose
-  usage cannot be separated. Short/unstreamed/fully buffered output is unavailable.
+  usage cannot be separated. If reasoning was requested or is always-on but
+  terminal usage has no reasoning count, suppress the estimate even when no
+  reasoning text/state was streamed: non-observation does not establish that
+  hidden reasoning was not generated. A missing reasoning capability is unknown,
+  not an explicit server assertion of unsupported reasoning, so even
+  `ReasoningConfig::Off` suppresses the client estimate in that case. An asserted
+  `AlwaysOn` capability also suppresses it; explicit Off is treated as disabled
+  for other asserted controls except OpenRouter Chat, whose encoder intentionally
+  leaves the provider default in force. Native reasoning metadata alone is not
+  evidence of OpenAI Chat wire support. Short/unstreamed/fully buffered output is
+  unavailable.
 
 `relative_dispersion` describes fit stability, **not an accuracy probability or
 confidence interval**. A stable stream can still have hidden server buffering or
@@ -103,9 +118,10 @@ under its documented assumptions, not a guarantee of matching every provider's
 server report. Native timing always wins the completion display; both independent
 observations remain available for comparison in `/status` and telemetry.
 
-`decode_unavailable` names missing visible usage, an unknown reasoning split,
-insufficient output/samples, buffered output, unstable cadence, deferred operations,
-media or local backpressure. It never falls back to the E2E average. Native
+`decode_unavailable` names missing visible usage, unknown or possibly unreported
+reasoning, an unrepresentative initial byte burst, tool-call framing, insufficient
+output/samples, buffered output, unstable cadence, deferred operations, media or
+local backpressure. It never falls back to the E2E average. Native
 `server_unavailable` remains independent and is not overwritten by an estimate.
 
 ## Server-reported generation throughput
@@ -181,12 +197,18 @@ are measured normally.
 
 ## Presentation and observability
 
-- Completion and copied outcomes show only `N.N tok/s` when a rate is available:
-  native generation timing first, otherwise the client-stream decode estimate.
-  When neither is available, the speed field and its separator are omitted.
-  Provenance and unavailability reasons remain in `/status` and telemetry, not
-  the completion line. E2E is never a completion-speed fallback; `/status`
-  retains it as a separately labeled request-throughput diagnostic.
+- Completion and copied outcomes show a rate only with complete run-level response
+  coverage, its provenance, and its scope: `whole run · server-reported generation
+  N.N tok/s · M responses`, or `whole run · estimated decode (approx.) N.N tok/s ·
+  M responses`. Complete native counters are aggregated over their matching
+  generation durations; otherwise every response must have a visible estimate,
+  aggregated as total visible tokens over summed estimated generation time. Partial
+  coverage, mixed bases without complete estimate coverage, and unsettled attempts
+  suppress the rate. The coordinator's root summary now rejects different
+  `ServerTimingSource` contracts across native responses; its source tests are not
+  yet compiled. Last-response metrics remain diagnostic only. E2E is never a
+  completion-speed fallback; `/status` retains it as a separately labeled
+  request-throughput diagnostic.
 - `/status` shows client output offsets/event count/gap/tail, estimate sample
   count/window/visible-token basis/dispersion/reasoning exclusion, and server source,
   native count, normalized duration, original unit, or explicit unavailability.
@@ -217,11 +239,13 @@ response identity, byte-fragmented SSE and completed audio. Deterministic client
 clock tests separate reasoning, answer, arguments, output gaps and completion
 tail. Existing loopback transport regressions assert measurement propagation
 through every codec, WebSocket transport selections, steering and deferred scopes.
-Presentation/telemetry tests pin compact completion rates, diagnostic provenance,
-native preference, no E2E completion fallback, accounting independence and frozen timing despite delayed
-persistence. Deterministic known-cadence fits test multi-token first batches,
+Presentation/telemetry tests pin compact whole-run rates, diagnostic provenance,
+native preference, no E2E completion fallback, accounting independence and frozen
+timing despite delayed persistence. Run-state regressions also exercise weighted
+aggregation through owner-gated provider events. Deterministic known-cadence fits test multi-token first batches,
 prefill offsets, packet jitter, chunk bursts, hidden reasoning exclusion and
-bounded long streams. Reader tests establish independent progress during a stalled
+bounded long streams, first-burst density counterexamples, and unreported
+reasoning context. Reader tests establish independent progress during a stalled
 consumer, queue/byte admission, ordering, saturation feedback and drop cancellation.
 They do not qualify a real provider's GPU execution.
 

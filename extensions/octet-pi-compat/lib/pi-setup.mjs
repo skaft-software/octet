@@ -8,12 +8,16 @@ import { fileURLToPath } from 'node:url';
 
 const MAX_SETTINGS_BYTES = 1024 * 1024;
 const MAX_THEME_BYTES = 256 * 1024;
+const MAX_EXTENSION_BYTES = 8 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 256;
 const MAX_SCAN_ENTRIES = 4096;
 const MAX_DEPTH = 16;
 const MAX_EXTENSIONS = 64;
 const MAX_PACKAGES = 64;
-const MAX_RESOURCE_ENTRIES = 64;
+export const MAX_RESOURCE_PATHS = 256;
+export const MAX_RESOURCE_PATH_BYTES_PER_PATH = 4096;
+export const MAX_RESOURCE_PATH_BYTES = 64 * 1024;
+const MAX_RESOURCE_ENTRIES = 256;
 export const SOURCE_EXTENSIONS = new Set(['.ts', '.mts', '.cts', '.tsx', '.js', '.mjs', '.cjs', '.jsx']);
 const CONTEXT_FILES = ['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'];
 const RESOURCE_KINDS = ['extensions', 'skills', 'prompts', 'themes'];
@@ -33,6 +37,13 @@ export function expandPiPath(value, baseDir) {
 }
 
 function diagnostic(ctx, message) { ctx.diagnostics.push(message); }
+
+function markIncomplete(ctx, key, limit, message) {
+  if (ctx.incompleteKeys.has(key)) return;
+  ctx.incompleteKeys.add(key);
+  ctx.incomplete.push(limit);
+  diagnostic(ctx, message);
+}
 
 // Check every component: lstat on only the leaf still follows linked parents.
 function safeStat(path, ctx, label, required = false) {
@@ -88,14 +99,20 @@ function readJson(path, label, ctx, limit = MAX_SETTINGS_BYTES) {
 }
 
 function directoryEntries(path, ctx, depth = 0) {
-  if (depth > MAX_DEPTH || ctx.scanned >= MAX_SCAN_ENTRIES) {
-    diagnostic(ctx, `directory ${path}: exceeds the bounded mirror traversal; skipped`);
+  if (depth > MAX_DEPTH) {
+    markIncomplete(ctx, `depth:${path}`, { dimension: 'depth', kind: 'directory', actual: depth, limit: MAX_DEPTH }, `directory ${path}: exceeds the bounded mirror depth; entries were skipped`);
+    return [];
+  }
+  if (ctx.scanned >= MAX_SCAN_ENTRIES) {
+    markIncomplete(ctx, `scan:${path}`, { dimension: 'scan_entries', kind: 'combined', actual: ctx.scanned + 1, limit: MAX_SCAN_ENTRIES }, `directory ${path}: exceeds the bounded mirror traversal; entries were skipped`);
     return [];
   }
   let names;
   try { names = readdirSync(path).sort(); } catch (error) { diagnostic(ctx, `directory ${path}: ${error.code || error.message}`); return []; }
   const remaining = Math.min(MAX_DIRECTORY_ENTRIES, MAX_SCAN_ENTRIES - ctx.scanned);
-  if (names.length > remaining) diagnostic(ctx, `directory ${path}: exceeds the ${remaining}-entry mirror budget; remaining entries were skipped`);
+  if (names.length > remaining) markIncomplete(ctx, `directory:${path}`,
+    { dimension: 'directory_entries', kind: 'directory', actual: names.length, limit: remaining },
+    `directory ${path}: exceeds the ${remaining}-entry mirror budget; remaining entries were skipped`);
   names = names.slice(0, remaining);
   ctx.scanned += names.length;
   return names.map(name => join(path, name));
@@ -172,16 +189,25 @@ function collect(path, kind, ctx, { required = false, depth = 0, root = path, ne
   const stat = safeStat(path, ctx, kind, required);
   if (!stat) return [];
   if (stat.isFile()) {
+    if (kind === 'extensions' && !required && !/\.(ts|js)$/i.test(path)) return [];
     if (!acceptedFile(path, kind)) { if (required) diagnostic(ctx, `${kind} ${path}: unsupported resource format`); return []; }
-    return regularFile(path, ctx, kind, kind === 'themes' ? MAX_THEME_BYTES : MAX_SETTINGS_BYTES) ? [path] : [];
+    const limit = kind === 'themes' ? MAX_THEME_BYTES : kind === 'extensions' ? MAX_EXTENSION_BYTES : MAX_SETTINGS_BYTES;
+    return regularFile(path, ctx, kind, limit) ? [path] : [];
   }
   if (!stat.isDirectory()) { diagnostic(ctx, `${kind} ${path}: not a regular file or directory`); return []; }
-  if (depth > MAX_DEPTH) { diagnostic(ctx, `${kind} ${path}: exceeds ${MAX_DEPTH} directory levels; skipped`); return []; }
+  if (depth > MAX_DEPTH) {
+    markIncomplete(ctx, `depth:${path}`, { dimension: 'depth', kind, actual: depth, limit: MAX_DEPTH }, `${kind} ${path}: exceeds ${MAX_DEPTH} directory levels; entries were skipped`);
+    return [];
+  }
   if (kind === 'extensions') {
     const manifest = manifestAt(path, ctx);
     if (manifest.invalid) return [];
-    if (manifest.pi?.extensions !== undefined) return manifestFiles(path, kind, manifest.pi.extensions, ctx, depth + 1);
-    for (const name of ['index.ts', 'index.js', 'index.mjs', 'index.cjs']) {
+    if (manifest.pi?.extensions !== undefined) {
+      if (!Array.isArray(manifest.pi.extensions)) return manifestFiles(path, kind, manifest.pi.extensions, ctx, depth + 1);
+      if (manifest.pi.extensions.length) return manifestFiles(path, kind, manifest.pi.extensions, ctx, depth + 1);
+      // Pi falls through to index.ts/index.js when the manifest list is empty.
+    }
+    for (const name of ['index.ts', 'index.js']) {
       const index = join(path, name), before = ctx.diagnostics.length;
       if (safeStat(index, ctx, kind)) return collect(index, kind, ctx, { required: true, depth: depth + 1 });
       if (ctx.diagnostics.length > before) return []; // never replace a refused entrypoint with another factory
@@ -214,7 +240,9 @@ function expandGlob(pattern, root, ctx, depth = 0) {
       if (!stat) continue;
       if (matchesGlob(posix(relative(root, path)), pattern)) out.push(path);
       if (stat.isDirectory() && level < MAX_DEPTH) walk(path, level + 1);
-      else if (stat.isDirectory()) diagnostic(ctx, `manifest glob ${path}: exceeds ${MAX_DEPTH} directory levels; skipped`);
+      else if (stat.isDirectory()) markIncomplete(ctx, `depth:${path}`,
+         { dimension: 'depth', kind: 'manifest_glob', actual: level + 1, limit: MAX_DEPTH },
+         `manifest glob ${path}: exceeds ${MAX_DEPTH} directory levels; entries were skipped`);
     }
   };
   walk(root, depth);
@@ -305,7 +333,9 @@ function packageEntries(settings, base, scope, ctx) {
   const packages = settings.packages;
   if (packages === undefined) return [];
   if (!Array.isArray(packages)) { diagnostic(ctx, 'settings.packages is not an array; skipped'); return []; }
-  if (packages.length > MAX_PACKAGES) diagnostic(ctx, `settings.packages exceeds ${MAX_PACKAGES} entries; remaining packages were skipped`);
+  if (packages.length > MAX_PACKAGES) markIncomplete(ctx, `packages:${scope}`,
+    { dimension: 'package_entries', kind: scope, actual: packages.length, limit: MAX_PACKAGES },
+    `settings.packages (${scope}) exceeds ${MAX_PACKAGES} entries; remaining packages were skipped`);
   return packages.slice(0, MAX_PACKAGES).flatMap(pkg => {
     const source = typeof pkg === 'string' ? pkg : plainObject(pkg) ? pkg.source : undefined;
     if (typeof source !== 'string' || !source.trim() || source.length > 4096 || /[\x00-\x1f\x7f]/.test(source)) { diagnostic(ctx, 'settings.packages entry has no bounded source; skipped'); return []; }
@@ -319,20 +349,32 @@ function add(map, path, enabled, rank = 4) { if (!map.has(path)) map.set(path, {
 
 function packageResources(entries, maps, ctx) {
   const deduped = [], seen = new Map();
-  // Project wins by identity, ignoring npm versions and git refs. A project
+  // Match Pi's first global / last project declaration semantics. A project
   // autoload:false entry is a delta against the global installation instead.
   for (const entry of entries) {
-    const existing = seen.get(entry.info.identity);
-    if (!existing) { seen.set(entry.info.identity, entry); deduped.push(entry); }
-    else if (existing.scope === 'project' && entry.scope === 'user' && existing.pkg?.autoload === false) deduped.push(entry);
+    const index = seen.get(entry.info.identity);
+    if (index === undefined) { seen.set(entry.info.identity, deduped.length); deduped.push(entry); continue; }
+    const existing = deduped[index];
+    if (existing.scope === 'project' && entry.scope === 'user') {
+      if (plainObject(existing.pkg) && existing.pkg.autoload === false) deduped.push(entry);
+    } else if (entry.scope === 'project') deduped[index] = entry;
   }
   for (const entry of deduped) {
     const filter = plainObject(entry.pkg) ? entry.pkg : undefined;
     const delta = filter?.autoload === false;
     const base = entry.scope === 'project' && delta ? deduped.find(other => other.scope === 'user' && other.info.identity === entry.info.identity) ?? entry : entry;
     const { root, type, version } = base.info;
+    const emptyDelta = delta && RESOURCE_KINDS.every(kind => filter?.[kind] === undefined || Array.isArray(filter[kind]) && filter[kind].length === 0);
+    // Empty npm/git deltas contribute nothing and need no package lookup. Local
+    // file entries are special: Pi enables the file directly, regardless of filters.
+    if (emptyDelta && type !== 'local') continue;
     const stat = safeStat(root, ctx, `package ${entry.source}`);
     if (!stat) { diagnostic(ctx, `package ${entry.source}: not installed at ${root}; the mirror never installs packages`); continue; }
+    if (type === 'local' && stat.isFile()) {
+      for (const path of collect(root, 'extensions', ctx, { required: true })) add(maps.extensions, path, true);
+      continue;
+    }
+    if (emptyDelta) continue;
     if (type === 'npm') {
       const manifest = readJson(join(root, 'package.json'), `package ${entry.source}`, ctx, MAX_THEME_BYTES);
       const installed = exactVersion(manifest?.version);
@@ -345,32 +387,36 @@ function packageResources(entries, maps, ctx) {
     }
     // Local-file sources are singleton extension packages, but still obey the
     // same selectors and autoload/project deltas before any enabled insertion.
-    const sourceFile = type === 'local' && stat.isFile();
-    if (!sourceFile && !stat.isDirectory()) { diagnostic(ctx, `package ${entry.source}: not a package directory; skipped`); continue; }
-    const manifest = sourceFile ? {} : manifestAt(root, ctx);
+    if (!stat.isDirectory()) { diagnostic(ctx, `package ${entry.source}: not a package directory; skipped`); continue; }
+    const manifest = manifestAt(root, ctx);
     if (manifest.invalid) continue;
-    const hasConventional = !sourceFile && RESOURCE_KINDS.some(kind => safeStat(join(root, kind), ctx, kind)?.isDirectory());
-    for (const kind of sourceFile ? ['extensions'] : RESOURCE_KINDS) {
+    const hasConventional = RESOURCE_KINDS.some(kind => safeStat(join(root, kind), ctx, kind)?.isDirectory());
+    for (const kind of RESOURCE_KINDS) {
       const patterns = filter?.[kind];
       if (patterns !== undefined && !validSelectors(patterns, `package ${entry.source} ${kind}`, ctx)) {
         // A project delta with unsupported selectors must also suppress the
         // global kind; otherwise global autoload would bypass the restriction.
-        const files = sourceFile ? collect(root, kind, ctx, { required: true }) : manifest.pi?.[kind] !== undefined ? manifestFiles(root, kind, manifest.pi[kind], ctx) : collect(join(root, kind), kind, ctx);
+        const files = manifest.pi?.[kind] !== undefined ? manifestFiles(root, kind, manifest.pi[kind], ctx) : collect(join(root, kind), kind, ctx);
         for (const path of files) add(maps[kind], path, false);
         continue;
       }
       let files;
-      if (sourceFile) files = collect(root, kind, ctx, { required: true });
-      else if (manifest.pi?.[kind] !== undefined) files = manifestFiles(root, kind, manifest.pi[kind], ctx);
+      const declared = manifest.pi?.[kind];
+      if (filter && patterns !== undefined) {
+        // Pi's filtered package resolver falls back to the conventional folder
+        // when the manifest entry list is absent or empty.
+        files = Array.isArray(declared) && declared.length ? manifestFiles(root, kind, declared, ctx) : collect(join(root, kind), kind, ctx);
+      } else if (declared !== undefined) files = manifestFiles(root, kind, declared, ctx);
       else if (manifest.pi && !filter) files = [];
       else if (type === 'local' && !manifest.pi && !hasConventional && kind === 'extensions') {
         files = collect(root, kind, ctx);
-        if (!files.length) diagnostic(ctx, `package ${entry.source}: no supported installed extension entrypoints; skipped`);
+        if (!files.length) diagnostic(ctx, `package ${entry.source}: Pi resolves this directory as an extension, but no reviewable file entrypoint was found`);
       }
       else files = collect(join(root, kind), kind, ctx);
       if (delta) {
+        if (!patterns?.length) continue;
         const changes = new Map();
-        for (const pattern of patterns ?? []) {
+        for (const pattern of patterns) {
           const exact = /^[+-]/.test(pattern);
           const target = override(pattern) ? pattern.slice(1) : pattern;
           const enabled = !/^[!-]/.test(pattern);
@@ -412,11 +458,11 @@ function mergeSettings(base, overrides) {
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
   const resolvedAgentDir = resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const projectRoot = resolve(cwd, '.pi');
-  const ctx = { diagnostics: [], scanned: 0, projectRoot, projectTrusted: projectTrusted === true };
+  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
   const projectSettings = ctx.projectTrusted ? settingsObject(join(projectRoot, 'settings.json'), 'project settings.json', ctx) : {};
   const settings = mergeSettings(globalSettings ?? {}, projectSettings ?? {});
-  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, diagnostics: ctx.diagnostics };
+  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, resourceLimitsExceeded: [], diagnostics: ctx.diagnostics };
   const text = value => typeof value === 'string' && value.trim() ? value.trim() : undefined;
   setup.defaultTheme = text(settings.theme);
   setup.defaultThinkingLevel = text(settings.defaultThinkingLevel);
@@ -432,6 +478,13 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   // then packages. Native discovery still owns name collisions and admission.
   const scopes = (ctx.projectTrusted ? [[projectRoot, projectSettings], [resolvedAgentDir, globalSettings]] : [[resolvedAgentDir, globalSettings]])
     .filter(([, scopeSettings]) => scopeSettings !== undefined);
+  const addAgentSkills = (directory, scopeSettings, rank, label) => {
+    const patterns = scopeSettings.skills ?? [];
+    if (!validSelectors(patterns, `settings.skills (${label})`, ctx)) return;
+    const base = dirname(directory), files = collect(directory, 'skills', ctx);
+    const enabled = enabledPaths(files, patterns.filter(override), base);
+    for (const path of files) add(maps.skills, path, enabled.has(path), rank);
+  };
   for (const [base, scopeSettings] of scopes) {
     for (const kind of RESOURCE_KINDS) {
       const entries = scopeSettings[kind] ?? [];
@@ -448,18 +501,58 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
       const autoEnabled = enabledPaths(auto, patterns.filter(override), base);
       for (const path of auto) add(maps[kind], path, autoEnabled.has(path), base === projectRoot ? 1 : 3);
     }
+    if (base === projectRoot && ctx.projectTrusted) {
+      const globalAgentsSkills = resolve(homedir(), '.agents', 'skills');
+      let dir = resolve(cwd);
+      while (true) {
+        const skillsDir = join(dir, '.agents', 'skills');
+        if (resolve(skillsDir) !== globalAgentsSkills) addAgentSkills(skillsDir, scopeSettings, 1, 'project .agents');
+        if (safeStat(join(dir, '.git'), ctx, 'project repository marker')) break;
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
   }
+  if (globalSettings !== undefined) addAgentSkills(join(homedir(), '.agents', 'skills'), globalSettings, 3, 'user .agents');
+  const resourceFiles = {};
   for (const kind of RESOURCE_KINDS) {
     const files = [...maps[kind]].filter(([, value]) => value.enabled).sort((a, b) => a[1].rank - b[1].rank).map(([path]) => path);
+    resourceFiles[kind] = files;
     const limit = kind === 'extensions' ? MAX_EXTENSIONS : MAX_RESOURCE_ENTRIES;
-    if (files.length > limit) diagnostic(ctx, `Pi setup has ${files.length} ${kind}; ${kind === 'themes' ? 'at most' : 'only the first'} ${limit} are mirrored${kind === 'themes' ? ' with later-stem precedence preserved' : ''}`);
-    setup[kind === 'extensions' ? kind : `${kind}Paths`] = kind === 'themes' ? limitThemes(files, limit) : files.slice(0, limit);
+    if (files.length > limit) {
+      setup.resourceLimitsExceeded.push({ dimension: 'kind', kind, actual: files.length, limit });
+      diagnostic(ctx, `Pi setup has ${files.length} ${kind}, above the ${limit}-path mirror bound; no partial ${kind} list is returned`);
+    }
+    setup[kind === 'extensions' ? kind : `${kind}Paths`] = files.length > limit ? [] : files;
   }
   const keybindings = join(resolvedAgentDir, 'keybindings.json');
   if (regularFile(keybindings, ctx, 'keybindings.json')) setup.keybindingsPath = keybindings;
   for (const name of CONTEXT_FILES) {
     const path = join(resolvedAgentDir, name);
     if (regularFile(path, ctx, 'context')) { setup.contextPath = path; break; }
+  }
+  setup.resourceLimitsExceeded.push(...ctx.incomplete);
+  const setupResourceFiles = ['skills', 'prompts', 'themes'].flatMap(kind => resourceFiles[kind]);
+  const totalPaths = setupResourceFiles.length + Number(Boolean(setup.keybindingsPath)) + Number(Boolean(setup.contextPath));
+  if (totalPaths > MAX_RESOURCE_PATHS) {
+    setup.resourceLimitsExceeded.push({ dimension: 'paths', kind: 'combined', actual: totalPaths, limit: MAX_RESOURCE_PATHS });
+    diagnostic(ctx, `Pi setup has ${totalPaths} combined resource paths, above the ${MAX_RESOURCE_PATHS}-path mirror bound; no partial setup is mirrorable`);
+  }
+  const resourcesByKind = { skills: resourceFiles.skills, prompts: resourceFiles.prompts, themes: resourceFiles.themes,
+    keybindings: [setup.keybindingsPath].filter(Boolean), context: [setup.contextPath].filter(Boolean) };
+  for (const [kind, paths] of Object.entries(resourcesByKind)) {
+    const longest = paths.reduce((max, path) => Math.max(max, Buffer.byteLength(path)), 0);
+    if (longest > MAX_RESOURCE_PATH_BYTES_PER_PATH) {
+      setup.resourceLimitsExceeded.push({ dimension: 'path_bytes', kind, actual: longest, limit: MAX_RESOURCE_PATH_BYTES_PER_PATH });
+      diagnostic(ctx, `Pi setup ${kind} contains a path using ${longest} bytes, above the ${MAX_RESOURCE_PATH_BYTES_PER_PATH}-byte per-path limit; no partial setup is mirrorable`);
+    }
+  }
+  const totalBytes = [...setupResourceFiles, setup.keybindingsPath, setup.contextPath]
+    .filter(Boolean).reduce((bytes, path) => bytes + Buffer.byteLength(path), 0);
+  if (totalBytes > MAX_RESOURCE_PATH_BYTES) {
+    setup.resourceLimitsExceeded.push({ dimension: 'bytes', kind: 'combined', actual: totalBytes, limit: MAX_RESOURCE_PATH_BYTES });
+    diagnostic(ctx, `Pi setup resource paths use ${totalBytes} bytes, above the ${MAX_RESOURCE_PATH_BYTES}-byte mirror bound; no partial setup is mirrorable`);
   }
   return setup;
 }
@@ -478,14 +571,9 @@ export function resolveThemeFile(themePaths, selection, diagnostics = []) {
   return undefined;
 }
 
-// Preserve native later-stem precedence when a path budget cuts discovery.
-// No JSON parsing: even an invalid winner must suppress its lower shadow.
+// Resource path limits fail closed; never publish an incomplete theme set.
 function limitThemes(files, limit) {
-  if (files.length <= limit) return files;
-  const stem = path => basename(path).replace(/\.(json|toml)$/i, '');
-  const winners = new Map(files.map(path => [stem(path), path]));
-  const admitted = new Set([...new Set([...winners.values(), ...files])].slice(0, limit));
-  return files.filter(path => admitted.has(path) && admitted.has(winners.get(stem(path))));
+  return files.length <= limit ? files : [];
 }
 
 // Also accepts directly configured roots. No linked/oversized palettes escape
@@ -493,6 +581,6 @@ function limitThemes(files, limit) {
 export function themeCandidates(paths, diagnostics = []) {
   const ctx = { diagnostics, scanned: 0 };
   const files = [...new Set(paths.flatMap(path => collect(path, 'themes', ctx, { required: true })))];
-  if (files.length > MAX_RESOURCE_ENTRIES) diagnostic(ctx, `themes: exceeds the ${MAX_RESOURCE_ENTRIES}-path mirror budget; remaining palettes skipped`);
+  if (files.length > MAX_RESOURCE_ENTRIES) diagnostic(ctx, `themes: ${files.length} paths exceed the ${MAX_RESOURCE_ENTRIES}-path mirror bound; no partial palette list returned`);
   return limitThemes(files, MAX_RESOURCE_ENTRIES);
 }

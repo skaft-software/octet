@@ -46,5 +46,6 @@ test('readonly session facade exposes complete branch/tree/projection getters wi
   assert.deepEqual(manager.getTree().map(node => [node.entry.id, node.label, node.children[0].entry.id]), [['root', 'bookmark', 'later']]);
   assert.deepEqual(manager.buildContextEntries().map(e => e.id), ['root', 'later']);
   assert.deepEqual(manager.buildSessionProjection().messages, [{ role: 'user', content: 'hi' }]);
+  assert.deepEqual(manager.buildSessionContext(), { messages: [{ role: 'user', content: 'hi' }], thinkingLevel: 'off', model: null });
   assert.throws(() => manager.appendCustomEntry('illegal', {}), /unsupported_feature/);
 });

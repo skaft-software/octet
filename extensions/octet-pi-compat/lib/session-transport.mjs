@@ -1,6 +1,4 @@
 import { jsonBytes } from './json-count.mjs';
-import { appendFileSync } from 'node:fs';
-const dbg = value => { try { appendFileSync('/tmp/u1-adapter-debug.log', `${value}\n`); } catch {} };
 // session-repair.v2. Tokens identify inert documents, never session authority.
 import { createHash } from 'node:crypto';
 import { fields, invalid, ownerKey, rpcError } from './errors.mjs';
@@ -79,7 +77,7 @@ export class SessionTransport {
       // view until current and all immutable invocation pins release it.
       bytes = undefined;
       return { descriptor: d, document, release, refs: 1 };
-    } catch (error) { dbg(`read failed transfer=${d.transfer_id.slice(0, 8)}: ${error?.message}`); bytes = undefined; release(); throw error; }
+    } catch (error) { bytes = undefined; release(); throw error; }
     finally { this.transfers--; }
   }
   retain(view) { view.refs++; return view; }
@@ -107,7 +105,6 @@ export class SessionTransport {
   }
   invalidate(owner, revision) {
     const key = ownerKey(owner), current = this.current.get(key);
-    dbg(`invalidate rev=${revision} current=${current?.revision} replaced=${Boolean(current) && revision > current.revision}`);
     if (current && revision <= current.revision) return current;
     if (current) { this.drop(current.view); current.resolve?.(); }
     let resolve;
@@ -117,7 +114,6 @@ export class SessionTransport {
     return next;
   }
   async prepare(params, store) {
-    dbg(`prepare start rev=${params.snapshot?.view_revision}`);
     exact(params, ['resource_owner', 'snapshot', 'host'], 'session snapshot prepare');
     const d = descriptor(params.snapshot, params.resource_owner, 'history');
     if (d.preparation !== null) invalid('read-only snapshot preparation');
@@ -130,11 +126,11 @@ export class SessionTransport {
     const hydrate = async () => {
       view = await this.read(d, store); this.history(view);
       store.controller.signal.throwIfAborted();
-      if (this.current.get(key) !== barrier || !store.state.alive) { dbg(`hydrate superseded rev=${d.view_revision} same_barrier=${this.current.get(key) === barrier} alive=${store.state.alive}`); throw unavailable(); }
+      if (this.current.get(key) !== barrier || !store.state.alive) throw unavailable();
       this.drop(barrier.view); barrier.view = view; view = undefined;
     };
     try { await hydrate(); }
-    catch (error) { dbg(`prepare failed revision=${d.view_revision} owner=${d.owner.session_id}: ${error?.message}`); this.drop(view); throw error; }
+    catch (error) { this.drop(view); throw error; }
     finally { barrier.resolve?.(); if (this.current.get(key) === barrier) barrier.promise = undefined; }
     for (const surface of this.runtime.ui.surfaces.values()) if (surface.store.state === store.state) surface.requestRender();
     return { accepted: true, transfer_id: d.transfer_id, view_revision: d.view_revision, head: d.head, sha256: d.sha256 };

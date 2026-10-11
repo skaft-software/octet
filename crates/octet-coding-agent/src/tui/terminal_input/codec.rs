@@ -111,6 +111,23 @@ impl Decoder {
             }
         }
     }
+
+    pub(super) fn has_pending_escape(&self) -> bool {
+        self.buffer.as_slice() == b"\x1b"
+    }
+
+    /// Resolve a lone ESC once the raw reader's short continuation lookahead
+    /// expires, retaining the exact spelling for input interception.
+    pub(super) fn finish_pending_escape(&mut self) -> Option<Packet> {
+        if !self.has_pending_escape() {
+            return None;
+        }
+        self.buffer.clear();
+        Some(Packet {
+            event: Event::Key(KeyCode::Esc.into()),
+            raw: Some("\x1b".into()),
+        })
+    }
 }
 
 /// Decode an entire replacement before admitting any part of it. Incomplete or
@@ -240,5 +257,18 @@ mod tests {
             Packet::synthetic(key(KeyCode::Char('x'), KeyModifiers::NONE)).raw,
             None
         );
+    }
+
+    #[test]
+    fn trailing_escape_waits_for_continuation_or_short_timeout() {
+        let mut decoder = Decoder::default();
+        assert_eq!(decoder.push(b'\x1b', true).unwrap(), None);
+        assert!(decoder.has_pending_escape());
+
+        let packet = decoder.finish_pending_escape().unwrap();
+        assert_eq!(packet.event, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(packet.raw.as_deref(), Some("\x1b"));
+        assert!(!decoder.has_pending_escape());
+        assert!(decoder.finish_pending_escape().is_none());
     }
 }

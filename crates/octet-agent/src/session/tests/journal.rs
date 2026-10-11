@@ -106,6 +106,9 @@ fn settled_assistant_frames_are_not_republished_as_progress() {
         let journal_path = journal.path().to_path_buf();
         // Terminal settlement removes the partial.
         journal.settle();
+        assert!(journal.file.is_none(), "settlement closes the writer");
+        journal.settle();
+        journal.append(&frame_stream("too late")[0]).unwrap();
         assert!(!journal_path.exists());
         journal_path
     };
@@ -139,13 +142,20 @@ fn partial_assistant_journal_bounds_reads_and_discards_torn_utf8_tail() {
     for frame in frame_stream("valid prefix") {
         journal.append(&frame).unwrap();
     }
-    journal.file.write_all(b"{\"torn\":\"\xff").unwrap();
+    journal
+        .file
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"torn\":\"\xff")
+        .unwrap();
     drop(journal);
     assert!(session.take_partial_assistant().unwrap().is_some());
 
     let journal = session.begin_assistant_frame_journal().unwrap();
     journal
         .file
+        .as_ref()
+        .unwrap()
         .set_len((MAX_PARTIAL_FRAME_JOURNAL_BYTES + 1) as u64)
         .unwrap();
     drop(journal);

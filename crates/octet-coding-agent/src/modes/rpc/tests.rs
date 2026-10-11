@@ -107,6 +107,220 @@ fn rpc_branch_summary_projection_retains_real_identity_and_provenance() {
 }
 
 #[test]
+fn rpc_messages_keep_durable_identity_across_turns_reopen_and_branching() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rpc-identity.jsonl");
+    let (_fixture, app) = crate::compaction::tests::app_for_estimate();
+    let model = app.model.clone();
+    let mut session = octet_agent::Session::create(&path).unwrap();
+    let first_prompt = session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("first prompt".into())],
+        })))
+        .unwrap();
+    let tool_call = octet_ai::ToolCall {
+        async_execution: false,
+        id: octet_ai::ToolCallId("call-1".into()),
+        name: "probe".into(),
+        arguments_json: "{}".into(),
+        argument_error: None,
+    };
+    let first_assistant = session
+        .append_assistant_turn(
+            AssistantMessage {
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+                content: vec![AssistantPart::ToolCall(tool_call)],
+            },
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                total_tokens: 5,
+                ..Usage::default()
+            },
+            None,
+            StopReason::ToolUse,
+            None,
+        )
+        .unwrap();
+    let tool_result = session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                tool_call_id: octet_ai::ToolCallId("call-1".into()),
+                content: vec![octet_ai::ToolResultPart::Text("effect retained".into())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        })))
+        .unwrap();
+    let first = rpc_messages_from_session(&session, &model);
+    assert_eq!(rpc_messages_from_session(&session, &model), first);
+    assert_eq!(first.len(), 3);
+    assert_eq!(
+        first[0]["timestamp"],
+        json!(session
+            .entry(&first_prompt)
+            .unwrap()
+            .timestamp_unix_ms
+            .unwrap())
+    );
+    assert_eq!(
+        first[1]["timestamp"],
+        json!(session
+            .entry(&first_assistant)
+            .unwrap()
+            .timestamp_unix_ms
+            .unwrap())
+    );
+    assert_eq!(first[1]["content"][0]["type"], "toolCall");
+    assert!(first[1]["usage"]["cost"].is_null());
+    assert_eq!(first[2]["toolName"], "probe");
+    assert_eq!(first[2]["content"][0]["text"], "effect retained");
+    assert_eq!(
+        first[2]["timestamp"],
+        json!(session
+            .entry(&tool_result)
+            .unwrap()
+            .timestamp_unix_ms
+            .unwrap())
+    );
+
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("second prompt".into())],
+        })))
+        .unwrap();
+    session
+        .append_assistant_turn(
+            AssistantMessage {
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+                content: vec![AssistantPart::Text("second answer".into())],
+            },
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            Usage::default(),
+            None,
+            StopReason::EndTurn,
+            None,
+        )
+        .unwrap();
+    let after_second_turn = rpc_messages_from_session(&session, &model);
+    assert_eq!(&after_second_turn[..first.len()], first.as_slice());
+    drop(session);
+
+    let mut reopened = octet_agent::Session::open(&path).unwrap();
+    assert_eq!(
+        rpc_messages_from_session(&reopened, &model),
+        after_second_turn
+    );
+    reopened.checkout(first_prompt).unwrap();
+    reopened
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("branched prompt".into())],
+        })))
+        .unwrap();
+    let branched = rpc_messages_from_session(&reopened, &model);
+    assert_eq!(branched.len(), 2);
+    assert_eq!(branched[0]["content"][0]["text"], "first prompt");
+    assert_eq!(branched[1]["content"][0]["text"], "branched prompt");
+}
+
+#[test]
+fn rpc_messages_omit_missing_legacy_timestamps_after_append_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rpc-legacy.jsonl");
+    let (_fixture, app) = crate::compaction::tests::app_for_estimate();
+    let model = app.model.clone();
+    let mut session = octet_agent::Session::create(&path).unwrap();
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("legacy prompt".into())],
+        })))
+        .unwrap();
+    drop(session);
+
+    let source = std::fs::read(&path).unwrap();
+    let mut legacy = Vec::new();
+    for line in source
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let mut record: Value = serde_json::from_slice(line).unwrap();
+        if record["type"] == "entry" {
+            record.as_object_mut().unwrap().remove("timestamp_unix_ms");
+        }
+        serde_json::to_writer(&mut legacy, &record).unwrap();
+        legacy.push(b'\n');
+    }
+    std::fs::write(&path, legacy).unwrap();
+
+    let mut reopened = octet_agent::Session::open(&path).unwrap();
+    let legacy_projection = rpc_messages_from_session(&reopened, &model);
+    assert_eq!(legacy_projection.len(), 1);
+    assert!(legacy_projection[0].get("timestamp").is_none());
+    reopened
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("new prompt".into())],
+        })))
+        .unwrap();
+    let projection = rpc_messages_from_session(&reopened, &model);
+    assert!(projection[0].get("timestamp").is_none());
+    assert!(projection[1].get("timestamp").is_some());
+    drop(reopened);
+    let resumed = octet_agent::Session::open(&path).unwrap();
+    assert_eq!(rpc_messages_from_session(&resumed, &model), projection);
+}
+
+#[test]
+fn rpc_recovered_output_does_not_enter_the_current_turn_or_history() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let capture = RpcCapture::default();
+    let mut output = capture.output(false);
+    let mut translator = EventTranslator::new(&app, json!({"role": "user", "content": []}));
+    let history = translator.messages.clone();
+    let run_messages = translator.run_messages.clone();
+    let mut queue = QueueState::default();
+
+    for channel in [OutputChannel::Text, OutputChannel::Reasoning] {
+        translator
+            .observe(
+                AgentEvent::RecoveredOutput {
+                    channel,
+                    text: "interrupted prior attempt".into(),
+                },
+                &mut output,
+                &mut queue,
+            )
+            .unwrap();
+    }
+    assert!(capture.frames().is_empty());
+    assert_eq!(translator.messages, history);
+    assert_eq!(translator.run_messages, run_messages);
+    assert!(translator.partial_text.is_empty());
+    assert!(translator.partial_reasoning.is_empty());
+    assert!(!translator.message_started);
+
+    translator
+        .observe(
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "current answer".into(),
+            },
+            &mut output,
+            &mut queue,
+        )
+        .unwrap();
+    assert_eq!(translator.partial_text, "current answer");
+    assert!(capture
+        .frames()
+        .iter()
+        .all(|frame| !frame.to_string().contains("interrupted prior attempt")));
+}
+
+#[test]
 fn rpc_cache_warming_events_are_session_only_and_preserve_exact_cost() {
     let (_directory, app) = crate::compaction::tests::app_for_estimate();
     let capture = RpcCapture::default();

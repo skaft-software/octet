@@ -159,6 +159,22 @@ impl ClientInferenceMetrics {
     }
 }
 
+pub(crate) fn reasoning_may_be_unreported(
+    reasoning: &crate::ReasoningConfig,
+    capability: Option<&crate::types::ReasoningCapability>,
+) -> bool {
+    let Some(capability) = capability else {
+        // Missing discovered reasoning metadata is unknown, not evidence that
+        // this endpoint cannot emit reasoning outside visible output.
+        return true;
+    };
+    *reasoning != crate::ReasoningConfig::Off
+        || capability.control == crate::types::ReasoningControl::AlwaysOn
+        // OpenRouter's Chat Off selection intentionally leaves the provider
+        // default in force, so hidden reasoning may still be generated.
+        || capability.openai_chat_mode == crate::types::OpenAiChatReasoningMode::OpenRouter
+}
+
 /// Usage-calibrated robust estimate of visible-output decode cadence.
 /// This excludes request/prefill and completion-tail time. Stable arrival
 /// cadence cannot authenticate GPU execution or bound hidden provider buffering.
@@ -200,6 +216,15 @@ pub enum DecodeEstimateUnavailable {
     GeneratedMedia,
     /// The bounded reader hit local queue backpressure.
     LocalBackpressure,
+    /// Provider usage includes structured tool-call framing that has no
+    /// byte-progress counterpart in the client estimate.
+    ToolCallFraming,
+    /// A large first byte burst can dominate calibration while lying outside
+    /// the fitted interval, and its token density is not independently known.
+    UnrepresentativeInitialBurst,
+    /// Reasoning may have been generated but neither streamed nor separated in
+    /// terminal usage, so output-token calibration has no visible-only basis.
+    UnreportedReasoningPossible,
 }
 
 /// Independent client and server measurements carried on a completed response.
@@ -248,13 +273,24 @@ pub(crate) struct ClientTiming {
     started: Instant,
     metrics: ClientInferenceMetrics,
     decode: estimate::DecodeFit,
+    reasoning_may_be_unreported: bool,
 }
 
 impl ClientTiming {
+    #[cfg(test)]
     pub(crate) fn new(started: Instant, scope: ClientTimingScope) -> Self {
+        Self::new_with_reasoning_context(started, scope, false)
+    }
+
+    fn new_with_reasoning_context(
+        started: Instant,
+        scope: ClientTimingScope,
+        reasoning_may_be_unreported: bool,
+    ) -> Self {
         Self {
             started,
             decode: estimate::DecodeFit::default(),
+            reasoning_may_be_unreported,
             metrics: ClientInferenceMetrics {
                 scope: Some(scope),
                 ..Default::default()
@@ -320,12 +356,34 @@ impl ClientTiming {
         } else if inference.server_unavailable.is_none() {
             inference.server_unavailable = Some(ServerTimingUnavailable::NotReported);
         }
-        match std::mem::take(&mut self.decode).finish(
-            &response.usage,
-            self.metrics.scope,
-            media_observed,
-            reasoning_observed,
-        ) {
+        let tool_call_observed = response
+            .message
+            .content
+            .iter()
+            .any(|part| matches!(part, crate::AssistantPart::ToolCall(_)));
+        let decode_result = if tool_call_observed {
+            // Provider completion usage includes call framing (and may include
+            // hidden argument tokens) that has no matching UTF-8 byte progress.
+            // Do not spread those tokens over answer-byte time as if they did.
+            Err(DecodeEstimateUnavailable::ToolCallFraming)
+        } else if self.reasoning_may_be_unreported
+            && !reasoning_observed
+            && response.usage.output_tokens > 0
+            && response.usage.reasoning_tokens == 0
+        {
+            // A false observed-reasoning flag only means no reasoning part or
+            // delta reached this client. Requested or always-on reasoning may
+            // still be hidden and included in aggregate output usage.
+            Err(DecodeEstimateUnavailable::UnreportedReasoningPossible)
+        } else {
+            std::mem::take(&mut self.decode).finish(
+                &response.usage,
+                self.metrics.scope,
+                media_observed,
+                reasoning_observed,
+            )
+        };
+        match decode_result {
             Ok(estimate) => {
                 inference.decode_estimate = Some(estimate);
                 inference.decode_unavailable = None;
@@ -352,10 +410,23 @@ pub(crate) fn measured_stream(
     started: Instant,
     scope: ClientTimingScope,
 ) -> ResponseStream {
+    measured_stream_with_context(stream, started, scope, false)
+}
+
+pub(crate) fn measured_stream_with_context(
+    stream: ResponseStream,
+    started: Instant,
+    scope: ClientTimingScope,
+    reasoning_may_be_unreported: bool,
+) -> ResponseStream {
     let stream_ready_ns = ns(started.elapsed());
     let measured: ResponseStream = Box::pin(async_stream::try_stream! {
         let mut stream = stream;
-        let mut timing = ClientTiming::new(started, scope);
+        let mut timing = ClientTiming::new_with_reasoning_context(
+            started,
+            scope,
+            reasoning_may_be_unreported,
+        );
         timing.metrics.stream_ready_ns = stream_ready_ns;
         while let Some(event) = stream.next().await {
             let mut event = event?;
@@ -489,6 +560,146 @@ mod tests {
         assert_eq!(
             inference.decode_unavailable,
             Some(DecodeEstimateUnavailable::GeneratedMedia)
+        );
+    }
+
+    #[test]
+    fn unknown_requested_or_always_on_reasoning_marks_unreported_usage_possible() {
+        let capability = crate::test_fixtures::reasoning_capability();
+        assert!(!reasoning_may_be_unreported(
+            &crate::ReasoningConfig::Off,
+            Some(&capability)
+        ));
+        assert!(reasoning_may_be_unreported(
+            &crate::ReasoningConfig::Off,
+            None
+        ));
+        assert!(reasoning_may_be_unreported(
+            &crate::ReasoningConfig::On,
+            Some(&capability)
+        ));
+        assert!(reasoning_may_be_unreported(
+            &crate::ReasoningConfig::Effort(crate::ReasoningEffort::High),
+            None
+        ));
+        let mut always_on = capability.clone();
+        always_on.control = crate::types::ReasoningControl::AlwaysOn;
+        assert!(reasoning_may_be_unreported(
+            &crate::ReasoningConfig::Off,
+            Some(&always_on)
+        ));
+        let mut openrouter = capability;
+        openrouter.openai_chat_mode = crate::types::OpenAiChatReasoningMode::OpenRouter;
+        assert!(reasoning_may_be_unreported(
+            &crate::ReasoningConfig::Off,
+            Some(&openrouter)
+        ));
+    }
+
+    #[test]
+    fn asserted_off_reasoning_context_allows_client_estimate() {
+        let origin = Instant::now();
+        let capability = crate::test_fixtures::reasoning_capability();
+        let reasoning_may_be_unreported =
+            reasoning_may_be_unreported(&crate::ReasoningConfig::Off, Some(&capability));
+        assert!(!reasoning_may_be_unreported);
+        let mut timing = ClientTiming::new_with_reasoning_context(
+            origin,
+            ClientTimingScope::Request,
+            reasoning_may_be_unreported,
+        );
+        for n in 0..=40 {
+            timing.observe_at(
+                &StreamEvent::TextDelta {
+                    index: 0,
+                    delta: "text".into(),
+                },
+                origin + Duration::from_millis(n * 50),
+            );
+        }
+        let mut response = crate::Response {
+            message: crate::AssistantMessage {
+                model: crate::ModelId("test".into()),
+                protocol: crate::Protocol::OpenAiChat,
+                content: Vec::new(),
+            },
+            usage: crate::Usage {
+                output_tokens: 205,
+                reasoning_tokens: 0,
+                ..Default::default()
+            },
+            stop_reason: crate::StopReason::EndTurn,
+            cost: None,
+            response_id: None,
+            responses_output: None,
+            deferred: None,
+            inference: None,
+            diagnostics: Vec::new(),
+        };
+        timing.finish_response(&mut response, origin + Duration::from_secs(3));
+        let inference = response.inference.unwrap();
+        assert!(inference.decode_estimate.is_some());
+        assert!(inference.decode_unavailable.is_none());
+    }
+
+    #[test]
+    fn unknown_off_reasoning_context_suppresses_only_client_estimate() {
+        let origin = Instant::now();
+        let mut timing = ClientTiming::new_with_reasoning_context(
+            origin,
+            ClientTimingScope::Request,
+            reasoning_may_be_unreported(&crate::ReasoningConfig::Off, None),
+        );
+        for n in 0..=40 {
+            timing.observe_at(
+                &StreamEvent::TextDelta {
+                    index: 0,
+                    delta: "text".into(),
+                },
+                origin + Duration::from_millis(n * 50),
+            );
+        }
+        let mut response = crate::Response {
+            message: crate::AssistantMessage {
+                model: crate::ModelId("test".into()),
+                protocol: crate::Protocol::OpenAiChat,
+                content: Vec::new(),
+            },
+            usage: crate::Usage {
+                output_tokens: 205,
+                reasoning_tokens: 0,
+                ..Default::default()
+            },
+            stop_reason: crate::StopReason::EndTurn,
+            cost: None,
+            response_id: None,
+            responses_output: None,
+            deferred: None,
+            inference: Some(InferenceMetrics {
+                server: Some(ServerGenerationMetrics {
+                    source: ServerTimingSource::TimingsPredicted,
+                    tokens: 300,
+                    generation_ns: 1_500_000_000,
+                    reported_unit: ReportedTimingUnit::Milliseconds,
+                    prompt_ns: None,
+                    queue_ns: None,
+                    total_ns: None,
+                }),
+                ..Default::default()
+            }),
+            diagnostics: Vec::new(),
+        };
+        timing.finish_response(&mut response, origin + Duration::from_secs(3));
+        let inference = response.inference.unwrap();
+        assert!(inference.decode_estimate.is_none());
+        assert_eq!(
+            inference.decode_unavailable,
+            Some(DecodeEstimateUnavailable::UnreportedReasoningPossible)
+        );
+        assert_eq!(
+            inference.server.unwrap().tokens_per_second(),
+            Some(200.0),
+            "native generation timing remains independent"
         );
     }
 

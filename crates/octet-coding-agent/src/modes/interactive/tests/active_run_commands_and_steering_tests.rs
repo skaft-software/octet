@@ -1107,7 +1107,14 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
         ("/settings images on", vec![], "dark"),
         (
             "/settings",
-            vec![KeyCode::Down, KeyCode::Enter, KeyCode::Up, KeyCode::Enter],
+            // Terminal screen is now the second root row; images is third.
+            vec![
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+                KeyCode::Up,
+                KeyCode::Enter,
+            ],
             "dark",
         ),
     ] {

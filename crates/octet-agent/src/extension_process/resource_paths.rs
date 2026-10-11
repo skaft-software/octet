@@ -3,7 +3,9 @@ use super::*;
 
 /// Optional bounded path-discovery contract. Never offer without a loader consumer.
 pub const EXTENSION_FEATURE_RESOURCE_PATHS: &str = "resource_paths_v1";
-const MAX_PATHS: usize = 64;
+// One combined setup must fit without truncating its per-kind resource lists.
+// Retain the independent path/total-byte bounds before filesystem access.
+const MAX_PATHS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TOTAL_PATH_BYTES: usize = 64 * 1024;
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
@@ -287,13 +289,44 @@ mod tests {
             .is_err()
         );
         let mut paths = ExtensionResourcePaths {
-            skill_paths: vec![root(); 64],
+            skill_paths: vec![root(); MAX_PATHS],
             ..Default::default()
         };
         paths.validate().unwrap();
         paths.prompt_paths.push(root());
         assert!(paths.validate().is_err());
     }
+    #[test]
+    fn resource_paths_accept_complete_combined_setup_with_one_shared_bound() {
+        let paths_for = |kind: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("{}/{kind}/{index}", root()))
+                .collect::<Vec<_>>()
+        };
+        // A dependency-bearing setup can exceed the old 64-path bound in more
+        // than one kind; the complete ordered response remains admissible.
+        let complete = ExtensionResourcePaths {
+            skill_paths: paths_for("skills", 85),
+            prompt_paths: paths_for("prompts", 87),
+            theme_paths: paths_for("themes", 50),
+            ..Default::default()
+        };
+        complete.validate().unwrap();
+
+        // All five kinds share the same count and unchanged total-byte budget.
+        let mut boundary = ExtensionResourcePaths {
+            skill_paths: paths_for("skills", 64),
+            prompt_paths: paths_for("prompts", 64),
+            theme_paths: paths_for("themes", 64),
+            keybindings_paths: paths_for("keybindings", 32),
+            context_paths: paths_for("context", 32),
+            ..Default::default()
+        };
+        boundary.validate().unwrap();
+        boundary.context_paths.push(root());
+        assert!(boundary.validate().is_err());
+    }
+
     #[test]
     fn resource_theme_default_must_reference_a_contributed_theme_path() {
         let theme = format!("{}/palette.toml", root());
@@ -403,7 +436,7 @@ mod tests {
         assert!(valid.validate().is_ok());
         // Every path kind shares one bound; the new kinds cannot bypass it.
         let oversized = ExtensionResourcePaths {
-            skill_paths: vec![format!("{}/skill", root()); 63],
+            skill_paths: vec![format!("{}/skill", root()); MAX_PATHS - 1],
             keybindings_paths: vec![format!("{}/keybindings.json", root())],
             context_paths: vec![format!("{}/AGENTS.md", root())],
             ..Default::default()

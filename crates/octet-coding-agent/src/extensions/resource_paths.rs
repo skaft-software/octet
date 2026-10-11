@@ -20,7 +20,49 @@ enum PathKind {
 
 const MAX_DISCOVERY_PROCESSES: usize = 16;
 const MAX_PASS_PATHS: usize = 256;
-const MAX_PASS_BYTES: usize = 512 * 1024;
+const MAX_PATH_BYTES_PER_PATH: usize = 4096;
+const MAX_PASS_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct ResourcePathBudget {
+    paths: usize,
+    bytes: usize,
+}
+
+impl ResourcePathBudget {
+    fn admit(&mut self, contribution: &ExtensionResourcePaths) -> anyhow::Result<()> {
+        let mut paths = 0usize;
+        let mut bytes = 0usize;
+        for path in contribution
+            .skill_paths
+            .iter()
+            .chain(&contribution.prompt_paths)
+            .chain(&contribution.theme_paths)
+            .chain(&contribution.keybindings_paths)
+            .chain(&contribution.context_paths)
+        {
+            anyhow::ensure!(
+                path.len() <= MAX_PATH_BYTES_PER_PATH,
+                "one resource path exceeds {MAX_PATH_BYTES_PER_PATH} UTF-8 bytes"
+            );
+            paths += 1;
+            bytes = bytes.saturating_add(path.len());
+        }
+        let total_paths = self.paths.saturating_add(paths);
+        let total_bytes = self.bytes.saturating_add(bytes);
+        anyhow::ensure!(
+            total_paths <= MAX_PASS_PATHS,
+            "combined resource paths exceed the {MAX_PASS_PATHS}-path limit"
+        );
+        anyhow::ensure!(
+            total_bytes <= MAX_PASS_BYTES,
+            "combined resource paths exceed the {MAX_PASS_BYTES}-byte limit"
+        );
+        self.paths = total_paths;
+        self.bytes = total_bytes;
+        Ok(())
+    }
+}
 
 struct Contribution {
     process: ExtensionProcess,
@@ -34,6 +76,7 @@ pub(crate) struct ResourceDiscoveryBatch {
     owner: String,
     contributions: Vec<Contribution>,
     diagnostics: Vec<String>,
+    resource_rejection: Option<String>,
 }
 
 impl ExecutableExtensions {
@@ -94,37 +137,49 @@ impl ExecutableExtensions {
                 owner,
                 contributions: Vec::new(),
                 diagnostics: Vec::new(),
+                resource_rejection: None,
             };
-            let mut count = 0;
-            let mut bytes = 0;
+            let mut budget = ResourcePathBudget::default();
             for (process, result) in results {
                 match result {
                     Ok((generation, paths)) => {
-                        let all = paths
-                            .skill_paths
-                            .iter()
-                            .chain(&paths.prompt_paths)
-                            .chain(&paths.theme_paths);
-                        let (n, size) = all.fold((0, 0), |(n, size), p| (n + 1, size + p.len()));
-                        if count + n > MAX_PASS_PATHS || bytes + size > MAX_PASS_BYTES {
-                            batch.diagnostics.push(format!(
-                                "warning: {}: resource discovery exceeds pass budget",
-                                process.descriptor().manifest.name
-                            ));
+                        if batch.resource_rejection.is_some() {
                             continue;
                         }
-                        count += n;
-                        bytes += size;
+                        if let Err(error) = budget.admit(&paths) {
+                            let message = format!(
+                                "{}: resource discovery exceeded the shared mirror budget: {error}",
+                                process.descriptor().manifest.name
+                            );
+                            batch.diagnostics.push(format!("warning: {message}"));
+                            batch.resource_rejection = Some(message);
+                            continue;
+                        }
                         batch.contributions.push(Contribution {
                             process,
                             generation,
                             paths,
                         });
                     }
-                    Err(error) => batch.diagnostics.push(format!(
-                        "warning: {}: resources_discover failed; no paths admitted: {error}",
-                        process.descriptor().manifest.name
-                    )),
+                    Err(error) => {
+                        if matches!(
+                            &error,
+                            octet_agent::extension_process::ExtensionRuntimeError::Protocol(message)
+                                if message == "invalid or over-budget resource_paths_v1 paths"
+                        ) {
+                            let message = format!(
+                                "{}: resource_paths_v1 response was rejected by the bounded path contract",
+                                process.descriptor().manifest.name
+                            );
+                            batch.diagnostics.push(format!("warning: {message}"));
+                            batch.resource_rejection = Some(message);
+                        } else {
+                            batch.diagnostics.push(format!(
+                                "warning: {}: resources_discover failed; no paths admitted: {error}",
+                                process.descriptor().manifest.name
+                            ));
+                        }
+                    }
                 }
             }
             batch
@@ -193,6 +248,9 @@ impl ResourceLoader {
             self.resource_owner.as_deref() == Some(batch.owner.as_str()),
             "stale resource discovery owner"
         );
+        if let Some(error) = batch.resource_rejection.as_deref() {
+            anyhow::bail!("resource discovery rejected: {error}");
+        }
         let mut config = base.clone();
         let mut diagnostics = batch.diagnostics;
         // Added roots precede the caller's explicit paths: explicit user

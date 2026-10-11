@@ -48,19 +48,15 @@ test('registry reads follow refreshed host snapshots without inventing full inve
   facts = {}; assert.throws(() => registry.getAvailable(), refusal);
 });
 
-test('full inventory lookup preserves provider identity when a host supplies it', () => {
-  const other = { ...view, provider: 'other', name: 'Other' };
-  const registry = modelRegistry(() => ({ pi_models: { all_models: [view, other] } }));
-  assert.equal(registry.find('other', view.id).name, 'Other');
-  assert.equal(registry.find('missing', view.id), undefined);
-  const all = registry.getAll(); all[0].input.push('image');
-  assert.deepEqual(view.input, ['text']);
-});
-
-test('OAuth status is per model and credentials never leave the host', () => {
+test('registry refuses incomplete inventory and provider-level auth facts', () => {
   const key = JSON.stringify([view.provider, view.id]);
-  const registry = modelRegistry(() => ({ pi_models: { model_auth: { [key]: { using_oauth: true } } } }));
-  assert.equal(registry.isUsingOAuth(view), true);
-  assert.throws(() => registry.isUsingOAuth({ provider: 'other', id: view.id }), refusal);
+  const registry = modelRegistry(() => ({ pi_models: {
+    available_models: [view],
+    model_auth: { [key]: { using_oauth: true } },
+  } }));
+  assert.throws(() => registry.getAll(), refusal);
+  assert.throws(() => registry.find(view.provider, view.id), refusal);
+  assert.throws(() => registry.hasConfiguredAuth(view), refusal);
+  assert.throws(() => registry.isUsingOAuth(view), refusal);
   assert.throws(() => registry.getApiKey(view), refusal);
 });

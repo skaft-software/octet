@@ -64,6 +64,7 @@ const CONFIG_KEYS: &[&str] = &[
     "cache_warming",
     "show_cache_miss_notices",
     "theme",
+    "tui_mode",
     "color",
     "mouse",
     "plain",

@@ -5,7 +5,26 @@ It records observed behaviour; it is not a frozen release or a publication appro
 ledger](pi-extension-api.md), and the user-facing scope is in
 [compatibility](pi-compatibility.md).
 
-## Current local qualification (2026-10-09)
+## Active completion and release gates
+
+The installed-setup acceptance target includes enabled package selection,
+settings and slash commands, configuration precedence, and extension UI/editor/
+footer mutations in Tern. Discovery, registration, a synthetic host, or an old
+local receipt does not qualify that target. Original dependency-bearing setup
+and combination journeys must be checked against the rebuilt candidate.
+
+The frozen candidate `9477eebb52d2f0818ce54b3b0b29be581f917122` has failed
+hosted Linux and macOS tests despite successful quality and archive jobs.
+Observed blockers include native input/selection and activity-resize contracts,
+Pi session replacement, unstable RPC message timestamps, multiline path-led
+prompt classification, and the absence of an actionable Settings mirror flow.
+These are being repaired; the records below do not qualify the repair tree.
+
+Release gates remain exact-head green PR CI, approved merge with valid required
+checks, green main CI, signed publication and fresh public-install smoke. The
+source candidate is not a published release.
+
+## Local qualification recorded 2026-10-09
 
 Octet is a **Pi-compatible harness that will evolve**. The integrated launch fixes
 have local evidence, but the release and an existing power-user setup remain
@@ -197,9 +216,10 @@ are the behavioral evidence.
   `modelRegistry.getApiKeyAndHeaders` disclosure is the only key/header
   credential path, and it resolves one named provider/model (see the adapter
   README).
-- Remaining UI/editor setters and native-to-Pi theme synchronization, Windows
-  `pi.exec`, MCP HTTP/credentials. Native transcript consumers now exist; final
-  original-extension qualification is separate.
+- Remaining UI/editor setters and original-extension combination qualification,
+  Windows `pi.exec`, MCP HTTP/credentials. Native transcript consumers and
+  native-to-Pi active-theme synchronization are implemented; their existence is
+  not full original-extension qualification.
 
 ### Fallback prompt proposal
 

@@ -28,6 +28,47 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// TSP text props are either plain strings or arrays of styled `{t, ...}` spans.
+/// Picker labels use both forms, so test matching follows the wire contract
+/// rather than treating presentation style as a different label.
+fn tern_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    value
+        .as_array()?
+        .iter()
+        .try_fold(String::new(), |mut text, span| {
+            text.push_str(span.get("t")?.as_str()?);
+            Some(text)
+        })
+}
+
+fn tern_node_label(node: &Value) -> Option<String> {
+    tern_text(&node["p"]["label"])
+}
+
+#[test]
+fn native_text_label_matching_follows_the_tsp_plain_or_styled_text_contract() {
+    let plain = json!({"p":{"label":"OpenAI-compatible endpoint"}});
+    let styled = json!({"p":{"label":[
+        {"t":"Grant ","s":"strong"},
+        {"t":"host authority","s":"muted"}
+    ]}});
+    assert_eq!(
+        tern_node_label(&plain).as_deref(),
+        Some("OpenAI-compatible endpoint")
+    );
+    assert_eq!(
+        tern_node_label(&styled).as_deref(),
+        Some("Grant host authority")
+    );
+    assert_eq!(
+        tern_node_label(&json!({"p":{"label":[{"s":"strong"}]}})),
+        None
+    );
+}
+
 struct Options {
     model: bool,
     args: Vec<String>,
@@ -402,7 +443,7 @@ impl NativePty {
         let item = self
             .nodes
             .values()
-            .find(|node| node["k"] == "item" && node["p"]["label"] == label)
+            .find(|node| node["k"] == "item" && tern_node_label(node).as_deref() == Some(label))
             .unwrap()["id"]
             .as_str()
             .unwrap()
@@ -631,7 +672,7 @@ fn setup_endpoint(pty: &mut NativePty) -> String {
     pty.wait(|pty| {
         pty.nodes
             .values()
-            .any(|node| node["p"]["label"] == "OpenAI-compatible endpoint")
+            .any(|node| tern_node_label(node).as_deref() == Some("OpenAI-compatible endpoint"))
     });
     pty.sheet_choice("OpenAI-compatible endpoint");
     pty.wait(|pty| {
@@ -954,7 +995,9 @@ fn native_reports_hotkeys_settings_and_accounting_stay_local_and_ephemeral() {
         assert_eq!(pty.nodes["composer.editor"]["p"]["readonly"], true);
         if command == "/status" {
             let text = pty.nodes["report.body"]["p"]["text"].as_str().unwrap();
-            assert!(text.contains("unavailable (no completed model turn)"));
+            // Built-in fact reports escape literal punctuation in Markdown source;
+            // the Tern Markdown node retains that source rather than decoded text.
+            assert!(text.contains("unavailable &#40;no completed model turn&#41;"));
             assert!(text.contains("Throughput") && text.contains("unavailable"));
         }
         if command == "/hotkeys" {
@@ -1710,9 +1753,9 @@ fn native_ordinary_setup_input_raw_and_pointer_edits_overflow_and_sequential_req
     pty.wait(|pty| pty.nodes[&first]["p"]["text"] == url);
     pty.action(&format!("{prefix}.confirm"), "confirm");
     pty.wait(|pty| {
-        pty.nodes
-            .values()
-            .any(|node| node["p"]["label"] == "Read an API key from an environment variable")
+        pty.nodes.values().any(|node| {
+            tern_node_label(node).as_deref() == Some("Read an API key from an environment variable")
+        })
     });
     pty.sheet_choice("Read an API key from an environment variable");
     pty.wait(|pty| {
@@ -1763,7 +1806,7 @@ fn native_secret_setup_input_never_transports_value_or_accepts_native_confirmati
     pty.wait(|pty| {
         pty.nodes
             .values()
-            .any(|node| node["p"]["label"] == "Enter an API key")
+            .any(|node| tern_node_label(node).as_deref() == Some("Enter an API key"))
     });
     pty.sheet_choice("Enter an API key");
     pty.wait(|pty| {
@@ -2075,12 +2118,12 @@ fn native_extensions_empty_and_untrusted_installed_menus_cannot_grant_by_pointer
     pty.wait(|pty| {
         pty.nodes
             .values()
-            .any(|node| node["p"]["label"] == "Grant host authority")
+            .any(|node| tern_node_label(node).as_deref() == Some("Grant host authority"))
     });
     let grant = pty
         .nodes
         .values()
-        .find(|node| node["p"]["label"] == "Grant host authority")
+        .find(|node| tern_node_label(node).as_deref() == Some("Grant host authority"))
         .unwrap()["id"]
         .as_str()
         .unwrap()

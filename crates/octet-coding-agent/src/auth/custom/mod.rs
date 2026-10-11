@@ -12,8 +12,9 @@
 mod store;
 
 pub use store::{
-    default_path, CredentialStore, CustomAuthConfig, CustomCredential, CustomModel, CustomPricing,
-    CustomProvider, CustomRegistry,
+    default_path, CredentialStore, CustomAuthConfig, CustomCredential, CustomModel,
+    CustomNativeMetadata, CustomNativeReasoning, CustomPricing, CustomProvider, CustomRegistry,
+    HeaderEntry,
 };
 pub(crate) use store::{RegistryCommitError, RegistrySnapshot};
 

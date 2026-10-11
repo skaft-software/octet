@@ -10,7 +10,7 @@ import { hookEvents } from './lib/api.mjs';
 import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
 import { locateInstalledPi } from './lib/installed-pi.mjs';
 import { PI_VERSION } from './lib/pi-modules.mjs';
-import { discoverPiSetup, resolveThemeFile } from './lib/pi-setup.mjs';
+import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } from './lib/pi-setup.mjs';
 import { readPiTheme } from './lib/theme-palette.mjs';
 import { reviewedSourceHashes } from './lib/runtime.mjs';
 import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
@@ -46,7 +46,7 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false }) {
+export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint }) {
   if (!reviewed) throw new Error('Factory execution requires --reviewed (review every entrypoint and its imports first)');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -57,7 +57,13 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
+  if (mirrorPiSetup && expectedSourceHashes && extensions.some(entry => !isDeepStrictEqual(expectedSourceHashes[entry], reviewedSourceHashes(entry)))) {
+    throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
+  }
   const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
+  if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
+    throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
+  }
   const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: join(output, '.cache') });
   if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
   const skippedAtCapture = captured.stderr.split('\n').filter(line => line.startsWith('[pi-compat] skipped '));
@@ -79,8 +85,11 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
   if (entrypoint_sources && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
+  if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
+    throw new Error('reviewed factory sources changed during capture; prepare and review again');
+  }
   const config = { extensions, entrypoint_sha256, registrations, subscribed_hooks,
-    ...(mirrorPiSetup ? { mirror_pi_setup: true, entrypoint_sources } : {}),
+    ...(mirrorPiSetup ? { mirror_pi_setup: true, entrypoint_sources, ...(piSetupFingerprint ? { pi_setup_fingerprint: piSetupFingerprint } : {}) } : {}),
     ...(Object.keys(routes).length ? { extension_runtimes: routes } : {}),
     ...(piAgentDir ? { pi_agent_dir: piAgentDir } : {}),
     ...(!mirrorPiSetup && piTheme ? { pi_theme: { name: piTheme.name, path: piTheme.path, native_name: piTheme.selector, native_path: piTheme.nativePath } } : {}),
@@ -119,23 +128,72 @@ const providerWireHooks = new Set(['before_provider_request', 'before_provider_h
 export const MIRROR_SUBSCRIBED_HOOKS = Object.freeze([...new Set(Object.values(hookEvents))]
   .filter(hook => !providerWireHooks.has(hook)).sort());
 
-export async function configureMirror({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, projectTrusted = false, activeNativeTools = new Map() }) {
+const mirrorReviewSchema = 'octet.pi-setup-mirror/v1';
+function mirrorPreparation({ output, cwd = process.cwd(), env = process.env, projectTrusted = false } = {}) {
+  if (!output) throw new Error('--output is required');
+  output = resolve(output);
+  if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
+  checkThemeImportOutput(output, true);
+  const agentDir = resolve(env.OCTET_PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
+  cwd = resolve(cwd);
+  projectTrusted = projectTrusted === true;
+  const setup = discoverPiSetup({ agentDir, env, cwd, projectTrusted });
+  const sourceHashes = {}, unreviewable = [];
+  for (const entry of setup.extensions) {
+    try { sourceHashes[entry] = reviewedSourceHashes(entry); }
+    catch (error) { unreviewable.push({ entry, reason: String(error?.message || error).slice(0, 512) }); }
+  }
+  const extensions = setup.extensions.map(entry => ({
+    path: entry,
+    sources: sourceHashes[entry] ? Object.entries(sourceHashes[entry]).map(([path, sha256]) => ({ path, sha256 })) : [],
+    reviewable: !!sourceHashes[entry],
+  }));
+  const base = {
+    schema: mirrorReviewSchema, output, cwd, agentDir, projectTrusted,
+    overwriteRequired: ['extension.toml', 'bridge.json', 'octet-config.toml'].some(name => existsSync(join(output, name))),
+    extensions,
+    resources: { skills: setup.skillsPaths, prompts: setup.promptsPaths, themes: setup.themesPaths,
+      keybindings: setup.keybindingsPath, context: setup.contextPath },
+    defaults: { theme: setup.defaultTheme, thinkingLevel: setup.defaultThinkingLevel, model: setup.defaultModel },
+    diagnostics: setup.diagnostics, unreviewable, resourceLimitsExceeded: setup.resourceLimitsExceeded,
+  };
+  const fingerprint = createHash('sha256').update(JSON.stringify(base)).digest('hex');
+  return { review: { ...base, fingerprint }, setup, sourceHashes, output, agentDir };
+}
+
+/** Read-only preparation for native Settings. Returns the exact setup and
+ * bounded relative-import hashes that a later reviewed mirror must match. */
+export function preparePiMirror(options = {}) {
+  return mirrorPreparation(options).review;
+}
+
+export async function configureMirror({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, projectTrusted = false, activeNativeTools = new Map() }) {
   if (!reviewed) throw new Error('Mirroring your Pi setup runs its enabled factories with your permissions; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed mirror`);
   checkThemeImportOutput(output, overwrite);
-  const agentDir = resolve(env.OCTET_PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'));
-  const setup = discoverPiSetup({ agentDir, env, cwd, projectTrusted: projectTrusted === true });
+  const prepared = mirrorPreparation({ output, cwd, env, projectTrusted });
+  if (expectedFingerprint !== undefined && (typeof expectedFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedFingerprint) || expectedFingerprint !== prepared.review.fingerprint)) {
+    throw new Error('Pi setup changed since preparation; prepare and review again before running factories');
+  }
+  if (prepared.review.resourceLimitsExceeded.length) throw new Error(`mirror preparation exceeds resource bounds (${MAX_RESOURCE_PATHS} paths / ${MAX_RESOURCE_PATH_BYTES} bytes); no partial mirror configured:\n${prepared.review.resourceLimitsExceeded.map(item => `${item.kind}: ${item.actual} exceeds ${item.limit} (${item.dimension})`).join('\n').slice(0, 4096)}`);
+  if (prepared.review.unreviewable.length) throw new Error(`mirror preparation contains factories the current review bounds cannot verify; no factories were run:\n${prepared.review.unreviewable.map(item => `${item.entry}: ${item.reason}`).join('\n').slice(0, 4096)}`);
+  const setup = prepared.setup;
+  const agentDir = prepared.agentDir;
   const themePath = resolveThemeFile(setup.themesPaths, setup.defaultTheme, setup.diagnostics);
   // Native TOML palettes are resolved by the host; JSON helpers also see the
   // chosen Pi palette during review, before any factory/helper is imported.
   const piTheme = themePath?.endsWith('.json') ? { name: readPiTheme(themePath).name, path: themePath } : undefined;
   const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: agentDir }, piAgentDir: agentDir, piTheme, activeNativeTools };
-  const routed = await routeExtensions(setup.extensions, options);
+  const routed = await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
   const refused = routed.filter(result => !result.route);
   if (refused.length) throw new Error(`mirror review refused factories (no partial import):\n${refused.map(result => `${result.entry}: ${result.error}`).join('\n').slice(0, 4096)}`);
+  const current = mirrorPreparation({ output, cwd, env, projectTrusted });
+  if (current.review.fingerprint !== prepared.review.fingerprint) throw new Error('Pi setup changed during mirror review; prepare and review again before capture');
+  const expectedSourceHashes = Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes]));
   const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,
+    expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint,
     extensions: routed.map(result => result.entry), routes: Object.fromEntries(routed.map(result => [result.entry, result.route])) });
   const { config } = result;
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
@@ -209,7 +267,7 @@ async function probe(entry, route, { cwd, env, owners = new Map(), piAgentDir, p
 
 // Chooses each extension's route: octet's emulated path when it loads there,
 // otherwise the installed Pi; an extension that loads on neither is skipped.
-export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map() } = {}) {
+export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map(), expectedSourceHashes } = {}) {
   if (!Array.isArray(extensions) || extensions.length > 64) throw new Error('Supply at most 64 entrypoints');
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) throw new Error('concurrency must be 1..64');
   // Only an authoritative selected/active owner catalog can establish a
@@ -220,6 +278,10 @@ export async function routeExtensions(extensions, { installed = true, concurrenc
   const worker = async () => {
     while (next < extensions.length) {
       const index = next++, entry = extensions[index];
+      if (expectedSourceHashes && !isDeepStrictEqual(expectedSourceHashes[entry], reviewedSourceHashes(entry))) {
+        results[index] = { entry, route: null, error: 'factory sources changed since mirror preparation; prepare and review again' };
+        continue;
+      }
       const emulated = await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
       if (emulated.ok) { results[index] = { entry, route: 'shims' }; continue; }
       const viaPi = installed && !emulated.conflict ? await probe(entry, 'installed', { cwd, env, owners, piAgentDir, piTheme }) : emulated;
@@ -239,8 +301,8 @@ const label = entry => {
 };
 
 // One step from an installed Pi 1.0.2 setup to a configured bridge.
-export async function configureFromPi({ output, reviewed, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false, projectTrusted = false, activeNativeTools = new Map() }) {
-  if (mirror) return configureMirror({ output, reviewed, overwrite, providerCredentials, cwd, env, log, projectTrusted, activeNativeTools });
+export async function configureFromPi({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false, projectTrusted = false, activeNativeTools = new Map() }) {
+  if (mirror) return configureMirror({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, cwd, env, log, projectTrusted, activeNativeTools });
   if (!reviewed) throw new Error('Loading your Pi extensions runs their code with your permissions, as in Pi; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -285,7 +347,7 @@ export async function configureFromPi({ output, reviewed, overwrite = false, pro
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, providerCredentials = false, fromPi = false, mirror = false;
+    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, providerCredentials = false, fromPi = false, mirror = false, prepareMirror = false, json = false, projectTrusted = false, expectedFingerprint;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--output') output = args[++i];
       else if (args[i] === '--reviewed') reviewed = true;
@@ -293,14 +355,26 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       else if (args[i] === '--provider-credentials') providerCredentials = true;
       else if (args[i] === '--from-pi') fromPi = true;
       else if (args[i] === '--mirror') mirror = true;
+      else if (args[i] === '--prepare-mirror') prepareMirror = true;
+      else if (args[i] === '--json') json = true;
+      else if (args[i] === '--project-trusted') projectTrusted = true;
+      else if (args[i] === '--expected-fingerprint') expectedFingerprint = args[++i];
       else if (args[i].startsWith('-')) throw new Error(`unknown configure option ${args[i]}`);
       else extensions.push(args[i]);
     }
-    if (!output) throw new Error('Usage: node configure.mjs --reviewed [--provider-credentials] --output /absolute/extensions/octet-pi-compat (--from-pi [--mirror] | <entry.ts>...)');
-    if (fromPi && extensions.length) throw new Error('--from-pi reads your Pi setup; do not also list entrypoints');
-    if (mirror && !fromPi) throw new Error('--mirror reads your Pi setup; it requires --from-pi');
-    const result = fromPi ? await configureFromPi({ output, reviewed, overwrite, providerCredentials, mirror }) : configure({ output, extensions, reviewed, overwrite, providerCredentials });
-    if (mirror) console.log(`Mirrored your Pi setup into ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
-    else console.log(`Configured ${result.registrations.commands.length} commands, ${result.registrations.tools.length} tools in ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
+    if (!output) throw new Error('Usage: node configure.mjs --prepare-mirror --output /absolute/extensions/octet-pi-compat --json [--project-trusted] | node configure.mjs --reviewed --from-pi --mirror --output ... --expected-fingerprint <sha256> [--project-trusted]');
+    if (prepareMirror) {
+      if (!json || reviewed || fromPi || mirror || overwrite || providerCredentials || expectedFingerprint || extensions.length) throw new Error('--prepare-mirror is read-only and requires --json; use only --output and optional --project-trusted');
+      console.log(JSON.stringify(preparePiMirror({ output, projectTrusted })));
+    } else {
+      if (json) throw new Error('--json is only valid with --prepare-mirror');
+      if (fromPi && extensions.length) throw new Error('--from-pi reads your Pi setup; do not also list entrypoints');
+      if (mirror && !fromPi) throw new Error('--mirror reads your Pi setup; it requires --from-pi');
+      if (mirror && !expectedFingerprint) throw new Error('--mirror requires --expected-fingerprint from --prepare-mirror --json');
+      if (expectedFingerprint && !mirror) throw new Error('--expected-fingerprint requires --mirror');
+      const result = fromPi ? await configureFromPi({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, mirror, projectTrusted }) : configure({ output, extensions, reviewed, overwrite, providerCredentials });
+      if (mirror) console.log(`Mirrored your Pi setup into ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
+      else console.log(`Configured ${result.registrations.commands.length} commands, ${result.registrations.tools.length} tools in ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
+    }
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

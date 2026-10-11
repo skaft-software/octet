@@ -93,6 +93,17 @@ fn command_queue_parses_reconfiguration_values() {
     queue_command(Command::Setup, &mut queue).unwrap();
     queue_command(Command::Thinking(Some("high".into())), &mut queue).unwrap();
     queue_command(Command::Resume(Some("id".into())), &mut queue).unwrap();
+    queue_command(Command::Pi(commands::PiSubcommand::Off), &mut queue).unwrap();
+    assert!(!active_command_needs_idle_slot(&Command::Pi(
+        commands::PiSubcommand::Status
+    )));
+    for sub in [
+        commands::PiSubcommand::On,
+        commands::PiSubcommand::Off,
+        commands::PiSubcommand::Setup,
+    ] {
+        assert!(active_command_needs_idle_slot(&Command::Pi(sub)));
+    }
     assert_eq!(queue.pop_front(), Some(PendingIdleAction::Login(None)));
     assert_eq!(queue.pop_front(), Some(PendingIdleAction::Setup));
     assert!(matches!(
@@ -102,6 +113,10 @@ fn command_queue_parses_reconfiguration_values() {
     assert_eq!(
         queue.pop_front(),
         Some(PendingIdleAction::ResumeSession(Some("id".into())))
+    );
+    assert_eq!(
+        queue.pop_front(),
+        Some(PendingIdleAction::Pi(commands::PiSubcommand::Off))
     );
 }
 

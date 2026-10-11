@@ -16,7 +16,7 @@ use super::native_scrollback::{
 };
 use super::shell_chrome::render_startup_surface;
 use super::viewport::{render_shell_viewport_at, render_shell_viewport_update};
-use super::ShellState;
+use super::{InteractiveShell, ShellState};
 use crate::tui::terminal::{OctetTerminal, TerminalSize};
 
 /// Bound semantic stream painting to roughly 60 fps; input/readiness preempt it.
@@ -86,6 +86,7 @@ pub(super) struct SharedState(
     /// without taking the state lock on every renderer wake.
     Arc<AtomicBool>,
     Arc<Mutex<super::tern_input::Mailbox>>,
+    Arc<AtomicBool>,
 );
 
 impl SharedState {
@@ -106,6 +107,7 @@ impl SharedState {
             Arc::new(Mutex::new(None)),
             file_index_ready,
             Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
+            Arc::new(AtomicBool::new(initial_fullscreen_mode())),
         )
     }
 
@@ -176,6 +178,14 @@ impl SharedState {
 
     pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {
         &self.3
+    }
+
+    fn fullscreen(&self) -> bool {
+        self.4.load(Ordering::Acquire)
+    }
+
+    fn set_fullscreen(&self, enabled: bool) -> bool {
+        self.4.swap(enabled, Ordering::AcqRel)
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -495,6 +505,7 @@ pub(super) fn render_loop(
     application_viewport: bool,
     clear_on_start: bool,
 ) {
+    let alternate_screen = state.fullscreen();
     render_loop_with_terminal(
         terminal,
         state,
@@ -503,27 +514,50 @@ pub(super) fn render_loop(
         RenderLoopOptions {
             application_viewport,
             clear_on_start,
-            alternate_screen: alternate_screen_opt_in(),
+            alternate_screen,
         },
         synchronize_terminal_size,
     );
 }
 
-/// Opt-in entry point for Pi's fullscreen alternate-screen session.
-///
-/// The primary screen remains the default: its native scrollback is what the
-/// default mouse policy (`auto`/`terminal`) promises the reader, and the PTY
-/// frame contract pins that behaviour. `OCTET_TUI_ALT_SCREEN` (any value other
-/// than empty/`0`/`false`/`off`) runs the same renderer with a fixed alternate
-/// viewport that restores the final document to the main screen on exit, until
-/// a product surface (config or CLI) carries the choice.
-fn alternate_screen_opt_in() -> bool {
-    std::env::var("OCTET_TUI_ALT_SCREEN").is_ok_and(|value| {
+/// The normal interactive renderer is fullscreen. The environment remains a
+/// compatibility/test override; persistent configuration and explicit CLI
+/// choices are applied by the shell's live mode API after configuration loads.
+fn initial_fullscreen_mode() -> bool {
+    fullscreen_from_override(std::env::var("OCTET_TUI_ALT_SCREEN").ok().as_deref())
+}
+
+fn fullscreen_from_override(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "off" | "no"
+            "" | "0" | "false" | "off" | "no" | "primary" | "inline"
         )
     })
+}
+
+#[cfg(test)]
+mod fullscreen_mode_tests {
+    use super::{fullscreen_from_override, InteractiveShell};
+
+    #[test]
+    fn fullscreen_is_the_default_and_inline_overrides_are_explicit() {
+        assert!(fullscreen_from_override(None));
+        for value in ["", "0", "false", "off", "no", "primary", "inline"] {
+            assert!(!fullscreen_from_override(Some(value)), "{value:?}");
+        }
+        for value in ["1", "true", "on", "yes", "fullscreen"] {
+            assert!(fullscreen_from_override(Some(value)), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn shell_mode_changes_are_retained_for_the_next_renderer_session() {
+        let mut shell = InteractiveShell::test_shell();
+        let fullscreen = !shell.state.fullscreen();
+        shell.set_tui_fullscreen(fullscreen).unwrap();
+        assert_eq!(shell.state.fullscreen(), fullscreen);
+    }
 }
 
 #[derive(Default)]
@@ -531,6 +565,30 @@ pub(super) struct RenderLoopOptions {
     pub application_viewport: bool,
     pub clear_on_start: bool,
     pub alternate_screen: bool,
+}
+
+impl InteractiveShell {
+    /// Apply the configured fullscreen mode without replacing the input owner
+    /// or shell state. Re-entering the renderer restores the retained transcript
+    /// and draft using the selected screen policy.
+    pub(crate) fn set_tui_fullscreen(&mut self, enabled: bool) -> anyhow::Result<()> {
+        let previous = self.state.set_fullscreen(enabled);
+        if previous == enabled || self.render_thread.is_none() || super::tern::enabled_cached() {
+            return Ok(());
+        }
+
+        self.suspend_renderer();
+        if let Err(error) = self.resume() {
+            self.state.set_fullscreen(previous);
+            if let Err(restore_error) = self.resume() {
+                return Err(anyhow::anyhow!(
+                    "could not apply fullscreen mode ({error:#}) or restore the previous renderer ({restore_error:#})"
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 // The same loop is exercised with an in-memory terminal and resize probe in

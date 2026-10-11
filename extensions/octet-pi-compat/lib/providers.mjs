@@ -63,11 +63,11 @@ export function modelRegistry(getHost, runtime) {
     getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').map(modelView),
     getAll: () => all().map(modelView),
     find: (provider, id) => modelView(all().find(model => model.provider === provider && model.id === id)),
-    isUsingOAuth(model) {
-      const facts = snapshot(getHost(), 'model_auth', 'ctx.modelRegistry.isUsingOAuth');
-      const key = JSON.stringify([model.provider, model.id]);
-      if (!Object.hasOwn(facts, key)) unsupported('ctx.modelRegistry.isUsingOAuth', 'authentication status for this model was not supplied by the host');
-      return facts[key].using_oauth;
+    isUsingOAuth() {
+      unsupported('ctx.modelRegistry.isUsingOAuth', 'provider-level OAuth status is not supplied by the host');
+    },
+    hasConfiguredAuth() {
+      unsupported('ctx.modelRegistry.hasConfiguredAuth', 'provider-level configured-auth status is not supplied by the host');
     },
     async getApiKeyAndHeaders(model) {
       if (!model || typeof model !== 'object') invalid('modelRegistry model');

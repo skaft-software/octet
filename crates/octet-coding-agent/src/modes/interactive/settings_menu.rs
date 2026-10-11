@@ -2,8 +2,8 @@
 //!
 //! Open `root_panel` for `SettingsCommand::Menu`. A confirmed
 //! `PanelAction::SelectSettings` index is already the original, unfiltered index.
-//! In that menu-result path only, `Images(None)`, `DefaultModel(None)`, and
-//! `DefaultReasoning(None)` open their child panels rather than invoking the
+//! In that menu-result path only, `Images(None)`, `DefaultModel(None)`,
+//! `DefaultReasoning(None)`, and `TuiMode(None)` open their child panels rather than invoking the
 //! explicit slash-command report/toggle behavior. `Theme(None)` opens the existing
 //! theme picker, `Menu` is Back, and `Show` opens the existing diagnostic report.
 //! Explicit values use the owner's existing safe display/deferred settings
@@ -14,7 +14,7 @@
 //! or infer saved defaults from the active model/reasoning or launch config.
 
 use crate::commands::SettingsCommand;
-use crate::config::ThinkingLevel;
+use crate::config::{ThinkingLevel, TuiMode};
 use crate::tui::view::{OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, Panel, PanelAction};
 use octet_ai::ModelId;
 
@@ -48,7 +48,7 @@ fn back() -> Row {
 }
 
 /// Root destinations. `show_images` is effective display state, not a saved default.
-pub(super) fn root_panel(show_images: bool) -> Panel {
+pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode) -> Panel {
     panel(
         OrdinarySurfaceMetadata::with_purpose(
             "Settings",
@@ -59,6 +59,11 @@ pub(super) fn root_panel(show_images: bool) -> Panel {
                 "Theme".into(),
                 "Preview and choose a terminal appearance".into(),
                 SettingsCommand::Theme(None),
+            ),
+            (
+                format!("Terminal screen ({})", tui_mode.as_str()),
+                "Choose the saved fullscreen/inline preference; --tui-mode overrides it for this invocation".into(),
+                SettingsCommand::TuiMode(None),
             ),
             (
                 format!(
@@ -85,6 +90,36 @@ pub(super) fn root_panel(show_images: bool) -> Panel {
             ),
         ],
         0,
+    )
+}
+
+/// Fullscreen/inline choices plus Back; CLI mode remains authoritative per launch.
+pub(super) fn tui_mode_panel(tui_mode: TuiMode) -> Panel {
+    let rows = [TuiMode::Fullscreen, TuiMode::Inline]
+        .into_iter()
+        .map(|mode| {
+            (
+                format!(
+                    "{}{}",
+                    mode.as_str(),
+                    if mode == tui_mode { " (current)" } else { "" },
+                ),
+                "Persisted interactive terminal mode; --tui-mode remains authoritative for this invocation".into(),
+                SettingsCommand::TuiMode(Some(mode)),
+            )
+        })
+        .chain(std::iter::once(back()))
+        .collect();
+    panel(
+        OrdinarySurfaceMetadata::with_purpose(
+            "Terminal screen",
+            "Choose fullscreen or inline rendering for the next interactive launch",
+        ),
+        rows,
+        match tui_mode {
+            TuiMode::Fullscreen => 0,
+            TuiMode::Inline => 1,
+        },
     )
 }
 
@@ -214,11 +249,12 @@ mod tests {
 
     #[test]
     fn root_has_only_the_approved_destinations_and_no_inferred_defaults() {
-        let (items, commands, selected) = parts(root_panel(false));
+        let (items, commands, selected) = parts(root_panel(false, TuiMode::Fullscreen));
         assert_eq!(
             items,
             vec![
                 "Theme",
+                "Terminal screen (fullscreen)",
                 "Inline tool-result images (Off)",
                 "Default model for new sessions",
                 "Default reasoning for new sessions",
@@ -229,6 +265,7 @@ mod tests {
             commands,
             vec![
                 SettingsCommand::Theme(None),
+                SettingsCommand::TuiMode(None),
                 SettingsCommand::Images(None),
                 SettingsCommand::DefaultModel(None),
                 SettingsCommand::DefaultReasoning(None),
@@ -237,9 +274,18 @@ mod tests {
         );
         assert_eq!(selected, 0);
         assert_eq!(
-            parts(root_panel(true)).0[1],
+            parts(root_panel(true, TuiMode::Fullscreen)).0[2],
             "Inline tool-result images (On)"
         );
+    }
+
+    #[test]
+    fn tui_mode_choices_preselect_the_effective_mode() {
+        for mode in [TuiMode::Fullscreen, TuiMode::Inline] {
+            let (_, commands, selected) = parts(tui_mode_panel(mode));
+            assert_eq!(commands[selected], SettingsCommand::TuiMode(Some(mode)));
+            assert_eq!(commands.last(), Some(&SettingsCommand::Menu));
+        }
     }
 
     #[test]
@@ -296,6 +342,7 @@ mod tests {
     #[test]
     fn child_back_and_escape_use_ordinary_selection_and_cancellation() {
         for panel in [
+            tui_mode_panel(TuiMode::Fullscreen),
             images_panel(false),
             default_model_panel(&[]),
             default_reasoning_panel(&[ThinkingLevel::High]),
@@ -304,7 +351,7 @@ mod tests {
             shell.open_panel(panel);
             filter(&mut shell, "back");
             assert_eq!(confirm(&mut shell).1, SettingsCommand::Menu);
-            shell.open_panel(root_panel(false));
+            shell.open_panel(root_panel(false, TuiMode::Fullscreen));
             assert!(matches!(
                 shell.panel_input(&key(KeyCode::Esc)),
                 Some((PanelResult::Cancel, PanelAction::SelectSettings(_))),
@@ -333,7 +380,7 @@ mod tests {
     #[test]
     fn no_filter_matches_keeps_the_menu_open_until_cancelled() {
         let mut shell = InteractiveShell::test_shell();
-        shell.open_panel(root_panel(false));
+        shell.open_panel(root_panel(false, TuiMode::Fullscreen));
         filter(&mut shell, "does-not-match");
         assert!(shell.panel_input(&key(KeyCode::Enter)).is_none());
         assert!(shell.has_panel());

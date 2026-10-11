@@ -985,6 +985,73 @@ mod tests {
     }
 
     #[test]
+    fn multiline_path_led_prompts_keep_prompt_and_command_input_semantics() {
+        let path_prompt = "/Users/example/project/new-file.txt\n\nPlease review this destination.";
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
+                path_prompt
+            ),
+            InputAction::Submit(path_prompt.into())
+        );
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                true,
+                path_prompt
+            ),
+            InputAction::Steer(path_prompt.into())
+        );
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                true,
+                path_prompt
+            ),
+            InputAction::Queue(path_prompt.into())
+        );
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Tab, KeyModifiers::NONE)),
+                false,
+                "/Users/example/project/new-file.txt"
+            ),
+            InputAction::CompletePath
+        );
+
+        for command in [
+            "/model provider/foo\n\nKeep this as a slash command.",
+            "/unknown-command\n\nKeep unknown-command handling unchanged.",
+        ] {
+            assert_eq!(
+                translate(
+                    Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                    false,
+                    command
+                ),
+                InputAction::Command(command.into())
+            );
+        }
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Enter, KeyModifiers::NONE)),
+                true,
+                "/skill:review\n\nKeep explicit skills as prompts."
+            ),
+            InputAction::Queue("/skill:review\n\nKeep explicit skills as prompts.".into())
+        );
+        assert_eq!(
+            translate(
+                Some(key(KeyCode::Tab, KeyModifiers::NONE)),
+                false,
+                "/unknown-command"
+            ),
+            InputAction::CompleteSlashCommand
+        );
+    }
+
+    #[test]
     fn slash_tab_requests_completion() {
         assert_eq!(
             translate(Some(key(KeyCode::Tab, KeyModifiers::NONE)), false, "/mod"),

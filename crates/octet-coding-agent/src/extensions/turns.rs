@@ -26,6 +26,15 @@ pub(crate) struct AfterResponseOutput {
     queued_context: Vec<(String, ContextContribution)>,
 }
 
+/// Opaque evidence that the current session view was prepared by every live,
+/// owner-routed process in the captured extension fleet.
+pub(crate) struct PreparedSessionSnapshot {
+    session_owner: String,
+    process_owners: Vec<octet_agent::extension_process::ExtensionResourceOwner>,
+}
+
+const SESSION_SNAPSHOT_READY_DEADLINE: Duration = Duration::from_secs(5);
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
@@ -171,11 +180,9 @@ impl ExecutableExtensions {
         self.last_lifecycle_outcome = Some(lifecycle_outcome);
     }
 
-    /// Settles the old observational session boundary, updates every live
-    /// process snapshot, starts observation for the replacement session, and
-    /// fences queued active-session mutations from the previous snapshot. The
-    /// active agent has already changed by the time this is called.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests only
+    /// Test helper for lifecycle-only tests. Production replacements must use
+    /// the prepared-snapshot release methods below.
+    #[cfg(test)]
     pub fn transition_active_session(
         &mut self,
         session: &Session,
@@ -186,6 +193,7 @@ impl ExecutableExtensions {
         self.transition_active_session_with_setup(
             session, model, reasoning, sessions, "resume", None,
         );
+        self.start_session_lifecycle();
     }
 
     pub fn transition_active_session_with_setup(
@@ -199,6 +207,7 @@ impl ExecutableExtensions {
     ) {
         self.session_start_reason = reason;
         self.pending_session_setup = setup;
+        self.deactivate_session_lifecycle_driver();
         self.retire_active_resources();
         self.cancel_session_hook_starts();
         if self.session_lifecycle_started {
@@ -248,12 +257,12 @@ impl ExecutableExtensions {
             view.resource_owner.is_none() || view.resource_owner.as_deref() == active_owner
         });
         self.refresh_host_state(session, model, reasoning, sessions);
-        if self.pending_session_setup.is_none() {
-            self.start_session_lifecycle();
+        // Setup requests are the only lifecycle work allowed before the final
+        // snapshot is prepared. Ordinary lifecycle and deferred start hooks are
+        // released by start_session_lifecycle_after_snapshot.
+        if self.pending_session_setup.is_some() {
+            self.activate_session_lifecycle_driver();
         }
-        // The session changed in place, so requests admitted against the old
-        // snapshot must not run against this replacement.
-        self.activate_session_lifecycle_driver();
     }
 
     /// Validate every setup mutation against its original parent and live owner.
@@ -273,15 +282,141 @@ impl ExecutableExtensions {
                 })
     }
 
-    /// Start only after setup writes are complete; return the exact process
-    /// handles whose deferred session_start callbacks the caller must await.
-    pub fn complete_session_setup(&mut self) -> Vec<(ExtensionProcess, String, &'static str)> {
+    /// Capture and prepare the current host session view without borrowing the
+    /// frontend. The caller supplies the real request cancellation token; all
+    /// stateful processes share one bounded deadline.
+    pub(crate) fn wait_for_active_session_snapshot_prepared(
+        &self,
+        cancellation: CancellationToken,
+    ) -> impl std::future::Future<Output = anyhow::Result<PreparedSessionSnapshot>> + Send + 'static
+    {
+        let session_owner = self.resource_owner.clone();
+        let routed_processes = session_owner
+            .as_deref()
+            .map(|owner| {
+                self.processes
+                    .iter()
+                    .filter_map(|process| {
+                        process
+                            .current_context_for_resource_owner(owner.to_owned())
+                            .resource_owner
+                            .map(|owner| (process.clone(), owner))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        async move {
+            let session_owner = session_owner
+                .ok_or_else(|| anyhow::anyhow!("active session owner is unavailable"))?;
+            anyhow::ensure!(
+                !cancellation.is_cancelled(),
+                "session snapshot readiness cancelled"
+            );
+            let deadline = Instant::now() + SESSION_SNAPSHOT_READY_DEADLINE;
+            let mut process_owners = Vec::with_capacity(routed_processes.len());
+            for (process, owner) in &routed_processes {
+                anyhow::ensure!(
+                    !cancellation.is_cancelled(),
+                    "session snapshot readiness cancelled"
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                anyhow::ensure!(
+                    !remaining.is_zero(),
+                    "session snapshot readiness exceeded {SESSION_SNAPSHOT_READY_DEADLINE:?}"
+                );
+                process
+                    .wait_for_session_snapshot_prepared(owner, remaining, &cancellation)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "extension {:?} session snapshot was not prepared",
+                            process.descriptor().manifest.name
+                        )
+                    })?;
+                process_owners.push(owner.clone());
+            }
+            anyhow::ensure!(
+                !cancellation.is_cancelled(),
+                "session snapshot readiness cancelled"
+            );
+            let current_owners = current_session_snapshot_owners(
+                routed_processes.iter().map(|(process, _)| process.clone()),
+                &session_owner,
+            );
+            anyhow::ensure!(
+                current_owners == process_owners,
+                "session snapshot owner or process generation changed while waiting"
+            );
+            Ok(PreparedSessionSnapshot {
+                session_owner,
+                process_owners,
+            })
+        }
+    }
+
+    /// Release ordinary replacement lifecycle only after the exact prepared
+    /// owner/generation set is still current.
+    pub(crate) fn start_session_lifecycle_after_snapshot(
+        &mut self,
+        prepared: PreparedSessionSnapshot,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.pending_session_setup.is_none(),
+            "session lifecycle cannot start before setup completes"
+        );
+        anyhow::ensure!(
+            self.prepared_session_snapshot_is_current(&prepared),
+            "prepared session snapshot owner or process generation is no longer current"
+        );
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "session lifecycle release cancelled"
+        );
+        self.start_session_lifecycle();
+        self.activate_session_lifecycle_driver();
+        Ok(())
+    }
+
+    /// Clear the setup fence and release deferred session_start only after the
+    /// final setup mutation's exact snapshot is still current.
+    pub(crate) fn complete_session_setup_after_snapshot(
+        &mut self,
+        parent: u64,
+        owner: &octet_agent::extension_process::ExtensionResourceOwner,
+        prepared: PreparedSessionSnapshot,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<Vec<(ExtensionProcess, String, &'static str)>> {
+        anyhow::ensure!(
+            self.session_setup_is_current(parent, owner),
+            "session setup parent or owner is no longer current"
+        );
+        anyhow::ensure!(
+            prepared.session_owner == owner.session_id
+                && prepared.process_owners.contains(owner)
+                && self.prepared_session_snapshot_is_current(&prepared),
+            "prepared setup snapshot owner or process generation is no longer current"
+        );
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "session setup completion cancelled"
+        );
         self.pending_session_setup = None;
         self.start_session_lifecycle();
-        std::mem::take(&mut self.pending_session_hook_starts)
+        self.activate_session_lifecycle_driver();
+        Ok(std::mem::take(&mut self.pending_session_hook_starts)
             .into_iter()
             .map(|(process, owner)| (process, owner, self.session_start_reason))
-            .collect()
+            .collect())
+    }
+
+    fn prepared_session_snapshot_is_current(&self, prepared: &PreparedSessionSnapshot) -> bool {
+        self.resource_owner.as_deref() == Some(prepared.session_owner.as_str())
+            && current_session_snapshot_owners(
+                self.processes.iter().cloned(),
+                &prepared.session_owner,
+            ) == prepared.process_owners
     }
 
     /// The launch already projected skills and session metadata for initialize.
@@ -660,6 +795,20 @@ impl ExecutableExtensions {
         messages.extend(self.drain_events());
         messages
     }
+}
+
+fn current_session_snapshot_owners(
+    processes: impl IntoIterator<Item = ExtensionProcess>,
+    session_owner: &str,
+) -> Vec<octet_agent::extension_process::ExtensionResourceOwner> {
+    processes
+        .into_iter()
+        .filter_map(|process| {
+            process
+                .current_context_for_resource_owner(session_owner.to_owned())
+                .resource_owner
+        })
+        .collect()
 }
 
 #[cfg(test)]

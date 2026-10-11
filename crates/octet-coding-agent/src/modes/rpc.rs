@@ -69,6 +69,8 @@ use crate::resources::{compose_instructions, expand_skill_command};
 use events::{active_state_value, EventTranslator};
 #[cfg(test)]
 use events::{RpcToolProgress, MAX_RPC_TOOL_PROGRESS_BYTES, PARTIAL_SNAPSHOTS};
+#[cfg(test)]
+use projection::rpc_messages_from_session;
 use projection::{
     assistant_value, dollars, inferred_stop_reason, iso_timestamp, media_content, model_value,
     rpc_commands, rpc_messages, tool_result_content, tool_result_value_at, user_content_at,

@@ -20,21 +20,10 @@ impl ExecutableExtensions {
         &mut self,
         catalog: &ModelCatalog,
         scope: Option<&[crate::cli::parity::ScopedModel]>,
-        current_model: &Model,
+        _current_model: &Model,
     ) {
         self.refresh_native_credential_catalog(catalog);
         let mut available = Vec::new();
-        let mut model_auth = serde_json::Map::new();
-        let mut record_auth = |model: &Model| {
-            if let (Some(using_oauth), Some(view)) = (
-                model.endpoint.auth.is_oauth(),
-                self.provider_runtime.pi_model_view(model),
-            ) {
-                let key = serde_json::to_string(&[&view.provider, &view.id])
-                    .expect("model identity is JSON text");
-                model_auth.insert(key, serde_json::json!({"using_oauth": using_oauth}));
-            }
-        };
         let mut available_representable = true;
         for spec in catalog.models() {
             let model = match catalog.resolve(&spec.id) {
@@ -51,7 +40,6 @@ impl ExecutableExtensions {
                 available_representable = false;
                 break;
             };
-            record_auth(&model);
             available.push(view);
         }
         let mut scoped = Vec::new();
@@ -87,10 +75,16 @@ impl ExecutableExtensions {
             }
             scoped.push(value);
         }
-        // The selected native route may not belong to the credential-scoped
-        // catalog (for example a host-owned scripted provider).
-        record_auth(current_model);
-        let mut snapshot = serde_json::json!({"model_auth": model_auth});
+        // No native service currently supplies Pi's complete uncredentialed
+        // registry or provider-level auth facts. Publish explicit unsupported
+        // states; the selection catalog and endpoint auth configuration are not
+        // substitutes for those provider-level facts.
+        let mut snapshot = serde_json::json!({
+            "all_models_status": {"status": "unavailable"},
+            "provider_auth_status": {"status": "unavailable"},
+            "configured_auth": {},
+            "provider_oauth": {},
+        });
         if available_representable {
             snapshot["available_models"] = serde_json::json!(available);
         }
@@ -745,5 +739,57 @@ mod credential_tests {
             .pi_provider_credentials("test", "gpt-6-astra")
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod pi_catalog_fact_tests {
+    use super::*;
+
+    #[test]
+    fn credential_filtered_catalog_does_not_claim_complete_inventory_or_provider_auth() {
+        let builtins = ModelCatalog::builtin().unwrap();
+        let mut spec = (*builtins
+            .resolve(&ModelId("gpt-6-astra".into()))
+            .unwrap()
+            .spec)
+            .clone();
+        spec.id = ModelId("fixture/test-model".into());
+        spec.endpoint = EndpointId("fixture-static-auth".into());
+        spec.api_name = "test-model".into();
+
+        let mut catalog = ModelCatalog::default();
+        catalog
+            .register_endpoint(Endpoint {
+                id: spec.endpoint.clone(),
+                base_url: url::Url::parse("https://example.test/v1/").unwrap(),
+                auth: octet_ai::Auth::bearer("catalog-fixture-secret"),
+                default_headers: http::HeaderMap::new(),
+                transport: Default::default(),
+                runtime: Default::default(),
+                timeout: Duration::from_secs(30),
+            })
+            .unwrap();
+        catalog.register_model(spec).unwrap();
+        let current = catalog
+            .resolve(&ModelId("fixture/test-model".into()))
+            .unwrap();
+        let mut extensions = ExecutableExtensions::default();
+
+        extensions.refresh_pi_model_catalog(&catalog, None, &current);
+
+        let state = extensions
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = state.pi_models.as_ref().unwrap();
+        assert_eq!(snapshot["all_models_status"]["status"], "unavailable");
+        assert!(snapshot.get("all_models").is_none());
+        assert_eq!(snapshot["provider_auth_status"]["status"], "unavailable");
+        assert_eq!(snapshot["configured_auth"], serde_json::json!({}));
+        assert_eq!(snapshot["provider_oauth"], serde_json::json!({}));
+        assert!(snapshot.get("model_auth").is_none());
+        assert_eq!(snapshot["available_models"][0]["provider"], "fixture");
+        assert!(!snapshot.to_string().contains("catalog-fixture-secret"));
     }
 }

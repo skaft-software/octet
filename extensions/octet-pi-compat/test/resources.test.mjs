@@ -211,12 +211,12 @@ test('resources: malformed callback values and unknown fields fail the entire re
 test('resources: bounds count normalized UTF-8 bytes and all arrays/handlers before deduplication', async t => {
   const peer = await started(t);
   const exact = '/' + 'é'.repeat(2047) + 'x'; assert.equal(Buffer.byteLength(exact), 4096);
-  await set(peer, { results: { first: { skillPaths: Array(64).fill('/x') } } });
-  assert.equal((await discover(peer).response).result.resource_paths.skill_paths.length, 64);
+  await set(peer, { results: { first: { skillPaths: Array(256).fill('/x') } } });
+  assert.equal((await discover(peer).response).result.resource_paths.skill_paths.length, 256);
   for (const results of [
-    { first: { skillPaths: Array(65).fill('/x') } },
-    { first: { skillPaths: Array(64).fill('/x'), promptPaths: ['/x'] } },
-    { first: { skillPaths: Array(64).fill('/x') }, middle: { themePaths: ['/x'] } },
+    { first: { skillPaths: Array(257).fill('/x') } },
+    { first: { skillPaths: Array(256).fill('/x'), promptPaths: ['/x'] } },
+    { first: { skillPaths: Array(256).fill('/x') }, middle: { themePaths: ['/x'] } },
     { first: { skillPaths: [exact + 'x'] } },
     { first: { skillPaths: ['x'.repeat(4096)] } }, // Input fits; resolved cwd + path does not.
     { first: { skillPaths: Array(16).fill(exact), themePaths: ['/x'] } },
@@ -298,15 +298,15 @@ test('resources: configured ordinary bridges reserve the real palette consumer a
   await late.close();
 });
 
-for (const mirror of [false, true]) test(`resources: ${mirror ? 'mirror' : 'manual non-mirror'} palettes refresh before a full skill inventory within the shared budget`, async t => {
+for (const mirror of [false, true]) test(`resources: ${mirror ? 'mirror' : 'manual non-mirror'} palettes refresh before a full skill inventory within the 256-path budget`, async t => {
   const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
   await mkdir(join(agent, 'themes'), { recursive: true });
   const first = join(agent, 'themes/first.json'), second = join(agent, 'themes/second.json'), third = join(agent, 'themes/third.json');
   await writeFile(first, JSON.stringify(palette('first'))); await writeFile(second, JSON.stringify(palette('second')));
   await writeFile(join(agent, 'settings.json'), JSON.stringify({ theme: 'first' }));
   await writeFile(join(agent, 'keybindings.json'), '{}'); await writeFile(join(agent, 'AGENTS.md'), 'fixture context');
-  for (let i = 0; i < 64; i++) {
-    const skill = join(agent, `skills/skill-${String(i).padStart(2, '0')}`);
+  for (let i = 0; i < 220; i++) {
+    const skill = join(agent, `skills/skill-${String(i).padStart(3, '0')}`);
     await mkdir(skill, { recursive: true }); await writeFile(join(skill, 'SKILL.md'), '# skill');
   }
   const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
@@ -316,13 +316,105 @@ for (const mirror of [false, true]) test(`resources: ${mirror ? 'mirror' : 'manu
   const startup = (await discover(peer).response).result.resource_paths;
   assert.deepEqual(startup.theme_paths, [first, second]);
   assert.equal(startup.default_theme, mirror ? first : undefined);
-  assert.equal(startup.skill_paths.length, mirror ? 60 : 0);
-  assert.equal(Object.entries(startup).filter(([key]) => key.endsWith('_paths')).reduce((n, [, paths]) => n + paths.length, 0), mirror ? 64 : 2);
+  assert.equal(startup.skill_paths.length, mirror ? 220 : 0);
+  assert.equal(Object.entries(startup).filter(([key]) => key.endsWith('_paths')).reduce((n, [, paths]) => n + paths.length, 0), mirror ? 224 : 2);
   await rm(second); await writeFile(third, JSON.stringify(palette('third')));
   const reload = (await discover(peer, 'reload').response).result.resource_paths;
   assert.deepEqual(reload.theme_paths, [first, third]);
   assert.equal(reload.default_theme, mirror ? first : undefined);
-  if (mirror) await peer.waitStderr(/Pi skills: .*shared 64-path/);
+  await peer.close();
+});
+
+test('resources: runtime Pi mirroring accepts the exact combined 256-path setup then refuses 257 without partial paths', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(agent, { recursive: true });
+  await writeFile(join(agent, 'settings.json'), '{}');
+  await writeFile(join(agent, 'keybindings.json'), '{}');
+  await writeFile(join(agent, 'AGENTS.md'), 'context');
+  await mkdir(join(agent, 'prompts'), { recursive: true });
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  for (let i = 0; i < 100; i++) {
+    const path = join(agent, `skills/skill-${String(i).padStart(3, '0')}/SKILL.md`);
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '# skill');
+  }
+  for (let i = 0; i < 100; i++) await writeFile(join(agent, `prompts/prompt-${String(i).padStart(3, '0')}.md`), '# prompt');
+  for (let i = 0; i < 54; i++) await writeFile(join(agent, `themes/theme-${String(i).padStart(3, '0')}.json`), '{}');
+  const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, mirrorPiSetup: true, cwd });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const accepted = (await discover(peer).response).result.resource_paths;
+  assert.equal(accepted.skill_paths.length + accepted.prompt_paths.length + accepted.theme_paths.length + accepted.keybindings_paths.length + accepted.context_paths.length, 256);
+  await mkdir(join(agent, 'skills/skill-100'), { recursive: true });
+  await writeFile(join(agent, 'skills/skill-100/SKILL.md'), '# overflow');
+  const refused = await discover(peer, 'reload').response;
+  assert.match(refused.error.message, /bounds_exceeded Pi setup resources/);
+  assert.equal(refused.result, undefined);
+  await peer.close();
+});
+
+test('resources: overlapping theme snapshot and live paths consume the raw combined budget', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  const theme = join(agent, 'themes/theme-000.json'), imported = join(cwd, 'selected.json');
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  await writeFile(theme, '{}'); await writeFile(imported, JSON.stringify(palette('selected')));
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [fixture], piAgentDir: agent, cwd,
+    themePaths: [theme], piTheme: { name: 'selected', path: imported, selector: 'pi-selected', nativePath: theme } });
+  const peer = launch(t, [fixture], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  await set(peer, { results: { first: { skillPaths: Array(255).fill('./duplicate') } } });
+  const refused = await discover(peer).response;
+  assert.match(refused.error.message, /bounds_exceeded/);
+  assert.equal(refused.result, undefined);
+  await peer.close();
+});
+
+test('resources: runtime Pi discovery refuses bounded traversal overflow instead of mirroring a partial inventory', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(agent, { recursive: true });
+  await writeFile(join(agent, 'settings.json'), '{}');
+  for (let i = 0; i < 257; i++) {
+    const path = join(agent, `skills/skill-${String(i).padStart(3, '0')}/SKILL.md`);
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '# skill');
+  }
+  const entry = join(cwd, 'empty.mjs'); await writeFile(entry, 'export default pi => {};');
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [entry], piAgentDir: agent, mirrorPiSetup: true, cwd });
+  const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const refused = await discover(peer).response;
+  assert.match(refused.error.message, /bounds_exceeded Pi setup resources: .*257\/256 directory_entries/);
+  assert.equal(refused.result, undefined);
+  await peer.close();
+});
+
+test('resources: Pi mirror preserves the complete installed-scale skill, prompt and theme inventory', async t => {
+  const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
+  await mkdir(agent, { recursive: true });
+  const settingsEntry = join(cwd, 'empty.mjs');
+  await writeFile(settingsEntry, 'export default pi => {};');
+  await writeFile(join(agent, 'settings.json'), JSON.stringify({ extensions: [settingsEntry] }));
+  const skills = [], prompts = [], themes = [];
+  for (let i = 0; i < 85; i++) {
+    const path = join(agent, `skills/skill-${String(i).padStart(3, '0')}/SKILL.md`);
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '# skill'); skills.push(path);
+  }
+  for (let i = 0; i < 87; i++) {
+    const path = join(agent, `prompts/prompt-${String(i).padStart(3, '0')}.md`);
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '# prompt'); prompts.push(path);
+  }
+  for (let i = 0; i < 50; i++) {
+    const path = join(agent, `themes/theme-${String(i).padStart(3, '0')}.json`);
+    await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, '{}'); themes.push(path);
+  }
+  const { registrations: metadata } = configure({ reviewed: true, output, extensions: [settingsEntry], piAgentDir: agent, mirrorPiSetup: true, cwd });
+  const peer = launch(t, [settingsEntry], { config: join(output, 'bridge.json'), metadata, cwd });
+  await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
+  const resources = (await discover(peer).response).result.resource_paths;
+  assert.deepEqual(resources.skill_paths, skills);
+  assert.deepEqual(resources.prompt_paths, prompts);
+  assert.deepEqual(resources.theme_paths, themes);
+  assert.equal(resources.skill_paths.length + resources.prompt_paths.length + resources.theme_paths.length, 222);
+  assert.doesNotMatch(peer.stderr(), /bounds_exceeded|paths exceeded/);
   await peer.close();
 });
 
@@ -345,9 +437,9 @@ test('resources: live palettes take priority over old unselected import snapshot
   const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
   await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
   const paths = (await discover(peer).response).result.resource_paths;
-  assert.deepEqual(paths.theme_paths, [...live, ...snapshots.slice(0, 13), selected]);
-  assert.equal(paths.default_theme, selected); assert.equal(paths.theme_paths.length, 64);
-  await peer.waitStderr(/Pi themes: 6 paths exceeded/); await peer.close();
+  assert.deepEqual(paths.theme_paths, [...live, ...snapshots]);
+  assert.equal(paths.default_theme, selected); assert.equal(paths.theme_paths.length, 70);
+  await peer.close();
 });
 
 test('resources: safe exact palette files preserve malformed JSON for native validation with bounded filesystem diagnostics', async t => {
@@ -372,7 +464,7 @@ test('resources: safe exact palette files preserve malformed JSON for native val
   await peer.close();
 });
 
-test('resources: palette budget retains a malformed later-stem winner instead of exposing its shadow', async t => {
+test('resources: project and user palettes preserve Pi order beyond the former 64-path budget', async t => {
   const cwd = await directory(t), agent = join(cwd, 'agent'), output = join(cwd, 'octet-pi-compat');
   await mkdir(join(agent, 'themes'), { recursive: true });
   await mkdir(join(cwd, '.pi/themes'), { recursive: true });
@@ -388,10 +480,10 @@ test('resources: palette budget retains a malformed later-stem winner instead of
   const peer = launch(t, [entry], { config: join(output, 'bridge.json'), metadata, cwd });
   await peer.init(['resource_paths_v1', 'session_entries']); await peer.start({ project_trusted: true });
   const paths = (await discover(peer, 'startup', {}, peer.context({ project_trusted: true })).response).result.resource_paths.theme_paths;
-  assert.equal(paths.length, 64);
-  assert.ok(paths.includes(winner), 'native loader must validate the winning JSON, never a fallback');
-  assert.ok(!paths.includes(lower), 'resource budget cannot resurrect the shadowed lower root');
-  await peer.waitStderr(/Pi setup has 65 themes/);
+  assert.equal(paths.length, 65);
+  assert.ok(paths.includes(winner));
+  assert.ok(paths.includes(lower));
+  assert.ok(paths.indexOf(lower) < paths.indexOf(winner), 'project entries precede user entries so native later-root precedence selects the user winner');
   await peer.close();
 });
 

@@ -106,6 +106,44 @@ fn debug_is_hidden_but_parses_and_reports_every_rendered_line() {
 }
 
 #[test]
+fn unknown_slash_fallback_reserves_builtin_names_and_prefixes() {
+    for name in ["settings", "sett", "pi", "p", "debug", "subagents"] {
+        assert!(is_reserved_slash_command_name(name), "{name}");
+        assert!(
+            is_reserved_slash_command_name(&name.to_ascii_uppercase()),
+            "{name}"
+        );
+    }
+    for name in ["custom-prompt", "unknown"] {
+        assert!(!is_reserved_slash_command_name(name), "{name}");
+    }
+}
+
+#[test]
+fn pi_compatibility_commands_parse_exactly_and_reject_malformed_forms() {
+    use super::PiSubcommand;
+
+    assert_eq!(parse("/pi"), Command::Pi(PiSubcommand::Status));
+    assert_eq!(parse("/pi status"), Command::Pi(PiSubcommand::Status));
+    assert_eq!(parse("/pi on"), Command::Pi(PiSubcommand::On));
+    assert_eq!(parse("/pi off"), Command::Pi(PiSubcommand::Off));
+    assert_eq!(parse("/pi setup"), Command::Pi(PiSubcommand::Setup));
+    for malformed in [
+        "/pi enable",
+        "/pi setup extra",
+        "/pi on extra",
+        "/pi status extra",
+    ] {
+        assert!(
+            matches!(parse(malformed), Command::Unknown(_)),
+            "{malformed}"
+        );
+    }
+    assert!(slash_commands().iter().any(|command| command.name == "pi"));
+    assert!(help_text(Path::new("/tmp"), Some("pi")).contains("/pi [status|on|off|setup]"));
+}
+
+#[test]
 fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
     assert_eq!(parse("/settings"), Command::Settings(SettingsCommand::Menu));
     assert_eq!(
@@ -123,6 +161,22 @@ fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
     assert_eq!(
         parse("/settings theme light"),
         Command::Settings(SettingsCommand::Theme(Some("light".into())))
+    );
+    assert_eq!(
+        parse("/settings tui"),
+        Command::Settings(SettingsCommand::TuiMode(None))
+    );
+    assert_eq!(
+        parse("/settings tui inline"),
+        Command::Settings(SettingsCommand::TuiMode(Some(
+            crate::config::TuiMode::Inline
+        )))
+    );
+    assert_eq!(
+        parse("/settings tui fullscreen"),
+        Command::Settings(SettingsCommand::TuiMode(Some(
+            crate::config::TuiMode::Fullscreen
+        )))
     );
     assert_eq!(
         parse("/settings images"),
@@ -169,6 +223,10 @@ fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
     ));
     assert!(matches!(
         parse("/settings images maybe"),
+        Command::Unknown(_)
+    ));
+    assert!(matches!(
+        parse("/settings tui mystery"),
         Command::Unknown(_)
     ));
     for malformed in [

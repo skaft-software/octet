@@ -12493,5 +12493,8 @@ async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
 #[path = "agent_run/gpt6.rs"]
 mod gpt6;
 
+#[path = "agent_run/partial_assistant_journal.rs"]
+mod partial_assistant_journal;
+
 #[path = "agent_run/responses_prewarm.rs"]
 mod responses_prewarm;

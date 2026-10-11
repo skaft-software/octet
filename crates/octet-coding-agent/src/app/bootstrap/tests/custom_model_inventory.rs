@@ -183,6 +183,7 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
     let configured = CustomModel {
         api_name: "system".into(),
         context_window: 4_096,
+        context_window_configured: true,
         max_output_tokens: 1_024,
         tools: true,
         reasoning: true,
@@ -195,6 +196,7 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
         context_window: 262_144,
         max_output_tokens: 16_384,
         context_window_asserted: true,
+        discovered_context_window: Some(262_144),
         max_output_tokens_asserted: true,
         tools: true,
         ..Default::default()
@@ -203,18 +205,21 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
     let discovered_other = CustomModel {
         api_name: "other".into(),
         context_window: 8_192,
+        context_window_asserted: true,
+        discovered_context_window: Some(8_192),
         ..Default::default()
     };
 
     let configured_missing = CustomModel {
         api_name: "configured-only".into(),
         context_window: 12_288,
+        context_window_configured: true,
         ..Default::default()
     };
 
-    // Discovery enabled: endpoint-asserted limits are authoritative while every
-    // other registry field keeps configured-wins behavior. Output stays the
-    // tighter of both caps so a profile shrink is honored in the safe direction.
+    // Discovery enabled: the saved operational context remains pinned while
+    // endpoint limits are retained independently as detected metadata. Output
+    // stays the tighter of both caps.
     let merged = apply_configured_custom_model_overrides(
         vec![discovered_system.clone(), discovered_other.clone()],
         &[configured.clone(), configured_missing.clone()],
@@ -222,7 +227,8 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
     );
 
     assert_eq!(merged[0].api_name, "system");
-    assert_eq!(merged[0].context_window, 262_144);
+    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(merged[0].discovered_context_window, Some(262_144));
     assert_eq!(merged[0].max_output_tokens, 1_024);
     assert!(merged[0].tools);
     assert!(merged[0].reasoning);
@@ -247,15 +253,15 @@ fn configured_custom_model_metadata_overrides_discovered_sparse_inventory() {
 }
 
 #[test]
-fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
+fn custom_endpoint_limits_remain_separate_from_explicit_operational_pins() {
     use crate::auth::custom::CustomModel;
 
-    // A vLLM profile switch from 131k to 161k: the registry still declares the
-    // old pin, but the live `max_model_len` assertion must win so restarts
-    // converge instead of re-entombing the stale value in the cache.
+    // A vLLM profile reports a new effective context. Keep the user's existing
+    // operational budget intact and record the live value separately.
     let configured = CustomModel {
         api_name: "qwen38-gptq-mtp4-stable".into(),
         context_window: 131_072,
+        context_window_configured: true,
         max_output_tokens: 16_384,
         ..Default::default()
     };
@@ -264,6 +270,34 @@ fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
         context_window: 161_000,
         max_output_tokens: 16_384,
         context_window_asserted: true,
+        discovered_context_window: Some(161_000),
+        max_output_tokens_asserted: true,
+        ..Default::default()
+    };
+    let merged = apply_configured_custom_model_overrides(
+        vec![discovered],
+        std::slice::from_ref(&configured),
+        true,
+    );
+    assert_eq!(merged[0].context_window, 131_072);
+    assert_eq!(merged[0].discovered_context_window, Some(161_000));
+    assert_eq!(merged[0].max_output_tokens, 16_384);
+
+    // A reported shrink is retained as fresh metadata; it does not silently
+    // rewrite the explicitly saved operational budget.
+    let configured = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 161_000,
+        context_window_configured: true,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    };
+    let discovered = CustomModel {
+        api_name: "qwen38-gptq-mtp4-stable".into(),
+        context_window: 32_768,
+        max_output_tokens: 16_384,
+        context_window_asserted: true,
+        discovered_context_window: Some(32_768),
         max_output_tokens_asserted: true,
         ..Default::default()
     };
@@ -273,30 +307,7 @@ fn custom_endpoint_limits_follow_live_assertions_not_registry_pins() {
         true,
     );
     assert_eq!(merged[0].context_window, 161_000);
-    assert_eq!(merged[0].max_output_tokens, 16_384);
-
-    // A shrink to a smaller profile must also be followed, with output clamped
-    // to the live window.
-    let configured = CustomModel {
-        api_name: "qwen38-gptq-mtp4-stable".into(),
-        context_window: 161_000,
-        max_output_tokens: 16_384,
-        ..Default::default()
-    };
-    let discovered = CustomModel {
-        api_name: "qwen38-gptq-mtp4-stable".into(),
-        context_window: 32_768,
-        max_output_tokens: 16_384,
-        context_window_asserted: true,
-        max_output_tokens_asserted: true,
-        ..Default::default()
-    };
-    let merged = apply_configured_custom_model_overrides(
-        vec![discovered],
-        std::slice::from_ref(&configured),
-        true,
-    );
-    assert_eq!(merged[0].context_window, 32_768);
+    assert_eq!(merged[0].discovered_context_window, Some(32_768));
     assert_eq!(merged[0].max_output_tokens, 16_384);
 }
 
@@ -307,6 +318,7 @@ fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
     let configured = CustomModel {
         api_name: "system".into(),
         context_window: 8_192,
+        context_window_configured: true,
         max_output_tokens: 1_024,
         ..Default::default()
     };
@@ -328,14 +340,14 @@ fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
     assert!(!merged[0].context_window_asserted);
     assert!(!merged[0].max_output_tokens_asserted);
 
-    // The two limits are asserted independently. A llama.cpp gateway reports
-    // its served context but no output cap, so the window must follow the live
-    // assertion while the configured output cap survives.
+    // A llama.cpp gateway reports its effective context without an output cap.
+    // Keep the configured operational budget and refresh the detected field.
     let context_only = CustomModel {
         api_name: "system".into(),
         context_window: 131_072,
         max_output_tokens: 16_384,
         context_window_asserted: true,
+        discovered_context_window: Some(131_072),
         ..Default::default()
     };
     let merged = apply_configured_custom_model_overrides(
@@ -343,7 +355,8 @@ fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
         std::slice::from_ref(&configured),
         true,
     );
-    assert_eq!(merged[0].context_window, 131_072);
+    assert_eq!(merged[0].context_window, 8_192);
+    assert_eq!(merged[0].discovered_context_window, Some(131_072));
     assert_eq!(merged[0].max_output_tokens, 1_024);
     assert!(merged[0].context_window_asserted);
     assert!(!merged[0].max_output_tokens_asserted);
@@ -386,21 +399,22 @@ fn unasserted_discovery_fallbacks_never_overwrite_configured_limits() {
 }
 
 #[test]
-fn merging_twice_keeps_a_live_assertion_over_a_registry_pin() {
+fn merging_twice_preserves_the_operational_pin_and_live_assertion() {
     use crate::auth::custom::CustomModel;
 
-    // Registration runs the merge once while caching and again over that
-    // output. The provenance has to survive the first pass, or the second one
-    // silently restores the stale pin.
+    // Registration merges once while caching and again on startup. Both the
+    // explicit operational pin and independent discovered assertion survive.
     let configured = CustomModel {
         api_name: "alpha".into(),
         context_window: 32_000,
+        context_window_configured: true,
         ..Default::default()
     };
     let discovered = CustomModel {
         api_name: "alpha".into(),
         context_window: 64_000,
         context_window_asserted: true,
+        discovered_context_window: Some(64_000),
         ..Default::default()
     };
     let once = apply_configured_custom_model_overrides(
@@ -408,12 +422,14 @@ fn merging_twice_keeps_a_live_assertion_over_a_registry_pin() {
         std::slice::from_ref(&configured),
         true,
     );
-    assert_eq!(once[0].context_window, 64_000);
+    assert_eq!(once[0].context_window, 32_000);
+    assert_eq!(once[0].discovered_context_window, Some(64_000));
     assert!(once[0].context_window_asserted);
 
     let twice =
         apply_configured_custom_model_overrides(once, std::slice::from_ref(&configured), true);
-    assert_eq!(twice[0].context_window, 64_000);
+    assert_eq!(twice[0].context_window, 32_000);
+    assert_eq!(twice[0].discovered_context_window, Some(64_000));
     assert!(twice[0].context_window_asserted);
 }
 
@@ -436,6 +452,7 @@ fn a_sparse_id_only_inventory_keeps_configured_limits_through_registration_and_c
             api_name: "local".into(),
             display_name: "Local".into(),
             context_window: 8_192,
+            context_window_configured: true,
             max_output_tokens: 1_024,
             tools: true,
             ..Default::default()
@@ -490,6 +507,75 @@ fn a_sparse_id_only_inventory_keeps_configured_limits_through_registration_and_c
     // provenance must round-trip or the next start cannot tell them apart.
     assert!(!cached[0].context_window_asserted);
     assert!(!cached[0].max_output_tokens_asserted);
+}
+
+#[test]
+fn lm_studio_native_metadata_keeps_loaded_and_maximum_context_distinct() {
+    use crate::auth::custom::CustomModel;
+    use octet_ai::discovery::DiscoveryMetadataSource::{Absent, Explicit};
+
+    let mut models = vec![CustomModel {
+        api_name: "openai/gpt-oss-20b".into(),
+        ..Default::default()
+    }];
+    let inventory = serde_json::json!({
+        "models": [{
+            "key": "openai/gpt-oss-20b",
+            "type": "llm",
+            "max_context_length": 262_144,
+            "loaded_instances": [{"config": {"context_length": 4_096}}],
+            "capabilities": {
+                "vision": false,
+                "trained_for_tool_use": true,
+                "reasoning": {"allowed_options": ["low", "medium"], "default": "low"}
+            }
+        }]
+    });
+    apply_lm_studio_native_metadata(&mut models, Some(&inventory));
+
+    let model = &models[0];
+    let native = model.native_metadata.as_ref().unwrap();
+    assert_eq!(native.max_context_window, Some(262_144));
+    assert_eq!(native.max_context_source, Explicit);
+    assert_eq!(native.loaded_context_window, Some(4_096));
+    assert_eq!(native.loaded_context_source, Explicit);
+    assert_eq!(model.context_window, 4_096);
+    assert_eq!(model.discovered_context_window, Some(4_096));
+    assert!(model.context_window_asserted);
+    assert_eq!(native.vision, Some(false));
+    assert_eq!(native.vision_source, Explicit);
+    assert_eq!(native.tool_use, Some(true));
+    assert_eq!(native.reasoning.supported, Some(true));
+    assert_eq!(native.reasoning.source, Explicit);
+    assert!(
+        !model.reasoning,
+        "native reasoning does not assert Chat support"
+    );
+    assert_eq!(model.reasoning_source, None);
+
+    let mut unloaded = vec![CustomModel {
+        api_name: "unloaded-model".into(),
+        context_window: 8_192,
+        context_window_configured: true,
+        ..Default::default()
+    }];
+    let maximum_only = serde_json::json!({
+        "models": [{
+            "key": "unloaded-model",
+            "type": "llm",
+            "max_context_length": 131_072,
+            "loaded_instances": []
+        }]
+    });
+    apply_lm_studio_native_metadata(&mut unloaded, Some(&maximum_only));
+    let model = &unloaded[0];
+    let native = model.native_metadata.as_ref().unwrap();
+    assert_eq!(native.max_context_window, Some(131_072));
+    assert_eq!(native.loaded_context_source, Absent);
+    assert_eq!(native.loaded_context_window, None);
+    assert_eq!(model.context_window, 8_192);
+    assert!(!model.context_window_asserted);
+    assert_eq!(model.discovered_context_window, None);
 }
 
 #[test]
@@ -561,14 +647,15 @@ fn configured_apple_metadata_overrides_embedded_defaults() {
     let configured = CustomModel {
         api_name: "system".into(),
         context_window: 4_096,
+        context_window_configured: true,
         max_output_tokens: 512,
         tools: false,
         reasoning: false,
         ..Default::default()
     };
-    // A sparse Apple response resolves through the embedded defaults before
-    // the merge, so the live 8k window wins over the 4k pin while the tighter
-    // 512-token output cap is preserved. Non-limit fields stay configured-wins.
+    // A sparse Apple response resolves through embedded metadata, but the
+    // explicitly saved 4k operational budget remains pinned; the live 8k value
+    // is refreshed independently. Other fields stay configured-wins.
     let merged = apply_configured_custom_model_overrides(
         apply_known_custom_model_defaults(
             &cred,
@@ -583,7 +670,11 @@ fn configured_apple_metadata_overrides_embedded_defaults() {
     );
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].context_window, APPLE_FM_SYSTEM_CONTEXT_WINDOW);
+    assert_eq!(merged[0].context_window, 4_096);
+    assert_eq!(
+        merged[0].discovered_context_window,
+        Some(APPLE_FM_SYSTEM_CONTEXT_WINDOW)
+    );
     assert_eq!(merged[0].max_output_tokens, 512);
     assert!(!merged[0].tools);
     assert!(!merged[0].reasoning);

@@ -193,6 +193,11 @@ pub(super) fn steering_event_stream(
                 let id = value.pointer("/response/id").and_then(serde_json::Value::as_str)
                     .ok_or_else(|| crate::steering::invalid("response segment has no id"))?.to_owned();
                 let req = request.lock().unwrap_or_else(|p|p.into_inner()).clone();
+                let reasoning_may_be_unreported =
+                    crate::inference::reasoning_may_be_unreported(
+                        &req.reasoning,
+                        model.spec.capabilities.reasoning.as_ref(),
+                    );
                 let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, model.spec.pricing.clone());
                 builder.set_tool_definitions(&req.tools)?;
                 builder.requested_service_tier = req.responses.as_ref().and_then(|o|o.service_tier);
@@ -205,7 +210,12 @@ pub(super) fn steering_event_stream(
                 if first { for diagnostic in &diagnostics { builder.add_diagnostic(diagnostic.clone()); } first=false; }
                 let (tx, mut rx) = mpsc::channel(1);
                 let guard = crate::stream::guard(try_stream! { while let Some(event) = rx.recv().await { yield event; } });
-                let guard = crate::inference::measured_stream(guard, origin, scope);
+                let guard = crate::inference::measured_stream_with_context(
+                    guard,
+                    origin,
+                    scope,
+                    reasoning_may_be_unreported,
+                );
                 segment = Some((id,builder,tx,guard));
             }
             let (id,builder,tx,guard) = segment.as_mut()

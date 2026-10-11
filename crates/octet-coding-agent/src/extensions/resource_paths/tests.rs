@@ -2,6 +2,52 @@ use super::*;
 use crate::tui::theme::TerminalBackground;
 use octet_agent::extension_process::ExtensionActivation;
 
+#[test]
+fn combined_resource_budget_covers_all_five_arrays_and_rejects_overages() {
+    let mut paths = ExtensionResourcePaths::default();
+    paths.skill_paths = vec!["/x".into(); 52];
+    paths.prompt_paths = vec!["/x".into(); 52];
+    paths.theme_paths = vec!["/x".into(); 52];
+    paths.keybindings_paths = vec!["/x".into(); 52];
+    paths.context_paths = vec!["/x".into(); 48];
+
+    let mut budget = ResourcePathBudget::default();
+    budget.admit(&paths).unwrap();
+    assert_eq!(budget.paths, MAX_PASS_PATHS);
+    let extra = ExtensionResourcePaths {
+        context_paths: vec!["/extra".into()],
+        ..ExtensionResourcePaths::default()
+    };
+    assert!(budget.admit(&extra).is_err());
+    assert_eq!(
+        budget.paths, MAX_PASS_PATHS,
+        "failed results are not partially admitted"
+    );
+
+    for kind in 0..5 {
+        let mut oversized = ExtensionResourcePaths::default();
+        let path = format!("/{}", "x".repeat(MAX_PATH_BYTES_PER_PATH));
+        match kind {
+            0 => oversized.skill_paths.push(path),
+            1 => oversized.prompt_paths.push(path),
+            2 => oversized.theme_paths.push(path),
+            3 => oversized.keybindings_paths.push(path),
+            _ => oversized.context_paths.push(path),
+        }
+        assert!(ResourcePathBudget::default().admit(&oversized).is_err());
+    }
+
+    let mut byte_budget = ResourcePathBudget::default();
+    let exact_bytes = ExtensionResourcePaths {
+        skill_paths: vec![format!("/{}", "x".repeat(MAX_PATH_BYTES_PER_PATH - 1)); 16],
+        ..ExtensionResourcePaths::default()
+    };
+    byte_budget.admit(&exact_bytes).unwrap();
+    assert_eq!(byte_budget.bytes, MAX_PASS_BYTES);
+    assert!(byte_budget.admit(&extra).is_err());
+    assert_eq!(byte_budget.bytes, MAX_PASS_BYTES);
+}
+
 async fn fixture(root: &Path) -> (ExecutableExtensions, Config) {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();

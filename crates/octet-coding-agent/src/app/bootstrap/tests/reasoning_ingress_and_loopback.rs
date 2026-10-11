@@ -514,9 +514,9 @@ async fn custom_catalog_discovery_bounds_batches_and_isolates_endpoints_and_offl
         }
         let online = online.resolve(&id).unwrap();
         let offline = offline.resolve(&id).unwrap();
-        // Discovery enabled: the live 64k assertion wins over the 32k registry
-        // pin online, and the offline run reuses the same normalized cache.
-        assert_eq!(online.spec.limits.context_window, 64000);
+        // The 32k registry value is an explicit operational pin; live discovery
+        // refreshes its separate 64k assertion without replacing that pin.
+        assert_eq!(online.spec.limits.context_window, 32000);
         assert_eq!(
             online.spec.limits.context_window,
             offline.spec.limits.context_window
@@ -527,6 +527,12 @@ async fn custom_catalog_discovery_bounds_batches_and_isolates_endpoints_and_offl
             registry.providers[provider].credential.base_url
         );
         assert_eq!(online.endpoint.base_url, offline.endpoint.base_url);
+        let cached: serde_json::Value =
+            serde_json::from_slice(&store.load_model_cache_for(provider).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(cached["models"][0]["context_window"], 32000);
+        assert_eq!(cached["models"][0]["context_window_configured"], true);
+        assert_eq!(cached["models"][0]["discovered_context_window"], 64000);
     }
     assert_eq!(std::fs::read(store.path()).unwrap(), original);
 }

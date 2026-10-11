@@ -37,6 +37,34 @@ async fn active_changelog_is_read_only_and_does_not_queue_or_interrupt() {
 }
 
 #[tokio::test]
+async fn active_pi_status_is_read_only_and_does_not_wait_for_idle() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.begin_run("test");
+    shell.prefill_editor("keep this draft".into());
+
+    let (queue, quit_requested) = run_active_command(
+        &mut shell,
+        Command::Pi(commands::PiSubcommand::Status),
+        test_run_inspection(),
+    )
+    .await;
+
+    assert!(
+        queue.is_empty(),
+        "/pi status must render during an active run"
+    );
+    assert!(!quit_requested);
+    assert_eq!(shell.pending(), "keep this draft");
+    assert!(shell.has_overlay());
+    assert!(shell
+        .dump_rendered_frame()
+        .await
+        .unwrap()
+        .join("\n")
+        .contains("Pi compatibility: unknown in the active extension snapshot"));
+}
+
+#[tokio::test]
 async fn active_inspection_reports_render_without_waiting_for_the_idle_boundary() {
     let session_dir = tempfile::tempdir().expect("inspection fixture");
     let inspection = test_run_inspection_with_session(session_dir.path());

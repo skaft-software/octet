@@ -24,8 +24,11 @@ Response (not the generic hook disposition envelope):
 
 `resource_paths` is mandatory; omitted arrays mean empty. Unknown keys, null arrays,
 wrong types, relative paths, parent components and controls fail validation.
-Paths are absolute UTF-8, at most 4096 bytes each, at most 64 entries / 64 KiB
-across all three arrays before deduplication. No arbitrary JSON or objects cross
+Paths are absolute UTF-8, at most 4096 bytes each, at most 256 entries / 64 KiB
+across all five path arrays before deduplication (skills, prompts, themes,
+keybindings and context). The combined count accommodates complete setups without
+per-kind truncation; exceeding either bound is an explicit validation failure.
+No arbitrary JSON or objects cross
 this boundary. The host request deadline is at most 5 seconds. A product pass
 allows 16 contributing processes and retains at most 256 paths / 512 KiB,
 in deterministic extension-name and returned-array order. Over-budget or failed

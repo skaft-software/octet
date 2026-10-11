@@ -186,6 +186,7 @@ fn configured_pi(root: &Path, start: StartBehavior) -> ConfiguredPi {
         .arg(root.join("factories/second.mjs"))
         .current_dir(&workspace)
         .env("PI_OFFLINE", "1")
+        .env("OCTET_PI_AGENT_DIR", root.join("pi-agent"))
         .output()
         .expect("existing Node 22.19+ and local adapter dependencies required; never auto-install");
     assert!(

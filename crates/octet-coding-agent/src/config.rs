@@ -60,8 +60,34 @@ impl MouseMode {
     }
 }
 
+/// Interactive terminal surface preference. Fullscreen is the product default;
+/// explicit CLI selection takes precedence over the saved user preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TuiMode {
+    #[default]
+    Fullscreen,
+    Inline,
+}
+
+impl TuiMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fullscreen" => Ok(Self::Fullscreen),
+            "inline" => Ok(Self::Inline),
+            _ => anyhow::bail!("invalid TUI mode {value:?}; use fullscreen or inline"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fullscreen => "fullscreen",
+            Self::Inline => "inline",
+        }
+    }
+}
+
 /// Tern Surface Protocol rendering policy for the interactive frontend.
-///
+//////
 /// `Auto` (the default) negotiates native surfaces only when the terminal
 /// advertises itself (`TERM_PROGRAM=tern`), so every other terminal keeps the
 /// ANSI renderer untouched. `On` forces negotiation regardless of detection,
@@ -658,6 +684,15 @@ mod tests {
         assert!(!MouseMode::Terminal.application_owned());
         assert!(!MouseMode::Off.application_owned());
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn tui_mode_defaults_fullscreen_and_parses_only_supported_modes() {
+        assert_eq!(TuiMode::default(), TuiMode::Fullscreen);
+        assert_eq!(TuiMode::parse("fullscreen").unwrap(), TuiMode::Fullscreen);
+        assert_eq!(TuiMode::parse("inline").unwrap(), TuiMode::Inline);
+        assert_eq!(TuiMode::Inline.as_str(), "inline");
+        assert!(TuiMode::parse("auto").is_err());
     }
 
     #[test]

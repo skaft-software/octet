@@ -1988,20 +1988,9 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
         spans.push(Span::new(" · "));
     }
     spans.push(Span::styled(verdict, token));
-    if let Some(metrics) = outcome.inference.as_deref() {
-        let rate = metrics
-            .server
-            .as_ref()
-            .and_then(|server| server.tokens_per_second())
-            .or_else(|| {
-                metrics
-                    .decode_estimate
-                    .as_ref()
-                    .map(|estimate| estimate.tokens_per_second)
-            });
-        if let Some(rate) = rate {
-            spans.push(Span::styled(format!(" · {rate:.1} tok/s"), "dim"));
-        }
+    if let Some(generation) = outcome.generation.as_ref() {
+        let detail = super::outcome_render::completion_rate_detail(generation);
+        spans.push(Span::styled(format!(" · {detail}"), "dim"));
     }
     match &outcome.outcome {
         RunOutcome::CompletedWithWarnings { warnings, .. } => {

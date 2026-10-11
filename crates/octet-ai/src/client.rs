@@ -608,14 +608,19 @@ impl AiClient {
         } else {
             None
         };
+        let reasoning_may_be_unreported = crate::inference::reasoning_may_be_unreported(
+            &req.reasoning,
+            model.spec.capabilities.reasoning.as_ref(),
+        );
         let open = client.stream_once(&model, req, &overrides, &host_options);
         let Some(deadline) = deadline else {
             let stream = open.await?;
             notify_first_request_opened();
-            return Ok(crate::inference::measured_stream(
+            return Ok(crate::inference::measured_stream_with_context(
                 stream,
                 started,
                 crate::inference::ClientTimingScope::Request,
+                reasoning_may_be_unreported,
             ));
         };
         let stream = tokio::time::timeout_at(deadline, open)
@@ -628,10 +633,11 @@ impl AiClient {
                 })
             })??;
         notify_first_request_opened();
-        let mut stream = crate::inference::measured_stream(
+        let mut stream = crate::inference::measured_stream_with_context(
             stream,
             started,
             crate::inference::ClientTimingScope::Request,
+            reasoning_may_be_unreported,
         );
         Ok(Box::pin(try_stream! {
             loop {

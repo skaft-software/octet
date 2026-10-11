@@ -47,8 +47,9 @@ use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
 use crate::prompts::{render_and_record, RenderedPrompt};
 use crate::provider_setup::{
-    CompletedSetup, ProviderSetupError, ProviderSetupService, ProviderSetupState,
-    SetupAuthentication, SetupAuthority, SetupDraft,
+    CompletedSetup, ExistingProviderSummary, ProviderSetupError, ProviderSetupService,
+    ProviderSetupState, SetupAuthentication, SetupAuthority, SetupCredentialSummary, SetupDraft,
+    SetupModel,
 };
 use crate::resources::{compose_instructions, expand_skill_command};
 use crate::tui::composer::ComposedInput;
@@ -576,6 +577,8 @@ pub enum PendingIdleAction {
         name: String,
         arguments: Vec<String>,
     },
+    /// `/pi` lifecycle and setup review, applied only with idle application ownership.
+    Pi(commands::PiSubcommand),
     /// `/settings` mutations that must own the application (theme, images,
     /// default model/reasoning). Reports are rendered immediately instead.
     Settings(commands::SettingsCommand),
@@ -1252,6 +1255,7 @@ fn queue_command(command: Command, queue: &mut VecDeque<PendingIdleAction>) -> a
         Command::Context => PendingIdleAction::ShowContext,
         Command::Reload => PendingIdleAction::ReloadResources,
         Command::Skills(sub) => PendingIdleAction::Skills(sub),
+        Command::Pi(sub) => PendingIdleAction::Pi(sub),
         // `/goal` is applied the instant it is submitted, mid-run or idle. It
         // has no queued form: queueing it is exactly the reported defect, so an
         // attempt to queue one fails closed instead of deferring the command.
@@ -2453,6 +2457,7 @@ fn open_active_codex_context(
 }
 
 const MAX_PENDING_IDLE_ACTIONS: usize = 64;
+const PI_COMPAT_EXTENSION_NAME: &str = "octet-pi-compat";
 
 /// Commands with an idle-owned effect need admission before consuming the draft.
 fn active_command_needs_idle_slot(command: &Command) -> bool {
@@ -2479,6 +2484,7 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
         | Command::Theme(Some(_))
         | Command::Bash(_) => true,
         Command::Fast(value) => value.is_some(),
+        Command::Pi(sub) => !matches!(sub, commands::PiSubcommand::Status),
         Command::Extensions(sub) => !matches!(
             sub,
             commands::ExtensionsSubcommand::Menu
@@ -2493,6 +2499,7 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::SettingsCommand::Padding
                 | commands::SettingsCommand::Theme(None)
                 | commands::SettingsCommand::Images(None)
+                | commands::SettingsCommand::TuiMode(None)
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -2740,7 +2747,11 @@ where
     F: Fn(&str, &str) -> Result<Option<Session>, Box<AgentError>>,
 {
     let template = matches!(&command, Command::Unknown(text)
-        if shell.has_prompt_template(split_prompt_invocation(text).map_or("", |(name, _)| name)));
+    if split_prompt_invocation(text).is_some_and(|(name, _)| {
+        !commands::is_reserved_slash_command_name(name)
+            && extensions.command_owner(name).is_none()
+            && shell.has_prompt_template(name)
+    }));
     if active_command_needs_idle_slot(&command)
         && !template
         && queue.len() >= MAX_PENDING_IDLE_ACTIONS
@@ -2939,6 +2950,14 @@ where
         Command::Extensions(commands::ExtensionsSubcommand::Menu) => {
             extension_menu.open(inspection.extension_menu.clone(), shell);
         }
+        Command::Pi(commands::PiSubcommand::Status) => {
+            let summary = extensions
+                .summaries()
+                .into_iter()
+                .find(|summary| summary.name == PI_COMPAT_EXTENSION_NAME);
+            let enabled = summary.as_ref().map(|summary| summary.enabled);
+            shell.show_overlay_text(pi_compat_status(enabled, summary));
+        }
         Command::Extensions(commands::ExtensionsSubcommand::Status) => {
             shell.show_overlay_text(extensions.inspect_text());
         }
@@ -3040,7 +3059,7 @@ where
             match sub {
                 commands::SettingsCommand::Menu => {
                     let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
-                    shell.open_panel(settings_menu::root_panel(show_images));
+                    shell.open_panel(settings_menu::root_panel(show_images, crate::cli::tui_mode()));
                 }
                 commands::SettingsCommand::Show => {
                     let mut settings = inspection.settings.clone();
@@ -3051,12 +3070,16 @@ where
                     if let Some(control) = &inspection.cache_warming_control {
                         settings.cache_warming = control.cache_warming_mode();
                     }
+                    let mut text = commands::settings_text(&settings);
+                    text.push('\n');
+                    text.push_str(&tui_mode_report());
                     shell.show_report_facts(
                         "Settings",
                         "Effective display, launch, and session settings",
-                        commands::settings_text(&settings),
+                        text,
                     );
                 }
+                commands::SettingsCommand::TuiMode(None) => shell.notice(tui_mode_report()),
                 commands::SettingsCommand::Transport => shell.notice(format!(
                     "transport {} (declared by the {} route; not a user preference)",
                     inspection.settings.transport, inspection.settings.endpoint,
@@ -3163,13 +3186,20 @@ where
                 return Ok(());
             }
             let name = split_prompt_invocation(&text).map_or("", |(name, _)| name);
-            if shell.has_prompt_template(name) {
-                shell.queue_follow_up(ComposedInput::from_text(text));
-                shell.notice("prompt template queued for expansion at the next idle boundary");
-                return Ok(());
-            }
-            match extensions.command_owner(name) {
-                Some(owner) if name != "subagents" => {
+            if name == "subagents" {
+                // This reserved name is supplied by the first-party extension,
+                // not a malformed built-in when its owner is absent.
+                shell.error(if extensions.command_owner(name).is_some() {
+                    "first-party subagent command is unavailable".into()
+                } else {
+                    format!("unknown command: {text}")
+                });
+            } else if commands::is_reserved_slash_command_name(name) {
+                shell.error(format!("invalid syntax for built-in command: {text}"));
+            } else if let Some(owner) = extensions.command_owner(name) {
+                if name == "subagents" {
+                    shell.error("first-party subagent command is unavailable".into());
+                } else {
                     let arguments = split_prompt_invocation(&text)
                         .map_or("", |(_, arguments)| arguments)
                         .split_whitespace()
@@ -3185,8 +3215,12 @@ where
                     );
                     shell.notice("extension command queued for the next idle boundary");
                 }
-                Some(_) => shell.error("first-party subagent command is unavailable".into()),
-                None => shell.error(format!("unknown command: {text}")),
+            } else if shell.has_prompt_template(name) {
+                shell.queue_follow_up(ComposedInput::from_text(text));
+                shell.notice("prompt template queued for expansion at the next idle boundary");
+                return Ok(());
+            } else {
+                shell.error(format!("unknown command: {text}"));
             }
         }
         command => match queue_command(command, queue) {
@@ -4189,7 +4223,7 @@ where
                             (PanelResult::Confirm(index), PanelAction::SelectSettings(commands)) => {
                                 if let Some(sub) = commands.get(index).cloned() {
                                     let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
-                                    if !open_settings_destination(shell, &sub, &inspection.catalog, &inspection.model, inspection.subagents_available, show_images) {
+                                    if !open_settings_destination(shell, &sub, &inspection.catalog, &inspection.model, inspection.subagents_available, show_images, crate::cli::tui_mode()) {
                                         let command = Command::Settings(sub);
                                         if active_command_needs_idle_slot(&command) && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
                                             shell.error("command queue is full; setting unchanged".into());
@@ -4481,7 +4515,11 @@ where
                         let parsed = commands::parse(&text);
                         let prompt_template = match &parsed {
                             Command::Prompt(Some(_)) => true,
-                            Command::Unknown(text) => shell.has_prompt_template(split_prompt_invocation(text).map_or("", |(name, _)| name)),
+                            Command::Unknown(text) => split_prompt_invocation(text).is_some_and(|(name, _)| {
+                                !commands::is_reserved_slash_command_name(name)
+                                    && executable_extensions.command_owner(name).is_none()
+                                    && shell.has_prompt_template(name)
+                            }),
                             _ => false,
                         };
                         if prompt_template && shell.queued_follow_up_len() >= MAX_PENDING_IDLE_ACTIONS {
@@ -7447,11 +7485,62 @@ fn replace_extension_active_session_with_setup(
     Ok(session_id)
 }
 
+async fn prepare_active_extension_session_snapshot<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    cancellation: &octet_agent::CancellationToken,
+) -> anyhow::Result<crate::extensions::PreparedSessionSnapshot>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let future = app
+        .executable_extensions
+        .wait_for_active_session_snapshot_prepared(cancellation.clone());
+    match await_with_ctrl_c_and_extensions(
+        future,
+        shell,
+        input,
+        Some(&mut app.executable_extensions),
+    )
+    .await
+    {
+        Some(result) => result,
+        None => {
+            cancellation.cancel();
+            Err(anyhow::anyhow!("session snapshot readiness interrupted"))
+        }
+    }
+}
+
+// Pi setup writes are synchronous: its factory thread is blocked waiting for
+// the native receipt and cannot dispatch snapshot preparation. Return the
+// committed, owner-fenced inline facts instead. The async creation/completion
+// boundaries still require the peer's matching prepared-snapshot acknowledgement.
+fn validate_extension_session_setup_receipt(
+    app: &App,
+    request: &ExtensionSessionLifecycleRequest,
+    parent: u64,
+    owner: &octet_agent::extension_process::ExtensionResourceOwner,
+) -> Result<(), String> {
+    if request.is_cancelled() {
+        return Err("session setup snapshot readiness cancelled".into());
+    }
+    if !app
+        .executable_extensions
+        .session_setup_is_current(parent, owner)
+    {
+        return Err("session setup parent/foreground owner retired".into());
+    }
+    Ok(())
+}
+
 async fn create_extension_session_with_options<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
     input: &mut S,
     request: &ExtensionSessionLifecycleRequest,
+    session_replaced: &mut bool,
     parent_session: Option<String>,
     setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
 ) -> anyhow::Result<Option<String>>
@@ -7472,13 +7561,44 @@ where
     }
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
-    replace_extension_active_session_with_setup(app, session, "new", setup).map(Some)
+    let session_id =
+        replace_extension_active_session_with_setup(app, session, "new", setup.clone())?;
+    *session_replaced = true;
+    let cancellation = request.cancellation_token();
+    let prepared =
+        prepare_active_extension_session_snapshot(app, shell, input, &cancellation).await?;
+    if request.is_cancelled() {
+        return Ok(None);
+    }
+    if let Some((parent, previous_owner)) = setup.as_ref() {
+        // Creation changes the session identity, not the admitted command's
+        // process generation. Validate the new native owner, not the retired
+        // session owner that authorized the replacement.
+        let owner = octet_agent::extension_process::ExtensionResourceOwner {
+            session_id: app.agent.session().resource_owner_key(),
+            ..previous_owner.clone()
+        };
+        if !app
+            .executable_extensions
+            .session_setup_is_current(*parent, &owner)
+        {
+            return Err(anyhow::anyhow!(
+                "session setup parent/foreground owner retired"
+            ));
+        }
+        drop(prepared);
+    } else {
+        app.executable_extensions
+            .start_session_lifecycle_after_snapshot(prepared, &cancellation)?;
+    }
+    Ok(Some(session_id))
 }
 
 async fn mutate_extension_session_setup<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
     input: &mut S,
+    request: &ExtensionSessionLifecycleRequest,
     parent: u64,
     owner: octet_agent::extension_process::ExtensionResourceOwner,
     namespace: String,
@@ -7487,6 +7607,9 @@ async fn mutate_extension_session_setup<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    if request.is_cancelled() {
+        return Err("session setup request cancelled".into());
+    }
     if !app
         .executable_extensions
         .session_setup_is_current(parent, &owner)
@@ -7521,6 +7644,7 @@ where
             shell
                 .hydrate(app.agent.session())
                 .map_err(|e| e.to_string())?;
+            validate_extension_session_setup_receipt(app, request, parent, &owner)?;
             Ok(
                 serde_json::json!({"entry_id":id.0, "context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
             )
@@ -7543,12 +7667,27 @@ where
             shell
                 .hydrate(app.agent.session())
                 .map_err(|e| e.to_string())?;
+            validate_extension_session_setup_receipt(app, request, parent, &owner)?;
             Ok(
                 serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
             )
         }
         Some("complete") => {
-            let starts = app.executable_extensions.complete_session_setup();
+            app.executable_extensions.refresh_host_state(
+                app.agent.session(),
+                &app.model,
+                &app.reasoning,
+                &app.sessions,
+            );
+            let cancellation = request.cancellation_token();
+            let prepared =
+                prepare_active_extension_session_snapshot(app, shell, input, &cancellation)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let starts = app
+                .executable_extensions
+                .complete_session_setup_after_snapshot(parent, &owner, prepared, &cancellation)
+                .map_err(|error| error.to_string())?;
             let mut future = Box::pin(async move {
                 for (process, session, reason) in starts {
                     process
@@ -7558,14 +7697,20 @@ where
                 }
                 Ok::<_, String>(())
             });
-            await_with_ctrl_c_and_extensions(
+            match await_with_ctrl_c_and_extensions(
                 future.as_mut(),
                 shell,
                 input,
                 Some(&mut app.executable_extensions),
             )
             .await
-            .ok_or("session setup completion interrupted")??;
+            {
+                Some(result) => result?,
+                None => {
+                    cancellation.cancel();
+                    return Err("session setup completion interrupted".into());
+                }
+            }
             Ok(
                 serde_json::json!({"context":app.executable_extensions.session_setup_context(&owner).map_err(|e| e.to_string())?}),
             )
@@ -7579,6 +7724,7 @@ async fn switch_extension_session<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     request: &ExtensionSessionLifecycleRequest,
+    session_replaced: &mut bool,
     session_id: String,
     reason: &'static str,
 ) -> anyhow::Result<Option<String>>
@@ -7592,7 +7738,17 @@ where
     }
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the foreground session is being replaced");
-    replace_extension_active_session(app, session, reason).map(Some)
+    let session_id = replace_extension_active_session(app, session, reason)?;
+    *session_replaced = true;
+    let cancellation = request.cancellation_token();
+    let prepared =
+        prepare_active_extension_session_snapshot(app, shell, input, &cancellation).await?;
+    if request.is_cancelled() {
+        return Ok(None);
+    }
+    app.executable_extensions
+        .start_session_lifecycle_after_snapshot(prepared, &cancellation)?;
+    Ok(Some(session_id))
 }
 
 /// The same sole idle owner used by create/fork/switch. Keep the native future
@@ -7755,6 +7911,7 @@ where
             }
         }
     }
+    let mut session_replaced = false;
     let mut result = match operation.clone() {
         ExtensionSessionLifecycleOperation::Setup {
             parent_request_id,
@@ -7766,6 +7923,7 @@ where
                 app,
                 shell,
                 input,
+                &request,
                 parent_request_id,
                 owner,
                 namespace,
@@ -7784,28 +7942,40 @@ where
                 shell,
                 input,
                 &request,
+                &mut session_replaced,
                 parent_session,
                 Some(parent.clone()),
             )
             .await;
-            let replaced = result.as_ref().is_ok_and(|id| id.is_some());
+            let result = if session_replaced {
+                shell.hydrate(app.agent.session()).and(result)
+            } else {
+                result
+            };
             let result = result.and_then(|id| {
                 let id = id.ok_or_else(|| anyhow::anyhow!("session creation interrupted"))?;
-                shell.hydrate(app.agent.session())?;
                 let owner = octet_agent::extension_process::ExtensionResourceOwner { session_id: app.agent.session().resource_owner_key(), ..parent.1 };
                 Ok(serde_json::json!({"session_id":id,"context":app.executable_extensions.session_setup_context(&owner)?}))
             }).map_err(|e| e.to_string());
             request.respond_setup(result);
             request_extension_ui(shell, app);
             update_status(shell, app);
-            return replaced;
+            return session_replaced;
         }
         ExtensionSessionLifecycleOperation::CreateWithOptions {
             parent_session,
             setup_parent: None,
         } => {
-            create_extension_session_with_options(app, shell, input, &request, parent_session, None)
-                .await
+            create_extension_session_with_options(
+                app,
+                shell,
+                input,
+                &request,
+                &mut session_replaced,
+                parent_session,
+                None,
+            )
+            .await
         }
         ExtensionSessionLifecycleOperation::ModelControl(_) => {
             let result = model_controls::apply_idle_request(app, &request);
@@ -7878,7 +8048,16 @@ where
         ExtensionSessionLifecycleOperation::Create => {
             match create_extension_session(app, shell, input).await {
                 Ok(session_id) => {
-                    switch_extension_session(app, shell, input, &request, session_id, "new").await
+                    switch_extension_session(
+                        app,
+                        shell,
+                        input,
+                        &request,
+                        &mut session_replaced,
+                        session_id,
+                        "new",
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             }
@@ -7886,13 +8065,31 @@ where
         ExtensionSessionLifecycleOperation::Fork { entry_id, at } => {
             match fork_extension_session(app, shell, input, entry_id, at).await {
                 Ok(session_id) => {
-                    switch_extension_session(app, shell, input, &request, session_id, "fork").await
+                    switch_extension_session(
+                        app,
+                        shell,
+                        input,
+                        &request,
+                        &mut session_replaced,
+                        session_id,
+                        "fork",
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             }
         }
         ExtensionSessionLifecycleOperation::Switch { session_id } => {
-            switch_extension_session(app, shell, input, &request, session_id, "resume").await
+            switch_extension_session(
+                app,
+                shell,
+                input,
+                &request,
+                &mut session_replaced,
+                session_id,
+                "resume",
+            )
+            .await
         }
         // Pi `reload` reloads extensions and resources; the idle loop already
         // marked them stale and applies the reload at its next boundary. The
@@ -7906,8 +8103,9 @@ where
             | ExtensionSessionLifecycleOperation::Fork { .. }
             | ExtensionSessionLifecycleOperation::Switch { .. }
     );
-    let active_session_replaced =
-        active_session_operation && result.as_ref().is_ok_and(|session_id| session_id.is_some());
+    let active_session_replaced = session_replaced
+        || (active_session_operation
+            && result.as_ref().is_ok_and(|session_id| session_id.is_some()));
     if active_session_replaced {
         // A cancelled response must not leave the visible transcript bound to
         // the discarded session, so hydrate before observing cancellation.
@@ -8424,6 +8622,9 @@ async fn apply_pending_actions(
                 } else {
                     shell.notice("image display preference saved at the idle boundary");
                 }
+            }
+            PendingIdleAction::Pi(sub) => {
+                app = apply_pi_command(app, shell, input, sub).await?;
             }
             PendingIdleAction::Settings(sub) => {
                 // Reuse the idle dispatcher verbatim so a queued mutation takes
@@ -9265,6 +9466,18 @@ where
     })
 }
 
+fn tui_mode_report() -> String {
+    format!(
+        "interactive terminal mode: {}{}",
+        crate::cli::tui_mode().as_str(),
+        if crate::cli::tui_mode_is_explicit() {
+            " (overridden by --tui-mode for this invocation; saved preference unchanged)"
+        } else {
+            " (saved preference or fullscreen default)"
+        }
+    )
+}
+
 /// Menu destinations are navigation only. Explicit slash-command None forms
 /// retain their existing report/toggle semantics outside this selection path.
 fn open_settings_destination(
@@ -9274,10 +9487,12 @@ fn open_settings_destination(
     model: &Model,
     subagents_available: bool,
     show_images: bool,
+    tui_mode: crate::config::TuiMode,
 ) -> bool {
     use commands::SettingsCommand as Sub;
     let panel = match sub {
-        Sub::Menu => settings_menu::root_panel(show_images),
+        Sub::Menu => settings_menu::root_panel(show_images, tui_mode),
+        Sub::TuiMode(None) => settings_menu::tui_mode_panel(tui_mode),
         Sub::Images(None) => settings_menu::images_panel(show_images),
         Sub::DefaultModel(None) => {
             let presentation = pickers::model_picker_presentation(catalog);
@@ -9311,6 +9526,7 @@ async fn settings_menu_interactively(
             &app.model,
             app.subagents_available(),
             app.config.show_images,
+            crate::cli::tui_mode(),
         ) {
             return Ok(Some(destination));
         }
@@ -9354,6 +9570,116 @@ async fn settings_menu_interactively(
     }
 }
 
+/// Truthful native inventory for `/pi status`. The bridge manifest is not
+/// evidence of the installed Pi release; setup remains explicitly unaudited
+/// until its safe native invocation boundary is available.
+fn pi_compat_status(
+    enabled: Option<bool>,
+    summary: Option<crate::extensions::ExtensionSummary>,
+) -> String {
+    let mut text = format!(
+        "Pi compatibility: {}\n",
+        match enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "unknown in the active extension snapshot",
+        }
+    );
+    if let Some(summary) = summary {
+        text.push_str(&format!(
+            "Bridge: {} · {} · source {:?} · manifest {}\n",
+            if summary.running {
+                "running"
+            } else {
+                "not running"
+            },
+            summary.compatibility,
+            summary.source,
+            summary.manifest_path.display(),
+        ));
+        text.push_str(&format!(
+            "Bridge manifest version: {} · extension API {} (neither identifies the installed Pi release)\n",
+            summary.version, summary.api_version,
+        ));
+    } else {
+        text.push_str("Bridge: not discovered; no bridge source or version is available.\n");
+    }
+    text.push_str(
+        "Pi setup audit: not performed; installed Pi source/version and missing entries are unknown. /pi setup is unavailable until a safe native review and output-installation boundary is provided.\n",
+    );
+    text.push_str("Pi configuration is not written by /pi commands.");
+    text
+}
+
+/// Apply `/pi` only while the application is idle-owned. Lifecycle changes may
+/// rebuild the App, so active-run requests are represented as pending intents.
+async fn apply_pi_command(
+    mut app: App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    sub: commands::PiSubcommand,
+) -> anyhow::Result<App> {
+    match sub {
+        commands::PiSubcommand::Status => {
+            let enabled = app
+                .config
+                .enabled_extensions
+                .iter()
+                .any(|name| name == PI_COMPAT_EXTENSION_NAME);
+            let summary = app
+                .executable_extensions
+                .summaries()
+                .into_iter()
+                .find(|summary| summary.name == PI_COMPAT_EXTENSION_NAME);
+            shell.show_overlay_text(pi_compat_status(Some(enabled), summary));
+        }
+        commands::PiSubcommand::On | commands::PiSubcommand::Off => {
+            let enable = matches!(sub, commands::PiSubcommand::On);
+            let currently_enabled = app
+                .config
+                .enabled_extensions
+                .iter()
+                .any(|name| name == PI_COMPAT_EXTENSION_NAME);
+            if currently_enabled == enable {
+                shell.notice(format!(
+                    "Pi compatibility is already {}",
+                    if enable { "enabled" } else { "disabled" }
+                ));
+            } else if enable
+                && !app
+                    .executable_extensions
+                    .summaries()
+                    .iter()
+                    .any(|summary| summary.name == PI_COMPAT_EXTENSION_NAME)
+            {
+                shell.error(format!(
+                    "Pi compatibility cannot be enabled: {PI_COMPAT_EXTENSION_NAME} was not discovered; use /extensions to inspect configured sources"
+                ));
+            } else {
+                let (next, changed) = set_extension_enabled(
+                    app,
+                    shell,
+                    input,
+                    PI_COMPAT_EXTENSION_NAME,
+                    currently_enabled,
+                )
+                .await?;
+                app = next;
+                if !changed {
+                    shell.error(format!(
+                        "Pi compatibility was not {}",
+                        if enable { "enabled" } else { "disabled" }
+                    ));
+                }
+            }
+        }
+        commands::PiSubcommand::Setup => shell.show_overlay_text(
+            "Pi setup review is unavailable: this build has no native safe invocation and output-installation boundary for the read-only audit and separately reviewed factory execution. No Pi factory was run and no Pi configuration was changed. Use /pi status for the current bridge state; retry setup after the safe integration is available.".into(),
+        ),
+    }
+    Ok(app)
+}
+
 /// `/settings` at the idle boundary. Reports render immediately; mutations
 /// persist through the shared configuration writer and apply in-session.
 async fn apply_settings_command(
@@ -9373,11 +9699,16 @@ async fn apply_settings_command(
     };
     match sub {
         Sub::Menu => unreachable!("menu navigation returns only a selected effect or report"),
-        Sub::Show => shell.show_report_facts(
-            "Settings",
-            "Effective display, launch, and session settings",
-            commands::settings_text(&commands::SettingsSurface::capture(app)),
-        ),
+        Sub::Show => {
+            let mut text = commands::settings_text(&commands::SettingsSurface::capture(app));
+            text.push('\n');
+            text.push_str(&tui_mode_report());
+            shell.show_report_facts(
+                "Settings",
+                "Effective display, launch, and session settings",
+                text,
+            );
+        }
         Sub::Transport => shell.notice(format!(
             "transport {} (declared by the {} route; not a user preference)",
             commands::transport_label(&app.model),
@@ -9387,6 +9718,26 @@ async fn apply_settings_command(
             "editor padding is compiled into the active theme layout; octet persists no padding override"
                 .to_owned(),
         ),
+        Sub::TuiMode(None) => shell.notice(tui_mode_report()),
+        Sub::TuiMode(Some(mode)) => {
+            if crate::cli::tui_mode_is_explicit() {
+                shell.error("TUI preference unchanged: --tui-mode overrides saved settings for this invocation".to_owned());
+                return Ok(());
+            }
+            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_tui_mode(mode)
+            })
+            .await
+            {
+                shell.error(format!("failed to save the TUI mode preference: {error}"));
+                return Ok(());
+            }
+            if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
+                shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
+                return Ok(());
+            }
+            shell.notice(format!("interactive terminal mode saved as {}", mode.as_str()));
+        }
         Sub::Theme(requested) => {
             configure_terminal_theme(
                 shell,
@@ -10157,6 +10508,9 @@ async fn run_idle_command_inner(
         Command::Settings(sub) => {
             apply_settings_command(&mut app, shell, input, sub).await?;
         }
+        Command::Pi(sub) => {
+            app = Box::new(apply_pi_command(*app, shell, input, sub).await?);
+        }
         Command::ScopedModels(sub) => {
             apply_scoped_models_command(&mut app, shell, sub).await;
         }
@@ -10169,39 +10523,41 @@ async fn run_idle_command_inner(
                 run_subagents_command(&mut app, shell, input, arguments).await?;
                 *goal_deadline = recovered_goal_deadline(&app)?;
             } else {
-                let selection = shell.selected_plain_text();
-                match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
-                    Ok(Some(rendered)) => {
-                        if app.config.debug_prompt {
-                            shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
-                        }
-                        return Ok(IdleCommandOutcome::Submit {
-                            app,
-                            input: ComposedInput::from_text(rendered.text),
-                        });
-                    }
-                    Ok(None) => {
-                        // Registered extension commands use the same attended,
-                        // policy-controlled owner pump as menu actions.
-                        let name = split_prompt_invocation(&text)
-                            .map(|(name, _)| name.to_owned())
-                            .unwrap_or_default();
-                        if let Some(owner) = app.executable_extensions.command_owner(&name) {
-                            if name == "subagents" {
-                                shell.error("first-party subagent command is unavailable".into());
-                            } else {
-                                let arguments = split_prompt_invocation(&text)
-                                    .map_or("", |(_, arguments)| arguments)
-                                    .split_whitespace()
-                                    .map(str::to_owned)
-                                    .collect();
-                                run_typed_extension_command(
-                                    &mut app, shell, input, owner, name, arguments,
-                                )
-                                .await?;
-                                *goal_deadline = recovered_goal_deadline(&app)?;
-                            }
+                let name = split_prompt_invocation(&text)
+                    .map(|(name, _)| name.to_owned())
+                    .unwrap_or_default();
+                if name == "subagents" {
+                    shell.error(
+                        if app.executable_extensions.command_owner(&name).is_some() {
+                            "first-party subagent command is unavailable".into()
                         } else {
+                            format!("unknown command: {text}")
+                        },
+                    );
+                } else if commands::is_reserved_slash_command_name(&name) {
+                    shell.error(format!("invalid syntax for built-in command: {text}"));
+                } else if let Some(owner) = app.executable_extensions.command_owner(&name) {
+                    let arguments = split_prompt_invocation(&text)
+                        .map_or("", |(_, arguments)| arguments)
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect();
+                    run_typed_extension_command(&mut app, shell, input, owner, name, arguments)
+                        .await?;
+                    *goal_deadline = recovered_goal_deadline(&app)?;
+                } else {
+                    let selection = shell.selected_plain_text();
+                    match expand_prompt_invocation(&mut app, &text, true, selection.as_deref()) {
+                        Ok(Some(rendered)) => {
+                            if app.config.debug_prompt {
+                                shell.show_overlay_text(crate::prompts::debug_expansion(&rendered));
+                            }
+                            return Ok(IdleCommandOutcome::Submit {
+                                app,
+                                input: ComposedInput::from_text(rendered.text),
+                            });
+                        }
+                        Ok(None) => {
                             // A slash command may still name an extension that
                             // is starting, degraded, or parked. Say so instead of
                             // a bare unknown.
@@ -10220,15 +10576,15 @@ async fn run_idle_command_inner(
                                     .collect();
                             if text.starts_with('/') && !not_ready.is_empty() {
                                 shell.error(format!(
-                                "unknown command: {text} (extensions not ready: {} — see /extensions status)",
-                                not_ready.join(", ")
-                            ));
+                                    "unknown command: {text} (extensions not ready: {} — see /extensions status)",
+                                    not_ready.join(", ")
+                                ));
                             } else {
                                 shell.error(format!("unknown command: {text}"));
                             }
                         }
+                        Err(error) => shell.error(error.to_string()),
                     }
-                    Err(error) => shell.error(error.to_string()),
                 }
             }
         }
@@ -11267,6 +11623,247 @@ fn valid_guided_manual_model(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
+fn setup_authentication_summary(authentication: &SetupCredentialSummary) -> String {
+    match authentication {
+        SetupCredentialSummary::None => "no authentication".to_owned(),
+        SetupCredentialSummary::Environment { variable } => {
+            format!("environment variable {variable}")
+        }
+        SetupCredentialSummary::StoredCredentialConfigured => {
+            "stored credential configured (value hidden)".to_owned()
+        }
+    }
+}
+
+fn setup_model_metadata_description(model: &SetupModel) -> String {
+    let context = if let Some(context) = model.configured_context_window {
+        format!("explicitly configured context: {context}")
+    } else if model.context_window_asserted {
+        model
+            .context_window
+            .map(|context| format!("endpoint-asserted effective context: {context}"))
+            .unwrap_or_else(|| "endpoint context assertion is unavailable".to_owned())
+    } else {
+        "effective context unknown; a positive explicit limit is required".to_owned()
+    };
+    let reasoning = match model.reasoning_supported {
+        Some(true) => "Chat reasoning explicitly supported",
+        Some(false) => "Chat reasoning explicitly unsupported",
+        None => "Chat reasoning support unknown",
+    };
+    format!("{} · {context} · {reasoning}", model.api_name)
+}
+
+async fn guided_context_window(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<Option<u64>> {
+    loop {
+        let Some(value) = guided_setup_input(
+            shell,
+            input,
+            "Effective context window in tokens (positive number):",
+            false,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        if let Ok(context) = value.trim().parse::<u64>() {
+            if context > 0 {
+                return Ok(Some(context));
+            }
+        }
+        shell.error("context window must be a positive token count".to_owned());
+        shell.render();
+    }
+}
+
+async fn guided_existing_provider_draft(
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+    providers: &[ExistingProviderSummary],
+) -> anyhow::Result<Option<(SetupDraft, ExistingProviderSummary)>> {
+    if providers.is_empty() {
+        shell.error("no editable custom providers are configured".to_owned());
+        shell.render();
+        return Ok(None);
+    }
+    let items = providers
+        .iter()
+        .map(|provider| format!("{} ({})", provider.label, provider.provider_id))
+        .collect();
+    let descriptions = providers
+        .iter()
+        .map(|provider| {
+            let unknown_context = provider
+                .models
+                .iter()
+                .filter(|model| model.requires_context_configuration)
+                .count();
+            Some(format!(
+                "endpoint: {}\nauthentication: {}\nmodels: {} ({} need an explicit context limit)",
+                provider.endpoint,
+                setup_authentication_summary(&provider.authentication),
+                provider.models.len(),
+                unknown_context,
+            ))
+        })
+        .collect();
+    let Some(selected) = provider_setup_picker(
+        shell,
+        input,
+        "Choose a provider to edit",
+        items,
+        descriptions,
+        0,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let provider = &providers[selected];
+
+    let Some(endpoint_choice) = provider_setup_picker(
+        shell,
+        input,
+        "Provider endpoint",
+        vec![
+            "Keep the current endpoint".to_owned(),
+            "Change the endpoint".to_owned(),
+            "Back".to_owned(),
+        ],
+        vec![
+            Some(provider.endpoint.clone()),
+            Some("Only the endpoint you enter will be contacted".to_owned()),
+            Some("Return to provider selection without writing state".to_owned()),
+        ],
+        0,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let endpoint = match endpoint_choice {
+        0 => provider.endpoint.clone(),
+        1 => {
+            let Some(endpoint) = guided_setup_input(shell, input, "Endpoint URL:", false).await?
+            else {
+                return Ok(None);
+            };
+            endpoint
+        }
+        _ => return Ok(None),
+    };
+    let Some(label_input) = guided_setup_input(
+        shell,
+        input,
+        &format!("Provider label (blank keeps {:?}):", provider.label),
+        false,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let label = if label_input.trim().is_empty() {
+        provider.label.clone()
+    } else {
+        label_input
+    };
+
+    let Some(authentication_choice) = provider_setup_picker(
+        shell,
+        input,
+        "Authentication source",
+        vec![
+            "Preserve current authentication".to_owned(),
+            "No authentication".to_owned(),
+            "Enter a replacement API key".to_owned(),
+            "Use an environment variable".to_owned(),
+            "Back".to_owned(),
+        ],
+        vec![
+            Some(setup_authentication_summary(&provider.authentication)),
+            Some("Remove the configured credential source".to_owned()),
+            Some("The new key is hidden and saved only after final confirmation".to_owned()),
+            Some("Read the named environment variable at runtime".to_owned()),
+            Some("Return without writing provider state".to_owned()),
+        ],
+        0,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let authentication = match authentication_choice {
+        0 => SetupAuthentication::preserve_existing(),
+        1 => SetupAuthentication::no_authentication(),
+        2 => {
+            let Some(value) =
+                guided_setup_input(shell, input, "Replacement API key:", true).await?
+            else {
+                return Ok(None);
+            };
+            SetupAuthentication::api_key(value)
+        }
+        3 => {
+            let Some(variable) =
+                guided_setup_input(shell, input, "Environment variable name:", false).await?
+            else {
+                return Ok(None);
+            };
+            SetupAuthentication::environment(variable)
+        }
+        _ => return Ok(None),
+    };
+
+    let endpoint_changed = endpoint != provider.endpoint;
+    let preserve_existing = matches!(&authentication, SetupAuthentication::PreserveExisting);
+    let allow_credential_reuse = if endpoint_changed
+        && preserve_existing
+        && !matches!(&provider.authentication, SetupCredentialSummary::None)
+    {
+        matches!(
+            provider_setup_picker(
+                shell,
+                input,
+                "Confirm credential reuse",
+                vec![
+                    "Reuse the existing credential at the new endpoint".to_owned(),
+                    "Cancel this edit".to_owned(),
+                ],
+                vec![
+                    Some(
+                        "This is a separate consent from saving the reviewed provider change"
+                            .to_owned()
+                    ),
+                    Some("No provider state is written".to_owned()),
+                ],
+                1,
+            )
+            .await?,
+            Some(0)
+        )
+    } else {
+        false
+    };
+    if endpoint_changed
+        && preserve_existing
+        && !matches!(&provider.authentication, SetupCredentialSummary::None)
+        && !allow_credential_reuse
+    {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        SetupDraft::edit_existing(provider.provider_id.clone(), label, endpoint)
+            .with_discovery_profile(provider.discovery_profile)
+            .with_authentication(authentication)
+            .allow_credential_reuse_at_new_endpoint(allow_credential_reuse),
+        provider.clone(),
+    )))
+}
+
 /// Interactive setup for an explicitly selected compatible endpoint. Every
 /// path before `commit_and_rebuild` is in-memory only.
 async fn guided_provider_setup(
@@ -11275,140 +11872,169 @@ async fn guided_provider_setup(
     config: &crate::config::Config,
     persist_default_model: bool,
 ) -> anyhow::Result<Option<CompletedSetup>> {
-    let mut replace_existing = false;
+    let mut replace_existing: Option<String> = None;
+    let service = ProviderSetupService::new(
+        crate::auth::custom::CredentialStore::new(crate::auth::custom::default_path()),
+        config.offline,
+    );
     'setup: loop {
         if shell.close_requested() {
             return Ok(None);
         }
-        let Some(preset) = provider_setup_picker(
-            shell,
-            input,
-            "Set up a provider",
-            vec![
-                "LM Studio".to_owned(),
-                "OpenAI-compatible endpoint".to_owned(),
-                "Cancel setup".to_owned(),
-            ],
-            vec![
-                Some("Use an explicitly selected local OpenAI-compatible endpoint".to_owned()),
-                Some("Use one endpoint you enter; octet will not scan for services".to_owned()),
-                Some("Cancel local endpoint setup without writing provider data".to_owned()),
-            ],
-            0,
-        )
-        .await?
+        let existing_providers = service.existing_providers()?;
+        let edit_index = (!existing_providers.is_empty()).then_some(2);
+        let mut items = vec![
+            "LM Studio".to_owned(),
+            "OpenAI-compatible endpoint".to_owned(),
+        ];
+        let mut descriptions = vec![
+            Some("Use an explicitly selected local OpenAI-compatible endpoint".to_owned()),
+            Some("Use one endpoint you enter; octet will not scan for services".to_owned()),
+        ];
+        if edit_index.is_some() {
+            items.push("Edit an existing custom provider".to_owned());
+            descriptions.push(Some(
+                "Review and edit a provider from the private custom-provider registry".to_owned(),
+            ));
+        }
+        items.push("Cancel setup".to_owned());
+        descriptions.push(Some(
+            "Cancel local endpoint setup without writing provider data".to_owned(),
+        ));
+        let cancel_index = items.len() - 1;
+        let Some(choice) =
+            provider_setup_picker(shell, input, "Set up a provider", items, descriptions, 0)
+                .await?
         else {
             return Ok(None);
         };
-        let preset = match preset {
-            0 => GuidedSetupPreset::LmStudio,
-            1 => GuidedSetupPreset::OpenAiCompatible,
-            _ => return Ok(None),
-        };
-
-        let endpoint = match preset {
-            GuidedSetupPreset::LmStudio => {
-                let Some(choice) = provider_setup_picker(
-                    shell,
-                    input,
-                    "LM Studio endpoint",
-                    vec![
-                        "Use http://localhost:1234/v1/".to_owned(),
-                        "Enter a different endpoint".to_owned(),
-                        "Back".to_owned(),
-                    ],
-                    vec![
-                        Some("The default LM Studio OpenAI-compatible server".to_owned()),
-                        Some("Only the endpoint you enter will be contacted".to_owned()),
-                        Some("Return to provider selection without writing state".to_owned()),
-                    ],
-                    0,
-                )
-                .await?
-                else {
-                    continue 'setup;
-                };
-                match choice {
-                    0 => "http://localhost:1234/v1/".to_owned(),
-                    1 => {
-                        let Some(endpoint) =
-                            guided_setup_input(shell, input, "Endpoint URL:", false).await?
-                        else {
-                            continue 'setup;
-                        };
-                        endpoint
-                    }
-                    _ => continue 'setup,
-                }
-            }
-            GuidedSetupPreset::OpenAiCompatible => {
-                let Some(endpoint) =
-                    guided_setup_input(shell, input, "Endpoint URL:", false).await?
-                else {
-                    continue 'setup;
-                };
-                endpoint
-            }
-        };
-
-        let Some(authentication_choice) = provider_setup_picker(
-            shell,
-            input,
-            "Credential source",
-            vec![
-                "No authentication".to_owned(),
-                "Enter an API key".to_owned(),
-                "Read an API key from an environment variable".to_owned(),
-                "Back".to_owned(),
-            ],
-            vec![
-                Some("Do not send or store a credential".to_owned()),
-                Some("The key is hidden and stored only after final confirmation".to_owned()),
-                Some("The environment value is read only at runtime and is not stored".to_owned()),
-                Some("Return to provider selection without writing state".to_owned()),
-            ],
-            0,
-        )
-        .await?
-        else {
-            continue 'setup;
-        };
-        let authentication = match authentication_choice {
-            0 => SetupAuthentication::no_authentication(),
-            1 => {
-                let Some(value) = guided_setup_input(shell, input, "API key:", true).await? else {
-                    continue 'setup;
-                };
-                SetupAuthentication::api_key(value)
-            }
-            2 => {
-                let Some(variable) =
-                    guided_setup_input(shell, input, "Environment variable name:", false).await?
-                else {
-                    continue 'setup;
-                };
-                SetupAuthentication::environment(variable)
-            }
-            _ => continue 'setup,
-        };
-
-        let is_default_lm_studio = matches!(preset, GuidedSetupPreset::LmStudio)
-            && endpoint == "http://localhost:1234/v1/"
-            && matches!(&authentication, SetupAuthentication::None);
-        let draft = if is_default_lm_studio {
-            SetupDraft::lm_studio().replace_existing(replace_existing)
+        if choice == cancel_index {
+            return Ok(None);
+        }
+        let mut edited_provider = None;
+        let (draft, draft_provider_id) = if edit_index == Some(choice) {
+            replace_existing = None;
+            let Some((draft, provider)) =
+                guided_existing_provider_draft(shell, input, &existing_providers).await?
+            else {
+                continue 'setup;
+            };
+            edited_provider = Some(provider);
+            (draft, None)
         } else {
+            let preset = match choice {
+                0 => GuidedSetupPreset::LmStudio,
+                1 => GuidedSetupPreset::OpenAiCompatible,
+                _ => continue 'setup,
+            };
+
+            let endpoint = match preset {
+                GuidedSetupPreset::LmStudio => {
+                    let Some(choice) = provider_setup_picker(
+                        shell,
+                        input,
+                        "LM Studio endpoint",
+                        vec![
+                            "Use http://localhost:1234/v1/".to_owned(),
+                            "Enter a different endpoint".to_owned(),
+                            "Back".to_owned(),
+                        ],
+                        vec![
+                            Some("The default LM Studio OpenAI-compatible server".to_owned()),
+                            Some("Only the endpoint you enter will be contacted".to_owned()),
+                            Some("Return to provider selection without writing state".to_owned()),
+                        ],
+                        0,
+                    )
+                    .await?
+                    else {
+                        continue 'setup;
+                    };
+                    match choice {
+                        0 => "http://localhost:1234/v1/".to_owned(),
+                        1 => {
+                            let Some(endpoint) =
+                                guided_setup_input(shell, input, "Endpoint URL:", false).await?
+                            else {
+                                continue 'setup;
+                            };
+                            endpoint
+                        }
+                        _ => continue 'setup,
+                    }
+                }
+                GuidedSetupPreset::OpenAiCompatible => {
+                    let Some(endpoint) =
+                        guided_setup_input(shell, input, "Endpoint URL:", false).await?
+                    else {
+                        continue 'setup;
+                    };
+                    endpoint
+                }
+            };
+
+            let Some(authentication_choice) = provider_setup_picker(
+                shell,
+                input,
+                "Credential source",
+                vec![
+                    "No authentication".to_owned(),
+                    "Enter an API key".to_owned(),
+                    "Read an API key from an environment variable".to_owned(),
+                    "Back".to_owned(),
+                ],
+                vec![
+                    Some("Do not send or store a credential".to_owned()),
+                    Some("The key is hidden and stored only after final confirmation".to_owned()),
+                    Some(
+                        "The environment value is read only at runtime and is not stored"
+                            .to_owned(),
+                    ),
+                    Some("Return to provider selection without writing state".to_owned()),
+                ],
+                0,
+            )
+            .await?
+            else {
+                continue 'setup;
+            };
+            let authentication = match authentication_choice {
+                0 => SetupAuthentication::no_authentication(),
+                1 => {
+                    let Some(value) = guided_setup_input(shell, input, "API key:", true).await?
+                    else {
+                        continue 'setup;
+                    };
+                    SetupAuthentication::api_key(value)
+                }
+                2 => {
+                    let Some(variable) =
+                        guided_setup_input(shell, input, "Environment variable name:", false)
+                            .await?
+                    else {
+                        continue 'setup;
+                    };
+                    SetupAuthentication::environment(variable)
+                }
+                _ => continue 'setup,
+            };
+
             let (provider_id, label) = match preset {
                 GuidedSetupPreset::LmStudio => ("local", "LM Studio"),
                 GuidedSetupPreset::OpenAiCompatible => ("custom", "OpenAI-compatible endpoint"),
             };
-            SetupDraft::new(provider_id, label, endpoint, authentication)
-                .replace_existing(replace_existing)
+            let replace_provider = replace_existing.take().as_deref() == Some(provider_id);
+            let is_default_lm_studio = matches!(preset, GuidedSetupPreset::LmStudio)
+                && endpoint == "http://localhost:1234/v1/"
+                && matches!(&authentication, SetupAuthentication::None);
+            let draft = if is_default_lm_studio {
+                SetupDraft::lm_studio().replace_existing(replace_provider)
+            } else {
+                SetupDraft::new(provider_id, label, endpoint, authentication)
+                    .replace_existing(replace_provider)
+            };
+            (draft, Some(provider_id.to_owned()))
         };
-        let service = ProviderSetupService::new(
-            crate::auth::custom::CredentialStore::new(crate::auth::custom::default_path()),
-            config.offline,
-        );
         let transaction = match service.begin(draft) {
             Ok(transaction) => transaction,
             Err(error)
@@ -11441,11 +12067,11 @@ async fn guided_provider_setup(
                 .await?
                 {
                     Some(0) => {
-                        replace_existing = true;
+                        replace_existing = draft_provider_id.clone();
                         continue 'setup;
                     }
                     Some(1) => {
-                        replace_existing = false;
+                        replace_existing = None;
                         continue 'setup;
                     }
                     _ => return Ok(None),
@@ -11523,7 +12149,64 @@ async fn guided_provider_setup(
                     shell.render();
                     continue 'prepare;
                 }
-                break 'prepare service.prepare_manual(transaction, &model)?;
+                let context_window = edited_provider
+                    .as_ref()
+                    .and_then(|provider| {
+                        provider
+                            .models
+                            .iter()
+                            .find(|candidate| candidate.api_name == model)
+                    })
+                    .and_then(|model| model.configured_context_window);
+                let context_window = if let Some(saved_context) = context_window {
+                    match provider_setup_picker(
+                        shell,
+                        input,
+                        "Effective context window",
+                        vec![
+                            format!("Keep saved explicit limit ({saved_context} tokens)"),
+                            "Enter a different positive limit".to_owned(),
+                            "Back".to_owned(),
+                        ],
+                        vec![
+                            Some(
+                                "Reuse the configured operational limit for this model".to_owned(),
+                            ),
+                            Some(
+                                "Set an explicit operational limit without endpoint discovery"
+                                    .to_owned(),
+                            ),
+                            Some("Return to provider selection without writing state".to_owned()),
+                        ],
+                        0,
+                    )
+                    .await?
+                    {
+                        Some(0) => saved_context,
+                        Some(1) => {
+                            let Some(context) = guided_context_window(shell, input).await? else {
+                                let _ = transaction.cancel();
+                                continue 'setup;
+                            };
+                            context
+                        }
+                        _ => {
+                            let _ = transaction.cancel();
+                            continue 'setup;
+                        }
+                    }
+                } else {
+                    let Some(context) = guided_context_window(shell, input).await? else {
+                        let _ = transaction.cancel();
+                        continue 'setup;
+                    };
+                    context
+                };
+                break 'prepare service.prepare_manual_with_context(
+                    transaction,
+                    &model,
+                    context_window,
+                )?;
             }
 
             let discovery_service = service.clone();
@@ -11543,7 +12226,7 @@ async fn guided_provider_setup(
                         .collect::<Vec<_>>();
                     let descriptions = models
                         .iter()
-                        .map(|model| Some(model.api_name.clone()))
+                        .map(|model| Some(setup_model_metadata_description(model)))
                         .collect::<Vec<_>>();
                     let Some(selected) = provider_setup_picker(
                         shell,
@@ -11558,8 +12241,21 @@ async fn guided_provider_setup(
                         let _ = transaction.cancel();
                         continue 'setup;
                     };
+                    let selected_model = &models[selected];
+                    if selected_model.requires_context_configuration {
+                        let Some(context_window) = guided_context_window(shell, input).await?
+                        else {
+                            let _ = transaction.cancel();
+                            continue 'setup;
+                        };
+                        break 'prepare service.prepare_discovered_with_context(
+                            transaction,
+                            &selected_model.api_name,
+                            context_window,
+                        )?;
+                    }
                     break 'prepare service
-                        .prepare_discovered(transaction, &models[selected].api_name)?;
+                        .prepare_discovered(transaction, &selected_model.api_name)?;
                 }
                 Err(error) => {
                     let diagnostic = error
@@ -11760,6 +12456,7 @@ async fn run_interactive_once(
     crate::tui::view::tern::set_policy(config.tern);
     let mut shell =
         InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
+    shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
     // Best-effort re-exec support: a host that cannot report its own executable
     // keeps the resources-only `/reload`.
     let mut reexec = crate::reexec::ReexecController::capture().ok();

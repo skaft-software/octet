@@ -22,6 +22,8 @@ fn custom_registry_registers_labeled_providers_with_isolated_auth_and_models() {
             headers: Vec::new(),
             models: vec![CustomModel {
                 api_name: model_id.into(),
+                context_window_asserted: true,
+                discovered_context_window: Some(131_072),
                 ..Default::default()
             }],
             auto_discover: false,
@@ -336,6 +338,8 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         context_window: 262_144,
         max_output_tokens: 16_384,
         context_window_asserted: true,
+        context_window_configured: false,
+        discovered_context_window: Some(262_144),
         max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: true,
@@ -350,6 +354,7 @@ fn custom_model_cache_is_scoped_to_endpoint_and_reuses_discovery() {
         reasoning_uses_system_message: true,
         pricing: None,
         preset: Default::default(),
+        native_metadata: None,
     }];
     let mut first_headers = http::HeaderMap::new();
     first_headers.insert("x-organization", "tenant-one".parse().unwrap());
@@ -545,6 +550,9 @@ async fn stale_positive_custom_cache_is_available_without_waiting_for_discovery(
     let fingerprint = custom_model_cache_fingerprint(&credential, &[]);
     let previous = crate::auth::custom::CustomModel {
         api_name: "last-good-model".into(),
+        context_window: 131_072,
+        context_window_asserted: true,
+        discovered_context_window: Some(131_072),
         ..Default::default()
     };
     save_custom_model_cache_for(

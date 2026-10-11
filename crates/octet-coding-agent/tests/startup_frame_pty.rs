@@ -295,6 +295,45 @@ impl PtyOctet {
         start: (u16, bool, bool),
         fixture: StartupFixture<'_>,
     ) -> Self {
+        Self::spawn_at_with_appearance_and_mode(
+            binary,
+            mode,
+            api,
+            appearance,
+            dimensions,
+            start,
+            fixture,
+            Some(false),
+        )
+    }
+
+    fn spawn_default_fullscreen(
+        binary: &Path,
+        mode: MouseMode,
+        fixture: StartupFixture<'_>,
+    ) -> Self {
+        Self::spawn_at_with_appearance_and_mode(
+            binary,
+            mode,
+            None,
+            (true, false),
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            fixture,
+            None,
+        )
+    }
+
+    fn spawn_at_with_appearance_and_mode(
+        binary: &Path,
+        mode: MouseMode,
+        api: Option<&str>,
+        appearance: (bool, bool),
+        dimensions: (u16, u16),
+        start: (u16, bool, bool),
+        fixture: StartupFixture<'_>,
+        fullscreen: Option<bool>,
+    ) -> Self {
         let (color, auto_appearance) = appearance;
         let root = tempfile::tempdir().expect("PTY test tempdir");
         // The CLI resolves the workspace physically. Give HOME the same path
@@ -460,6 +499,9 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+        if let Some(fullscreen) = fullscreen {
+            command.env("OCTET_TUI_ALT_SCREEN", if fullscreen { "1" } else { "0" });
+        }
 
         if let Some(mode) = mode.as_arg() {
             command.args(["--mouse", mode]);
@@ -1161,6 +1203,30 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
     let capture = octet.shutdown();
     assert!(capture.status.success());
     assert!(capture.termios_restored);
+}
+
+#[test]
+fn real_octet_defaults_to_fullscreen_and_restores_the_primary_screen() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn_default_fullscreen(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        StartupFixture::Setup,
+    );
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        synchronized_frame_end_containing(bytes, b"Choose terminal appearance").is_some()
+    });
+    assert!(contains_bytes(&octet.pty.output, b"\x1b[?1049h"));
+
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+    assert!(contains_bytes(
+        &capture.output[capture.shutdown_start..],
+        b"\x1b[?1049l"
+    ));
 }
 
 #[test]

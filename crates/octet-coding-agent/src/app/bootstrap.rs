@@ -419,8 +419,9 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // Version 11 invalidates inventories where sparse endpoint metadata had
 // overwritten configured limits with unasserted discovery fallbacks, and starts
 // recording each limit's provenance so a cached inventory re-merges to the same
-// effective limit on the next start.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 11;
+// effective limit on the next start. Version 12 adds provenance-scoped native
+// metadata, including separate maximum and loaded-instance context values.
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 12;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
 const MAX_PROVIDER_INVENTORY_CACHE_BYTES: usize = MAX_DISCOVERY_BODY_BYTES + 1024 * 1024;
 const PROVIDER_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -4583,7 +4584,7 @@ where
     )
 }
 
-fn configured_custom_models(
+pub(crate) fn configured_custom_models(
     cred: &crate::auth::custom::CustomCredential,
 ) -> Vec<crate::auth::custom::CustomModel> {
     if !cred.models.is_empty() {
@@ -4599,7 +4600,7 @@ fn configured_custom_models(
     }
 }
 
-fn apply_configured_custom_model_overrides(
+pub(crate) fn apply_configured_custom_model_overrides(
     discovered: Vec<crate::auth::custom::CustomModel>,
     configured: &[crate::auth::custom::CustomModel],
     auto_discover: bool,
@@ -4643,19 +4644,38 @@ where
         emitted_names.insert(model.api_name.clone());
         match configured_by_name.get(model.api_name.as_str()).copied() {
             Some(configured_model) if auto_discover => {
-                // Endpoint-asserted limits are authoritative; every non-limit
-                // field (names, capabilities, reasoning, pricing, presets)
-                // remains configured-wins. Output keeps the tighter cap,
-                // clamped to the effective window.
+                // Preserve explicit operational context pins while refreshing
+                // endpoint facts independently. Unasserted fallback values never
+                // become ready limits and a native model maximum is not effective
+                // loaded-instance context.
                 let mut effective = configured_model.clone();
-                if model.context_window_asserted {
-                    effective.context_window = model.context_window;
+                let discovered_context = model.context_window_asserted.then_some(
+                    model
+                        .discovered_context_window
+                        .unwrap_or(model.context_window),
+                );
+                effective.discovered_context_window = discovered_context;
+                effective.context_window_asserted = discovered_context.is_some();
+                effective.context_window_configured = configured_model.context_window_configured;
+                if !effective.context_window_configured {
+                    if let Some(context_window) = discovered_context {
+                        effective.context_window = context_window;
+                    }
                 }
-                // Carry the provenance onto the merged model. Registration runs
-                // this merge again over its own output, so a dropped flag would
-                // let that second pass re-apply a stale registry pin on top of
-                // a live assertion.
-                effective.context_window_asserted = model.context_window_asserted;
+                // A discovered route contract refreshes prior discovered
+                // reasoning facts. Models with no provenance retain their
+                // explicitly configured reasoning profile/settings.
+                if model.reasoning_source.is_some() && configured_model.reasoning_source.is_some() {
+                    effective.reasoning = model.reasoning;
+                    effective.reasoning_configurable = model.reasoning_configurable;
+                    effective.reasoning_values = model.reasoning_values.clone();
+                    effective.reasoning_default = model.reasoning_default.clone();
+                    effective.reasoning_source = model.reasoning_source;
+                    effective.reasoning_uses_system_message = model.reasoning_uses_system_message;
+                    if configured_model.reasoning_profile.is_none() {
+                        effective.reasoning_profile = model.reasoning_profile.clone();
+                    }
+                }
                 effective.max_output_tokens = if model.max_output_tokens_asserted {
                     model
                         .max_output_tokens
@@ -4665,6 +4685,13 @@ where
                 }
                 .min(effective.context_window);
                 effective.max_output_tokens_asserted = model.max_output_tokens_asserted;
+                // Native metadata belongs to its explicitly selected inventory
+                // source; keep refreshed unknown/absent facts distinct from stale
+                // configured values, without promoting them to Chat capabilities.
+                effective.native_metadata = model
+                    .native_metadata
+                    .clone()
+                    .or_else(|| configured_model.native_metadata.clone());
                 merged.push(effective);
             }
             // Explicit opt-out: the registry is truth, including its limits.
@@ -4937,6 +4964,8 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         context_window,
         max_output_tokens: APPLE_FM_MAX_OUTPUT_TOKENS,
         context_window_asserted: true,
+        context_window_configured: false,
+        discovered_context_window: Some(context_window),
         max_output_tokens_asserted: true,
         tools: true,
         parallel_tool_calls: false,
@@ -4951,6 +4980,7 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
         reasoning_uses_system_message: true,
         pricing: None,
         preset: Default::default(),
+        native_metadata: None,
     })
 }
 
@@ -5065,6 +5095,19 @@ fn custom_model_id(
     } else {
         format!("custom/{provider_id}/{}", model.api_name)
     }
+}
+
+fn custom_model_effective_context_window(model: &crate::auth::custom::CustomModel) -> Option<u64> {
+    let context_window = if model.context_window_configured {
+        model.context_window
+    } else if model.context_window_asserted {
+        model
+            .discovered_context_window
+            .unwrap_or(model.context_window)
+    } else {
+        return None;
+    };
+    (context_window > 0).then_some(context_window)
 }
 
 fn register_custom_openai_endpoints_from_store(
@@ -5322,12 +5365,33 @@ fn register_custom_openai_provider(
         &configured_overrides,
         cred.auto_discover,
     );
+    let (models, unknown_context_models): (Vec<_>, Vec<_>) = models
+        .into_iter()
+        .partition(|model| custom_model_effective_context_window(model).is_some());
+    let missing_context_count = unknown_context_models.len();
+    let mut context_diagnostics =
+        crate::output::DiagnosticCheck::new(crate::output::DiagnosticComponent::Bootstrap(
+            format!("custom-context-required:{provider_id}"),
+        ));
+    if missing_context_count > 0 {
+        context_diagnostics.problem(format!(
+            "warning: custom provider {provider_id:?} has {missing_context_count} model(s) with unknown effective context; configure a positive context in provider setup before selecting them"
+        ));
+    }
+    context_diagnostics.finish(true);
     if models.is_empty() {
         return Ok(());
     }
 
     let cache = provider.cache.clone().unwrap_or_default();
     for model in &models {
+        let context_window = custom_model_effective_context_window(model)
+            .expect("models without asserted or configured context were filtered");
+        let max_output_tokens = model.max_output_tokens.min(context_window);
+        anyhow::ensure!(
+            max_output_tokens > 0,
+            "custom provider {provider_id:?} has an invalid output limit"
+        );
         if !model.reasoning_values.is_empty() {
             anyhow::ensure!(
                 octet_ai::types::ReasoningOptions {
@@ -5374,14 +5438,342 @@ fn register_custom_openai_provider(
                 responses_features: Default::default(),
             },
             limits: ModelLimits {
-                context_window: model.context_window,
-                max_output_tokens: model.max_output_tokens,
+                context_window,
+                max_output_tokens,
             },
             pricing: Some(custom_model_pricing(model)),
             cache: cache.clone(),
         })?;
     }
     Ok(())
+}
+
+const MAX_NATIVE_METADATA_MODELS: usize = 512;
+
+fn fetch_lm_studio_native_inventory(
+    client: &reqwest::blocking::Client,
+    endpoint: &url::Url,
+    credential: &crate::auth::custom::CustomCredential,
+    report_errors: bool,
+    diagnostics: &mut crate::output::DiagnosticCheck,
+) -> Option<serde_json::Value> {
+    let Some(url) = lm_studio_native_models_url(endpoint) else {
+        if report_errors {
+            diagnostics.problem("warning: native model metadata URL could not be resolved");
+        }
+        return None;
+    };
+    let mut request = client.get(url);
+    if !credential.api_key.trim().is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", credential.api_key));
+    }
+    for header in &credential.headers {
+        request = request.header(&header.name, &header.value);
+    }
+    let response = match request.send() {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) => {
+            if report_errors {
+                diagnostics.problem(
+                    "warning: native model metadata endpoint returned an unsuccessful status",
+                );
+            }
+            return None;
+        }
+        Err(_) => {
+            if report_errors {
+                diagnostics.problem("warning: native model metadata endpoint could not be reached");
+            }
+            return None;
+        }
+    };
+    match bounded_discovery_json(response, "native model metadata") {
+        Ok(body) => Some(body),
+        Err(_) => {
+            if report_errors {
+                diagnostics.problem("warning: native model metadata body was invalid or oversized");
+            }
+            None
+        }
+    }
+}
+
+/// Resolve the documented LM Studio native inventory below the explicitly
+/// selected OpenAI-compatible `/v1/` endpoint. No service scanning is performed.
+pub(crate) fn lm_studio_native_models_url(endpoint: &url::Url) -> Option<url::Url> {
+    endpoint.join("../api/v1/models").ok()
+}
+
+pub(crate) fn custom_uses_lm_studio_native_metadata(
+    credential: &crate::auth::custom::CustomCredential,
+) -> bool {
+    configured_custom_models(credential)
+        .iter()
+        .any(|model| model.native_metadata.is_some())
+}
+
+fn unknown_native_model_metadata() -> crate::auth::custom::CustomNativeMetadata {
+    use octet_ai::discovery::DiscoveryMetadataSource::Unknown;
+    crate::auth::custom::CustomNativeMetadata {
+        source: Unknown,
+        max_context_source: Unknown,
+        loaded_context_source: Unknown,
+        vision_source: Unknown,
+        tool_use_source: Unknown,
+        reasoning: crate::auth::custom::CustomNativeReasoning {
+            source: Unknown,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Attach metadata from the explicitly selected provider-native inventory.
+/// `None` means the request/body was unavailable or invalid; a valid inventory
+/// with no matching key records `Absent`, not unsupported or guessed facts.
+pub(crate) fn apply_lm_studio_native_metadata(
+    models: &mut [crate::auth::custom::CustomModel],
+    inventory: Option<&serde_json::Value>,
+) {
+    use octet_ai::discovery::DiscoveryMetadataSource::{Absent, Explicit};
+
+    for model in models.iter_mut() {
+        model.native_metadata = Some(unknown_native_model_metadata());
+    }
+    let Some(entries) = inventory
+        .and_then(|body| body.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|entries| entries.len() <= MAX_NATIVE_METADATA_MODELS)
+    else {
+        return;
+    };
+
+    for model in models {
+        let matching = entries
+            .iter()
+            .filter(|entry| {
+                entry.get("key").and_then(serde_json::Value::as_str)
+                    == Some(model.api_name.as_str())
+            })
+            .collect::<Vec<_>>();
+        let metadata = match matching.as_slice() {
+            [] => crate::auth::custom::CustomNativeMetadata {
+                source: Absent,
+                max_context_source: Absent,
+                loaded_context_source: Absent,
+                vision_source: Absent,
+                tool_use_source: Absent,
+                reasoning: crate::auth::custom::CustomNativeReasoning {
+                    source: Absent,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            [entry] if entry.get("type").and_then(serde_json::Value::as_str) == Some("llm") => {
+                parse_lm_studio_native_model(entry)
+            }
+            [entry]
+                if matches!(
+                    entry.get("type").and_then(serde_json::Value::as_str),
+                    Some("embedding" | "decision")
+                ) =>
+            {
+                crate::auth::custom::CustomNativeMetadata {
+                    source: Absent,
+                    max_context_source: Absent,
+                    loaded_context_source: Absent,
+                    vision_source: Absent,
+                    tool_use_source: Absent,
+                    reasoning: crate::auth::custom::CustomNativeReasoning {
+                        source: Absent,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }
+            _ => unknown_native_model_metadata(),
+        };
+        if metadata.loaded_context_source == Explicit {
+            if let Some(context_window) = metadata.loaded_context_window {
+                model.discovered_context_window = Some(context_window);
+                model.context_window_asserted = true;
+                if !model.context_window_configured {
+                    model.context_window = context_window;
+                }
+                let effective_context = if model.context_window_configured {
+                    model.context_window
+                } else {
+                    context_window
+                };
+                model.max_output_tokens = model.max_output_tokens.min(effective_context);
+            }
+        }
+        model.native_metadata = Some(metadata);
+    }
+}
+
+fn parse_lm_studio_native_model(
+    entry: &serde_json::Value,
+) -> crate::auth::custom::CustomNativeMetadata {
+    use octet_ai::discovery::DiscoveryMetadataSource::{Absent, Explicit, Unknown};
+    let mut metadata = crate::auth::custom::CustomNativeMetadata {
+        source: Explicit,
+        ..Default::default()
+    };
+
+    match entry.get("max_context_length") {
+        None => metadata.max_context_source = Absent,
+        Some(serde_json::Value::Number(number)) => {
+            metadata.max_context_window = number.as_u64().filter(|value| *value > 0);
+            metadata.max_context_source = if metadata.max_context_window.is_some() {
+                Explicit
+            } else {
+                Unknown
+            };
+        }
+        Some(serde_json::Value::Null) => metadata.max_context_source = Unknown,
+        Some(_) => metadata.max_context_source = Unknown,
+    }
+
+    match entry.get("loaded_instances") {
+        None => metadata.loaded_context_source = Unknown,
+        Some(serde_json::Value::Array(instances)) if instances.is_empty() => {
+            metadata.loaded_context_source = Absent;
+        }
+        Some(serde_json::Value::Array(instances)) => {
+            // The instances are nested under this exact model entry, but the
+            // OpenAI route does not identify which loaded instance it will use.
+            // Only a single unambiguous effective context is safe to assert.
+            let contexts = instances
+                .iter()
+                .map(|instance| {
+                    instance
+                        .get("config")
+                        .and_then(|config| config.get("context_length"))
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|value| *value > 0)
+                })
+                .collect::<Option<Vec<_>>>();
+            match contexts {
+                Some(contexts) if contexts.iter().all(|value| *value == contexts[0]) => {
+                    let context = contexts[0];
+                    metadata.loaded_context_window = Some(context);
+                    metadata.loaded_context_source = Explicit;
+                }
+                _ => metadata.loaded_context_source = Unknown,
+            }
+        }
+        Some(_) => metadata.loaded_context_source = Unknown,
+    }
+
+    match entry.get("capabilities") {
+        None => {
+            metadata.vision_source = Absent;
+            metadata.tool_use_source = Absent;
+            metadata.reasoning.source = Absent;
+        }
+        Some(serde_json::Value::Object(capabilities)) => {
+            metadata.vision = native_bool(capabilities.get("vision"), &mut metadata.vision_source);
+            metadata.tool_use = native_bool(
+                capabilities.get("trained_for_tool_use"),
+                &mut metadata.tool_use_source,
+            );
+            metadata.reasoning = parse_lm_studio_native_reasoning(capabilities.get("reasoning"));
+        }
+        Some(_) => {
+            metadata.vision_source = Unknown;
+            metadata.tool_use_source = Unknown;
+            metadata.reasoning.source = Unknown;
+        }
+    }
+    metadata
+}
+
+fn native_bool(
+    value: Option<&serde_json::Value>,
+    source: &mut octet_ai::discovery::DiscoveryMetadataSource,
+) -> Option<bool> {
+    use octet_ai::discovery::DiscoveryMetadataSource::{Absent, Explicit, Unknown};
+    match value {
+        None => {
+            *source = Absent;
+            None
+        }
+        Some(serde_json::Value::Bool(value)) => {
+            *source = Explicit;
+            Some(*value)
+        }
+        Some(_) => {
+            *source = Unknown;
+            None
+        }
+    }
+}
+
+fn parse_lm_studio_native_reasoning(
+    value: Option<&serde_json::Value>,
+) -> crate::auth::custom::CustomNativeReasoning {
+    use octet_ai::discovery::DiscoveryMetadataSource::{Absent, Explicit, Unknown};
+    let Some(value) = value else {
+        return crate::auth::custom::CustomNativeReasoning {
+            source: Absent,
+            ..Default::default()
+        };
+    };
+    let Some(object) = value.as_object() else {
+        return crate::auth::custom::CustomNativeReasoning {
+            source: Unknown,
+            ..Default::default()
+        };
+    };
+    let Some(values) = object
+        .get("allowed_options")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return crate::auth::custom::CustomNativeReasoning {
+            source: Unknown,
+            ..Default::default()
+        };
+    };
+    let values = values
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>();
+    let Some(values) = values else {
+        return crate::auth::custom::CustomNativeReasoning {
+            source: Unknown,
+            ..Default::default()
+        };
+    };
+    let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    let default = match object.get("default") {
+        None => None,
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return crate::auth::custom::CustomNativeReasoning {
+                source: Unknown,
+                ..Default::default()
+            };
+        }
+    };
+    let options = octet_ai::types::ReasoningOptions { values, default };
+    if !options.is_valid()
+        || options
+            .values
+            .iter()
+            .any(|value| !matches!(value.as_str(), "off" | "on" | "low" | "medium" | "high"))
+    {
+        return crate::auth::custom::CustomNativeReasoning {
+            source: Unknown,
+            ..Default::default()
+        };
+    }
+    let supported = options.values.iter().any(|value| value != "off");
+    crate::auth::custom::CustomNativeReasoning {
+        source: Explicit,
+        supported: Some(supported),
+        options: Some(options),
+    }
 }
 
 /// Call GET /v1/models on the custom endpoint and convert the response into
@@ -5429,11 +5821,22 @@ fn discover_models_blocking(
         } else {
             format!("{}/", cred.base_url)
         };
-        let models_url = match url::Url::parse(&base).and_then(|u| u.join("models")) {
-            Ok(u) => u.to_string(),
-            Err(e) => {
+        let endpoint_url = match url::Url::parse(&base) {
+            Ok(url) => url,
+            Err(error) => {
                 if report_errors {
-                    diagnostics.problem(format!("warning: auto-discover URL parse failed: {e}"));
+                    diagnostics
+                        .problem(format!("warning: auto-discover URL parse failed: {error}"));
+                }
+                return Vec::new();
+            }
+        };
+        let models_url = match endpoint_url.join("models") {
+            Ok(url) => url.to_string(),
+            Err(error) => {
+                if report_errors {
+                    diagnostics
+                        .problem(format!("warning: auto-discover URL parse failed: {error}"));
                 }
                 return Vec::new();
             }
@@ -5569,7 +5972,10 @@ fn discover_models_blocking(
                 context_window: ctx,
                 max_output_tokens,
                 context_window_asserted: asserted_ctx.is_some(),
+                context_window_configured: false,
+                discovered_context_window: asserted_ctx,
                 max_output_tokens_asserted: asserted_output.is_some(),
+                native_metadata: None,
                 tools: custom_model_metadata_supports_tools(entry),
                 parallel_tool_calls: asserted_capability(entry, &["parallel_tool_calls"])
                     .unwrap_or_else(|| supports("parallel_tool_calls")),
@@ -5599,6 +6005,16 @@ fn discover_models_blocking(
             }
             models.push(model);
         }
+        if custom_uses_lm_studio_native_metadata(cred) {
+            let native_inventory = fetch_lm_studio_native_inventory(
+                &client,
+                &endpoint_url,
+                cred,
+                report_errors,
+                &mut diagnostics,
+            );
+            apply_lm_studio_native_metadata(&mut models, native_inventory.as_ref());
+        }
         apply_known_custom_model_defaults(cred, models)
     })();
     diagnostics.finish(report_errors);
@@ -5613,7 +6029,7 @@ fn discover_models_blocking(
 /// how a sparse inventory is distinguished from one that stated a limit. A
 /// zero or unparsable command-line value is rejected rather than accepted as
 /// a window of nothing.
-fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
+pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<u64> {
     let args = match entry
         .get("status")
         .and_then(|s| s.get("args"))

@@ -27,7 +27,7 @@ fn fixture_pi_home(root: &Path) -> PiHome {
     let agent = home.join(".pi/agent");
     let extensions = agent.join("extensions");
     put(
-        extensions.join("pi-setup-one.mjs"),
+        extensions.join("pi-setup-one.js"),
         r#"export default function (pi) {
   pi.registerCommand('pi-setup-one', { description: 'Pi setup one', handler() {} });
   // A Pi setup's custom provider, declared exactly as a Pi extension declares one.
@@ -43,7 +43,7 @@ fn fixture_pi_home(root: &Path) -> PiHome {
 "#,
     );
     put(
-        extensions.join("pi-setup-two.mjs"),
+        extensions.join("pi-setup-two.js"),
         "export default function (pi) {\n  pi.registerCommand('pi-setup-two', { description: 'Pi setup two', handler() {} });\n}\n",
     );
     put(
@@ -110,11 +110,32 @@ fn configure_mirror(root: &Path, pi: &PiHome, workspace: &Path) -> PathBuf {
     let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/octet-pi-compat");
     let adapter = adapter.canonicalize().expect("real adapter package");
     let output = root.join("extensions/octet-pi-compat");
+    // Exercise the nonexecuting review boundary before admitting fixture factories.
+    let before_prepare = tree_contents(&pi.home);
+    let prepared = Command::new("node")
+        .arg(adapter.join("configure.mjs"))
+        .args(["--prepare-mirror", "--json", "--output"])
+        .arg(&output)
+        .current_dir(workspace)
+        .env("OCTET_PI_AGENT_DIR", &pi.agent)
+        .output()
+        .expect("existing Node and real adapter preparation required");
+    assert!(
+        prepared.status.success(),
+        "mirror preparation failed: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    assert_eq!(tree_contents(&pi.home), before_prepare);
+    let review: serde_json::Value = serde_json::from_slice(&prepared.stdout).unwrap();
+    assert_eq!(review["extensions"].as_array().unwrap().len(), 2);
+    let fingerprint = review["fingerprint"].as_str().unwrap();
     let configured = Command::new("node")
         .arg(adapter.join("configure.mjs"))
         .arg("--reviewed")
         .arg("--from-pi")
         .arg("--mirror")
+        .arg("--expected-fingerprint")
+        .arg(fingerprint)
         .arg("--output")
         .arg(&output)
         .current_dir(workspace)

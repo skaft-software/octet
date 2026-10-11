@@ -175,18 +175,434 @@ struct CompactionBlock {
     expanded: bool,
 }
 
+/// Complete main-response generation coverage for one presentation run. Native
+/// all-output counters and visible-output estimates are never mixed into a rate.
+#[derive(Clone, Debug, Default)]
+struct RunGenerationSummary {
+    responses: u64,
+    native_responses: u64,
+    native_source: Option<octet_ai::ServerTimingSource>,
+    native_sources_compatible: bool,
+    native_tokens: u128,
+    native_ns: u128,
+    estimated_responses: u64,
+    estimated_tokens: u128,
+    estimated_ns: f64,
+    incomplete: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RunGenerationRate {
+    tokens_per_second: f64,
+    is_estimate: bool,
+    responses: u64,
+}
+
+impl RunGenerationSummary {
+    fn record(&mut self, metrics: Option<&octet_ai::InferenceMetrics>) {
+        self.responses += 1;
+        let Some(metrics) = metrics else { return };
+        if let Some(server) = &metrics.server {
+            if server.tokens_per_second().is_some() {
+                if self.native_responses == 0 {
+                    self.native_source = Some(server.source);
+                    self.native_sources_compatible = true;
+                } else if self.native_source != Some(server.source) {
+                    self.native_sources_compatible = false;
+                }
+                self.native_responses += 1;
+                self.native_tokens += u128::from(server.tokens);
+                self.native_ns += u128::from(server.generation_ns);
+            }
+        }
+        if let Some(estimate) = &metrics.decode_estimate {
+            let tokens = estimate.reported_visible_tokens;
+            let rate = estimate.tokens_per_second;
+            let generation_ns = tokens as f64 / rate * 1e9;
+            if tokens > 0
+                && rate.is_finite()
+                && rate > 0.0
+                && generation_ns.is_finite()
+                && generation_ns > 0.0
+            {
+                self.estimated_responses += 1;
+                self.estimated_tokens += u128::from(tokens);
+                self.estimated_ns += generation_ns;
+            }
+        }
+    }
+
+    fn rate(&self) -> Option<RunGenerationRate> {
+        if self.incomplete || self.responses == 0 {
+            return None;
+        }
+        let (tokens_per_second, is_estimate) =
+            if self.native_responses == self.responses && self.native_sources_compatible {
+                (
+                    self.native_tokens as f64 / self.native_ns as f64 * 1e9,
+                    false,
+                )
+            } else if self.estimated_responses == self.responses {
+                (self.estimated_tokens as f64 / self.estimated_ns * 1e9, true)
+            } else {
+                // A final response or a supported subset cannot stand for the run.
+                return None;
+            };
+        (tokens_per_second.is_finite() && tokens_per_second > 0.0).then_some(RunGenerationRate {
+            tokens_per_second,
+            is_estimate,
+            responses: self.responses,
+        })
+    }
+}
+
+#[cfg(test)]
+mod run_generation_tests {
+    use super::*;
+
+    fn native(tokens: u64, generation_ns: u64) -> octet_ai::InferenceMetrics {
+        octet_ai::InferenceMetrics {
+            server: Some(octet_ai::ServerGenerationMetrics {
+                source: octet_ai::ServerTimingSource::TimingsPredicted,
+                tokens,
+                generation_ns,
+                reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
+                prompt_ns: Some(50_000_000_000),
+                queue_ns: Some(90_000_000_000),
+                total_ns: Some(200_000_000_000),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn estimated(tokens: u64, rate: f64) -> octet_ai::InferenceMetrics {
+        octet_ai::InferenceMetrics {
+            decode_estimate: Some(octet_ai::DecodeEstimate {
+                tokens_per_second: rate,
+                reported_visible_tokens: tokens,
+                observed_ns: (tokens as f64 / rate * 1e9) as u64,
+                samples: 40,
+                relative_dispersion: 0.0,
+                reasoning_tokens_excluded: 0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_run_rate_weights_matching_generation_time_not_response_rates_or_wall_time() {
+        let mut run = RunGenerationSummary::default();
+        run.record(Some(&native(100, 1_000_000_000)));
+        run.record(Some(&native(200, 4_000_000_000)));
+        let rate = run.rate().unwrap();
+        assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
+        assert!(!rate.is_estimate);
+        assert_eq!(rate.responses, 2);
+        // An arithmetic mean would be 75; the final response alone would be 50.
+    }
+
+    #[test]
+    fn estimated_run_rate_weights_token_basis_and_retains_estimated_provenance() {
+        let mut run = RunGenerationSummary::default();
+        run.record(Some(&estimated(100, 100.0)));
+        run.record(Some(&estimated(200, 50.0)));
+        let rate = run.rate().unwrap();
+        assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
+        assert!(rate.is_estimate);
+        assert_eq!(rate.responses, 2);
+    }
+
+    #[test]
+    fn missing_response_mixed_token_bases_and_unsettled_attempts_never_become_whole_run_rates() {
+        let mut missing = RunGenerationSummary::default();
+        missing.record(Some(&native(100, 1_000_000_000)));
+        missing.record(None);
+        missing.record(Some(&native(200, 4_000_000_000)));
+        assert!(missing.rate().is_none());
+
+        let mut mixed = RunGenerationSummary::default();
+        mixed.record(Some(&native(100, 1_000_000_000)));
+        mixed.record(Some(&estimated(200, 50.0)));
+        assert!(mixed.rate().is_none());
+
+        let mut interrupted = RunGenerationSummary::default();
+        interrupted.record(Some(&native(100, 1_000_000_000)));
+        interrupted.incomplete = true;
+        assert!(interrupted.rate().is_none());
+    }
+
+    #[test]
+    fn native_complete_coverage_wins_and_client_elapsed_never_substitutes_for_generation() {
+        let mut first = native(100, 1_000_000_000);
+        first.decode_estimate = estimated(100, 500.0).decode_estimate;
+        let mut second = native(200, 4_000_000_000);
+        second.decode_estimate = estimated(200, 600.0).decode_estimate;
+        let mut run = RunGenerationSummary::default();
+        run.record(Some(&first));
+        run.record(Some(&second));
+        let rate = run.rate().unwrap();
+        assert!(!rate.is_estimate);
+        assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
+
+        let mut unmeasured = RunGenerationSummary::default();
+        unmeasured.record(Some(&octet_ai::InferenceMetrics {
+            client: Some(octet_ai::ClientInferenceMetrics {
+                scope: Some(octet_ai::ClientTimingScope::Request),
+                elapsed_ns: 1_000_000_000,
+                reported_output_tokens: 100,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        assert!(unmeasured.rate().is_none());
+    }
+
+    #[test]
+    fn incompatible_native_counter_contracts_require_complete_visible_estimates() {
+        let mut first = native(100, 1_000_000_000);
+        let mut second = native(200, 4_000_000_000);
+        second.server.as_mut().unwrap().source = octet_ai::ServerTimingSource::UsageCompletion;
+        let mut native_only = RunGenerationSummary::default();
+        native_only.record(Some(&first));
+        native_only.record(Some(&second));
+        assert!(native_only.rate().is_none());
+
+        first.decode_estimate = estimated(100, 100.0).decode_estimate;
+        second.decode_estimate = estimated(200, 50.0).decode_estimate;
+        let mut estimated_run = RunGenerationSummary::default();
+        estimated_run.record(Some(&first));
+        estimated_run.record(Some(&second));
+        let rate = estimated_run.rate().unwrap();
+        assert!(rate.is_estimate);
+        assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
+        assert_eq!(rate.responses, 2);
+    }
+
+    #[test]
+    fn new_run_and_stale_owner_events_cannot_reuse_prior_generation() {
+        let mut shell = InteractiveShell::test_shell();
+        let old = shell.begin_run("openai");
+        shell.on_run_event(old, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            old,
+            &AgentEvent::ProviderInference {
+                metrics: native(100, 1_000_000_000),
+            },
+        );
+        shell.interrupt_run(old);
+        let frozen = shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .find_map(|block| match block {
+                TranscriptBlock::Outcome(block) => block.generation,
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(frozen.tokens_per_second, 100.0);
+
+        let current = shell.begin_run("openai");
+        assert!(shell.state.borrow().run_generation.rate().is_none());
+        shell.on_run_event(
+            old,
+            &AgentEvent::ProviderInference {
+                metrics: native(900, 1_000_000_000),
+            },
+        );
+        assert_eq!(shell.state.borrow().run_generation.responses, 0);
+        shell.on_run_event(current, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            current,
+            &AgentEvent::ProviderInference {
+                metrics: native(200, 1_000_000_000),
+            },
+        );
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .run_generation
+                .rate()
+                .unwrap()
+                .tokens_per_second,
+            200.0
+        );
+        assert_eq!(frozen.tokens_per_second, 100.0);
+        let stored = shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .find_map(|block| match block {
+                TranscriptBlock::Outcome(block) => block.generation,
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(stored.tokens_per_second, 100.0);
+    }
+
+    fn settled_turn() -> AgentEvent {
+        AgentEvent::TurnFinished {
+            message: octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("accepted answer".into())],
+                model: octet_ai::ModelId("test".into()),
+                protocol: octet_ai::Protocol::OpenAiResponses,
+            },
+            stop_reason: octet_ai::StopReason::EndTurn,
+            turn_usage: octet_ai::Usage::default(),
+            turn_cost: None,
+            usage: octet_ai::Usage::default(),
+            session_cost_microdollars: None,
+            run_cost_microdollars: 0,
+        }
+    }
+
+    fn finish_run(shell: &mut InteractiveShell, run: RunId) -> OutcomeBlock {
+        shell.on_run_event(
+            run,
+            &AgentEvent::RunFinished {
+                head: octet_agent::EntryId("test-head".into()),
+                reason: octet_agent::FinishReason::Completed,
+            },
+        );
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .find_map(|block| match block {
+                TranscriptBlock::Outcome(block) => Some(block.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn measured_rejected_candidates_count_as_physical_generation_before_acceptance() {
+        let mut shell = InteractiveShell::test_shell();
+        let run = shell.begin_run("openai");
+        shell.on_run_event(run, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            run,
+            &AgentEvent::ProviderInference {
+                metrics: native(100, 1_000_000_000),
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::CandidateRejected {
+                usage: octet_ai::Usage::default(),
+                run_cost_microdollars: 0,
+                session_cost_microdollars: None,
+            },
+        );
+        shell.on_run_event(run, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            run,
+            &AgentEvent::ProviderInference {
+                metrics: native(200, 4_000_000_000),
+            },
+        );
+        shell.on_run_event(run, &settled_turn());
+        let rate = finish_run(&mut shell, run).generation.unwrap();
+        assert_eq!(rate.responses, 2);
+        assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_retry_or_legacy_turn_suppresses_rate_even_with_a_measured_final_response() {
+        for retry in [true, false] {
+            let mut shell = InteractiveShell::test_shell();
+            let run = shell.begin_run("openai");
+            shell.on_run_event(run, &AgentEvent::TurnStarted);
+            if retry {
+                shell.on_run_event(
+                    run,
+                    &AgentEvent::ProviderRetry {
+                        attempt: 1,
+                        max_attempts: 3,
+                        delay: Duration::ZERO,
+                        error: "interrupted request".into(),
+                    },
+                );
+            } else {
+                shell.on_run_event(run, &settled_turn());
+            }
+            shell.on_run_event(run, &AgentEvent::TurnStarted);
+            shell.on_run_event(
+                run,
+                &AgentEvent::ProviderInference {
+                    metrics: native(200, 1_000_000_000),
+                },
+            );
+            shell.on_run_event(run, &settled_turn());
+            let outcome = finish_run(&mut shell, run);
+            assert!(outcome.inference.unwrap().server.is_some());
+            assert!(outcome.generation.is_none());
+        }
+    }
+
+    #[test]
+    fn unsettled_attempt_at_run_completion_cannot_reuse_a_prior_rate() {
+        let mut shell = InteractiveShell::test_shell();
+        let run = shell.begin_run("openai");
+        shell.on_run_event(run, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            run,
+            &AgentEvent::ProviderInference {
+                metrics: native(100, 1_000_000_000),
+            },
+        );
+        shell.on_run_event(run, &settled_turn());
+        shell.on_run_event(run, &AgentEvent::TurnStarted);
+        assert!(finish_run(&mut shell, run).generation.is_none());
+    }
+
+    #[test]
+    fn session_hydration_clears_generation_and_rejects_the_previous_owner() {
+        let mut shell = InteractiveShell::test_shell();
+        let run = shell.begin_run("openai");
+        shell.on_run_event(run, &AgentEvent::TurnStarted);
+        shell.on_run_event(
+            run,
+            &AgentEvent::ProviderInference {
+                metrics: native(100, 1_000_000_000),
+            },
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let session = Session::create(temp.path().join("session.jsonl")).unwrap();
+        shell.hydrate(&session).unwrap();
+        assert!(shell.state.borrow().last_turn_inference.is_none());
+        assert!(shell.state.borrow().run_generation.rate().is_none());
+        assert_eq!(shell.state.borrow().run_generation.responses, 0);
+        shell.on_run_event(
+            run,
+            &AgentEvent::ProviderInference {
+                metrics: native(900, 1_000_000_000),
+            },
+        );
+        assert_eq!(shell.state.borrow().run_generation.responses, 0);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Frozen native timing or robust estimate, never the E2E average.
+    /// Last-response diagnostics, not a whole-run generation average.
     inference: Option<Box<octet_ai::InferenceMetrics>>,
+    /// Frozen token/time-weighted rate; absent for incomplete run coverage.
+    generation: Option<RunGenerationRate>,
 }
 
 impl OutcomeBlock {
     fn new(outcome: RunOutcome, inference: Option<octet_ai::InferenceMetrics>) -> Self {
+        let mut generation = RunGenerationSummary::default();
+        generation.record(inference.as_ref());
         Self {
             outcome,
             inference: inference.map(Box::new),
+            generation: generation.rate(),
         }
     }
 }
@@ -1476,6 +1892,9 @@ pub(crate) struct ShellState {
     /// Legacy event producers use request-to-TurnFinished, including settlement.
     pub(crate) last_turn_provider_elapsed: Option<Duration>,
     pub(crate) last_turn_inference: Option<octet_ai::inference::InferenceMetrics>,
+    run_generation: RunGenerationSummary,
+    /// Terminal metrics/settlement were received for the current attempt.
+    turn_generation_settled: bool,
     /// (tool name, wall time) of recently completed tool calls, most
     /// recent last. Session-scoped and bounded; powers the `/status`
     /// tool wall-time line.
@@ -1842,6 +2261,8 @@ impl ShellState {
             last_turn_first_token: Default::default(),
             last_turn_provider_elapsed: Default::default(),
             last_turn_inference: Default::default(),
+            run_generation: Default::default(),
+            turn_generation_settled: false,
             tool_durations: Default::default(),
             turn_streamed_output_bytes: Default::default(),
             turn_output_tokens_before_generation: Default::default(),
@@ -2352,6 +2773,8 @@ impl ShellState {
         self.last_turn_first_token = None;
         self.last_turn_provider_elapsed = None;
         self.last_turn_inference = None;
+        self.run_generation = RunGenerationSummary::default();
+        self.turn_generation_settled = false;
         self.turn_streamed_output_bytes = 0;
         self.turn_output_tokens_before_generation = 0;
         self.run_cost_microdollars = 0;
@@ -4277,7 +4700,13 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
+        if state.turn_requested_at.is_some() && !state.turn_generation_settled {
+            // An unfinished generation attempt has no matching terminal count
+            // and duration. Earlier responses cannot masquerade as complete.
+            state.run_generation.incomplete = true;
+        }
+        let mut block = OutcomeBlock::new(outcome, state.last_turn_inference.clone());
+        block.generation = state.run_generation.rate();
         state.push_block(TranscriptBlock::Outcome(block));
         if !state.selected_model_owns_telemetry() {
             state.clear_turn_telemetry();
@@ -4435,6 +4864,11 @@ impl InteractiveShell {
                 // message; embedded callers receive the payload here directly.
             }
             AgentEvent::ProviderInference { metrics } => {
+                // Physical terminal responses count even if later persistence or
+                // candidate admission fails. This is provider generation, not
+                // an arithmetic mean of accepted-answer rates.
+                state.run_generation.record(Some(metrics));
+                state.turn_generation_settled = true;
                 state.last_turn_inference = Some(metrics.clone());
             }
             AgentEvent::ProviderLifecycle { lifecycle } => {
@@ -4457,6 +4891,10 @@ impl InteractiveShell {
                 }
             }
             AgentEvent::ProviderRetry { .. } | AgentEvent::CandidateRejected { .. } => {
+                if !state.turn_generation_settled {
+                    state.run_generation.incomplete = true;
+                }
+                state.turn_generation_settled = true;
                 state.last_turn_inference = None;
                 state.last_turn_tokens_per_second = None;
                 state.last_turn_generated_tokens = None;
@@ -4622,7 +5060,11 @@ impl InteractiveShell {
                 // A new provider attempt for this model turn is beginning;
                 // the request is opened immediately after this event, so
                 // this moment anchors the attempt's first-token latency.
+                if state.turn_requested_at.is_some() && !state.turn_generation_settled {
+                    state.run_generation.incomplete = true;
+                }
                 state.turn_requested_at = Some(Instant::now());
+                state.turn_generation_settled = false;
                 state.turn_generation_started_at = None;
                 state.turn_streamed_output_bytes = 0;
                 state.last_turn_tokens_per_second = None;
@@ -4840,6 +5282,10 @@ impl InteractiveShell {
                 run_cost_microdollars,
                 ..
             } => {
+                if !state.turn_generation_settled {
+                    state.run_generation.record(None);
+                    state.turn_generation_settled = true;
+                }
                 state.finish_turn_streaming_blocks();
                 if message.content.iter().any(|part| matches!(part, octet_ai::AssistantPart::Text(text) if !text.trim().is_empty())) {
                     state.seal_activity_group();
@@ -8497,6 +8943,8 @@ impl InteractiveShell {
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;
         state.last_turn_inference = None;
+        state.run_generation = RunGenerationSummary::default();
+        state.turn_generation_settled = false;
         state.last_turn_tokens_per_second = None;
         state.last_turn_generated_tokens = None;
         state.turn_generation_started_at = None;

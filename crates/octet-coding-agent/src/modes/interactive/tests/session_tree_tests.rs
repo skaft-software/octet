@@ -405,6 +405,10 @@ async fn busy_import_and_share_queue_only_intents_without_reading_a_file_or_conf
             Command::Import(source.clone()),
             PendingIdleAction::Import(source),
         ),
+        (
+            Command::Pi(commands::PiSubcommand::Off),
+            PendingIdleAction::Pi(commands::PiSubcommand::Off),
+        ),
         (Command::Share, PendingIdleAction::Share),
     ] {
         assert!(active_command_needs_idle_slot(&command));

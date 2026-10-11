@@ -255,16 +255,16 @@ test('local files/directories and nested index/package entrypoints resolve from 
 for (const { label, entry, enabled } of [
   { label: 'string default', entry: source => source, enabled: true },
   { label: 'object default', entry: source => ({ source }), enabled: true },
-  { label: 'empty extensions', entry: source => ({ source, extensions: [] }), enabled: false },
-  { label: 'nonmatching includes', entry: source => ({ source, extensions: ['other.ts'] }), enabled: false },
+  { label: 'empty extensions', entry: source => ({ source, extensions: [] }), enabled: true },
+  { label: 'nonmatching includes', entry: source => ({ source, extensions: ['other.ts'] }), enabled: true },
   { label: 'matching include', entry: source => ({ source, extensions: ['*.ts'] }), enabled: true },
-  { label: 'negative glob', entry: source => ({ source, extensions: ['!**/*.ts'] }), enabled: false },
+  { label: 'negative glob', entry: source => ({ source, extensions: ['!**/*.ts'] }), enabled: true },
   { label: 'exact inclusion after exclusion', entry: source => ({ source, extensions: ['!**/*.ts', `+${source}`] }), enabled: true },
-  { label: 'exact exclusion wins', entry: source => ({ source, extensions: ['!**/*.ts', `+${source}`, `-${source}`] }), enabled: false },
-  { label: 'autoload false without deltas', entry: source => ({ source, autoload: false }), enabled: false },
-  { label: 'autoload false with empty deltas', entry: source => ({ source, autoload: false, extensions: [] }), enabled: false },
+  { label: 'exact exclusion does not filter direct file', entry: source => ({ source, extensions: ['!**/*.ts', `+${source}`, `-${source}`] }), enabled: true },
+  { label: 'autoload false without deltas', entry: source => ({ source, autoload: false }), enabled: true },
+  { label: 'autoload false with empty deltas', entry: source => ({ source, autoload: false, extensions: [] }), enabled: true },
   { label: 'autoload false with matching include', entry: source => ({ source, autoload: false, extensions: ['*.ts'] }), enabled: true },
-  { label: 'autoload false last exclusion wins', entry: source => ({ source, autoload: false, extensions: [`+${source}`, '!**/*.ts'] }), enabled: false },
+  { label: 'autoload false last exclusion does not filter direct file', entry: source => ({ source, autoload: false, extensions: [`+${source}`, '!**/*.ts'] }), enabled: true },
   { label: 'autoload false last inclusion wins', entry: source => ({ source, autoload: false, extensions: [`-${source}`, '*.ts'] }), enabled: true },
 ]) {
   test(`singleton local-file package selection: ${label}`, t => {
@@ -281,13 +281,13 @@ for (const { label, entry, enabled } of [
 }
 
 for (const extensions of [['{direct,other}.ts'], ['[ab].ts'], ['@(direct).ts'], '*.ts']) {
-  test(`singleton local-file package refuses unsupported selectors: ${JSON.stringify(extensions)}`, t => {
+  test(`singleton local-file package remains unconditional with selectors: ${JSON.stringify(extensions)}`, t => {
     const f = fixture(t);
     const source = put(join(f.agentDir, 'direct.ts'), factory);
     settings(f.agentDir, { packages: [{ source, extensions }] });
     const setup = f.discover();
-    assert.deepEqual(setup.extensions, []);
-    assert.ok(setup.diagnostics.some(line => line.includes(`package ${source} extensions`) && line.includes('resource kind skipped')));
+    assert.deepEqual(setup.extensions, [source]);
+    assert.deepEqual(setup.diagnostics, []);
   });
 }
 
@@ -295,10 +295,10 @@ for (const { label, selectors, enabled, unsupported } of [
   { label: 'no deltas retain global', selectors: () => undefined, enabled: true },
   { label: 'empty deltas retain global', selectors: () => [], enabled: true },
   { label: 'nonmatching deltas retain global', selectors: () => ['!other.ts'], enabled: true },
-  { label: 'negative glob disables global', selectors: () => ['!**/*.ts'], enabled: false },
-  { label: 'exact exclusion disables global', selectors: source => [`-${source}`], enabled: false },
+  { label: 'negative glob does not filter direct local file', selectors: () => ['!**/*.ts'], enabled: true },
+  { label: 'exact exclusion does not filter direct local file', selectors: source => [`-${source}`], enabled: true },
   { label: 'ordered inclusion retains global', selectors: source => [`-${source}`, '*.ts'], enabled: true },
-  { label: 'unsupported delta suppresses global', selectors: () => ['!{direct,other}.ts'], enabled: false, unsupported: true },
+  { label: 'unsupported delta does not filter direct local file', selectors: () => ['!{direct,other}.ts'], enabled: true },
 ]) {
   test(`trusted project singleton local-file delta: ${label}`, t => {
     const f = fixture(t);
@@ -308,26 +308,25 @@ for (const { label, selectors, enabled, unsupported } of [
     assert.deepEqual(f.discover().extensions, [source]); // no project settings without trust
     const setup = f.discover({ projectTrusted: true });
     assert.deepEqual(setup.extensions, enabled ? [source] : []);
-    if (unsupported) assert.ok(setup.diagnostics.some(line => line.includes('extensions') && line.includes('resource kind skipped')));
-    else assert.deepEqual(setup.diagnostics, []);
+    assert.deepEqual(setup.diagnostics, []);
   });
 }
 
-test('singleton local-file package restrictions cannot be bypassed by automatic or explicit rediscovery', t => {
+test('singleton local-file package sources remain enabled like Pi despite top-level filters', t => {
   const f = fixture(t);
   const source = put(join(f.agentDir, 'extensions/direct.ts'), factory);
   for (const extensions of [[], ['!**/*.ts'], ['{direct,other}.ts']]) {
     settings(f.agentDir, { packages: [{ source, extensions }], extensions: [source] });
-    assert.deepEqual(f.discover().extensions, []);
+    assert.deepEqual(f.discover().extensions, [source]);
   }
 });
 
-test('trusted project singleton delta can enable a globally disabled local file', t => {
+test('trusted project filters do not disable a direct local file', t => {
   const f = fixture(t);
   const source = put(join(f.agentDir, 'direct.ts'), factory);
   settings(f.agentDir, { packages: [{ source: './direct.ts', extensions: [] }] });
-  settings(f.project, { packages: [{ source, autoload: false, extensions: [`+${source}`] }] });
-  assert.deepEqual(f.discover().extensions, []);
+  settings(f.project, { packages: [{ source, autoload: false, extensions: [`-${source}`] }] });
+  assert.deepEqual(f.discover().extensions, [source]);
   const setup = f.discover({ projectTrusted: true });
   assert.deepEqual(setup.extensions, [source]);
   assert.deepEqual(setup.diagnostics, []);
@@ -349,7 +348,7 @@ test('linked parents/leaves, missing and oversized resources are diagnosed and n
   symlinkSync(outside, join(f.agentDir, 'linked'));
   mkdirSync(join(f.agentDir, 'extensions'));
   symlinkSync(linkedFile, join(f.agentDir, 'extensions/link.ts'));
-  put(join(f.agentDir, 'extensions/huge.ts'), ' '.repeat(1024 * 1024 + 1));
+  put(join(f.agentDir, 'extensions/huge.ts'), ' '.repeat(8 * 1024 * 1024 + 1));
   put(join(f.agentDir, 'themes/huge.json'), ' '.repeat(256 * 1024 + 1));
   settings(f.agentDir, { extensions: ['linked/entry.ts', 'missing.ts'], packages: ['linked'] });
   const before = snapshot(f.root);
@@ -405,13 +404,17 @@ test('unsupported ignore rules fail closed and explicit entrypoints remain avail
   assert.deepEqual(setup.extensions, [entry]);
 });
 
-test('directory and factory bounds diagnose truncation instead of silently dropping entries', t => {
+test('directory and factory bounds diagnose and refuse partial enabled factory lists', t => {
   const f = fixture(t);
   for (let index = 0; index < 257; index++) put(join(f.agentDir, `extensions/e${String(index).padStart(3, '0')}.ts`), factory);
   const setup = f.discover();
-  assert.equal(setup.extensions.length, 64);
+  assert.deepEqual(setup.extensions, []);
+  assert.deepEqual(setup.resourceLimitsExceeded, [
+    { dimension: 'kind', kind: 'extensions', actual: 256, limit: 64 },
+    { dimension: 'directory_entries', kind: 'directory', actual: 257, limit: 256 },
+  ]);
   assert.ok(setup.diagnostics.some(line => line.includes('256-entry mirror budget')));
-  assert.ok(setup.diagnostics.some(line => line.includes('only the first 64')));
+  assert.ok(setup.diagnostics.some(line => line.includes('no partial extensions list is returned')));
 });
 
 test('a refused linked index or ignore file cannot trigger alternate unfiltered factories', t => {

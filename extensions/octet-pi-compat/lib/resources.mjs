@@ -3,15 +3,15 @@ import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded, facade, invalid, ownerKey, rpcError, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
-import { discoverPiSetup, resolveThemeFile, themeCandidates } from './pi-setup.mjs';
+import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES_PER_PATH, MAX_RESOURCE_PATH_BYTES, resolveThemeFile, themeCandidates } from './pi-setup.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
 function record(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(`${label} must be a plain object`);
   for (const key of Reflect.ownKeys(value)) if (!allowed.includes(key)) unsupported(`${label}.${String(key)}`, 'field would not be honored');
 }
-function pathText(value, label) {
-  bounded(value, label, 4096, { controls: true });
+function pathText(value, label, max = MAX_RESOURCE_PATH_BYTES_PER_PATH) {
+  bounded(value, label, max, { controls: true });
   if (/[\x00-\x1f\x7f-\x9f]/u.test(value)) invalid(`${label} contains controls`);
   return value;
 }
@@ -30,7 +30,7 @@ function normalizePath(value) {
   return /^file:\/\//.test(value) ? fileURLToPath(value) : value;
 }
 export function normalizeResourcePath(value, cwd) {
-  bounded(value, 'resource path input', 4096, { controls: true });
+  bounded(value, 'resource path input', MAX_RESOURCE_PATH_BYTES_PER_PATH, { controls: true });
   value = pathText(value.trim(), 'resource path');
   if (value.startsWith('builtin:') || value.startsWith('<')) unsupported('synthetic resource path', 'native discovery accepts filesystem paths only');
   return pathText(resolve(normalizePath(cwd), normalizePath(value)), 'normalized resource path');
@@ -44,7 +44,7 @@ function appendPaths(paths, contribution, budget) {
     const values = contribution[field];
     if (values === undefined) continue;
     if (!Array.isArray(values) || Object.getPrototypeOf(values) !== Array.prototype) invalid(`${field} must be a string array`);
-    if (budget.count + values.length > 64) invalid('bounds_exceeded resource path count');
+    if (budget.count + values.length > MAX_RESOURCE_PATHS) invalid('bounds_exceeded resource path count');
     for (const key of Reflect.ownKeys(values)) {
       if (key !== 'length' && (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= values.length)) unsupported(`${field}.${String(key)}`, 'array field would not be honored');
     }
@@ -52,7 +52,7 @@ function appendPaths(paths, contribution, budget) {
       if (!Object.hasOwn(values, index)) invalid(`${field} must not contain holes`);
       const path = normalizeResourcePath(values[index], budget.cwd);
       budget.count++; budget.bytes += Buffer.byteLength(path);
-      if (budget.bytes > 65536) invalid('bounds_exceeded resource path bytes');
+      if (budget.bytes > MAX_RESOURCE_PATH_BYTES) invalid('bounds_exceeded resource path bytes');
       paths[wire].push(path); // Preserve duplicates and order; native loaders own precedence.
     }
   }
@@ -64,13 +64,13 @@ function appendPaths(paths, contribution, budget) {
 function appendPiSetupPaths(runtime, paths, budget) {
   const setup = discoverPiSetup({ agentDir: runtime.config.pi_agent_dir, env: process.env,
     cwd: budget.cwd, projectTrusted: runtime.host.project_trusted === true });
+  if (setup.resourceLimitsExceeded.length) invalid(`bounds_exceeded Pi setup resources: ${setup.resourceLimitsExceeded.map(item => `${item.kind} ${item.actual}/${item.limit} ${item.dimension}`).join(', ')}`);
   // Keep exact regular files, including malformed JSON. Native discovery
   // resolves later-root winners before validation: dropping a broken winning
   // file here could incorrectly resurrect a shadowed palette.
   const themeFiles = themeCandidates(setup.themesPaths, setup.diagnostics);
-  // Validate immutable import declarations exactly as before, before choosing
-  // which optional palettes fit. The selected snapshot must never be displaced
-  // by live discovery, and snapshots follow live paths for native precedence.
+  // Validate immutable import declarations before accounting the complete
+  // palette contribution. Snapshots follow live paths for native precedence.
   const snapshots = { skill_paths: [], prompt_paths: [], theme_paths: [] };
   appendPaths(snapshots, { themePaths: runtime.config.pi_theme_paths }, { ...budget });
   let preferred;
@@ -82,14 +82,12 @@ function appendPiSetupPaths(runtime, paths, budget) {
     if (!preferred && setup.defaultTheme) setup.diagnostics.push(`theme ${setup.defaultTheme} was not found in the Pi setup; no native preference`);
   }
   const admit = (values, label) => {
-    const kept = [];
-    for (const value of values) {
-      const path = normalizeResourcePath(value, budget.cwd), bytes = Buffer.byteLength(path);
-      if (budget.count === 64 || budget.bytes + bytes > 65536) continue;
-      budget.count++; budget.bytes += bytes; kept.push(path);
-    }
-    if (kept.length < values.length) setup.diagnostics.push(`${label}: ${values.length - kept.length} paths exceeded the shared 64-path / 64-KiB resource budget; skipped`);
-    return kept;
+    const normalized = values.map(value => normalizeResourcePath(value, budget.cwd));
+    const bytes = normalized.reduce((sum, path) => sum + Buffer.byteLength(path), 0);
+    if (budget.count + normalized.length > MAX_RESOURCE_PATHS) invalid(`bounds_exceeded ${label} exceeds the shared ${MAX_RESOURCE_PATHS}-path resource budget`);
+    if (budget.bytes + bytes > MAX_RESOURCE_PATH_BYTES) invalid(`bounds_exceeded ${label} exceeds the shared ${MAX_RESOURCE_PATH_BYTES}-byte resource budget`);
+    budget.count += normalized.length; budget.bytes += bytes;
+    return normalized;
   };
   // Session-only mirror paths also share the native budget. Reserve these few
   // paths first, then palettes before potentially large skill/prompt inventories.
@@ -99,15 +97,13 @@ function appendPiSetupPaths(runtime, paths, budget) {
     if (setup.defaultModel) paths.default_model = setup.defaultModel;
     if (setup.defaultThinkingLevel) paths.default_thinking_level = setup.defaultThinkingLevel;
   }
-  const ordered = [...new Set([...themeFiles, ...snapshots.theme_paths])];
-  // Prefer the immutable selected snapshot, then every current palette, then
-  // remaining old snapshots. Publish in original order, not priority order.
-  // Reserve later-stem candidates first, without parsing their contents. A
-  // budget cutoff must not resurrect a shadowed lower-precedence palette.
+  const themeContributions = [...themeFiles, ...snapshots.theme_paths];
+  const ordered = [...new Set(themeContributions)];
+  // Charge the raw resource contributions before de-duplicating output paths.
+  // Discovery fails closed rather than silently selecting a fitting subset.
+  const admitted = new Set(admit(themeContributions, 'Pi themes'));
   const stem = path => basename(path, extname(path));
   const winners = new Map(ordered.map(path => [stem(path), path]));
-  const priority = [...new Set([...(preferred ? [preferred] : []), ...winners.values(), ...ordered])];
-  const admitted = new Set(admit(priority, 'Pi themes'));
   paths.theme_paths.push(...ordered.filter(path => admitted.has(path) && admitted.has(winners.get(stem(path)))));
   if (preferred && admitted.has(preferred)) paths.default_theme = preferred;
   if (runtime.mirrorPiSetup) {

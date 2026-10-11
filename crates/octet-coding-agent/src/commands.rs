@@ -6,7 +6,7 @@ use crate::app::{reasoning_label, App, Reconfig};
 use crate::cli::parity::ScopedModel;
 use crate::codex_context::CodexContextTier;
 use crate::compaction::{context_window, estimate_next_request_tokens};
-use crate::config::CompactionMode;
+use crate::config::{CompactionMode, TuiMode};
 use crate::presentation::{format_token_rate, ModelDisplayMetadata};
 use crate::session_store::active_branch_title;
 use octet_agent::{
@@ -81,6 +81,8 @@ pub enum Command {
     Settings(SettingsCommand),
     /// Inspect or change the ordered model cycling scope.
     ScopedModels(ScopedModelsCommand),
+    /// Manage Pi compatibility setup and its executable resource owner.
+    Pi(PiSubcommand),
     /// Local shell escape. `!command` results are model-visible context;
     /// `!!command` results are explicitly excluded from it.
     Bash(BashEscape),
@@ -165,10 +167,25 @@ pub enum SettingsCommand {
     DefaultModel(Option<String>),
     /// Set, or report, the persisted default reasoning level.
     DefaultReasoning(Option<String>),
+    /// Select, or report, the persisted interactive terminal screen policy.
+    TuiMode(Option<TuiMode>),
     /// Report the active endpoint's declared transport.
     Transport,
     /// Report the editor-padding policy.
     Padding,
+}
+
+/// Subcommands for the `/pi` Pi-compatibility control surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiSubcommand {
+    /// Report the active Pi bridge and native behavior mappings.
+    Status,
+    /// Enable the discovered Pi compatibility extension through native lifecycle policy.
+    On,
+    /// Disable the Pi compatibility extension and withdraw its owned resources.
+    Off,
+    /// Prepare a reviewed mirror of the installed Pi setup.
+    Setup,
 }
 
 /// Subcommands for the `/scoped-models` slash command.
@@ -430,7 +447,7 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "settings",
-        "/settings [show|theme|images on/off|default model/reasoning|transport|padding]",
+        "/settings [show|theme|images on/off|tui fullscreen/inline|default model/reasoning|transport|padding]",
         "open settings or change display and default preferences",
         true
     ),
@@ -438,6 +455,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "scoped-models",
         "/scoped-models [all|clear|enable|disable|toggle|move]",
         "manage the ordered model cycling scope",
+        true
+    ),
+    slash!(
+        "pi",
+        "/pi [status|on|off|setup]",
+        "inspect or manage Pi compatibility and reviewed setup",
         true
     ),
     slash!("exit", "/exit", "exit octet", false),
@@ -465,6 +488,21 @@ pub(crate) fn reject_tui_changelog(input: &str) -> anyhow::Result<()> {
 /// Complete TUI-ordered built-in slash-command catalog.
 pub fn slash_commands() -> &'static [SlashCommandSuggestion] {
     SLASH_COMMANDS
+}
+
+/// Whether an unknown slash invocation names, or abbreviates, a built-in
+/// command. Malformed built-ins must not fall through to prompt templates or
+/// extension dispatch.
+pub fn is_reserved_slash_command_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty()
+        && (SLASH_COMMANDS
+            .iter()
+            .any(|command| command.name.starts_with(&name))
+            || HIDDEN_COMMANDS
+                .iter()
+                .any(|command| command.eq_ignore_ascii_case(&name))
+            || name == "subagents")
 }
 
 /// Render local command help without contacting a model.
@@ -984,6 +1022,17 @@ pub fn parse(input: &str) -> Command {
         return Command::Goal(parse_goal_command(argument));
     }
 
+    if full_name == "pi" {
+        let args = parts.collect::<Vec<_>>();
+        return match args.as_slice() {
+            [] | ["status"] => Command::Pi(PiSubcommand::Status),
+            ["on"] => Command::Pi(PiSubcommand::On),
+            ["off"] => Command::Pi(PiSubcommand::Off),
+            ["setup"] => Command::Pi(PiSubcommand::Setup),
+            _ => Command::Unknown(input.to_owned()),
+        };
+    }
+
     if full_name == "settings" {
         let args = parts.collect::<Vec<_>>();
         return match args.as_slice() {
@@ -997,6 +1046,11 @@ pub fn parse(input: &str) -> Command {
             ["images", value] => match parse_on_off(value) {
                 Some(enabled) => Command::Settings(SettingsCommand::Images(Some(enabled))),
                 None => Command::Unknown(input.to_owned()),
+            },
+            ["tui"] => Command::Settings(SettingsCommand::TuiMode(None)),
+            ["tui", value] => match TuiMode::parse(value) {
+                Ok(mode) => Command::Settings(SettingsCommand::TuiMode(Some(mode))),
+                Err(_) => Command::Unknown(input.to_owned()),
             },
             ["default", "model"] => Command::Settings(SettingsCommand::DefaultModel(None)),
             ["default", "model", id] => {
@@ -1628,7 +1682,7 @@ pub fn settings_text(surface: &SettingsSurface) -> String {
          Cache warming      {} (user-only billable policy; /cache-warming)\n\
          Editor padding     compiled theme layout (no persisted override)\n\n\
          Project trust is deliberately not persisted here: workspace trust comes from --workspace-trusted or the interactive startup prompt.\n\n\
-         Change: /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
+         Change: /settings tui <fullscreen|inline> · /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
         surface.reasoning,
         surface.theme.as_deref().unwrap_or("auto"),
         surface.transport,

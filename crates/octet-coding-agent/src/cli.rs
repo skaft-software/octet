@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use octet_agent::{EffectPolicy, PolicyValueSource, ToolPolicyProvenance};
@@ -29,6 +30,57 @@ pub(crate) use extension_flags::{parse_with_extension_flags, uses_runtime_extens
 use config_diagnostics::{
     read_layer, report_config_diagnostics, ConfigSourceKind, LoadedConfigLayer,
 };
+
+/// The terminal mode resolved for the current process. The settings command can
+/// update it only after the saved preference was written successfully.
+static TUI_MODE: AtomicU8 = AtomicU8::new(0);
+static TUI_MODE_EXPLICIT: AtomicBool = AtomicBool::new(false);
+
+fn store_tui_mode(mode: config::TuiMode) {
+    TUI_MODE.store(
+        match mode {
+            config::TuiMode::Fullscreen => 0,
+            config::TuiMode::Inline => 1,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn tui_mode() -> config::TuiMode {
+    match TUI_MODE.load(Ordering::Relaxed) {
+        1 => config::TuiMode::Inline,
+        _ => config::TuiMode::Fullscreen,
+    }
+}
+
+pub fn tui_mode_is_explicit() -> bool {
+    TUI_MODE_EXPLICIT.load(Ordering::Relaxed)
+}
+
+pub fn persist_tui_mode(mode: config::TuiMode) -> anyhow::Result<()> {
+    if tui_mode_is_explicit() {
+        anyhow::bail!("--tui-mode overrides the saved preference for this invocation");
+    }
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist TUI mode: user home directory is unavailable")
+    })?;
+    persist_key_to_path("tui_mode", mode.as_str(), &path)?;
+    store_tui_mode(mode);
+    Ok(())
+}
+
+fn resolve_tui_mode(
+    cli: Option<&str>,
+    saved: Option<&str>,
+) -> anyhow::Result<(config::TuiMode, bool)> {
+    let explicit = cli.is_some();
+    let mode = cli
+        .or(saved)
+        .map(config::TuiMode::parse)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((mode, explicit))
+}
 
 // The runtime flag parser moved to `extension_flags`; the suite reaches it
 // through `use super::*`, so the names it needs are re-imported for tests only
@@ -249,6 +301,9 @@ pub struct Cli {
     /// Colour output policy: auto, always, or never.
     #[arg(long, value_name = "WHEN")]
     pub color: Option<String>,
+    /// Terminal screen policy for interactive mode: fullscreen (default) or inline.
+    #[arg(long = "tui-mode", value_name = "MODE", value_parser = ["fullscreen", "inline"])]
+    pub tui_mode: Option<String>,
     /// Use chronological ASCII output without cursor control.
     #[arg(long)]
     pub plain: bool,
@@ -413,6 +468,7 @@ struct ConfigLayer {
     cache_warming: Option<String>,
     show_cache_miss_notices: Option<bool>,
     theme: Option<String>,
+    tui_mode: Option<String>,
     color: Option<String>,
     mouse: Option<String>,
     tern: Option<String>,
@@ -475,6 +531,7 @@ impl ConfigLayer {
         override_some!(cache_warming);
         override_some!(show_cache_miss_notices);
         override_some!(theme);
+        override_some!(tui_mode);
         override_some!(color);
         override_some!(mouse);
         override_some!(tern);
@@ -624,6 +681,7 @@ impl ConfigLayer {
         project.trusted_extensions = None;
         let scoped_models = self.models.clone();
         project.models = None;
+        project.tui_mode = None;
         project.cache_warming = None;
         project.show_cache_miss_notices = None;
         tighten_effect_policy(&mut self.effect_policy, project.effect_policy.take());
@@ -1313,6 +1371,7 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         cache_warming: env_value("OCTET_CACHE_WARMING"),
         show_cache_miss_notices: None,
         theme: env_value("OCTET_THEME"),
+        tui_mode: None,
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
         tern: env_value("OCTET_TERN").or_else(|| env_value("OCTET_TUI_TERN")),
@@ -1461,6 +1520,10 @@ fn build_config_with_global_path_and_diagnostics(
     let mut values = global.values;
     values.merge_project(project.values);
     values.merge(environment);
+    let (tui_mode, tui_mode_explicit) =
+        resolve_tui_mode(cli.tui_mode.as_deref(), values.tui_mode.as_deref())?;
+    store_tui_mode(tui_mode);
+    TUI_MODE_EXPLICIT.store(tui_mode_explicit, Ordering::Relaxed);
     if report_diagnostics {
         report_config_diagnostics(
             &diagnostics,

@@ -2,10 +2,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { SessionTransport, SESSION_FEATURES } from './session-transport.mjs';
 import { withContextLimits } from './context-limits.mjs';
 import { createJiti } from 'jiti';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createAPI, createContext, extensionDisplayName, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
@@ -43,23 +43,100 @@ const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'term
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
-// Review the bounded relative-import source closure without executing it. This
-// is a change detector for reviewed code, not a sandbox or computed-import gate.
+// Measured against every enabled Pi 1.0.2 entrypoint: the largest closure is
+// 224 files / 4,268,958 bytes. Leave bounded headroom without package-specific
+// exceptions; these are review limits, not a sandbox or computed-import gate.
+export const REVIEWED_SOURCE_LIMITS = Object.freeze({
+  files: 256,
+  bytes: 8 * 1024 * 1024,
+  fileBytes: 8 * 1024 * 1024,
+});
+
+function missingPath(error) { return error?.code === 'ENOENT' || error?.code === 'ENOTDIR'; }
+function sourceFilePath(pathname, baseDirectory) {
+  const absolute = resolve(pathname), relativePath = relative(baseDirectory, absolute);
+  const parts = relativePath ? relativePath.split(sep) : [];
+  let current = baseDirectory;
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    if (!part || part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    current = join(current, part);
+    let stat;
+    try { stat = lstatSync(current); }
+    catch (error) { if (missingPath(error)) return undefined; throw error; }
+    if (stat.isSymbolicLink()) invalid('reviewed factory source traverses a symlink; configure entrypoints explicitly');
+    if (index < parts.length - 1 && !stat.isDirectory()) return undefined;
+    if (index === parts.length - 1 && !stat.isFile()) return undefined;
+  }
+  if (!parts.length) {
+    let stat;
+    try { stat = lstatSync(absolute); }
+    catch (error) { if (missingPath(error)) return undefined; throw error; }
+    if (stat.isSymbolicLink()) invalid('reviewed factory source traverses a symlink; configure entrypoints explicitly');
+    if (!stat.isFile()) return undefined;
+  }
+  return realpathSync(current);
+}
+
+function readReviewedSource(file, maxBytes, limitMessage) {
+  // O_NOFOLLOW is available on the supported Unix platforms. The lstat checks
+  // also protect platforms where Node does not expose that flag.
+  let fd;
+  try { fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)); }
+  catch (error) {
+    if (error?.code === 'ELOOP') invalid('reviewed factory source became a symlink; configure entrypoints explicitly');
+    throw error;
+  }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) invalid('reviewed factory source is not a regular file; configure entrypoints explicitly');
+    if (before.size > maxBytes) invalid(limitMessage);
+    // Read at most the size observed plus one byte, so concurrent growth is
+    // detected without ever allocating or reading an unbounded source file.
+    const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(maxBytes + 1, before.size + 1)));
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, length);
+      if (!count) break;
+      length += count;
+    }
+    if (length > maxBytes || length !== before.size) invalid('reviewed factory source changed during review; configure entrypoints explicitly');
+    const after = fstatSync(fd);
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      invalid('reviewed factory source changed during review; configure entrypoints explicitly');
+    }
+    return buffer.subarray(0, length);
+  } finally { closeSync(fd); }
+}
+
+// Review the bounded relative-import source closure without executing it. Every
+// accepted file is hashed; symlink candidates and changed/oversized sources fail closed.
 export function reviewedSourceHashes(entry) {
-  const hashes = {}, queue = [realpathSync(entry)];
+  const absolute = resolve(entry), initial = sourceFilePath(absolute, dirname(absolute));
+  if (!initial) invalid('reviewed factory entrypoint is not a regular file; configure entrypoints explicitly');
+  const hashes = {}, queue = [initial];
+  let totalBytes = 0;
   while (queue.length) {
     const file = queue.shift();
     if (Object.hasOwn(hashes, file)) continue;
-    if (Object.keys(hashes).length >= 64 || statSync(file).size > 1048576) invalid('reviewed factory source bounds; configure entrypoints explicitly');
-    const bytes = readFileSync(file), source = bytes.toString('utf8');
+    if (Object.keys(hashes).length >= REVIEWED_SOURCE_LIMITS.files) {
+      invalid(`reviewed factory source closure exceeds ${REVIEWED_SOURCE_LIMITS.files} files; configure entrypoints explicitly`);
+    }
+    const remaining = REVIEWED_SOURCE_LIMITS.bytes - totalBytes;
+    const maxBytes = Math.min(REVIEWED_SOURCE_LIMITS.fileBytes, remaining);
+    const limitMessage = remaining < REVIEWED_SOURCE_LIMITS.fileBytes
+      ? `reviewed factory source closure exceeds ${REVIEWED_SOURCE_LIMITS.bytes} bytes; configure entrypoints explicitly`
+      : `reviewed factory source file exceeds ${REVIEWED_SOURCE_LIMITS.fileBytes} bytes; configure entrypoints explicitly`;
+    const bytes = readReviewedSource(file, maxBytes, limitMessage), source = bytes.toString('utf8');
+    totalBytes += bytes.length;
     hashes[file] = createHash('sha256').update(bytes).digest('hex');
     const imports = source.matchAll(/\b(?:from\s*|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"\n]+)['"]/g);
     for (const [, specifier] of imports) {
       const base = resolve(dirname(file), specifier), stem = base.slice(0, base.length - extname(base).length);
       for (const candidate of [base, ...[...SOURCE_EXTENSIONS].map(extension => base + extension), ...[...SOURCE_EXTENSIONS].map(extension => stem + extension), ...[...SOURCE_EXTENSIONS].map(extension => join(base, `index${extension}`))]) {
-        let regular = false;
-        try { regular = statSync(candidate).isFile(); } catch { continue; }
-        if (regular) { queue.push(realpathSync(candidate)); break; }
+        const resolved = sourceFilePath(candidate, dirname(file));
+        if (resolved) { queue.push(resolved); break; }
       }
     }
   }

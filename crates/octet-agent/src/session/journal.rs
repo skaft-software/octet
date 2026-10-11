@@ -35,7 +35,7 @@ pub const MAX_PARTIAL_FRAME_JOURNAL_FRAMES: usize = 8192;
 /// appended. The sidecar is never parsed as a session record.
 pub struct AssistantFrameJournal {
     path: PathBuf,
-    pub(super) file: File,
+    pub(super) file: Option<File>,
     bytes: usize,
     frames: usize,
     bounded: bool,
@@ -61,7 +61,10 @@ impl AssistantFrameJournal {
             self.bounded = true;
             return Ok(());
         }
-        self.file.write_all(&line)?;
+        self.file
+            .as_mut()
+            .expect("an unsettled journal owns its writer")
+            .write_all(&line)?;
         self.bytes += line.len();
         self.frames += 1;
         Ok(())
@@ -77,22 +80,28 @@ impl AssistantFrameJournal {
             return;
         }
         self.settled = true;
-        let _ = self.file.sync_data();
-        // Read from the descriptor we created, then compare-and-delete. A
-        // replaced pathname or parent must not redirect cleanup to a new file.
-        if self.file.rewind().is_ok() {
-            let mut bytes = Vec::new();
-            if Read::by_ref(&mut self.file)
+        let mut file = self
+            .file
+            .take()
+            .expect("an unsettled journal owns its writer");
+        let _ = file.sync_data();
+        // Snapshot the descriptor we created, not a potentially replaced path.
+        let mut bytes = Vec::new();
+        let snapshot = file.rewind().and_then(|()| {
+            Read::by_ref(&mut file)
                 .take((MAX_PARTIAL_FRAME_JOURNAL_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
-                .is_ok()
-            {
-                let _ = crate::secure_fs::remove_private_file_if_unchanged(
-                    &self.path,
-                    &bytes,
-                    MAX_PARTIAL_FRAME_JOURNAL_BYTES,
-                );
-            }
+        });
+        // Windows compare-and-delete pins the file without FILE_SHARE_WRITE.
+        // Close our writable handle first, or that pin fails with a sharing
+        // violation and completed frames survive as false recovered output.
+        drop(file);
+        if snapshot.is_ok() {
+            let _ = crate::secure_fs::remove_private_file_if_unchanged(
+                &self.path,
+                &bytes,
+                MAX_PARTIAL_FRAME_JOURNAL_BYTES,
+            );
         }
     }
 
@@ -147,7 +156,7 @@ impl Session {
             .map_err(partial_journal_file_error)?;
         Ok(AssistantFrameJournal {
             path,
-            file,
+            file: Some(file),
             bytes: 0,
             frames: 0,
             bounded: false,

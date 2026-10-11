@@ -257,8 +257,10 @@ throughput separate from the decode estimate and native server observation.
 The receive-side reader runs ahead of terminal/agent polling with bounded event
 and byte admission; cancellation aborts it, and saturation suppresses estimates.
 A usage-calibrated median long-baseline fit of visible output progress excludes
-request/prefill and completion-tail time and corrects the first chunk's token
-mass. Hidden reasoning usage is excluded, and an unknown reasoning split cannot
+request/prefill and completion-tail time from the fitted baselines. Calibration
+still includes first-burst bytes and tokens; dominant first bursts are suppressed
+because their token density cannot be identified from arrivals. Hidden reasoning
+usage is excluded, and an unknown reasoning split cannot
 be assigned to answer-text time. Burst coalescing and slope dispersion reject
 unresolvable timing rather than claiming infinite decode speed.
 

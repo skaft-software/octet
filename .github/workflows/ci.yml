@@ -335,10 +335,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --lib -- `
             secure_fs `
+            session::tests::journal `
             tools::bash::tests `
             extension_process::tests::python_script_detection_uses_the_extension_or_interpreter_line `
             extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter `
             extension_process::tests::compaction_strategy_negotiates_and_renders_through_host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test agent_run partial_assistant_journal -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test windows_process_current
       - name: Test the Python SDK, computer-use extension, and Windows release tooling

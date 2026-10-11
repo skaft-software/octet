@@ -35,6 +35,7 @@ fn base() -> Cli {
         theme: None,
         theme_dirs: vec![],
         color: None,
+        tui_mode: None,
         mouse: None,
         tern: None,
         plain: false,
@@ -816,6 +817,53 @@ fn cache_warming_keys_are_known_and_persistence_preserves_other_user_settings() 
             .as_deref(),
         Some("off")
     );
+}
+
+#[test]
+fn tui_mode_defaults_fullscreen_and_explicit_cli_precedes_saved_setting() {
+    assert_eq!(
+        resolve_tui_mode(None, None).unwrap(),
+        (config::TuiMode::Fullscreen, false)
+    );
+    assert_eq!(
+        resolve_tui_mode(None, Some("inline")).unwrap(),
+        (config::TuiMode::Inline, false)
+    );
+    assert_eq!(
+        resolve_tui_mode(Some("fullscreen"), Some("inline")).unwrap(),
+        (config::TuiMode::Fullscreen, true)
+    );
+    assert!(resolve_tui_mode(None, Some("other")).is_err());
+    for mode in ["fullscreen", "inline"] {
+        let parsed = Cli::try_parse_from(["octet", "--tui-mode", mode]).unwrap();
+        assert_eq!(parsed.tui_mode.as_deref(), Some(mode));
+    }
+    assert!(Cli::try_parse_from(["octet", "--tui-mode", "auto"]).is_err());
+
+    let mut user = ConfigLayer {
+        tui_mode: Some("fullscreen".into()),
+        ..ConfigLayer::default()
+    };
+    user.merge_project(ConfigLayer {
+        tui_mode: Some("inline".into()),
+        ..ConfigLayer::default()
+    });
+    assert_eq!(user.tui_mode.as_deref(), Some("fullscreen"));
+}
+
+#[test]
+fn tui_mode_config_is_known_and_persistence_preserves_other_settings() {
+    let directory = cwd();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "# user choices\nmodel = 'keep-model'\n").unwrap();
+    persist_key_to_path("tui_mode", "inline", &path).unwrap();
+    let loaded = read_layer(&path, ConfigSourceKind::Global).unwrap();
+    assert!(loaded.diagnostics.is_empty());
+    assert_eq!(loaded.values.tui_mode.as_deref(), Some("inline"));
+    assert_eq!(loaded.values.model.as_deref(), Some("keep-model"));
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("# user choices"));
 }
 
 #[test]

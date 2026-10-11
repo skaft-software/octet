@@ -204,6 +204,20 @@ struct BoundLeaf {
     view_revision: AtomicU64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SnapshotPublicationState {
+    Pending {
+        publication_id: u64,
+        revision: Option<u64>,
+    },
+    Prepared {
+        revision: u64,
+    },
+    Failed {
+        revision: Option<u64>,
+    },
+}
+
 #[derive(Default)]
 pub(super) struct SessionLeafMailbox {
     bound: StdMutex<HashMap<ExtensionResourceOwner, Arc<BoundLeaf>>>,
@@ -214,6 +228,15 @@ pub(super) struct SessionLeafMailbox {
     // so an accepted reload can rebind the last host-installed immutable view.
     pub(super) mirror: StdMutex<Option<SessionMirror>>,
     pub(super) transport: StdMutex<transport::Store>,
+    // Latest publication readiness per native process owner. Publication is
+    // newest-wins, so waiters must observe the exact revision they intend to use.
+    snapshot_publication: StdMutex<
+        Option<(
+            ExtensionResourceOwner,
+            watch::Sender<SnapshotPublicationState>,
+        )>,
+    >,
+    next_snapshot_publication_id: AtomicU64,
     // Selected v2 profile; None derives the deterministic frame candidate for
     // test-installed gates. One source of truth for both peers of the wire.
     pub(super) profile: StdRwLock<Option<transport::SessionSnapshotProfile>>,
@@ -244,6 +267,119 @@ impl SessionLeafMailbox {
     pub(super) fn terminate_execution(&self) {
         lock_std_mutex(&self.execution_slots).clear();
         lock_std_mutex(&self.transport).clear();
+        self.fail_pending_snapshot_publication();
+    }
+
+    pub(super) fn begin_snapshot_publication(&self, owner: ExtensionResourceOwner) -> u64 {
+        let publication_id = self
+            .next_snapshot_publication_id
+            .fetch_add(1, Ordering::Relaxed);
+        let state = SnapshotPublicationState::Pending {
+            publication_id,
+            revision: None,
+        };
+        let mut publication = lock_std_mutex(&self.snapshot_publication);
+        if let Some((current_owner, sender)) = publication.as_ref() {
+            if current_owner == &owner {
+                sender.send_replace(state);
+                return publication_id;
+            }
+        }
+        let (sender, _receiver) = watch::channel(state);
+        *publication = Some((owner, sender));
+        publication_id
+    }
+
+    pub(super) fn set_snapshot_publication_revision(
+        &self,
+        owner: &ExtensionResourceOwner,
+        publication_id: u64,
+        revision: u64,
+    ) {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        if let Some((current_owner, sender)) = publication.as_ref() {
+            if current_owner == owner
+                && matches!(
+                    &*sender.borrow(),
+                    SnapshotPublicationState::Pending { publication_id: current, .. }
+                        if *current == publication_id
+                )
+            {
+                sender.send_replace(SnapshotPublicationState::Pending {
+                    publication_id,
+                    revision: Some(revision),
+                });
+            }
+        }
+    }
+
+    pub(super) fn finish_snapshot_publication(
+        &self,
+        owner: &ExtensionResourceOwner,
+        publication_id: u64,
+        revision: u64,
+        prepared: bool,
+    ) {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        let Some((current_owner, sender)) = publication.as_ref() else {
+            return;
+        };
+        if current_owner != owner
+            || sender.borrow().clone()
+                != (SnapshotPublicationState::Pending {
+                    publication_id,
+                    revision: Some(revision),
+                })
+        {
+            return;
+        }
+        sender.send_replace(if prepared {
+            SnapshotPublicationState::Prepared { revision }
+        } else {
+            SnapshotPublicationState::Failed {
+                revision: Some(revision),
+            }
+        });
+    }
+
+    pub(super) fn fail_snapshot_publication(
+        &self,
+        owner: &ExtensionResourceOwner,
+        publication_id: u64,
+    ) {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        let Some((current_owner, sender)) = publication.as_ref() else {
+            return;
+        };
+        if current_owner != owner {
+            return;
+        }
+        // Drop the watch read guard before publishing the failure; retaining
+        // it through an if-let body deadlocks send_replace's write lock.
+        let state = sender.borrow().clone();
+        if let SnapshotPublicationState::Pending {
+            publication_id: current,
+            revision,
+        } = state
+        {
+            if current == publication_id {
+                sender.send_replace(SnapshotPublicationState::Failed { revision });
+            }
+        };
+    }
+
+    fn fail_pending_snapshot_publication(&self) {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        if let Some((_, sender)) = publication.as_ref() {
+            let state = sender.borrow().clone();
+            if let SnapshotPublicationState::Pending {
+                publication_id: _,
+                revision,
+            } = state
+            {
+                sender.send_replace(SnapshotPublicationState::Failed { revision });
+            }
+        }
     }
 }
 
@@ -319,6 +455,116 @@ impl InvocationSnapshot {
 }
 
 impl ExtensionProcess {
+    /// Wait until the current native session view has been accepted by the
+    /// extension peer. The owner and generation are checked on both sides of
+    /// the wait so a late acknowledgement cannot release a replacement.
+    pub async fn wait_for_session_snapshot_prepared(
+        &self,
+        owner: &ExtensionResourceOwner,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ExtensionRuntimeError> {
+        if cancellation.is_cancelled() {
+            return Err(ExtensionRuntimeError::Cancelled {
+                method: transport::PREPARE.into(),
+                reason: "active session transition cancelled".into(),
+            });
+        }
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if owner.extension_instance_id.as_str() != self.inner.instance_id.as_str()
+            || owner.process_generation != connection.generation
+            || connection.closed.load(Ordering::Acquire)
+            || connection.draining.load(Ordering::Acquire)
+        {
+            return Err(ExtensionRuntimeError::Closed(
+                "session snapshot owner is no longer current".into(),
+            ));
+        }
+        if !owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+            return Ok(());
+        }
+
+        let mut receiver = {
+            let publication = lock_std_mutex(&connection.session_leaf.snapshot_publication);
+            let Some((current_owner, sender)) = publication.as_ref() else {
+                return Err(ExtensionRuntimeError::Closed(
+                    "session snapshot has not been published".into(),
+                ));
+            };
+            if current_owner != owner {
+                return Err(ExtensionRuntimeError::Closed(
+                    "session snapshot owner is no longer current".into(),
+                ));
+            }
+            sender.subscribe()
+        };
+        let revision = tokio::time::timeout(deadline, async {
+            loop {
+                match receiver.borrow().clone() {
+                    SnapshotPublicationState::Prepared { revision, .. } => break Ok(revision),
+                    SnapshotPublicationState::Failed { .. } => {
+                        break Err(ExtensionRuntimeError::Protocol(
+                            "session snapshot preparation was not acknowledged".into(),
+                        ));
+                    }
+                    SnapshotPublicationState::Pending { .. } => {}
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        break Err(ExtensionRuntimeError::Cancelled {
+                            method: transport::PREPARE.into(),
+                            reason: "active session transition cancelled".into(),
+                        });
+                    }
+                    changed = receiver.changed() => {
+                        if changed.is_err() {
+                            break Err(ExtensionRuntimeError::Closed(
+                                "session snapshot owner was retired".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| ExtensionRuntimeError::Timeout {
+            method: transport::PREPARE.into(),
+        })??;
+
+        if connection.closed.load(Ordering::Acquire)
+            || connection.draining.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&read_std_lock(&self.inner.connection), &connection)
+        {
+            return Err(ExtensionRuntimeError::Closed(
+                "session snapshot owner is no longer current".into(),
+            ));
+        }
+        let current_revision = lock_std_mutex(&connection.session_leaf.transport)
+            .current
+            .get(owner)
+            .and_then(Option::as_ref)
+            .map(|view| view.descriptor.view_revision);
+        let mirror_revision = lock_std_mutex(&connection.session_leaf.mirror)
+            .as_ref()
+            .filter(|mirror| &mirror.owner == owner)
+            .and_then(|mirror| mirror.value.as_ref())
+            .and_then(|value| value.get("session_view_revision"))
+            .and_then(serde_json::Value::as_u64);
+        if current_revision != Some(revision) || mirror_revision != Some(revision) {
+            return Err(ExtensionRuntimeError::Protocol(
+                "session snapshot acknowledgement was superseded".into(),
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(ExtensionRuntimeError::Cancelled {
+                method: transport::PREPARE.into(),
+                reason: "active session transition cancelled".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Publish the native owner independently of optional session_entries. A
     /// negotiated read-only projection is independent of the append grant;
     /// failure replaces it with unavailable state, never stale or empty entries.

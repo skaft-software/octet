@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use octet_agent::{InputPart, UserInput};
+use octet_agent::{Entry, EntryId, EntryValue, InputPart, Session, UserInput};
 use octet_ai::{
     AssistantMessage, AssistantPart, Cost, ImageSource, Media, Message, Modality, Model, Protocol,
-    StopReason, ToolResult, ToolResultPart, Usage, UserPart,
+    StopReason, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
 };
 use serde_json::{json, Value};
 
@@ -126,12 +126,22 @@ pub(super) fn media_content(media: &Media) -> Value {
     }
 }
 
-pub(super) fn user_content_at(parts: impl IntoIterator<Item = Value>, timestamp: u64) -> Value {
-    json!({
+fn user_content_with_optional_timestamp(
+    parts: impl IntoIterator<Item = Value>,
+    timestamp: Option<u64>,
+) -> Value {
+    let mut value = json!({
         "role": "user",
-        "content": parts.into_iter().collect::<Vec<_>>(),
-        "timestamp": timestamp
-    })
+        "content": parts.into_iter().collect::<Vec<_>>()
+    });
+    if let Some(timestamp) = timestamp {
+        value["timestamp"] = json!(timestamp);
+    }
+    value
+}
+
+pub(super) fn user_content_at(parts: impl IntoIterator<Item = Value>, timestamp: u64) -> Value {
+    user_content_with_optional_timestamp(parts, Some(timestamp))
 }
 
 fn user_content(parts: impl IntoIterator<Item = Value>) -> Value {
@@ -224,6 +234,29 @@ fn assistant_content(message: &AssistantMessage) -> Vec<Value> {
         .collect()
 }
 
+fn assistant_value_with_optional_timestamp(
+    message: &AssistantMessage,
+    endpoint: &str,
+    usage: &Usage,
+    cost: Option<Cost>,
+    stop_reason: &StopReason,
+    timestamp: Option<u64>,
+) -> Value {
+    let mut value = json!({
+        "role": "assistant",
+        "content": assistant_content(message),
+        "api": protocol_name(&message.protocol),
+        "provider": endpoint,
+        "model": message.model.0,
+        "usage": usage_value(usage, cost),
+        "stopReason": pi_stop_reason(stop_reason)
+    });
+    if let Some(timestamp) = timestamp {
+        value["timestamp"] = json!(timestamp);
+    }
+    value
+}
+
 pub(super) fn assistant_value(
     message: &AssistantMessage,
     endpoint: &str,
@@ -232,16 +265,14 @@ pub(super) fn assistant_value(
     stop_reason: &StopReason,
     timestamp: Option<u64>,
 ) -> Value {
-    json!({
-        "role": "assistant",
-        "content": assistant_content(message),
-        "api": protocol_name(&message.protocol),
-        "provider": endpoint,
-        "model": message.model.0,
-        "usage": usage_value(usage, cost),
-        "stopReason": pi_stop_reason(stop_reason),
-        "timestamp": timestamp.map_or_else(now_millis, u128::from)
-    })
+    assistant_value_with_optional_timestamp(
+        message,
+        endpoint,
+        usage,
+        cost,
+        stop_reason,
+        Some(timestamp.unwrap_or_else(|| now_millis().min(u128::from(u64::MAX)) as u64)),
+    )
 }
 
 pub(super) fn tool_result_content(result: &ToolResult) -> Vec<Value> {
@@ -255,42 +286,216 @@ pub(super) fn tool_result_content(result: &ToolResult) -> Vec<Value> {
         .collect()
 }
 
-pub(super) fn tool_result_value_at(result: &ToolResult, tool_name: &str, timestamp: u64) -> Value {
-    json!({
+fn tool_result_value_with_optional_timestamp(
+    result: &ToolResult,
+    tool_name: &str,
+    timestamp: Option<u64>,
+) -> Value {
+    let mut value = json!({
         "role": "toolResult",
         "toolCallId": result.tool_call_id.0,
         "toolName": tool_name,
         "content": tool_result_content(result),
-        "isError": result.is_error,
-        "timestamp": timestamp
-    })
+        "isError": result.is_error
+    });
+    if let Some(timestamp) = timestamp {
+        value["timestamp"] = json!(timestamp);
+    }
+    value
 }
 
-fn tool_result_value(result: &ToolResult, tool_name: &str) -> Value {
-    tool_result_value_at(
-        result,
-        tool_name,
-        now_millis().min(u128::from(u64::MAX)) as u64,
-    )
+pub(super) fn tool_result_value_at(result: &ToolResult, tool_name: &str, timestamp: u64) -> Value {
+    tool_result_value_with_optional_timestamp(result, tool_name, Some(timestamp))
+}
+
+struct RpcHistoryMessage {
+    message: Message,
+    timestamp_unix_ms: Option<u64>,
+    user_part_timestamps: Vec<Option<u64>>,
+    assistant_entry: Option<EntryId>,
+}
+
+fn history_message(entry: &Entry) -> RpcHistoryMessage {
+    let message = match &entry.value {
+        EntryValue::Message(message) => message.clone(),
+        EntryValue::BranchSummary { summary, .. } => Message::User(UserMessage {
+            content: vec![UserPart::Text(format!(
+                "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{summary}</summary>"
+            ))],
+        }),
+        _ => unreachable!("history_message is called for visible entries only"),
+    };
+    let user_part_timestamps = match &message {
+        Message::User(message) => vec![entry.timestamp_unix_ms; message.content.len()],
+        Message::Assistant(_) => Vec::new(),
+    };
+    let assistant_entry = matches!(&message, Message::Assistant(_)).then(|| entry.id.clone());
+    RpcHistoryMessage {
+        message,
+        timestamp_unix_ms: entry.timestamp_unix_ms,
+        user_part_timestamps,
+        assistant_entry,
+    }
+}
+
+fn tool_result_turn(message: &UserMessage) -> bool {
+    !message.content.is_empty()
+        && message
+            .content
+            .iter()
+            .any(|part| matches!(part, UserPart::ToolResult(_)))
+        && message
+            .content
+            .iter()
+            .all(|part| matches!(part, UserPart::ToolResult(_) | UserPart::Media(_)))
+}
+
+fn coalesce_rpc_history(messages: Vec<RpcHistoryMessage>) -> Vec<RpcHistoryMessage> {
+    let mut output: Vec<RpcHistoryMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let merge = match &message.message {
+            Message::User(current) if tool_result_turn(current) => {
+                output.last().is_some_and(|previous| {
+                    matches!(&previous.message, Message::User(previous) if tool_result_turn(previous))
+                })
+            }
+            _ => false,
+        };
+        if !merge {
+            output.push(message);
+            continue;
+        }
+
+        let Message::User(current) = &message.message else {
+            unreachable!("only tool-result user messages are coalesced");
+        };
+        let previous = output
+            .last_mut()
+            .expect("a matching previous tool-result message exists");
+        let Message::User(previous_user) = &mut previous.message else {
+            unreachable!("the matching previous message is a user message");
+        };
+        let media_start = previous_user
+            .content
+            .iter()
+            .position(|part| matches!(part, UserPart::Media(_)))
+            .unwrap_or(previous_user.content.len());
+        let current_results = current
+            .content
+            .iter()
+            .zip(&message.user_part_timestamps)
+            .filter(|(part, _)| matches!(part, UserPart::ToolResult(_)))
+            .map(|(part, timestamp)| (part.clone(), *timestamp))
+            .collect::<Vec<_>>();
+        previous_user.content.splice(
+            media_start..media_start,
+            current_results.iter().map(|(part, _)| part.clone()),
+        );
+        previous.user_part_timestamps.splice(
+            media_start..media_start,
+            current_results.iter().map(|(_, timestamp)| *timestamp),
+        );
+        let current_media = current
+            .content
+            .iter()
+            .zip(&message.user_part_timestamps)
+            .filter(|(part, _)| matches!(part, UserPart::Media(_)))
+            .map(|(part, timestamp)| (part.clone(), *timestamp));
+        for (part, timestamp) in current_media {
+            previous_user.content.push(part);
+            previous.user_part_timestamps.push(timestamp);
+        }
+    }
+    output
+}
+
+fn rpc_history_messages(session: &Session) -> Vec<RpcHistoryMessage> {
+    let mut newest_first = Vec::new();
+    let mut summary = None;
+    let mut boundary: Option<EntryId> = None;
+    let mut cursor = session.head();
+    while let Some(id) = cursor {
+        let entry = session
+            .entry(&id)
+            .expect("session head and parent links refer to durable entries");
+        match &entry.value {
+            EntryValue::Message(_) | EntryValue::BranchSummary { .. } => {
+                newest_first.push(history_message(entry));
+            }
+            EntryValue::Compaction {
+                summary: compaction_summary,
+                snapcompact,
+                first_kept,
+                ..
+            } => {
+                if boundary.is_none() {
+                    summary = Some((
+                        compaction_summary.clone(),
+                        snapcompact.clone(),
+                        entry.timestamp_unix_ms,
+                    ));
+                    boundary = Some(first_kept.clone());
+                }
+            }
+            EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
+            | EntryValue::Config { .. }
+            | EntryValue::PromptTemplateSelected { .. }
+            | EntryValue::ResponsesTurn { .. }
+            | EntryValue::ResponsesCompaction { .. }
+            | EntryValue::SkillActivated { .. }
+            | EntryValue::SkillResourceRead { .. }
+            | EntryValue::SkillDeactivated { .. } => {}
+        }
+        if boundary.as_ref() == Some(&id) {
+            break;
+        }
+        cursor = entry.parent.clone();
+    }
+
+    let mut messages = Vec::with_capacity(newest_first.len().saturating_add(1));
+    if let Some((summary, snapcompact, timestamp_unix_ms)) = summary {
+        let mut content = vec![UserPart::Text(format!(
+            "[summary of earlier conversation]\n{summary}"
+        ))];
+        if let Some(snapcompact) = snapcompact {
+            content.extend(snapcompact.frames.into_iter().map(UserPart::Media));
+        }
+        messages.push(RpcHistoryMessage {
+            user_part_timestamps: vec![timestamp_unix_ms; content.len()],
+            message: Message::User(UserMessage { content }),
+            timestamp_unix_ms,
+            assistant_entry: None,
+        });
+    }
+    messages.extend(newest_first.into_iter().rev());
+    coalesce_rpc_history(messages)
 }
 
 pub(super) fn rpc_messages(app: &App) -> Vec<Value> {
-    let usage_records = app
-        .agent
-        .session()
+    rpc_messages_from_session(app.agent.session(), &app.model)
+}
+
+pub(super) fn rpc_messages_from_session(session: &Session, model: &Model) -> Vec<Value> {
+    let usage_by_assistant = session
         .usage_records()
         .iter()
-        .filter(|record| {
-            matches!(
-                &record.kind,
-                octet_agent::UsageRecordKind::AssistantTurn { .. }
-            )
+        .filter_map(|record| match &record.kind {
+            octet_agent::UsageRecordKind::AssistantTurn { assistant } => {
+                Some((assistant.clone(), record))
+            }
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    let mut usage_index = 0usize;
+        .collect::<HashMap<_, _>>();
     let mut tool_names = HashMap::<String, String>::new();
     let mut messages = Vec::new();
-    for message in app.agent.session().context().unwrap_or_default() {
+    for source in rpc_history_messages(session) {
+        let RpcHistoryMessage {
+            message,
+            timestamp_unix_ms,
+            user_part_timestamps,
+            assistant_entry,
+        } = source;
         match message {
             Message::Assistant(message) => {
                 for part in &message.content {
@@ -298,45 +503,62 @@ pub(super) fn rpc_messages(app: &App) -> Vec<Value> {
                         tool_names.insert(call.id.0.clone(), call.name.clone());
                     }
                 }
-                let record = usage_records.get(usage_index).copied();
-                usage_index = usage_index.saturating_add(1);
+                let record = assistant_entry
+                    .as_ref()
+                    .and_then(|entry| usage_by_assistant.get(entry).copied());
                 let reason = record
                     .and_then(|record| record.stop_reason.clone())
                     .unwrap_or_else(|| inferred_stop_reason(&message));
-                messages.push(assistant_value(
+                messages.push(assistant_value_with_optional_timestamp(
                     &message,
                     record
                         .and_then(|record| record.endpoint.as_ref())
-                        .map_or(app.model.endpoint.id.0.as_str(), |endpoint| {
-                            endpoint.0.as_str()
-                        }),
+                        .map_or(model.endpoint.id.0.as_str(), |endpoint| endpoint.0.as_str()),
                     record.map_or(&Usage::default(), |record| &record.usage),
                     record.and_then(|record| record.cost),
                     &reason,
-                    record.and_then(|record| record.completed_at_unix_ms),
+                    timestamp_unix_ms
+                        .or_else(|| record.and_then(|record| record.completed_at_unix_ms)),
                 ));
             }
             Message::User(message) => {
                 let mut ordinary = Vec::new();
-                for part in &message.content {
+                let mut ordinary_timestamp = None;
+                for (part, timestamp) in message.content.iter().zip(user_part_timestamps) {
                     match part {
                         UserPart::Text(text) => {
+                            if ordinary.is_empty() {
+                                ordinary_timestamp = timestamp;
+                            }
                             ordinary.push(json!({"type": "text", "text": text}));
                         }
-                        UserPart::Media(media) => ordinary.push(media_content(media)),
+                        UserPart::Media(media) => {
+                            if ordinary.is_empty() {
+                                ordinary_timestamp = timestamp;
+                            }
+                            ordinary.push(media_content(media));
+                        }
                         UserPart::ToolResult(result) => {
                             if !ordinary.is_empty() {
-                                messages.push(user_content(std::mem::take(&mut ordinary)));
+                                messages.push(user_content_with_optional_timestamp(
+                                    std::mem::take(&mut ordinary),
+                                    ordinary_timestamp.take(),
+                                ));
                             }
                             let name = tool_names
                                 .get(&result.tool_call_id.0)
                                 .map_or("", String::as_str);
-                            messages.push(tool_result_value(result, name));
+                            messages.push(tool_result_value_with_optional_timestamp(
+                                result, name, timestamp,
+                            ));
                         }
                     }
                 }
                 if !ordinary.is_empty() {
-                    messages.push(user_content(ordinary));
+                    messages.push(user_content_with_optional_timestamp(
+                        ordinary,
+                        ordinary_timestamp,
+                    ));
                 }
             }
         }

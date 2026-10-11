@@ -162,6 +162,83 @@ fn threaded_native_settled_resize_repairs_once_before_unchanged_stop() {
 }
 
 #[test]
+fn threaded_native_resize_keeps_held_working_status_visible_after_reflow() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 8);
+    shell.tui.take().unwrap().stop();
+    for index in 0..40 {
+        shell.notice(format!(
+            "RESIZE-HISTORY-{index:02} {}",
+            "history ".repeat(10)
+        ));
+    }
+    shell.begin_run("openai");
+    assert!(shell.state.borrow().has_active_status_shimmer());
+
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let resize_offset = Cell::new(None);
+    let resized = Cell::new(false);
+    let repaired = Cell::new(false);
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let state = shell.state.clone();
+    let size = shell.size.clone();
+    render_loop_with_terminal(
+        EmulatedTerminal {
+            size: size.clone(),
+            bytes: bytes.clone(),
+            synchronized_output: true,
+            status_frames: None,
+        },
+        state,
+        size,
+        rx,
+        RenderLoopOptions::default(),
+        |state, size| {
+            if !resized.get() {
+                resize_offset.set(Some(bytes.lock().unwrap().len()));
+                assert!(reconcile_terminal_size(state, size, (64, 8)));
+                resized.set(true);
+                return true;
+            }
+
+            if !repaired.get() {
+                let output = bytes.lock().unwrap();
+                let offset = resize_offset.get().expect("resize output boundary");
+                let repair = &output[offset..];
+                if repair
+                    .windows(b"\x1b[3J".len())
+                    .any(|window| window == b"\x1b[3J")
+                    && repair
+                        .windows(b"\x1b[?2026l".len())
+                        .any(|window| window == b"\x1b[?2026l")
+                {
+                    repaired.set(true);
+                    tx.send(RenderCommand::Stop).unwrap();
+                } else {
+                    assert!(started.elapsed() < Duration::from_secs(2));
+                }
+            }
+            false
+        },
+    );
+    assert!(
+        repaired.get(),
+        "the resize repair must complete before shutdown"
+    );
+
+    let bytes = bytes.lock().unwrap();
+    let offset = resize_offset.get().expect("resize output boundary");
+    let mut terminal = vt100::Parser::new(8, 64, 4096);
+    process_vt100_with_saved_line_clear(&mut terminal, &bytes[offset..], 8, 64, 4096);
+    assert!(
+        terminal.screen().contents().contains("Working"),
+        "a held activity label must remain on the reflowed live screen: {}",
+        terminal.screen().contents()
+    );
+}
+
+#[test]
 fn threaded_native_tool_contraction_keeps_working_clocks_alive_without_resize() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 8);

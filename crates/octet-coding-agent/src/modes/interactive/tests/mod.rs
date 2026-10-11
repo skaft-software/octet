@@ -47,6 +47,7 @@ mod pi_session_replacement_tests;
 mod pi_tool_hooks_tests;
 mod pi_tools_surface_tests;
 mod pi_ui_contract_tests;
+mod provider_setup_ui_tests;
 mod queued_follow_ups_and_input_close_tests;
 mod resource_reload_tests;
 mod session_compaction_service_tests;

@@ -21,11 +21,16 @@ def record(message):
 init = json.loads(sys.stdin.readline())
 p = init["params"]
 features = p["protocol"]["required_features"] + ["remote_ui"]
+protocol = {"version":"0.4", "features":features,"limits":{"max_concurrent_requests":4}}
 if os.path.exists(os.path.join(os.path.dirname(__file__), "mirror-enabled")):
     features.append("session_entries")
+if os.path.exists(os.path.join(os.path.dirname(__file__), "snapshot-enabled")):
+    features.extend(["session_entries", "session_owner_routes_v1", "session_snapshot_transport_v1"])
+    protocol["limits"]["max_message_bytes"] = p["protocol"]["limits"]["max_message_bytes"]
+    protocol["session_snapshot_transport_v1"] = p["protocol"]["session_snapshot_transport_v1"]
 reply(init, {"api_version":"0.4", "tools":[],
     "commands":[{"name":name,"description":name} for name in ["inspect", "open"]],
-    "protocol":{"version":"0.4", "features":features,"limits":{"max_concurrent_requests":4}}})
+    "protocol":protocol})
 start = None
 update = None
 for line in sys.stdin:
@@ -47,6 +52,14 @@ for line in sys.stdin:
             reply(message, {"text":"opened"})
         else:
             reply(message, {"text":json.dumps({"start":start,"update":update,"command":params})})
+    elif method == "session/snapshot/prepare":
+        record(message)
+        descriptor = params["snapshot"]
+        revision = descriptor["view_revision"]
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "bad-snapshot-ack")):
+            revision += 1
+        reply(message, {"accepted":True, "transfer_id":descriptor["transfer_id"],
+            "view_revision":revision, "head":descriptor["head"], "sha256":descriptor["sha256"]})
     elif method == "context/updated":
         update = params
         record(message)
@@ -66,6 +79,18 @@ async fn process(
     ExtensionProcess,
     broadcast::Receiver<ExtensionEvent>,
 ) {
+    process_with_snapshot_transport(enabled, false, false).await
+}
+
+async fn process_with_snapshot_transport(
+    enabled: bool,
+    snapshot_transport: bool,
+    bad_snapshot_ack: bool,
+) -> (
+    TempDir,
+    ExtensionProcess,
+    broadcast::Receiver<ExtensionEvent>,
+) {
     let temp = TempDir::new().unwrap();
     // The host stages entrypoint bytes outside the author directory. Fixture
     // markers and observations belong in the original private directory.
@@ -76,6 +101,12 @@ async fn process(
     write_executable_script(&temp.path().join("extension.py"), &script);
     if enabled {
         std::fs::write(temp.path().join("mirror-enabled"), "").unwrap();
+    }
+    if snapshot_transport {
+        std::fs::write(temp.path().join("snapshot-enabled"), "").unwrap();
+    }
+    if bad_snapshot_ack {
+        std::fs::write(temp.path().join("bad-snapshot-ack"), "").unwrap();
     }
     let manifest = ExtensionManifest::parse(
         r#"name = "mirror-process"
@@ -170,6 +201,109 @@ fn observations(temp: &TempDir) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+#[test]
+fn stale_snapshot_publication_cannot_fail_a_newer_revision() {
+    let mailbox = SessionLeafMailbox::default();
+    let owner = ExtensionResourceOwner {
+        session_id: "session".into(),
+        extension_instance_id: "extension".into(),
+        process_generation: 1,
+    };
+    let stale = mailbox.begin_snapshot_publication(owner.clone());
+    let current = mailbox.begin_snapshot_publication(owner.clone());
+    mailbox.set_snapshot_publication_revision(&owner, current, 7);
+
+    mailbox.fail_snapshot_publication(&owner, stale);
+    mailbox.finish_snapshot_publication(&owner, stale, 7, false);
+    let publication = lock_std_mutex(&mailbox.snapshot_publication);
+    let (_, sender) = publication.as_ref().unwrap();
+    assert_eq!(
+        sender.borrow().clone(),
+        SnapshotPublicationState::Pending {
+            publication_id: current,
+            revision: Some(7),
+        }
+    );
+    drop(publication);
+
+    mailbox.finish_snapshot_publication(&owner, current, 7, true);
+    let publication = lock_std_mutex(&mailbox.snapshot_publication);
+    let (_, sender) = publication.as_ref().unwrap();
+    assert_eq!(
+        sender.borrow().clone(),
+        SnapshotPublicationState::Prepared { revision: 7 }
+    );
+}
+
+#[test]
+fn pending_snapshot_failure_and_termination_release_watch_read_guards() {
+    for terminate in [false, true] {
+        let mailbox = Arc::new(SessionLeafMailbox::default());
+        let owner = ExtensionResourceOwner {
+            session_id: "session".into(),
+            extension_instance_id: "extension".into(),
+            process_generation: 1,
+        };
+        let publication = mailbox.begin_snapshot_publication(owner.clone());
+        mailbox.set_snapshot_publication_revision(&owner, publication, 7);
+        let (completed, receiver) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&mailbox);
+        let handle = std::thread::spawn(move || {
+            if terminate {
+                worker.terminate_execution();
+            } else {
+                worker.fail_snapshot_publication(&owner, publication);
+            }
+            completed.send(()).unwrap();
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failure publication must not hold its watch read guard");
+        handle.join().unwrap();
+        let publication = lock_std_mutex(&mailbox.snapshot_publication);
+        let (_, sender) = publication.as_ref().unwrap();
+        assert_eq!(
+            sender.borrow().clone(),
+            SnapshotPublicationState::Failed { revision: Some(7) }
+        );
+    }
+}
+
+#[tokio::test]
+async fn snapshot_publication_readiness_requires_matching_peer_acknowledgement() {
+    for bad_ack in [false, true] {
+        let (temp, process, _events) = process_with_snapshot_transport(false, true, bad_ack).await;
+        let path = temp.path().join("session.jsonl");
+        let mut session = crate::Session::create(&path).unwrap();
+        append(&mut session);
+        let owner = ExtensionResourceOwner {
+            session_id: session.resource_owner_key(),
+            extension_instance_id: process.extension_instance_id().to_owned(),
+            process_generation: process.health_snapshot().generation,
+        };
+        process
+            .set_host_state_with_session(ExtensionHostState::default(), &session)
+            .unwrap();
+        let cancellation = CancellationToken::default();
+        let result = process
+            .wait_for_session_snapshot_prepared(&owner, Duration::from_secs(5), &cancellation)
+            .await;
+        if bad_ack {
+            assert!(matches!(
+                result,
+                Err(ExtensionRuntimeError::Protocol(message))
+                    if message.contains("session snapshot preparation was not acknowledged")
+            ));
+        } else {
+            result.unwrap();
+            assert!(observations(&temp)
+                .iter()
+                .any(|message| message["method"] == "session/snapshot/prepare"));
+        }
+        assert!(process.shutdown().await);
+    }
 }
 
 #[tokio::test]

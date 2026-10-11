@@ -66,7 +66,8 @@ The CI job `windows (x86_64-pc-windows-gnu)` runs on a native Windows runner. It
 builds both executables, checks `--version`, `--help` and the `octet-host.exe`
 hello handshake, and gates on the Windows-relevant suites: terminal detection
 and frame writing, ConPTY scenarios against both the test and release
-binaries, the renderer, private file access, Python extension launch, Windows
+binaries, the renderer, private file access, partial-assistant journal settlement
+and genuine interrupted-reasoning recovery, Python extension launch, Windows
 Bash process control, the Python SDK, the computer-use extension (no driver
 installed), and release tooling. It starts the packaged executables with only
 the Windows system directories on `PATH` and as a freshly created standard
@@ -221,6 +222,31 @@ Windows Terminal. Use a disposable workspace and `--safe-mode`.
     `out.txt` contains no escape sequences.
 12. **conhost**: repeat items 1, 3, 6 and 10 in a classic console window
     (`conhost.exe powershell`); expect the ASCII profile.
+
+The following v0.9.0 release-blocker checks also require the exact candidate on
+an attended Windows desktop; source changes and deterministic CI fixtures do
+not qualify them:
+
+- **Recovery**: complete at least three reasoning-enabled turns, then reopen
+  and complete another. No successfully completed turn is shown as recovered
+  output. Interrupt an actual reasoning stream, reopen, and verify only that
+  interrupted prefix appears as recovered output, exactly once and separately
+  from the next answer.
+- **Local setup**: `/setup` offers editing an existing local configuration,
+  creating a new one, and cancellation immediately. Edit once, confirm once,
+  and use the updated model without restarting. Cancellation preserves the
+  existing configuration; credentials are neither displayed nor needlessly
+  re-entered.
+- **Model facts**: compare selected model reasoning options/default and context
+  with the configured server's assertions, including loaded context versus
+  model maximum. Refresh metadata after changing the server's loaded context.
+  Repeat with a sparse model list: absent facts must remain unknown/actionable,
+  not guessed effort levels or a detected 131K limit.
+- **Fullscreen Settings**: verify the default fullscreen mode, persisted
+  `/settings` mode changes, restart and explicit invocation precedence. Repeat
+  scrolling, resize, cancellation, exit restoration and plain/piped checks in
+  each mode. Check the complete pinned Pi Settings row matrix against actual
+  behavior, not only the presence of labels.
 
 ## Shell selection order
 

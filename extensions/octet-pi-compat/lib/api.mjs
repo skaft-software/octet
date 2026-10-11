@@ -16,7 +16,7 @@ import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js'
 import { contextFacts, getSettings } from './context-api.mjs';
 import { sessionMethods, sessionHeader } from './session-methods.mjs';
 import { customMessageParams, userMessageParams } from './custom-messages.mjs';
-import { buildContextEntries, buildSessionProjection } from './context.mjs';
+import { buildContextEntries, buildSessionContext, buildSessionProjection } from './context.mjs';
 
 export const hookEvents = {
   session_before_switch: 'session_before_switch', session_before_fork: 'session_before_fork',
@@ -332,6 +332,7 @@ export function createContext(runtime, store, replaced = false) {
     getLeafEntry: () => sessionEntry(sessionState().host.session_leaf_id),
     getLabel: id => snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getLabel')[id],
     buildContextEntries: () => buildContextEntries(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
+    buildSessionContext: () => buildSessionContext(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
     buildSessionProjection: () => buildSessionProjection(sessionEntries('session_entries'), sessionState().host.session_leaf_id),
     getTree: () => {
       const entries = sessionEntries('session_entries'), labels = snapshot(sessionState().host, 'session_labels', 'ctx.sessionManager.getTree');
