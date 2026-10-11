@@ -126,10 +126,12 @@ fn indexed_custom_merge_preserves_duplicates_case_identity_and_all_metadata() {
             expected[1].context_window = 4_096;
             expected[1].max_output_tokens = 4_000;
             expected[1].context_window_asserted = true;
+            expected[1].discovered_context_window = Some(4_096);
             expected[1].max_output_tokens_asserted = true;
             expected[3].context_window = 512;
             expected[3].max_output_tokens = 512;
             expected[3].context_window_asserted = true;
+            expected[3].discovered_context_window = Some(512);
         }
         let merged =
             apply_configured_custom_model_overrides(discovered.clone(), &configured, auto_discover);

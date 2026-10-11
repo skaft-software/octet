@@ -94,13 +94,18 @@ The artifact contains:
 | --- | --- |
 | `octet.exe`, `octet-host.exe` | The native binaries built from that commit |
 | `SHA256SUMS` | SHA-256 of both executables |
-| `BUILD-INFO.json` | Commit, CI run, rustc and linker versions, observed `--version` and hello output |
+| `BUILD-INFO.json` | Commit and tree, CI run, rustc and linker versions, observed `--version` and hello output |
 | `WINDOWS.md` | This page at that commit |
 | `extensions/octet-computer-use/` | The version-matched source computer-use bundle, for the [attended procedure](../extensions/octet-computer-use/README.md#windows) |
 
-These builds are unsigned and are **not releases**: they are not published,
-not attached to a GitHub release, and cannot be packaged as a release
-candidate (the packager requires a probe recorded by the immutable release
+Manually dispatched [dogfood candidates](distribution.md#unsigned-dogfood-candidates)
+also include all six official extension bundles and extracted payloads. Their
+root checksum manifest covers those extracted files as well as the binaries,
+metadata and archives; verify it before running the extracted extensions.
+
+Ordinary PR builds are unsigned and are **not releases**: they are not published,
+not attached to a GitHub release, and cannot be repackaged as stable release
+archives (the packager requires a probe recorded by the immutable release
 workflow tag). Windows SmartScreen may warn about an unsigned download.
 
 To test one from an ordinary Windows account, without WSL:
@@ -285,12 +290,16 @@ through `sh -c` (`crates/octet-coding-agent/src/modes/interactive.rs`).
 ## Extensions
 
 Executable extensions whose entrypoint is a Python script (a `.py` file or a
-`#!…python…` first line, as every first-party bundle uses) need Python 3 on
+`#!…python…` first line, as the computer-use, MCP, subagents and web-search
+bundles use) need Python 3 on
 Windows, because Windows cannot execute a script by its `#!` line. octet runs
 the script with the first interpreter found on `PATH`: the `py -3` launcher
 (installed by the python.org installer), then `python3.exe` or `python.exe`,
 with Microsoft Store app-execution aliases tried last. The extension otherwise
-starts, and is supervised, exactly as on other platforms.
+starts, and is supervised, exactly as on other platforms. Dogfood codemode
+bundles instead contain native `bin/codemode.exe`; the Pi adapter uses Node
+22.19+ and its bundled dependencies. Neither installation nor extraction enables
+an extension or authorizes Pi factory execution.
 
 ## Computer use
 

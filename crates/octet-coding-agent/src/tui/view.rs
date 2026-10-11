@@ -537,8 +537,15 @@ mod run_generation_tests {
                 },
             );
             shell.on_run_event(run, &settled_turn());
+            assert!(shell
+                .state
+                .borrow()
+                .last_turn_inference
+                .as_ref()
+                .unwrap()
+                .server
+                .is_some());
             let outcome = finish_run(&mut shell, run);
-            assert!(outcome.inference.unwrap().server.is_some());
             assert!(outcome.generation.is_none());
         }
     }
@@ -589,8 +596,6 @@ mod run_generation_tests {
 #[derive(Clone, Debug)]
 struct OutcomeBlock {
     outcome: RunOutcome,
-    /// Last-response diagnostics, not a whole-run generation average.
-    inference: Option<Box<octet_ai::InferenceMetrics>>,
     /// Frozen token/time-weighted rate; absent for incomplete run coverage.
     generation: Option<RunGenerationRate>,
 }
@@ -601,7 +606,6 @@ impl OutcomeBlock {
         generation.record(inference.as_ref());
         Self {
             outcome,
-            inference: inference.map(Box::new),
             generation: generation.rate(),
         }
     }

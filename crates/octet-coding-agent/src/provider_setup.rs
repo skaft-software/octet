@@ -957,7 +957,7 @@ fn sanitized_endpoint(value: &str) -> String {
     let _ = endpoint.set_password(None);
     endpoint.set_query(None);
     endpoint.set_fragment(None);
-    bounded_copy(&endpoint.to_string(), MAX_ENDPOINT_BYTES)
+    bounded_copy(endpoint.as_str(), MAX_ENDPOINT_BYTES)
 }
 
 fn setup_credential_summary(

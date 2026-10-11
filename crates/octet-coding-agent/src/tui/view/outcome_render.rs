@@ -369,24 +369,26 @@ mod inference_tests {
     #[test]
     fn completion_prefers_native_generation_and_never_displays_e2e() {
         let theme = crate::tui::theme::test_theme();
-        let mut metrics = octet_ai::InferenceMetrics::default();
-        metrics.decode_estimate = Some(octet_ai::DecodeEstimate {
-            tokens_per_second: 100.0,
-            reported_visible_tokens: 100,
-            observed_ns: 1_000_000_000,
-            samples: 20,
-            relative_dispersion: 0.01,
-            reasoning_tokens_excluded: 0,
-        });
-        metrics.server = Some(octet_ai::ServerGenerationMetrics {
-            source: octet_ai::ServerTimingSource::TimingsPredicted,
-            tokens: 100,
-            generation_ns: 500_000_000,
-            reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
-            prompt_ns: None,
-            queue_ns: None,
-            total_ns: None,
-        });
+        let metrics = octet_ai::InferenceMetrics {
+            decode_estimate: Some(octet_ai::DecodeEstimate {
+                tokens_per_second: 100.0,
+                reported_visible_tokens: 100,
+                observed_ns: 1_000_000_000,
+                samples: 20,
+                relative_dispersion: 0.01,
+                reasoning_tokens_excluded: 0,
+            }),
+            server: Some(octet_ai::ServerGenerationMetrics {
+                source: octet_ai::ServerTimingSource::TimingsPredicted,
+                tokens: 100,
+                generation_ns: 500_000_000,
+                reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
+                prompt_ns: None,
+                queue_ns: None,
+                total_ns: None,
+            }),
+            ..Default::default()
+        };
         let block = OutcomeBlock::new(
             RunOutcome::Completed {
                 elapsed: Duration::from_secs(2),
@@ -450,15 +452,17 @@ mod decode_estimate_tests {
                 missing
             );
         }
-        let mut metrics = octet_ai::InferenceMetrics::default();
-        metrics.decode_estimate = Some(octet_ai::DecodeEstimate {
-            tokens_per_second: 100.0,
-            reported_visible_tokens: 205,
-            observed_ns: 2_000_000_000,
-            samples: 41,
-            relative_dispersion: 0.01,
-            reasoning_tokens_excluded: 10000,
-        });
+        let metrics = octet_ai::InferenceMetrics {
+            decode_estimate: Some(octet_ai::DecodeEstimate {
+                tokens_per_second: 100.0,
+                reported_visible_tokens: 205,
+                observed_ns: 2_000_000_000,
+                samples: 41,
+                relative_dispersion: 0.01,
+                reasoning_tokens_excluded: 10000,
+            }),
+            ..Default::default()
+        };
         let estimated_block = block(Some(metrics));
         let text = completion_text(
             Duration::from_secs(60),

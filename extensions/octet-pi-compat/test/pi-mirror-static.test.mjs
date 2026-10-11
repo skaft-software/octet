@@ -19,7 +19,9 @@ function fixture(t, source = 'export default pi => pi.registerCommand("kept",{ha
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'octet-pi-static-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const agent = join(dir, 'agent'), output = join(dir, 'extensions/octet-pi-compat');
-  const entry = put(join(agent, 'extensions/fixture.mjs'), source);
+  // Use Pi's supported flat autoload suffix; imported .mjs helpers below
+  // remain explicit imports, not additional factories.
+  const entry = put(join(agent, 'extensions/fixture.js'), source);
   const settings = put(join(agent, 'settings.json'), '{}');
   const env = { ...process.env, HOME: dir, OCTET_PI_AGENT_DIR: agent, PI_CODING_AGENT_DIR: '/not-the-recorded-root' };
   return { dir, agent, output, entry, settings, env, options: { output, cwd: dir, env, reviewed: true, log() {} } };
@@ -122,7 +124,7 @@ test('new factories and changed entrypoint/imported sources require review befor
   await changedEntry.close();
   put(f.entry, original);
   const marker = join(f.dir, 'executed');
-  put(join(f.agent, 'extensions/new.mjs'), `import {writeFileSync} from 'node:fs'; export default () => writeFileSync(${JSON.stringify(marker)},'no');`);
+  put(join(f.agent, 'extensions/new.js'), `import {writeFileSync} from 'node:fs'; export default () => writeFileSync(${JSON.stringify(marker)},'no');`);
   const added = peer(t, f, captured);
   assert.match((await initialize(added, captured)).error.message, /factory list changed.*configure again/);
   assert.equal(existsSync(marker), false);
@@ -169,7 +171,7 @@ test('present but disabled first-party manifests do not discard a factory; activ
 test('mirror factory and resource discovery use only authoritative native project trust', async t => {
   const f = fixture(t);
   const projectMarker = join(f.dir, 'project-executed');
-  const project = put(join(f.dir, '.pi/extensions/project.mjs'), `import {writeFileSync} from 'node:fs'; export default pi => {writeFileSync(${JSON.stringify(projectMarker)},'executed');pi.registerCommand('project',{handler(){}});};`);
+  const project = put(join(f.dir, '.pi/extensions/project.js'), `import {writeFileSync} from 'node:fs'; export default pi => {writeFileSync(${JSON.stringify(projectMarker)},'executed');pi.registerCommand('project',{handler(){}});};`);
   const skill = put(join(f.dir, '.pi/skills/private/SKILL.md'), '---\nname: private\ndescription: private\n---\n');
   put(join(f.dir, '.pi/trust.json'), '{"trusted":true}');
   const captured = await configureMirror(f.options);
@@ -241,7 +243,7 @@ test('dynamic mirror resources forward thinking preference; chosen Pi and author
 
 test('snapshot active command collisions refuse rather than dropping unrelated commands', async t => {
   const f = fixture(t);
-  const other = put(join(f.agent, 'extensions/other.mjs'), 'export default pi => {pi.registerCommand("unrelated",{handler(){}});pi.registerCommand("kept",{handler(){}});};');
+  const other = put(join(f.agent, 'extensions/other.js'), 'export default pi => {pi.registerCommand("unrelated",{handler(){}});pi.registerCommand("kept",{handler(){}});};');
   syntheticInstall(f.agent);
   const codingAgent = join(f.agent, 'install/releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
   put(codingAgent, `export const parseSkillBlock = text => ({text});

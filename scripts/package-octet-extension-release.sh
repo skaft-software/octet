@@ -141,12 +141,29 @@ command = pathlib.PurePosixPath(entrypoint["command"])
 if not command.is_absolute() and (not command.parts or ".." in command.parts or "." in command.parts):
     raise SystemExit("relative entrypoint.command is not portable")
 local_entrypoint = None
+
+def entrypoint_is_executable(path, mode, platform):
+    if platform != "nt":
+        return bool(mode & 0o111)
+    # Windows has no POSIX executable bits. Match the native host's bounded
+    # Python-script detection, or admit an explicitly named native PE payload.
+    # A POSIX shell launcher is not a Windows executable, even after chmod.
+    if path.suffix.casefold() == ".py":
+        return True
+    with path.open("rb") as handle:
+        first_line = handle.read(256).split(b"\n", 1)[0]
+    if path.suffix.casefold() == ".exe":
+        return first_line.startswith(b"MZ")
+    return first_line.startswith(b"#!") and b"python" in first_line
+
 if not command.is_absolute():
     local_command = source.joinpath(*command.parts)
     if local_command.exists():
         local_entrypoint = command
         command_metadata = local_command.lstat()
-        if not stat.S_ISREG(command_metadata.st_mode) or not command_metadata.st_mode & 0o111:
+        if not stat.S_ISREG(command_metadata.st_mode) or not entrypoint_is_executable(
+            local_command, command_metadata.st_mode, os.name
+        ):
             raise SystemExit("local entrypoint.command must be a regular executable file")
     elif len(command.parts) > 1:
         raise SystemExit("relative entrypoint.command is missing from the bundle")
@@ -280,7 +297,8 @@ with archive.open("wb") as raw:
             for relative, path, metadata in relative_files:
                 info = tarfile.TarInfo(f"{package_id}/{relative.as_posix()}")
                 info.size = metadata.st_size
-                info.mode = 0o755 if metadata.st_mode & 0o111 else 0o644
+                is_entrypoint = local_entrypoint is not None and relative.as_posix() == local_entrypoint.as_posix()
+                info.mode = 0o755 if metadata.st_mode & 0o111 or is_entrypoint else 0o644
                 info.mtime = epoch
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""

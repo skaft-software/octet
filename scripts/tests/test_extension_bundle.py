@@ -1,5 +1,6 @@
 """Exercise release packaging without modifying Git or executing extensions."""
 
+import ast
 import io
 import json
 import os
@@ -135,6 +136,44 @@ class ExtensionBundleTests(unittest.TestCase):
             member = archive.getmember("fixture-extension/bin/extension.py")
             self.assertTrue(member.isfile())
             self.assertEqual(member.mode, 0o755)
+
+
+class WindowsEntrypointModeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Test the actual inline release predicate, not a duplicate model of it.
+        body = SCRIPT.read_text().split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        function = next(node for node in ast.parse(body).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "entrypoint_is_executable")
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(SCRIPT), "exec"), namespace)
+        self.executable = namespace["entrypoint_is_executable"]
+
+    def test_windows_python_without_posix_execute_bits_matches_native_host(self):
+        for name, source in (("extension.PY", b"raise RuntimeError('must not execute')\n"),
+                             ("octet-mcp", b"#!/usr/bin/env python3\nraise RuntimeError('must not execute')\n")):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.write_bytes(source)
+                self.assertTrue(self.executable(path, 0o644, "nt"))
+                self.assertFalse(self.executable(path, 0o644, "posix"))
+
+    def test_windows_does_not_admit_posix_shell_launchers_or_late_python_text(self):
+        path = self.root / "launcher"
+        for source in (b"#!/bin/sh\npython3 script.py\n", b"#!" + b"x" * 300 + b"python\n"):
+            path.write_bytes(source)
+            self.assertFalse(self.executable(path, 0o644, "nt"))
+            self.assertFalse(self.executable(path, 0o755, "nt"))
+        self.assertTrue(self.executable(path, 0o755, "posix"))
+
+    def test_windows_native_exe_without_posix_execute_bits_requires_pe_prefix(self):
+        path = self.root / "codemode.exe"
+        path.write_bytes(b"MZfixture payload; actual execution is a separate native CI smoke")
+        self.assertTrue(self.executable(path, 0o644, "nt"))
+        path.write_bytes(b"#!/bin/sh\nexit 99\n")
+        self.assertFalse(self.executable(path, 0o755, "nt"))
 
 
 class PiCompatBundleTests(unittest.TestCase):

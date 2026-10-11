@@ -4,12 +4,14 @@ use octet_agent::extension_process::ExtensionActivation;
 
 #[test]
 fn combined_resource_budget_covers_all_five_arrays_and_rejects_overages() {
-    let mut paths = ExtensionResourcePaths::default();
-    paths.skill_paths = vec!["/x".into(); 52];
-    paths.prompt_paths = vec!["/x".into(); 52];
-    paths.theme_paths = vec!["/x".into(); 52];
-    paths.keybindings_paths = vec!["/x".into(); 52];
-    paths.context_paths = vec!["/x".into(); 48];
+    let paths = ExtensionResourcePaths {
+        skill_paths: vec!["/x".into(); 52],
+        prompt_paths: vec!["/x".into(); 52],
+        theme_paths: vec!["/x".into(); 52],
+        keybindings_paths: vec!["/x".into(); 52],
+        context_paths: vec!["/x".into(); 48],
+        ..ExtensionResourcePaths::default()
+    };
 
     let mut budget = ResourcePathBudget::default();
     budget.admit(&paths).unwrap();

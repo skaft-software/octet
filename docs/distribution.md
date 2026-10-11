@@ -96,6 +96,41 @@ npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.0
 installation of this unpublished candidate. Published versions are immutable,
 so a pinned install can't be silently replaced.
 
+## Unsigned dogfood candidates
+
+Manually dispatching `ci.yml` on a reviewed ref builds unsigned, commit-scoped
+artifacts for Linux x64, macOS Intel and Apple silicon, and native Windows x64.
+It does not tag or publish a release, update a registry, or sign assets:
+
+```sh
+gh workflow run ci.yml --ref "$RC_REF"
+gh run view "$RUN_ID" --json headSha,status,conclusion
+gh run download "$RUN_ID" --name "octet-rc-${COMMIT_PREFIX}-${TARGET}" --dir dogfood
+```
+
+Select the run for the exact reviewed commit, require its gating checks to
+succeed, and compare `BUILD-INFO.json` with that commit and target. Unix artifacts
+contain the native archive plus `extension-bundles/`; Windows artifacts contain
+`octet.exe`, `octet-host.exe`, extracted `extensions/`, and the same bundle
+archives. All six official extensions are included. Codemode ships a target-native
+executable, including `bin/codemode.exe` on Windows; the Pi adapter includes its
+locked Node dependency closure, but no enabled local factories. Python adapters
+still require Python, the Pi adapter requires Node 22.19+, and optional drivers
+and integrations require separately consented setup.
+
+Verify the native `SHA256SUMS` and the bundle directory's `SHA256SUMS` before
+extracting or running anything (`shasum -a 256 -c SHA256SUMS` on macOS;
+`sha256sum -c SHA256SUMS` on Linux). On Windows, compare `Get-FileHash -Algorithm
+SHA256` with each manifest. Keep the candidates in a disposable directory;
+don't replace an existing installation. Extracting bundles never enables them,
+grants trust, imports Pi configuration, or authorizes factory execution.
+
+These are dogfood artifacts, not stable qualification. Windows multiline paste,
+installed-Pi package parity, live-provider metric accuracy, and attended
+rendering/driver journeys remain release gates. The Windows workspace baseline
+is explicitly informational, not a gating full-suite pass. See
+[Windows testing](windows.md) and [candidate status](pi-compat-release-status.md).
+
 ## Reviewed model metadata
 
 Release preparation refreshes and reviews the checked-in models.dev names,

@@ -273,11 +273,13 @@ async fn custom_binary_profiles_discover_cache_and_send_distinct_controls() {
     for fixture_name in ["local_binary", "local_template"] {
         let directory = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
+        // This suite exercises reasoning and request overrides, not unknown
+        // context handling: supply an asserted endpoint limit for registration.
+        let mut inventory = thinking_hotfix_fixture()[fixture_name].clone();
+        inventory["data"][0]["context_window"] = serde_json::json!(32_768);
         Mock::given(method("GET"))
             .and(path("/v1/models"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(&thinking_hotfix_fixture()[fixture_name]),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(inventory))
             .expect(1)
             .mount(&server)
             .await;

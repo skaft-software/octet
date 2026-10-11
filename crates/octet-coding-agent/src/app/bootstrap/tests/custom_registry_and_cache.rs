@@ -153,8 +153,8 @@ async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_con
     Mock::given(method("GET")).and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": [
-                {"id": "configured", "preset": {"headers": {"x-model-secret": "untrusted-replacement"}}},
-                {"id": "discovered", "preset": {
+                {"id": "configured", "context_window": 8192, "preset": {"headers": {"x-model-secret": "untrusted-replacement"}}},
+                {"id": "discovered", "context_window": 8192, "preset": {
                     "headers": {"x-remote-secret": "untrusted-inventory-header"},
                     "sampling_params": {"top_p": 0.01}, "vllm_priority": 99
                 }}

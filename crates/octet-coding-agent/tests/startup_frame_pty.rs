@@ -302,8 +302,7 @@ impl PtyOctet {
             appearance,
             dimensions,
             start,
-            fixture,
-            Some(false),
+            (fixture, Some(false)),
         )
     }
 
@@ -319,8 +318,7 @@ impl PtyOctet {
             (true, false),
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (2, false, false),
-            fixture,
-            None,
+            (fixture, None),
         )
     }
 
@@ -331,9 +329,9 @@ impl PtyOctet {
         appearance: (bool, bool),
         dimensions: (u16, u16),
         start: (u16, bool, bool),
-        fixture: StartupFixture<'_>,
-        fullscreen: Option<bool>,
+        startup: (StartupFixture<'_>, Option<bool>),
     ) -> Self {
+        let (fixture, fullscreen) = startup;
         let (color, auto_appearance) = appearance;
         let root = tempfile::tempdir().expect("PTY test tempdir");
         // The CLI resolves the workspace physically. Give HOME the same path
@@ -366,11 +364,11 @@ impl PtyOctet {
                     // values now that successful changes do not append notices.
                     "models": if model == "qwen-3.8-27b" {
                         vec![serde_json::json!({
-                            "api_name": model,
+                            "api_name": model, "context_window": 32768,
                             "reasoning": true, "reasoning_values": ["off", "low", "high"],
                             "reasoning_default": "off",
                         })]
-                    } else { vec![] },
+                    } else { vec![serde_json::json!({"api_name": model, "context_window": 32768})] },
                 });
                 fs::write(&credential, record.to_string()).expect("loopback provider fixture");
             }
@@ -381,8 +379,8 @@ impl PtyOctet {
                         "label": "Cerebras", "base_url": "http://127.0.0.1:9/v1/",
                         "auth": {"kind": "none"}, "auto_discover": false,
                         "models": [
-                            {"api_name": "gemma-4-31b", "display_name": "Gemma 4 31B"},
-                            {"api_name": "qwen-3.8-27b", "display_name": "Qwen 3.8 27B"},
+                            {"api_name": "gemma-4-31b", "display_name": "Gemma 4 31B", "context_window": 32768},
+                            {"api_name": "qwen-3.8-27b", "display_name": "Qwen 3.8 27B", "context_window": 32768},
                         ]
                     }}
                 });
@@ -401,7 +399,7 @@ impl PtyOctet {
                     &credential,
                     serde_json::json!({
                         "base_url": api.unwrap(), "api_key": "", "api_name": "probe",
-                        "headers": [], "models": [], "auto_discover": false,
+                        "headers": [], "models": [{"api_name": "probe", "context_window": 32768}], "auto_discover": false,
                     })
                     .to_string(),
                 )
@@ -500,6 +498,23 @@ impl PtyOctet {
             .stdout(stdout)
             .stderr(stderr);
         if let Some(fullscreen) = fullscreen {
+            // Current policy is persisted/CLI-selected, not the old renderer
+            // environment override. Preserve the latter for optional baselines.
+            let mode = if fullscreen { "fullscreen" } else { "inline" };
+            if matches!(fixture, StartupFixture::Setup) {
+                // Any saved config suppresses first-run appearance onboarding.
+                // Select only screen policy, leaving this fixture's HOME fresh.
+                command.args(["--tui-mode", mode]);
+            } else {
+                let config_path = home.join(".octet/config.toml");
+                let mut config = if config_path.exists() {
+                    fs::read_to_string(&config_path).expect("fixture config")
+                } else {
+                    String::new()
+                };
+                config.push_str(&format!("\ntui_mode = \"{mode}\"\n"));
+                fs::write(config_path, config).expect("fixture screen policy");
+            }
             command.env("OCTET_TUI_ALT_SCREEN", if fullscreen { "1" } else { "0" });
         }
 
@@ -2445,13 +2460,15 @@ fn real_octet_held_api_wait_pty_contract() {
 }
 
 fn create_inert_environment(home: &Path, workspace: &Path, sessions: &Path) {
+    // These tests exercise frames and input, not unknown model facts. Their
+    // offline provider needs an explicit positive operational context to select.
     fs::create_dir_all(home.join(".octet/credentials")).expect("credential directory");
     fs::create_dir_all(workspace).expect("workspace directory");
     fs::create_dir_all(sessions).expect("session directory");
     let credential = home.join(".octet/credentials/custom.json");
     fs::write(
         &credential,
-        r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[],"auto_discover":false}"#,
+        r#"{"base_url":"http://127.0.0.1:9/v1/","api_key":"","api_name":"probe","headers":[],"models":[{"api_name":"probe","context_window":32768}],"auto_discover":false}"#,
     )
     .expect("inert custom-provider fixture");
     let mut permissions = fs::metadata(&credential)
@@ -2947,7 +2964,7 @@ fn spawn_plain(
         home.join(".octet/credentials/custom.json"),
         serde_json::json!({
             "base_url": api, "api_key": "", "api_name": "probe",
-            "headers": [], "models": [], "auto_discover": false,
+            "headers": [], "models": [{"api_name": "probe", "context_window": 32768}], "auto_discover": false,
         })
         .to_string(),
     )

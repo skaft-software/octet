@@ -7599,14 +7599,14 @@ async fn mutate_extension_session_setup<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
     request: &ExtensionSessionLifecycleRequest,
-    parent: u64,
-    owner: octet_agent::extension_process::ExtensionResourceOwner,
+    setup: (u64, octet_agent::extension_process::ExtensionResourceOwner),
     namespace: String,
     mutation: serde_json::Value,
 ) -> Result<serde_json::Value, String>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let (parent, owner) = setup;
     if request.is_cancelled() {
         return Err("session setup request cancelled".into());
     }
@@ -7924,8 +7924,7 @@ where
                 shell,
                 input,
                 &request,
-                parent_request_id,
-                owner,
+                (parent_request_id, owner),
                 namespace,
                 mutation,
             )

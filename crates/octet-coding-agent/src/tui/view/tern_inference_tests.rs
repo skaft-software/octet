@@ -102,8 +102,10 @@ fn outcome_views_use_owner_gated_whole_run_rate_instead_of_last_response() {
         })
         .expect("owner-gated run events should settle an outcome");
 
-    let last_response_rate = block
-        .inference
+    let last_response_rate = shell
+        .state
+        .borrow()
+        .last_turn_inference
         .as_ref()
         .and_then(|metrics| metrics.server.as_ref())
         .and_then(|server| server.tokens_per_second())

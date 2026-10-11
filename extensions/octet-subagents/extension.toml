@@ -2,7 +2,7 @@ name = "octet-subagents"
 version = "0.9.0"
 api_version = "0.4"
 requires_octet = "=0.9.0"
-description = "Claude Code-like background workers over host-owned octet agent sessions, with per-spawn mutation grants and continue/resume"
+description = "Run and resume background Octet assistants with explicit tool permissions"
 
 [entrypoint]
 command = "octet-subagents"
