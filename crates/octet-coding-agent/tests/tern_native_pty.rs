@@ -823,7 +823,7 @@ fn slash_completion_settings_and_theme_picker_keep_native_ownership() {
         pty.nodes.get("report.body").is_some_and(|node| {
             node["p"]["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("octet settings"))
+                .is_some_and(|text| text.contains("## Launch and session"))
         })
     });
     pty.send(b"\x1b[27u");
