@@ -6,10 +6,68 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch, owner, root } from './helper.mjs';
+import { SessionTransport } from '../lib/session-transport.mjs';
+import { sessionMethods } from '../lib/session-methods.mjs';
+import { ownerKey } from '../lib/errors.mjs';
 
 const profile = { profile: 'json-chunks.v1', chunk_bytes: 65536, snapshot_bytes: 268435456,
   generation_bytes: 536870912, owner_views: 64, transfers: 64, view_entries: 1048576,
   generation_entries: 2097152, projection_bytes: 67108864, projections: 64 };
+function replacementPublication() {
+  const controller = new AbortController();
+  const next = { ...owner, session_id: 'replacement-owner' };
+  const state = { key: ownerKey(next), owner: next, alive: true, host: { session_id: 'replacement', session_view_revision: 2, session_entries: null } };
+  const store = { method: 'command/execute', controller, state: { key: ownerKey(owner), owner } };
+  const runtime = {
+    assertOwner: fresh => assert.ok(fresh === store || fresh.state === state), require() {}, track: promise => promise,
+    hostCall: async () => ({ session_id: 'replacement' }), foregroundFor: async () => state,
+    scope: { run: (_store, callback) => callback() },
+    sessionFacts: fresh => runtime.sessionTransport.host(fresh),
+  };
+  // The old command remains admitted, but its fresh owner history is pending.
+  runtime.sessionTransport = new SessionTransport(runtime, profile, 1048576);
+  const barrier = runtime.sessionTransport.invalidate(next, 2);
+  const publish = () => {
+    barrier.view = { descriptor: { owner: next, view_revision: 2 }, document: history([]), host: { session_file: '/replacement.jsonl' } };
+    barrier.promise = undefined; barrier.resolve();
+  };
+  const fail = () => { barrier.failed = true; barrier.promise = undefined; barrier.resolve(); };
+  const methods = sessionMethods(runtime, store, (_runtime, fresh) => ({ file: () => runtime.sessionFacts(fresh).session_file }));
+  return { methods, controller, publish, fail };
+}
+
+test('withSession waits for the replacement owner history publication', async () => {
+  const { methods, publish } = replacementPublication();
+  let called = false;
+  const result = methods.newSession({ withSession: fresh => { called = true; assert.equal(fresh.file(), '/replacement.jsonl'); } });
+  result.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(called, false, 'foreground binding alone is not snapshot readiness');
+  publish();
+  assert.deepEqual(await result, { cancelled: false });
+  assert.equal(called, true);
+});
+
+test('cancelling a replacement publication wait never invokes withSession', async () => {
+  const { methods, controller, publish } = replacementPublication();
+  const result = methods.newSession({ withSession: () => assert.fail('cancelled callback') });
+  result.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  const reason = new Error('cancelled pending publication');
+  controller.abort(reason);
+  await assert.rejects(result, error => error === reason);
+  publish();
+});
+
+test('failed replacement publication prevents withSession execution', async () => {
+  const { methods, fail } = replacementPublication();
+  const result = methods.newSession({ withSession: () => assert.fail('failed publication callback') });
+  result.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  fail();
+  await assert.rejects(result, error => error.code === -32002 && error.message === 'session view unavailable');
+});
+
 const features = ['session_entries', 'session_owner_routes_v1', 'session_snapshot_transport_v1'];
 const limits = { max_concurrent_requests: 8, max_message_bytes: 1048576 };
 const offer = { limits, session_snapshot_transport_v1: profile };

@@ -217,7 +217,7 @@ impl Candidate {
             "api_key": "",
             "api_name": "probe",
             "headers": [],
-            "models": [],
+            "models": [{"api_name": "probe", "context_window": 32768}],
             "auto_discover": false,
         });
         fs::write(&credential, record.to_string()).expect("loopback credential fixture");
@@ -235,6 +235,10 @@ impl Candidate {
                 "--offline",
                 "--no-context-files",
                 "--no-tools",
+                // This suite qualifies primary-screen clear/replay, not the
+                // default alternate-screen viewport policy.
+                "--tui-mode",
+                "inline",
                 "--color",
                 color,
                 "--theme",

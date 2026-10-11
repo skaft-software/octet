@@ -104,7 +104,7 @@ test('original hashline: reviewed installed route executes hashed text, anchored
   assert.ok(metadata.tools.some(tool => tool.name === 'read'));
   assert.ok(metadata.tools.some(tool => tool.name === 'replace'));
   const h = launch(t, [source], { metadata, config: configPath, env, cwd: dir, auto: false });
-  const features = ['builtin_tool_overrides_v1', 'dynamic_tools', 'tool_prompt_metadata_v1', 'artifacts', 'session_entries', 'active_tools', 'lifecycle_events', 'input_transform_v1', 'before_prompt_state_v1'];
+  const features = ['builtin_tool_overrides_v1', 'dynamic_tools', 'tool_prompt_metadata_v1', 'artifacts', 'session_entries', 'active_tools', 'lifecycle_events', 'input_transform_v1', 'before_prompt_state_v1', 'resource_paths_v1'];
   const initialized = await h.request('initialize', { api_version: '0.4', workspace: dir, host,
     extension: { name: 'octet-pi-compat' }, capabilities: { builtin_tool_overrides: grants },
     contributes: { tools: metadata.tools.map(tool => tool.name), commands: metadata.commands.map(command => command.name),

@@ -7,13 +7,19 @@ use super::*;
 async fn native_pi_custom_keybindings_survive_host_state_refresh() {
     let (directory, mut app, mut shell) = pi_ui_app(
         r#"
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, renameSync } from 'node:fs';
+// The native test polls this receipt while the retained callback updates it.
+// Publish atomically so it cannot observe writeFileSync's truncate/write gap.
+const trace = value => {
+  writeFileSync(TRACE + '.new', JSON.stringify(value));
+  renameSync(TRACE + '.new', TRACE);
+};
 export default pi => pi.registerCommand('native-keys', { handler: async (_, ctx) => {
   await ctx.ui.custom((tui, theme, keys, done) => {
-    writeFileSync(TRACE, JSON.stringify(keys.getKeys('app.tools.expand')));
+    trace(keys.getKeys('app.tools.expand'));
     return { render: () => ['Native keybinding dialog'], invalidate() {}, handleInput(data) {
       keys.matches(data, 'app.tools.expand');
-      writeFileSync(TRACE, JSON.stringify(keys.getKeys('app.tools.expand')));
+      trace(keys.getKeys('app.tools.expand'));
       if (data === 'y') done('yes');
     } };
   });

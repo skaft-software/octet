@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { entryPayload } from './session-leaf.mjs';
 import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
-import { piToCanonical } from './provider-context.mjs';
+import { cancellable, piToCanonical } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
 
 // Creation identity/provenance comes from the durable native header. Historical
@@ -145,7 +145,13 @@ export function sessionMethods(runtime, store, createContext) {
       try { await writable.complete(); } catch (cause) { if (!failed) throw cause; }
       if (failed) throw error;
     }
-    if (withSession) await runtime.scope.run(fresh, () => withSession(createContext(runtime, fresh, true)));
+    if (withSession) {
+      // Foreground binding proves ownership, not completion of a newer history
+      // publication. Do not expose synchronous getters until that view is ready.
+      if (runtime.sessionTransport) await cancellable(runtime.sessionTransport.ready(fresh), fresh.controller.signal);
+      runtime.assertOwner(fresh);
+      await runtime.scope.run(fresh, () => withSession(createContext(runtime, fresh, true)));
+    }
     return { cancelled: false };
   };
   return {

@@ -58,7 +58,9 @@ setup appends and branch changes return the committed, owner-fenced native inlin
 facts instead: the Pi factory thread is waiting for that receipt and cannot
 process a snapshot preparation until it returns. Each receipt rechecks the live
 setup parent, replacement owner, process generation and cancellation; retained
-old-session contexts never gain replacement authority.
+old-session contexts never gain replacement authority. A `withSession` callback
+also waits for readable replacement history, not just its session binding;
+cancellation or a failed history transfer prevents the callback from running.
 
 The integrated source passes these real Rust-host suites (the scripted local
 provider replaces inference only). The counts are the test functions in each
