@@ -324,6 +324,12 @@ export class Runtime {
       const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
       extensions = setup.extensions.map(entry => realpathSync(entry));
+      // Factories the owner explicitly excluded at review stay unloaded; an
+      // exclusion only narrows the reviewed grant and is reported each start.
+      const excluded = new Map((Array.isArray(this.config.mirror_excluded) ? this.config.mirror_excluded : [])
+        .filter(item => typeof item?.entry === 'string').map(item => [item.entry, String(item.reason ?? '')]));
+      for (const entry of extensions.filter(entry => excluded.has(entry))) this.diagnostic(`mirror excluded at review: ${entry} (${excluded.get(entry).slice(0, 256)}); configure again to retry`);
+      extensions = extensions.filter(entry => !excluded.has(entry));
       if (extensions.some(entry => !this.config.extensions?.includes(entry) || !this.config.entrypoint_sources[entry])) invalid('mirror factory list changed; review the Pi setup and configure again');
       this.reviewedFactoriesOmitted = this.config.extensions.some(entry => !extensions.includes(entry));
       const themePath = resolveThemeFile(setup.themesPaths, setup.defaultTheme, setup.diagnostics);

@@ -46,7 +46,7 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint }) {
+export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint, mirrorExcluded = [] }) {
   if (!reviewed) throw new Error('Factory execution requires --reviewed (review every entrypoint and its imports first)');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -90,6 +90,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   }
   const config = { extensions, entrypoint_sha256, registrations, subscribed_hooks,
     ...(mirrorPiSetup ? { mirror_pi_setup: true, entrypoint_sources, ...(piSetupFingerprint ? { pi_setup_fingerprint: piSetupFingerprint } : {}) } : {}),
+    ...(mirrorPiSetup && mirrorExcluded.length ? { mirror_excluded: mirrorExcluded } : {}),
     ...(Object.keys(routes).length ? { extension_runtimes: routes } : {}),
     ...(piAgentDir ? { pi_agent_dir: piAgentDir } : {}),
     ...(!mirrorPiSetup && piTheme ? { pi_theme: { name: piTheme.name, path: piTheme.path, native_name: piTheme.selector, native_path: piTheme.nativePath } } : {}),
@@ -161,13 +162,28 @@ function mirrorPreparation({ output, cwd = process.cwd(), env = process.env, pro
   return { review: { ...base, fingerprint }, setup, sourceHashes, output, agentDir };
 }
 
+/** What a terminal user reviews before a mirror runs any factory: the exact
+ * factories and resources plus the fingerprint that binds the next run to them. */
+export function mirrorReviewPrompt(review, { skipUnsupported = false } = {}) {
+  const lines = ['--mirror runs the factories below with your permissions. Review them, then rerun with the fingerprint that binds this review:'];
+  for (const item of review.extensions.slice(0, 64)) lines.push(`  factory  ${item.path}${item.reviewable ? '' : ' (not reviewable)'}`);
+  for (const kind of ['skills', 'prompts', 'themes']) for (const path of review.resources[kind].slice(0, 32)) lines.push(`  ${kind.padEnd(8)} ${path}`);
+  for (const kind of ['keybindings', 'context']) if (review.resources[kind]) lines.push(`  ${kind.padEnd(8)} ${review.resources[kind]}`);
+  for (const message of review.diagnostics.slice(0, 16)) lines.push(`  note     ${message}`);
+  const args = ['--reviewed', '--from-pi', '--mirror', '--output', JSON.stringify(review.output),
+    ...(review.projectTrusted ? ['--project-trusted'] : []), ...(skipUnsupported ? ['--skip-unsupported'] : []),
+    '--expected-fingerprint', review.fingerprint];
+  lines.push(`Then run: node ${JSON.stringify(join(root, 'configure.mjs'))} ${args.join(' ')}`);
+  return lines.join('\n').slice(0, 16384);
+}
+
 /** Read-only preparation for native Settings. Returns the exact setup and
  * bounded relative-import hashes that a later reviewed mirror must match. */
 export function preparePiMirror(options = {}) {
   return mirrorPreparation(options).review;
 }
 
-export async function configureMirror({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, projectTrusted = false, activeNativeTools = new Map() }) {
+export async function configureMirror({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, projectTrusted = false, activeNativeTools = new Map(), skipUnsupported = false }) {
   if (!reviewed) throw new Error('Mirroring your Pi setup runs its enabled factories with your permissions; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -188,15 +204,23 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: agentDir }, piAgentDir: agentDir, piTheme, activeNativeTools };
   const routed = await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
   const refused = routed.filter(result => !result.route);
-  if (refused.length) throw new Error(`mirror review refused factories (no partial import):\n${refused.map(result => `${result.entry}: ${result.error}`).join('\n').slice(0, 4096)}`);
+  // An unsupported factory is excluded only on the owner's explicit choice. A
+  // registration collision always needs an owner decision, never exclusion.
+  if (refused.length && (!skipUnsupported || refused.some(result => result.disposition === 'review_required'))) {
+    throw new Error(`mirror review refused factories (no partial import):\n${refused.map(result => `${result.entry}: ${result.error}`).join('\n').slice(0, 4096)}${skipUnsupported ? '' : '\nTo mirror the rest of your Pi setup without these factories, review and rerun with --skip-unsupported (they stay excluded until the next reviewed configuration).'}`);
+  }
+  if (refused.length && refused.length === routed.length) throw new Error('none of your Pi extensions loaded');
+  const mirrorExcluded = refused.map(result => ({ entry: realpathSync(result.entry), reason: String(result.error).slice(0, 512) }));
+  const accepted = routed.filter(result => result.route);
   const current = mirrorPreparation({ output, cwd, env, projectTrusted });
   if (current.review.fingerprint !== prepared.review.fingerprint) throw new Error('Pi setup changed during mirror review; prepare and review again before capture');
   const expectedSourceHashes = Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes]));
   const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,
-    expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint,
-    extensions: routed.map(result => result.entry), routes: Object.fromEntries(routed.map(result => [result.entry, result.route])) });
+    expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint, mirrorExcluded,
+    extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])) });
   const { config } = result;
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
+  for (const item of mirrorExcluded) log(`  excluded      ${label(item.entry)}: ${item.reason.slice(0, 160)}`);
   log(`  Mirrored Pi setup at ${agentDir}: ${setup.extensions.length} extensions, ${setup.skillsPaths.length} skill paths, ${setup.promptsPaths.length} prompt paths, ${setup.themesPaths.length} theme paths`);
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
   return { ...result, setup, config, routed };
@@ -301,8 +325,8 @@ const label = entry => {
 };
 
 // One step from an installed Pi 1.0.2 setup to a configured bridge.
-export async function configureFromPi({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false, projectTrusted = false, activeNativeTools = new Map() }) {
-  if (mirror) return configureMirror({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, cwd, env, log, projectTrusted, activeNativeTools });
+export async function configureFromPi({ output, reviewed, expectedFingerprint, overwrite = false, providerCredentials = false, cwd = process.cwd(), env = process.env, log = console.log, mirror = false, projectTrusted = false, activeNativeTools = new Map(), skipUnsupported = false }) {
+  if (mirror) return configureMirror({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, cwd, env, log, projectTrusted, activeNativeTools, skipUnsupported });
   if (!reviewed) throw new Error('Loading your Pi extensions runs their code with your permissions, as in Pi; pass --reviewed to accept');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -347,7 +371,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, providerCredentials = false, fromPi = false, mirror = false, prepareMirror = false, json = false, projectTrusted = false, expectedFingerprint;
+    const args = process.argv.slice(2), extensions = []; let output, reviewed = false, overwrite = false, providerCredentials = false, fromPi = false, mirror = false, prepareMirror = false, json = false, projectTrusted = false, skipUnsupported = false, expectedFingerprint;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--output') output = args[++i];
       else if (args[i] === '--reviewed') reviewed = true;
@@ -358,6 +382,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       else if (args[i] === '--prepare-mirror') prepareMirror = true;
       else if (args[i] === '--json') json = true;
       else if (args[i] === '--project-trusted') projectTrusted = true;
+      else if (args[i] === '--skip-unsupported') skipUnsupported = true;
       else if (args[i] === '--expected-fingerprint') expectedFingerprint = args[++i];
       else if (args[i].startsWith('-')) throw new Error(`unknown configure option ${args[i]}`);
       else extensions.push(args[i]);
@@ -370,9 +395,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (json) throw new Error('--json is only valid with --prepare-mirror');
       if (fromPi && extensions.length) throw new Error('--from-pi reads your Pi setup; do not also list entrypoints');
       if (mirror && !fromPi) throw new Error('--mirror reads your Pi setup; it requires --from-pi');
-      if (mirror && !expectedFingerprint) throw new Error('--mirror requires --expected-fingerprint from --prepare-mirror --json');
+      if (skipUnsupported && !mirror) throw new Error('--skip-unsupported is only valid with --mirror');
+      if (mirror && !expectedFingerprint) throw new Error(mirrorReviewPrompt(preparePiMirror({ output, projectTrusted }), { skipUnsupported }));
       if (expectedFingerprint && !mirror) throw new Error('--expected-fingerprint requires --mirror');
-      const result = fromPi ? await configureFromPi({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, mirror, projectTrusted }) : configure({ output, extensions, reviewed, overwrite, providerCredentials });
+      const result = fromPi ? await configureFromPi({ output, reviewed, expectedFingerprint, overwrite, providerCredentials, mirror, projectTrusted, skipUnsupported }) : configure({ output, extensions, reviewed, overwrite, providerCredentials });
       if (mirror) console.log(`Mirrored your Pi setup into ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
       else console.log(`Configured ${result.registrations.commands.length} commands, ${result.registrations.tools.length} tools in ${result.output}. Not enabled or trusted. Dependencies remain in ${root}.`);
     }

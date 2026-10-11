@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configure, configureMirror, MIRROR_SUBSCRIBED_HOOKS, preparePiMirror } from '../configure.mjs';
+import { configure, configureMirror, MIRROR_SUBSCRIBED_HOOKS, mirrorReviewPrompt, preparePiMirror } from '../configure.mjs';
 import { discoverPiSetup, resolveThemeFile } from '../lib/pi-setup.mjs';
 import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
 import { launch } from './helper.mjs';
@@ -279,6 +279,40 @@ test('pi setup: a generated mirror bridge discovers the fixture items through th
   assert.deepEqual(paths.context_paths, [join(agent, 'AGENTS.md')]);
   assert.deepEqual(paths.default_model, { provider: 'pi-mirror-provider', model: 'pi-mirror-model' });
   assert.equal(paths.default_thinking_level, 'high');
+});
+
+test('pi setup: an unsupported factory is excluded from the mirror only by explicit --skip-unsupported', async t => {
+  const root = temporary(t);
+  const agent = join(root, 'home/.pi/agent');
+  const good = join(agent, 'extensions/good.mjs'), broken = join(agent, 'extensions/broken.mjs');
+  put(join(agent, 'settings.json'), JSON.stringify({ extensions: [good, broken] }));
+  put(good, 'export default pi => pi.registerCommand("good", {handler(){}});');
+  put(broken, 'export default () => { throw new Error("needs a terminal Octet owns"); };');
+  const output = join(root, 'extensions/octet-pi-compat');
+  const env = { ...process.env, OCTET_PI_AGENT_DIR: agent };
+  const review = preparePiMirror({ output, cwd: root, env });
+  // A terminal user without a fingerprint gets the exact review and next command.
+  const prompt = mirrorReviewPrompt(review, { skipUnsupported: true });
+  assert.match(prompt, /factory +.*good\.mjs/);
+  assert.match(prompt, /factory +.*broken\.mjs/);
+  assert.ok(prompt.includes(`--skip-unsupported --expected-fingerprint ${review.fingerprint}`));
+  await assert.rejects(configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, cwd: root, log: () => {}, env }),
+    /no partial import[\s\S]*broken\.mjs[\s\S]*--skip-unsupported/);
+  assert.equal(existsSync(join(output, 'bridge.json')), false);
+  const lines = [];
+  const { registrations } = await configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, skipUnsupported: true, cwd: root, log: line => lines.push(line), env });
+  const bridge = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
+  assert.deepEqual(bridge.extensions, [realpathSync(good)]);
+  assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(broken)]);
+  assert.deepEqual(registrations.commands.map(command => command.name), ['good']);
+  assert.ok(lines.some(line => /excluded .*broken\.mjs/.test(line)));
+  // The runner keeps the exclusion at startup and reports it instead of
+  // treating the still-enabled Pi factory as an unreviewed change.
+  const adapter = fileURLToPath(new URL('../', import.meta.url));
+  const result = spawnSync(process.execPath, [join(adapter, 'runner.mjs'), '--config', join(output, 'bridge.json'), '--inspect'], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).result.commands.map(command => command.name), ['good']);
+  assert.match(result.stderr, /mirror excluded at review: .*broken\.mjs/);
 });
 
 test('pi setup: mirror refuses changed factory sources before executing new hooks', async t => {

@@ -80,8 +80,17 @@ one frozen import, configure the reviewed mirror opt-in once:
 ```bash
 node configure.mjs --reviewed --from-pi --mirror \
   --output "$HOME/.octet/pi-import/octet-pi-compat"
+# Review the listed factories and resources, then rerun the printed command,
+# which binds the run to that review with --expected-fingerprint <sha256>.
 octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compat
 ```
+
+Without `--expected-fingerprint`, the first command runs nothing: it prints
+every factory and resource it would mirror plus the exact command to run. If a
+factory cannot load on either route (for example one that needs its own
+alternate-screen terminal), the mirror is refused as a whole; rerun with
+`--skip-unsupported` to mirror the rest. Excluded factories are recorded in the
+bridge, reported at every start, and stay excluded until you configure again.
 
 `--mirror` captures reviewed entrypoints, bounded literal-relative import hashes,
 routes and static commands/tools/shortcuts/flags, and records the Pi agent directory.
