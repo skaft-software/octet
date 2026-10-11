@@ -267,6 +267,8 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             let highlighted =
                 (0..columns).any(|col| parser.screen().cell(row, col).unwrap().inverse());
             octet.pty.write_input(&event(0, columns.min(220) - 2, true));
+            // Name the phase so a platform-only timeout identifies its input path.
+            eprintln!("mouse drag copy: {columns}x{rows} legacy={legacy} row={row} highlighted={highlighted} painted={painted:?}");
             octet.wait_until(STARTUP_TIMEOUT, |bytes| {
                 clipboard(&bytes[before..]).is_some()
             });
@@ -283,6 +285,7 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             // The explicit selection-copy key uses the same remote transport.
             let before = octet.pty.output.len();
             octet.pty.write_input(b"\x1b[99;6u");
+            eprintln!("mouse copy key: {columns}x{rows} legacy={legacy}");
             octet.wait_until(STARTUP_TIMEOUT, |bytes| {
                 clipboard(&bytes[before..]).is_some()
             });
