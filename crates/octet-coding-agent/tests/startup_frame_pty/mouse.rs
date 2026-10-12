@@ -246,11 +246,15 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
         settle(&mut octet, &mut parser, &mut consumed);
         for legacy in [false, true] {
+            // Search upward: rows above an inline frame can hold stale
+            // scrollback the application does not own, and where the frame
+            // starts depends on the terminal's initial cursor position.
             let row = (2..rows - 7)
+                .rev()
                 .find(|row| row_text(&parser, *row, columns).contains("MOUSE-ROW-"))
                 .expect("visible numbered row");
             let painted = row_text(&parser, row, columns);
-            let expected = painted.trim_matches([' ', '│']).trim().to_owned();
+            let expected = painted.trim_matches([' ', '│', '┃']).trim().to_owned();
             let before = octet.pty.output.len();
             let event = |button, column, release| {
                 if legacy {
