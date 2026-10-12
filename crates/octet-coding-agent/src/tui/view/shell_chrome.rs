@@ -4,6 +4,10 @@ use sexy_tui_rs::visible_width;
 
 use super::input_overlays::{render_input_suggestions, render_pending_steering};
 use super::panel_render::render_panel_with_limit;
+
+/// Fewest rows (heading, filter, purpose and a handful of options) a picker keeps
+/// even when a long transcript leaves less room below it.
+const MIN_PICKER_WINDOW_ROWS: usize = 12;
 use super::terminal_text::sanitize_for_terminal;
 use super::{fit_line, semantic_separator, wrap_hanging, ShellState};
 
@@ -282,11 +286,16 @@ fn shell_chrome_with_composer_rows(
     let panel_limit = if state.panel.is_some() && !state.transcript_search_active() {
         let transcript = state.rendered_transcript(width);
         let retained_rows = transcript.len() + ShellChrome::separator_rows(transcript.last());
-        if retained_rows < remaining {
+        let leftover = if retained_rows < remaining {
             remaining - retained_rows
         } else {
             remaining
-        }
+        };
+        // A transcript that nearly fills the screen leaves only a few rows, and a
+        // picker budgeted with those showed one option (or none) and had to be
+        // cycled. A picker always keeps a usable window; the older transcript
+        // scrolls above it instead.
+        leftover.max(remaining.min(MIN_PICKER_WINDOW_ROWS))
     } else {
         remaining
     };

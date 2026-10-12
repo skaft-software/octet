@@ -921,3 +921,43 @@ fn ordinary_surface_contract_statuses_actions_and_sanitization_are_explicit() {
         "ordinary surface exposed unsanitized display text: raw={untrusted_raw:?}, plain={untrusted_text}"
     );
 }
+
+fn many_option_picker(shell: &mut InteractiveShell) {
+    let names: Vec<String> = (0..8).map(|index| format!("Option-{index}")).collect();
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::with_purpose(
+            "Settings",
+            "Choose a display or new-session preference",
+        ),
+        descriptions: vec![None; names.len()],
+        items: names,
+        selected: 1,
+        filter: String::new(),
+        action: PanelAction::SelectModel(Vec::new()),
+    });
+}
+
+#[test]
+fn a_picker_keeps_a_usable_window_when_the_transcript_nearly_fills_the_screen() {
+    // After a few messages the retained transcript leaves only a handful of rows
+    // below it. The picker used to be budgeted with just those leftovers, so a
+    // Settings menu showed one option and the user had to cycle through it.
+    for transcript_rows in [10usize, 17, 19, 20, 21, 30, 60] {
+        let mut shell = shell_for(LARGE);
+        for index in 0..transcript_rows {
+            shell.notice(format!("transcript line {index}"));
+        }
+        many_option_picker(&mut shell);
+        let state = shell.state.borrow();
+        let chrome = super::shell_chrome::shell_chrome(&state, LARGE.width, Instant::now());
+        let panel = plain_rows(&chrome.panel).join("\n");
+        let visible = (0..8)
+            .filter(|index| panel.contains(&format!("Option-{index}")))
+            .count();
+        assert!(
+            visible >= 5,
+            "{transcript_rows} transcript rows left the picker {visible} of 8 options:\n{panel}"
+        );
+        assert!(panel.contains("Option-1"), "the selected row stays visible");
+    }
+}
