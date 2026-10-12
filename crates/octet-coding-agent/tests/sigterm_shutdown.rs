@@ -809,7 +809,12 @@ fn ctrl_c_stops_a_hung_resource_rebuild_without_freezing_input() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = tempfile::tempdir().expect("tempdir");
     let (args, reload_marker) = install_reload_probe(directory.path());
+    let initialized_marker = directory.path().join("workspace/reload-initialized.marker");
     let mut octet = PtyOctet::spawn_with_args(directory.path(), &args);
+    // The probe hangs only on its *second* start. Reloading before the first
+    // start has answered `initialize` makes the reload that first start, so
+    // wait for the real precondition rather than for the UI alone.
+    octet.wait_until(READY_DEADLINE, |_| initialized_marker.exists());
     octet.submit_command(b"/reload");
     octet.wait_until(READY_DEADLINE, |_| reload_marker.exists());
 
@@ -920,6 +925,7 @@ if [ "$count" -gt 1 ]; then
 fi
 id=$(printf '%s\n' "$initialize" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[]}}\n' "$id"
+printf '%s\n' initialized > "$OCTET_WORKSPACE/reload-initialized.marker"
 while IFS= read -r request; do
   case "$request" in
     *'"method":"shutdown"'*)
