@@ -12844,7 +12844,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -14008,7 +14008,7 @@
   "openrouter/inclusionai/ling-3.1-flash": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -14239,7 +14239,7 @@
   "openrouter/meta-llama/llama-4-scout": {
     "limit": {
       "context": 1310720,
-      "output": 16384
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -15526,7 +15526,7 @@
   "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 182520
     },
     "modalities": {
       "input": [
@@ -15640,7 +15640,7 @@
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "limit": {
       "context": 262144,
-      "output": 131072
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -17937,7 +17937,7 @@
   "openrouter/qwen/qwen3-14b": {
     "limit": {
       "context": 40960,
-      "output": 36864
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -18472,7 +18472,7 @@
   "openrouter/qwen/qwen3.6-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -18651,7 +18651,7 @@
   "openrouter/qwen/qwen3.8-27b": {
     "limit": {
       "context": 1000000,
-      "output": 131072
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -20291,7 +20291,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943717
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20535,7 +20535,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -20567,7 +20567,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
