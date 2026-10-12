@@ -484,7 +484,13 @@ impl NativePty {
         }
     }
     fn close(&mut self) {
-        self.send(&[4]);
+        // macOS reports EIO for a write after the child closed its terminal;
+        // an already-exited child still has to have exited successfully.
+        match self.master.write(&[4]) {
+            Ok(_) => self.master.flush().unwrap(),
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => {}
+            Err(error) => panic!("PTY input: {error}"),
+        }
         let until = Instant::now() + Duration::from_secs(5);
         loop {
             self.read();
