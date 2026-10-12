@@ -924,3 +924,44 @@ fn extension_tool_renderer_stays_internal_to_the_tool_record() {
     assert_eq!(panel.output, "RAW EVIDENCE");
     assert_eq!(panel.extension_render_segments[0].text, "branch: main");
 }
+
+#[test]
+fn a_reload_outcome_is_one_dot_note_and_startup_success_is_silent() {
+    let notes = |shell: &InteractiveShell| -> Vec<(NoticeTone, String)> {
+        shell
+            .state
+            .borrow()
+            .transcript
+            .iter()
+            .filter_map(|block| match block {
+                TranscriptBlock::NoticeStatus { text, tone, .. } => Some((*tone, text.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let mut shell = InteractiveShell::test_shell();
+    // Startup: nothing to report is not worth a line.
+    shell.report_reload_outcome(&[], false);
+    assert!(notes(&shell).is_empty());
+    // An explicit reload with no problems: one green note.
+    shell.report_reload_outcome(&[], true);
+    assert_eq!(
+        notes(&shell),
+        vec![(NoticeTone::Success, "reload succeeded".to_owned())]
+    );
+
+    // Many problems become one red note with the first reasons and a count.
+    let mut shell = InteractiveShell::test_shell();
+    let problems: Vec<String> = (0..6)
+        .map(|index| format!("warning: skill {index} bad"))
+        .collect();
+    shell.report_reload_outcome(&problems, true);
+    let shown = notes(&shell);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].0, NoticeTone::Error);
+    assert_eq!(
+        shown[0].1,
+        "reload failed: skill 0 bad · skill 1 bad (+4 more)"
+    );
+}

@@ -15,6 +15,13 @@ and known limitations.
   never changed.
 - Pickers such as Settings keep a usable window of options when a long
   transcript leaves little room, instead of showing one row.
+- Quieter startup and reloads: only what you must act on is shown. Best-effort
+  background work (model inventory and metadata caches, model discovery, provider
+  registration, optional local probes) no longer prints warnings; a provider that
+  is down reports its real error when you use it. A reload now ends in one note:
+  a green dot with `reload succeeded` (explicit `/reload` only) or a red dot with
+  `reload failed: reason (+N more)`. An extension notice that repeats identically
+  is shown once per 30 seconds instead of on every event.
 - Default fullscreen launches now capture the wheel and trackpad (`mouse = "auto"`
   follows the surface), so the transcript scrolls without a flag. Inline sessions
   keep native selection and scrollback; `--mouse terminal` and `--mouse off`

@@ -9,6 +9,7 @@ pub(crate) mod fuzzy;
 pub mod keymap;
 pub(crate) mod layout;
 pub mod pickers;
+pub(crate) mod reload_summary;
 pub(crate) mod splash;
 pub mod terminal;
 pub mod theme;

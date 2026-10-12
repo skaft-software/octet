@@ -470,17 +470,12 @@ where
         request.respond(Ok(app.goal_session_id.clone()));
         match reload_resource_processes(app, shell, input).await {
             Ok(report) => {
-                for (_, outcome) in report.processes {
-                    match outcome {
-                        Ok(detail) => shell.notice(detail),
-                        Err(error) => shell.error(error),
-                    }
-                }
-                for notice in report
-                    .details
+                // One outcome line instead of a notice per process, detail,
+                // shortcut and event: only failures are worth the transcript.
+                let problems: Vec<String> = report
+                    .processes
                     .into_iter()
-                    .chain(report.shortcuts)
-                    .chain(report.events)
+                    .filter_map(|(_, outcome)| outcome.err())
                     .chain(
                         report
                             .rescans
@@ -488,11 +483,8 @@ where
                             .into_iter()
                             .flat_map(|(_, problems)| problems),
                     )
-                    .chain(report.rescans.details)
-                    .chain(report.rescans.events)
-                {
-                    shell.notice(notice);
-                }
+                    .collect();
+                shell.report_reload_outcome(&problems, true);
             }
             Err(error) => shell.error(format!("extension reload failed: {error:#}")),
         }
@@ -5480,7 +5472,8 @@ where
         Ok(app)
     })
     .await?;
-    refresh_resource_paths(&mut app, shell, input).await?;
+    let problems = resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
+    shell.report_reload_outcome(&problems, true);
     shell.set_theme(load_theme_for_background(&app.config, background));
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
@@ -8520,7 +8513,7 @@ async fn apply_pending_actions(
                 shell.show_context_report(crate::tui::context::ContextReport::capture(&app, &[]));
             }
             PendingIdleAction::ReloadResources => {
-                let (next, plan, applied) = reload_resources_with_reexec(
+                let (next, plan, _applied) = reload_resources_with_reexec(
                     app,
                     shell,
                     input,
@@ -8529,9 +8522,6 @@ async fn apply_pending_actions(
                     reload,
                 )
                 .await?;
-                if applied {
-                    shell.notice("resources reloaded");
-                }
                 app = next;
                 if let Some(plan) = plan {
                     *pending_reexec = Some(plan);
@@ -10513,7 +10503,7 @@ async fn run_idle_command_inner(
             // Plain `/reload` is resources-only: it never probes or replaces
             // the process image. `/reload --force` is handled before
             // `commands::parse` and is the explicit host path.
-            let (next, plan, applied) = reload_resources_with_reexec(
+            let (next, plan, _applied) = reload_resources_with_reexec(
                 *app,
                 shell,
                 input,
@@ -10522,9 +10512,6 @@ async fn run_idle_command_inner(
                 reload,
             )
             .await?;
-            if applied {
-                shell.notice("resources reloaded");
-            }
             app = Box::new(next);
             if let Some(plan) = plan {
                 return Ok(IdleCommandOutcome::Reexec { app, plan });
@@ -10545,7 +10532,6 @@ async fn run_idle_command_inner(
             app = Box::new(next);
             if applied {
                 request_extension_ui(shell, &mut app);
-                shell.notice("skills and prompt templates reloaded");
             }
         }
         Command::Skills(sub) => {

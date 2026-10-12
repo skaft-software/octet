@@ -8811,6 +8811,18 @@ impl InteractiveShell {
         state.push_block(TranscriptBlock::Notice(message.into()));
     }
 
+    /// Present a reload's outcome as one note: a red dot and
+    /// `reload failed: reason` when anything went wrong, or, when
+    /// `announce_success` is set, a green dot and `reload succeeded`. Success is
+    /// silent at startup, where nobody asked for a reload.
+    pub fn report_reload_outcome(&mut self, problems: &[String], announce_success: bool) {
+        match crate::tui::reload_summary::reload_failure_text(problems) {
+            Some(text) => self.notice_error(text),
+            None if announce_success => self.notice_success("reload succeeded"),
+            None => {}
+        }
+    }
+
     /// Add an informational event whose margin marker communicates success.
     pub fn notice_success(&mut self, message: impl Into<String>) {
         let mut state = self.state.borrow_mut();

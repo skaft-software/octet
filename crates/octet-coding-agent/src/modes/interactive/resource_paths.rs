@@ -64,6 +64,8 @@ where
     }
 }
 
+/// The resource phase at startup and after configuration changes: problems are
+/// shown as one `reload failed: …` note; success is silent.
 pub(super) async fn refresh_resource_paths<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
@@ -72,8 +74,23 @@ pub(super) async fn refresh_resource_paths<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let problems = refresh_resource_paths_reporting(app, shell, input).await?;
+    shell.report_reload_outcome(&problems, false);
+    Ok(())
+}
+
+/// The same phase, but the caller owns how problems are presented (an explicit
+/// reload also announces success).
+pub(super) async fn refresh_resource_paths_reporting<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<Vec<String>>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
     match refresh_resource_paths_until_closed(app, shell, input).await {
-        Err(error) if error.is::<ResourceDiscoveryClosed>() => Ok(()),
+        Err(error) if error.is::<ResourceDiscoveryClosed>() => Ok(Vec::new()),
         result => result,
     }
 }
@@ -82,7 +99,7 @@ async fn refresh_resource_paths_until_closed<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
     input: &mut S,
-) -> anyhow::Result<()>
+) -> anyhow::Result<Vec<String>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
@@ -90,7 +107,7 @@ where
     if shell.close_requested()
         || (!resources_pending && !app.executable_extensions.has_pending_session_starts())
     {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let starts = match app.executable_extensions.resource_session_starts() {
@@ -101,7 +118,7 @@ where
     // the existing UI/session pump, without inventing a resource-discovery pass.
     if !resources_pending {
         starts?;
-        return Ok(());
+        return Ok(Vec::new());
     }
     let candidate = match starts {
         Ok(lease) => match app.prepare_resource_paths(shell.theme().background(), lease) {
@@ -125,11 +142,8 @@ where
     shell.set_session_keybindings(&app.user_keybindings);
     app.executable_extensions
         .refresh_frontend_keybindings(shell);
-    for diagnostic in diagnostics {
-        shell.notice(diagnostic);
-    }
     update_status(shell, app);
-    Ok(())
+    Ok(diagnostics)
 }
 
 pub(super) async fn reload_resource_processes<S>(

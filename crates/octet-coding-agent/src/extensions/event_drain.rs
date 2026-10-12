@@ -245,7 +245,13 @@ impl ExecutableExtensions {
                         }
                     }
                     Ok(ExtensionEvent::Notification { notification }) => {
-                        messages.push(format_notification(&name, &notification));
+                        let message = format_notification(&name, &notification);
+                        if self
+                            .recent_notices
+                            .admit(&message, std::time::Instant::now())
+                        {
+                            messages.push(message);
+                        }
                     }
                     Ok(ExtensionEvent::ContextContributed { contribution }) => {
                         admit_context(

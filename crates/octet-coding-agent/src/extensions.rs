@@ -108,6 +108,7 @@ mod mcp;
 #[cfg(all(test, unix))]
 mod mcp_native_tests;
 pub(crate) mod model_control;
+mod notice_dedup;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
@@ -377,6 +378,8 @@ pub(crate) struct DeferredStartupProgress {
 pub struct ExecutableExtensions {
     telemetry: Option<octet_agent::TelemetryObserver>,
     telemetry_rejected: u64,
+    /// Recently shown extension notices, so a repeating one is shown once.
+    recent_notices: notice_dedup::RecentNotices,
     telemetry_error: Option<std::io::ErrorKind>,
     processes: Vec<ExtensionProcess>,
     resource_paths_epoch: Arc<std::sync::atomic::AtomicU64>,
@@ -477,6 +480,7 @@ impl Default for ExecutableExtensions {
         Self {
             telemetry: None,
             telemetry_rejected: 0,
+            recent_notices: notice_dedup::RecentNotices::default(),
             telemetry_error: None,
             processes: Vec::new(),
             resource_paths_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
