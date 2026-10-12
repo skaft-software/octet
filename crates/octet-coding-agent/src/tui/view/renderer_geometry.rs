@@ -39,6 +39,29 @@ impl GeometryFence {
     }
 }
 
+/// A plain press that arrived while no recorded frame matched the screen.
+#[derive(Clone, Copy)]
+pub(super) struct DeferredPointerPress {
+    fence: GeometryFence,
+    pub(super) press: (u16, u16),
+    pub(super) motion: Option<(u16, u16)>,
+}
+impl DeferredPointerPress {
+    pub(super) fn new(state: &ShellState, row: u16, col: u16) -> Self {
+        Self {
+            fence: GeometryFence::capture(state),
+            press: (row, col),
+            motion: None,
+        }
+    }
+    pub(super) fn same_layout(&self, state: &ShellState) -> bool {
+        GeometryFence {
+            semantic: state.transcript_semantic_revision,
+            ..self.fence
+        } == GeometryFence::capture(state)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct VisibleBlockGeometry {
     pub(super) index: usize,
@@ -286,6 +309,17 @@ impl RenderedGeometry {
         self.fence == GeometryFence::capture(state)
     }
 
+    /// Pointer input names a cell of the frame on screen. A transcript
+    /// revision alone (live activity, a touched block) does not move that
+    /// frame's rows; hit tests still verify each block's commit id. Layout,
+    /// scroll, draft, panel and overlay changes keep the exact fence.
+    pub(super) fn is_pointer_current(&self, state: &ShellState) -> bool {
+        GeometryFence {
+            semantic: state.transcript_semantic_revision,
+            ..self.fence
+        } == GeometryFence::capture(state)
+    }
+
     /// A completed frame may still describe the transcript after typing or
     /// navigation has changed the draft, chrome, or scroll offset. Reuse only
     /// its *row layout* for keyboard navigation; pointer hit tests and paint
@@ -314,5 +348,14 @@ impl ShellState {
         self.render_geometry
             .as_deref()
             .filter(|geometry| geometry.is_current(self))
+    }
+    /// The frame the terminal shows, for pointer hit tests. A press that
+    /// lands while a repaint is pending must not be dropped: the following
+    /// drag and release would then select nothing.
+    pub(super) fn pointer_render_geometry(&self) -> Option<&RenderedGeometry> {
+        self.painted_geometry
+            .as_deref()
+            .or(self.render_geometry.as_deref())
+            .filter(|geometry| geometry.is_pointer_current(self))
     }
 }

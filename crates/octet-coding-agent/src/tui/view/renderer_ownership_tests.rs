@@ -473,6 +473,61 @@ fn scrolled_pointer_receipt_survives_anchor_promotion_without_feedback() {
 }
 
 #[test]
+fn pointer_press_before_the_frame_is_recorded_resolves_against_that_frame() {
+    for scroll_between in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 16);
+        for index in 0..40 {
+            shell.notice(format!("deferred-row-{index:03}"));
+        }
+        {
+            let mut state = shell.state.borrow_mut();
+            state.render_threaded = true;
+            state.application_viewport_requested = true;
+        }
+        let component = ShellComponent::isolated(shell.state.clone(), false);
+        let frame = component.render(80);
+        let (row, expected) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let plain = sexy_tui_rs::strip_terminal_sequences(line);
+                plain
+                    .find("deferred-row-")
+                    .map(|start| (row as u16, plain[start..].trim_end().to_owned()))
+            })
+            .unwrap();
+        // The terminal already shows this frame; its write has not reported back.
+        shell.begin_transcript_selection(row, 0, false);
+        shell.extend_transcript_selection(row, 79);
+        assert!(shell.state.borrow().transcript_selection.is_none());
+        if scroll_between {
+            shell.scroll(-1);
+        }
+        shell.state.frame_written();
+        if scroll_between {
+            // The cell no longer names the same content: nothing is selected
+            // and the release cannot copy.
+            assert!(shell.state.borrow().transcript_selection.is_none());
+            shell.end_transcript_selection(row, 79);
+            assert!(shell.state.borrow().copy_buffer.is_none());
+            continue;
+        }
+        assert!(shell.state.borrow().selection_dragging);
+        shell.end_transcript_selection(row, 79);
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .copy_buffer
+                .as_deref()
+                .map(str::trim_end),
+            Some(expected.as_str())
+        );
+    }
+}
+
+#[test]
 fn stale_layout_cannot_overwrite_new_viewport_intent() {
     let state = SharedState::new(ShellState {
         theme: crate::tui::theme::test_theme(),

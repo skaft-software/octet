@@ -172,8 +172,12 @@ impl SharedState {
                     .map(|(id, start)| (*id, *start >= top))
                     .collect();
             }
+            state.painted_geometry = None;
             state.render_geometry = Some(geometry);
+        } else {
+            state.painted_geometry = Some(geometry);
         }
+        super::InteractiveShell::resolve_deferred_pointer_press(&mut state);
     }
 
     pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {

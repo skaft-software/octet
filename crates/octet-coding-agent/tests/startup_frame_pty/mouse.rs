@@ -249,10 +249,17 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             // Search upward: rows above an inline frame can hold stale
             // scrollback the application does not own, and where the frame
             // starts depends on the terminal's initial cursor position.
-            let row = (2..rows - 7)
-                .rev()
-                .find(|row| row_text(&parser, *row, columns).contains("MOUSE-ROW-"))
-                .expect("visible numbered row");
+            // The scrolled repaint can follow the fixed settle on a loaded runner.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let row = loop {
+                let found = (2..rows - 7)
+                    .rev()
+                    .find(|row| row_text(&parser, *row, columns).contains("MOUSE-ROW-"));
+                if found.is_some() || Instant::now() >= deadline {
+                    break found.expect("visible numbered row");
+                }
+                settle(&mut octet, &mut parser, &mut consumed);
+            };
             let painted = row_text(&parser, row, columns);
             let expected = painted.trim_matches([' ', '│', '┃']).trim().to_owned();
             let before = octet.pty.output.len();
@@ -267,9 +274,17 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             octet
                 .pty
                 .write_input(&event(32, columns.min(220) - 2, false));
-            settle(&mut octet, &mut parser, &mut consumed);
-            let highlighted =
-                (0..columns).any(|col| parser.screen().cell(row, col).unwrap().inverse());
+            // The highlight is a later repaint; on a loaded runner it can
+            // follow the fixed settle window, so wait for it within a bound.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let highlighted = loop {
+                settle(&mut octet, &mut parser, &mut consumed);
+                let painted =
+                    (0..columns).any(|col| parser.screen().cell(row, col).unwrap().inverse());
+                if painted || Instant::now() >= deadline {
+                    break painted;
+                }
+            };
             octet.pty.write_input(&event(0, columns.min(220) - 2, true));
             // Name the phase so a platform-only timeout identifies its input path.
             eprintln!("mouse drag copy: {columns}x{rows} legacy={legacy} row={row} highlighted={highlighted} painted={painted:?}");

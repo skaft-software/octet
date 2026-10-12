@@ -568,13 +568,13 @@ pub(super) fn visible_copy_rows(
 /// The painted content rows of one block, aligned with its copy text.
 fn painted_copy_rows(
     state: &ShellState,
+    retained: Option<&super::renderer_geometry::RenderedGeometry>,
     block: usize,
     copy_text: &str,
     geometry: SurfaceGeometry,
 ) -> Option<CopyRows> {
     if state.render_threaded {
-        return state
-            .retained_render_geometry()?
+        return retained?
             .blocks
             .iter()
             .find(|geometry| geometry.index == block)?
@@ -736,7 +736,13 @@ pub(super) fn visual_line_for_transcript_position(
     }
     let block = state.transcript.get(position.block)?;
     let copy_text = block_copy_text(block);
-    let rows = painted_copy_rows(state, position.block, &copy_text, geometry);
+    let rows = painted_copy_rows(
+        state,
+        state.retained_render_geometry(),
+        position.block,
+        &copy_text,
+        geometry,
+    );
     let content_row = copy_offset_to_visual_row(
         block,
         &copy_text,
@@ -761,7 +767,7 @@ pub(super) fn selection_position_for_visual_cell(
 ) -> Option<TranscriptPosition> {
     let (block, local_row, total_rows, geometry) = if state.render_threaded {
         let block = state
-            .retained_render_geometry()?
+            .pointer_render_geometry()?
             .blocks
             .iter()
             .find(|block| visual_line >= block.start && visual_line < block.start + block.rows)?;
@@ -794,7 +800,13 @@ pub(super) fn selection_position_for_visual_cell(
     let content_col = geometry.content_col(col);
     let transcript_block = state.transcript.get(block)?;
     let text = block_copy_text(transcript_block);
-    let rows = painted_copy_rows(state, block, &text, geometry);
+    let rows = painted_copy_rows(
+        state,
+        state.pointer_render_geometry(),
+        block,
+        &text,
+        geometry,
+    );
     let offset = visual_cell_to_copy_offset(
         transcript_block,
         &text,

@@ -1645,6 +1645,10 @@ pub(crate) struct ShellState {
     render_revision: u64,
     transcript_semantic_revision: u64,
     render_geometry: Option<Arc<renderer_geometry::RenderedGeometry>>,
+    /// The newest written frame when it was already stale on completion and
+    /// therefore not retained above. It is what the terminal shows, so pointer
+    /// hit tests use it instead of an older frame.
+    painted_geometry: Option<Arc<renderer_geometry::RenderedGeometry>>,
     render_threaded: bool,
     rendered_animation_addressability: HashMap<u64, bool>,
     panel_epoch: u64,
@@ -1870,6 +1874,8 @@ pub(crate) struct ShellState {
     /// movement clears any prior selection; the first drag event promotes
     /// this anchor into `transcript_selection`.
     pending_selection_anchor: Option<TranscriptPosition>,
+    /// A press whose frame was on screen before its geometry was recorded.
+    deferred_pointer_press: Option<renderer_geometry::DeferredPointerPress>,
     /// A drag which began in the transcript remains transcript-owned even
     /// when its pointer crosses into the pinned composer/footer.
     selection_dragging: bool,
@@ -2149,6 +2155,7 @@ impl ShellState {
             render_revision: Default::default(),
             transcript_semantic_revision: Default::default(),
             render_geometry: Default::default(),
+            painted_geometry: Default::default(),
             render_threaded: Default::default(),
             rendered_animation_addressability: Default::default(),
             panel_epoch: Default::default(),
@@ -2255,6 +2262,7 @@ impl ShellState {
             new_output_count: Default::default(),
             transcript_selection: Default::default(),
             pending_selection_anchor: Default::default(),
+            deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
             copy_buffer: Default::default(),
             context_estimate: Default::default(),
@@ -7107,7 +7115,7 @@ impl InteractiveShell {
         col: u16,
     ) -> Option<TranscriptPosition> {
         if state.render_threaded {
-            let geometry = state.retained_render_geometry()?;
+            let geometry = state.pointer_render_geometry()?;
             if usize::from(row) >= geometry.visible_lines.len() {
                 return None;
             }
@@ -7127,6 +7135,35 @@ impl InteractiveShell {
         let end = transcript.len().saturating_sub(scroll);
         let start = end.saturating_sub(capacity);
         selection_position_for_visual_cell(state, start + usize::from(row), col)
+    }
+
+    /// Resolve a deferred press once the frame it named is recorded. A changed
+    /// layout (scroll, size, draft, panel) discards it: the cell no longer
+    /// names the same content.
+    fn resolve_deferred_pointer_press(state: &mut ShellState) {
+        let Some(deferred) = state.deferred_pointer_press else {
+            return;
+        };
+        if !deferred.same_layout(state) {
+            state.deferred_pointer_press = None;
+            return;
+        }
+        if state.pointer_render_geometry().is_none() {
+            return;
+        }
+        state.deferred_pointer_press = None;
+        let (row, col) = deferred.press;
+        // A press on pinned chrome resolves to nothing and stays ignored.
+        let Some(anchor) = Self::transcript_position_at_screen_cell(state, row, col) else {
+            return;
+        };
+        let focus = deferred
+            .motion
+            .and_then(|(row, col)| Self::transcript_position_at_screen_cell(state, row, col))
+            .filter(|focus| *focus != anchor);
+        state.transcript_selection = focus.map(|focus| TranscriptSelection { anchor, focus });
+        state.selection_dragging = focus.is_some();
+        state.pending_selection_anchor = focus.is_none().then_some(anchor);
     }
 
     /// The OSC 8 hyperlink target under one transcript screen cell.
@@ -7168,9 +7205,18 @@ impl InteractiveShell {
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
         self.reset_input_interaction();
         let mut state = self.state.borrow_mut();
+        state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
             state.selection_dragging = false;
+            // The terminal can show a frame before the renderer records its
+            // geometry. Resolve a plain press against that frame once it is
+            // recorded instead of losing the whole drag.
+            if state.render_threaded && !extend && state.pointer_render_geometry().is_none() {
+                state.deferred_pointer_press = Some(renderer_geometry::DeferredPointerPress::new(
+                    &state, row, col,
+                ));
+            }
             return;
         };
         if extend {
@@ -7214,6 +7260,11 @@ impl InteractiveShell {
         //
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
+        Self::resolve_deferred_pointer_press(&mut state);
+        if let Some(deferred) = state.deferred_pointer_press.as_mut() {
+            deferred.motion = Some((row, col));
+            return;
+        }
         if !state.selection_dragging {
             let anchor = match state.pending_selection_anchor {
                 Some(anchor) => anchor,
@@ -7271,7 +7322,9 @@ impl InteractiveShell {
     /// - Drag that created a selection -> copy to clipboard, keep selection.
     /// - Stationary click (no drag)    -> clear any prior selection.
     pub fn end_transcript_selection(&mut self, row: u16, col: u16) {
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
+        Self::resolve_deferred_pointer_press(&mut state);
+        state.deferred_pointer_press = None;
         if !state.selection_dragging && state.pending_selection_anchor.is_none() {
             // A release without a transcript-owned press (chrome, scrollbar,
             // or stale geometry) cannot recopy a previous selection.
