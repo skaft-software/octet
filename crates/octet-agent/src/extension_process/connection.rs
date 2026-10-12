@@ -626,10 +626,20 @@ pub(super) async fn run_protocol_writer(
         };
         let result = match &frame.bus_delivery {
             Some(delivery) => delivery.guard_write(write).await,
-            None => write.await,
+            None => write.await.map(|()| super::event_bus::BusWrite::Written),
         };
         match result {
-            Ok(()) => {
+            Ok(super::event_bus::BusWrite::Dropped) => {
+                // Invalidated before any byte was written: the stream is
+                // intact, so discard the delivery like a stale queued frame.
+                if let Some(completion) = frame.completion.take() {
+                    let _ = completion.send(Err(PendingError::Cancelled(
+                        "bus delivery invalidated before write".into(),
+                    )));
+                }
+                continue;
+            }
+            Ok(super::event_bus::BusWrite::Written) => {
                 frame.state.store(FRAME_WRITTEN, Ordering::Release);
                 if let Some(completion) = frame.completion.take() {
                     let _ = completion.send(Ok(()));

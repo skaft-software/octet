@@ -86,23 +86,66 @@ impl Delivery {
     /// Cancellation of a partial frame must close the protocol stream: it can
     /// never be completed later in a replacement session or replayed. Already
     /// written bytes cannot be rolled back, just like other protocol writes.
+    ///
+    /// A delivery invalidated before its first byte is written leaves the
+    /// stream clean, so it is only dropped ([`BusWrite::Dropped`]): the same
+    /// outcome as the writer's earlier skip of a stale queued frame. Otherwise
+    /// a session switch that fences a delivery in flight would tear down a
+    /// surviving peer. The one pre-write failure that stays fatal is an expired
+    /// *control* notice: the peer would be left with a stale lifecycle view.
     pub(super) async fn guard_write(
         &self,
         write: impl std::future::Future<Output = Result<(), String>>,
-    ) -> Result<(), String> {
+    ) -> Result<BusWrite, String> {
         if !self.is_current() {
-            return Err("bus delivery invalidated before write".into());
+            return if self.control_expired() {
+                Err("bus delivery invalidated before write".into())
+            } else {
+                Ok(BusWrite::Dropped)
+            };
         }
+        let started = AtomicBool::new(false);
+        let write = async {
+            started.store(true, Ordering::Release);
+            write.await
+        };
         let remaining = Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64)
             .saturating_sub(self.queued.elapsed());
         tokio::select! {
             biased;
-            _ = self.topic_cancelled.cancelled() => Err("bus publisher/session invalidated during write".into()),
-            _ = self.subscription_cancelled.cancelled() => Err("bus subscription invalidated during write".into()),
-            _ = tokio::time::sleep(remaining) => Err("bus delivery expired during write".into()),
-            result = write => result,
+            _ = self.topic_cancelled.cancelled() => {
+                if started.load(Ordering::Acquire) {
+                    Err("bus publisher/session invalidated during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            _ = self.subscription_cancelled.cancelled() => {
+                if started.load(Ordering::Acquire) {
+                    Err("bus subscription invalidated during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                if started.load(Ordering::Acquire) || self.control {
+                    Err("bus delivery expired during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            result = write => result.map(|()| BusWrite::Written),
         }
     }
+}
+
+/// Outcome of a guarded bus write that did not fail the stream.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BusWrite {
+    /// The whole frame was written and flushed.
+    Written,
+    /// The delivery went stale before any byte was written; nothing was sent.
+    Dropped,
 }
 impl Drop for Delivery {
     fn drop(&mut self) {
@@ -935,6 +978,96 @@ mod tests {
         assert_eq!(event["method"], "bus/event");
         assert_eq!(event["params"]["sequence"], 1);
         assert!(lock_std_mutex(&beta.reader.child_requests).is_empty());
+    }
+
+    fn test_delivery(control: bool, age: Duration) -> Delivery {
+        let budget = Arc::new(Budget::default());
+        budget.messages.fetch_add(1, Ordering::AcqRel);
+        Delivery {
+            budget,
+            bytes: 0,
+            topic_cancelled: CancellationToken::default(),
+            subscription_cancelled: CancellationToken::default(),
+            closed: Arc::new(AtomicBool::new(false)),
+            draining: Arc::new(AtomicBool::new(false)),
+            queued: Instant::now().checked_sub(age).expect("monotonic clock"),
+            control,
+        }
+    }
+
+    fn never_polled() -> impl std::future::Future<Output = Result<(), String>> {
+        async { panic!("a delivery invalidated before its write must not start writing") }
+    }
+
+    #[tokio::test]
+    async fn a_delivery_invalidated_before_any_byte_is_dropped_not_fatal() {
+        // The fence in a session switch cancels deliveries already queued. If
+        // that lands between the writer's skip check and the write, nothing has
+        // been written, so the peer's stream must stay open.
+        for (control, invalidate) in [(false, 0), (false, 1), (false, 2), (true, 0), (true, 1)] {
+            let delivery = test_delivery(control, Duration::ZERO);
+            match invalidate {
+                0 => delivery.subscription_cancelled.cancel(),
+                1 => delivery.topic_cancelled.cancel(),
+                _ => delivery.draining.store(true, Ordering::Release),
+            }
+            assert_eq!(
+                delivery.guard_write(never_polled()).await,
+                Ok(BusWrite::Dropped),
+                "control={control} invalidate={invalidate}"
+            );
+        }
+        let expired = test_delivery(
+            false,
+            Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64 + 1),
+        );
+        assert_eq!(
+            expired.guard_write(never_polled()).await,
+            Ok(BusWrite::Dropped)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_control_notice_still_fails_the_stream_closed() {
+        let delivery = test_delivery(
+            true,
+            Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64 + 1),
+        );
+        assert_eq!(
+            delivery.guard_write(never_polled()).await,
+            Err("bus delivery invalidated before write".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_after_the_write_began_fails_the_stream_closed() {
+        // Bytes may already be in the pipe: the frame can never be completed.
+        let delivery = test_delivery(false, Duration::ZERO);
+        let token = delivery.subscription_cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            token.cancel();
+        });
+        let result = delivery
+            .guard_write(async { std::future::pending::<Result<(), String>>().await })
+            .await;
+        assert_eq!(
+            result,
+            Err("bus subscription invalidated during write".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_current_delivery_writes_normally() {
+        let delivery = test_delivery(false, Duration::ZERO);
+        assert_eq!(
+            delivery.guard_write(async { Ok(()) }).await,
+            Ok(BusWrite::Written)
+        );
+        let failed = test_delivery(false, Duration::ZERO)
+            .guard_write(async { Err("broken pipe".to_owned()) })
+            .await;
+        assert_eq!(failed, Err("broken pipe".to_owned()));
     }
 
     #[test]
