@@ -149,8 +149,8 @@ fn throughput_includes_hidden_thinking_and_works_without_visible_deltas() {
         );
         assert!(state.turn_requested_at.is_none());
         let status = status_telemetry(&state, Instant::now());
-        assert!(status.contains("tok/s end-to-end, last attempt"));
-        assert!(status.contains("request-to-completion; not server speed"));
+        assert!(status.contains("tok/s, last response"));
+        assert!(status.contains("request-to-stream-end; excludes tool time"));
     }
 }
 
@@ -304,7 +304,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
     );
     assert!(!active_sample.contains("tool"));
     let final_diagnostics = status_telemetry(&shell.state.borrow(), now);
-    assert!(final_diagnostics.contains("72.4 tok/s end-to-end, last attempt"));
+    assert!(final_diagnostics.contains("72.4 tok/s, last response"));
 
     {
         let mut state = shell.state.borrow_mut();

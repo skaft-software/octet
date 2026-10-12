@@ -2390,3 +2390,77 @@ async fn native_server_generation_survives_the_public_http_client_boundary() {
     assert_eq!(server.tokens_per_second(), Some(200.0));
     assert_eq!(metrics.server_unavailable, None);
 }
+
+/// A loopback provider with known timing: 300 ms before the first frame
+/// (queueing and prefill), five answer frames 100 ms apart, then a usage frame
+/// reporting 80 output tokens of which 30 are reasoning. The output rate counts
+/// every reported output token over request dispatch to the end of the stream,
+/// and consumer work after the terminal event (tool execution) is outside it.
+#[tokio::test]
+async fn output_rate_uses_reported_usage_over_dispatch_to_stream_end() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            request.extend_from_slice(&buf[..n]);
+            if n == 0 || request.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        let chunk = |data: &str| format!("{:x}\r\n{data}\r\n", data.len());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for _ in 0..5 {
+            let frame =
+                "data: {\"id\":\"rate\",\"choices\":[{\"delta\":{\"content\":\"word \"}}]}\n\n";
+            socket.write_all(chunk(frame).as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let terminal = "data: {\"id\":\"rate\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":80,\"completion_tokens_details\":{\"reasoning_tokens\":30}}}\n\ndata: [DONE]\n\n";
+        socket.write_all(chunk(terminal).as_bytes()).await.unwrap();
+        socket.write_all(b"0\r\n\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let model = make_test_model(&uri, Protocol::OpenAiChat, false);
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let mut finished = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::Finished(response) = event.unwrap() {
+            finished = Some(response);
+            // Simulated tool execution after the response completed.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let response = finished.expect("terminal response");
+    assert_eq!(response.usage.output_tokens, 80);
+    let metrics = response.inference.unwrap();
+    let sample = metrics.client.unwrap().output_rate_sample().unwrap();
+    assert_eq!(sample.tokens, 80, "reasoning is output; input is not");
+    assert!(!sample.estimated_tokens);
+    // 300 ms to first frame + 5 x 100 ms of streaming.
+    assert!(
+        sample.active_ns >= 800_000_000,
+        "time to first token is provider-active time: {sample:?}"
+    );
+    assert!(
+        sample.active_ns < 1_300_000_000,
+        "the interval closes at the terminal event, before tool work: {sample:?}"
+    );
+    let rate = sample.tokens_per_second().unwrap();
+    assert!(
+        (61.0..=100.0).contains(&rate),
+        "80 tokens over 0.8-1.3 s: {rate}"
+    );
+}

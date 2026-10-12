@@ -2,12 +2,66 @@
 
 [Providers](providers.md) · [Telemetry](telemetry.md) · [Performance contract](design/performance.md)
 
-This checkout estimates **decode cadence**, rather than labeling round-trip
-throughput as decode speed. It prefers **server-reported generation** when a
-matching native pair exists; otherwise it uses a separate robust
-client-stream estimate. Neither authenticates pure GPU-active execution.
-Deterministic fixtures establish parsing, units, scope and propagation—not live
-provider accuracy, loaded-serving performance, or a released feature.
+The displayed **output rate** (`N.N tok/s`) follows opencode's method: output
+tokens over the time the provider was actively serving each response. Server
+generation counters and a client decode-cadence estimate remain available as
+separately labeled diagnostics in `/status` and telemetry; neither replaces the
+displayed rate. Deterministic fixtures establish parsing, units, scope and
+propagation, not live provider accuracy.
+
+## Displayed output rate
+
+For one run (one prompt and every model response it triggers):
+
+```
+rate = Σ output_tokens(response) / Σ (stream_end(response) − dispatch(response))
+```
+
+- **Numerator:** provider-reported output tokens from terminal usage. Reasoning
+  tokens are included (they are a subset of `Usage.output_tokens`), as are tool
+  call arguments. Input and cached prompt tokens are never counted. Only when a
+  response reports no output usage but output streamed is its count estimated
+  from streamed answer, reasoning and tool-argument UTF-8 bytes at four bytes per
+  token. Any estimated response marks the run rate `~N.N tok/s (estimated
+  tokens)`.
+- **Denominator:** per response, from entry into the AI client request
+  (`request` scope origin, before preparation and dispatch) to the guarded
+  terminal event (`ClientInferenceMetrics.elapsed_ns`). It includes queueing,
+  prefill/time to first token and streaming. It excludes tool execution, agent
+  persistence, terminal paint, approval waits and gaps between responses.
+- **Steps:** totals are summed before dividing, so each response is weighted by
+  its active duration rather than averaging per-response rates. A retried
+  attempt that failed before a terminal response is dropped from both sides.
+  A rejected candidate that completed is counted (it did generate).
+- **Availability:** shown on completion and copied outcomes as `N.N tok/s · M
+  responses`. It is suppressed when any response in the run lacks a
+  `request`-scope interval (native-steering successors, deferred submission or
+  polls, legacy producers without client metrics) or when an attempt is still
+  unsettled or interrupted. No rate is shown while streaming.
+- `/status` shows the same quantity for the last response:
+  `Throughput N.N tok/s, last response (T provider-reported output tokens incl.
+  reasoning / S s request-to-stream-end; excludes tool time)`.
+
+`ClientInferenceMetrics::output_rate_sample()` is the single source of each
+response's tokens, interval and estimate flag.
+
+### Why this replaced the previous display
+
+The completion line previously showed either a server-native generation
+counter (only for a few Chat envelopes, such as llama.cpp `timings` or Groq
+`completion_time`) or a usage-calibrated byte-arrival slope, and nothing
+otherwise. The two were different quantities: native counters measure pure
+decode and excluded prefill; the slope excluded both prefill and reasoning, and
+depended on network chunking. The slope was unavailable for every response
+with a tool call, so a run that used any tool showed no rate, and short,
+buffered, reasoning-capable or proxied responses either suppressed it or
+produced chunk-cadence artifacts. Rates therefore swung between providers and
+runs by large factors and rarely matched perceived speed.
+
+## Diagnostic measurements
+
+The following observations are kept for `/status`, telemetry and comparison.
+They do not drive the displayed rate.
 
 ## Client observations
 
@@ -115,8 +169,8 @@ a wrong token basis. Chunk jitter can be reduced statistically; arbitrary proxy
 buffering, hidden reasoning timing, GPU scheduling and speculative execution
 cannot be uniquely recovered from arrivals. This is the best available estimate
 under its documented assumptions, not a guarantee of matching every provider's
-server report. Native timing always wins the completion display; both independent
-observations remain available for comparison in `/status` and telemetry.
+server report. Neither it nor native timing drives the completion display; both
+independent observations remain available for comparison in `/status` and telemetry.
 
 `decode_unavailable` names missing visible usage, unknown or possibly unreported
 reasoning, an unrepresentative initial byte burst, tool-call framing, insufficient
@@ -197,18 +251,9 @@ are measured normally.
 
 ## Presentation and observability
 
-- Completion and copied outcomes show a rate only with complete run-level response
-  coverage, its provenance, and its scope: `whole run · server-reported generation
-  N.N tok/s · M responses`, or `whole run · estimated decode (approx.) N.N tok/s ·
-  M responses`. Complete native counters are aggregated over their matching
-  generation durations; otherwise every response must have a visible estimate,
-  aggregated as total visible tokens over summed estimated generation time. Partial
-  coverage, mixed bases without complete estimate coverage, and unsettled attempts
-  suppress the rate. The coordinator's root summary now rejects different
-  `ServerTimingSource` contracts across native responses; its source tests are not
-  yet compiled. Last-response metrics remain diagnostic only. E2E is never a
-  completion-speed fallback; `/status` retains it as a separately labeled
-  request-throughput diagnostic.
+- Completion and copied outcomes show the whole-run output rate defined in
+  [Displayed output rate](#displayed-output-rate). Server-reported generation
+  and the decode estimate are diagnostics only.
 - `/status` shows client output offsets/event count/gap/tail, estimate sample
   count/window/visible-token basis/dispersion/reasoning exclusion, and server source,
   native count, normalized duration, original unit, or explicit unavailability.
@@ -227,9 +272,9 @@ are measured normally.
 
 Attempt reset, model/branch hydration, rejection and deferred/native segment
 scopes must not resurrect a previous successful rate. For legacy external event
-producers without AI-client metrics, presentation's E2E fallback is explicitly
-agent-observed request-to-`TurnFinished`, which can include persistence; it still
-cannot stand in for server timing.
+producers without AI-client metrics, the `/status` last-response fallback is
+agent-observed request-to-`TurnFinished`, which can include persistence; such a
+response leaves the whole-run completion rate unavailable.
 
 ## Evidence and further qualification
 
@@ -239,9 +284,13 @@ response identity, byte-fragmented SSE and completed audio. Deterministic client
 clock tests separate reasoning, answer, arguments, output gaps and completion
 tail. Existing loopback transport regressions assert measurement propagation
 through every codec, WebSocket transport selections, steering and deferred scopes.
-Presentation/telemetry tests pin compact whole-run rates, diagnostic provenance,
-native preference, no E2E completion fallback, accounting independence and frozen
-timing despite delayed persistence. Run-state regressions also exercise weighted
+Output-rate tests pin reasoning-inclusive provider usage over dispatch-to-stream-end
+time (clock-injected client timing and a loopback provider with a known 300 ms
+first-frame delay and 100 ms frame cadence), duration-weighted multi-response
+aggregation, exclusion of tool time between responses, retried-attempt dropping,
+marked byte estimates when usage is missing, and suppression for unmeasured
+scopes. Presentation/telemetry tests pin diagnostic provenance, accounting
+independence and frozen timing despite delayed persistence. Run-state regressions also exercise weighted
 aggregation through owner-gated provider events. Deterministic known-cadence fits test multi-token first batches,
 prefill offsets, packet jitter, chunk bursts, hidden reasoning exclusion and
 bounded long streams, first-burst density counterexamples, and unreported

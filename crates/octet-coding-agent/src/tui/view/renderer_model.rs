@@ -551,6 +551,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         last_turn_usage,
         last_turn_tokens_per_second,
         last_turn_generated_tokens,
+        last_turn_tokens_estimated,
         turn_generation_started_at,
         turn_requested_at,
         last_turn_first_token,

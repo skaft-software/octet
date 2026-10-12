@@ -139,6 +139,28 @@ pub struct ClientInferenceMetrics {
     pub reported_output_tokens: u64,
 }
 
+/// Fallback tokenization used only when a provider reports no output usage.
+pub const ESTIMATED_BYTES_PER_TOKEN: u64 = 4;
+
+/// One response's contribution to the displayed output rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputRateSample {
+    /// Output tokens, including reasoning. Provider-reported unless
+    /// `estimated_tokens` is set.
+    pub tokens: u64,
+    /// Request dispatch to end of the response stream, in nanoseconds.
+    pub active_ns: u64,
+    /// The provider reported no output usage; `tokens` is a byte estimate.
+    pub estimated_tokens: bool,
+}
+
+impl OutputRateSample {
+    /// Tokens per second for this response alone.
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        rate(self.tokens, self.active_ns)
+    }
+}
+
 impl ClientInferenceMetrics {
     /// Latest physical client's E2E usage throughput, not decode speed. Parked
     /// polls and successor segments deliberately do not manufacture this rate.
@@ -146,6 +168,34 @@ impl ClientInferenceMetrics {
         (self.scope == Some(ClientTimingScope::Request))
             .then(|| rate(self.reported_output_tokens, self.elapsed_ns))
             .flatten()
+    }
+
+    /// The headline output-rate sample for this response: provider-reported
+    /// output tokens (reasoning included) over request dispatch to the end of
+    /// the response stream. Tool execution, persistence and terminal paint
+    /// happen after this interval closes. When the provider reported no output
+    /// usage but output streamed, tokens are estimated from streamed UTF-8 bytes
+    /// (four bytes per token) and marked as an estimate. Only the `request`
+    /// scope has a dispatch origin; successor segments and deferred
+    /// submissions/polls return `None` rather than inventing one.
+    pub fn output_rate_sample(&self) -> Option<OutputRateSample> {
+        if self.scope != Some(ClientTimingScope::Request) || self.elapsed_ns == 0 {
+            return None;
+        }
+        let (tokens, estimated_tokens) = if self.reported_output_tokens > 0 {
+            (self.reported_output_tokens, false)
+        } else {
+            let bytes = self
+                .text_bytes
+                .saturating_add(self.reasoning_bytes)
+                .saturating_add(self.tool_argument_bytes);
+            (bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN), bytes > 0)
+        };
+        Some(OutputRateSample {
+            tokens,
+            active_ns: self.elapsed_ns,
+            estimated_tokens,
+        })
     }
 
     /// First-to-last observed output interval. This is not server decode time.
@@ -518,6 +568,77 @@ mod tests {
         assert_eq!(sample.max_output_gap_ns, Some(200_000_000));
         assert_eq!(sample.output_events, 3);
         assert_eq!(sample.end_to_end_tokens_per_second(), Some(200.0));
+    }
+
+    #[test]
+    fn output_rate_counts_reasoning_and_spans_dispatch_to_stream_end() {
+        // 400 ms to first output (queue + prefill), reasoning, answer and tool
+        // arguments, then the stream ends at 1.5 s. Provider usage reports 300
+        // output tokens, 120 of them reasoning.
+        let origin = Instant::now();
+        let at = |ms| origin + Duration::from_millis(ms);
+        let mut timing = ClientTiming::new(origin, ClientTimingScope::Request);
+        timing.observe_at(
+            &StreamEvent::ReasoningDelta {
+                index: 0,
+                delta: "think".into(),
+            },
+            at(400),
+        );
+        timing.observe_at(
+            &StreamEvent::TextDelta {
+                index: 1,
+                delta: "answer".into(),
+            },
+            at(900),
+        );
+        timing.observe_at(
+            &StreamEvent::ToolCallArgsDelta {
+                index: 2,
+                delta: "{\"a\":1}".into(),
+            },
+            at(1400),
+        );
+        let client = timing.finish_at(300, at(1500));
+        let sample = client.output_rate_sample().unwrap();
+        assert_eq!(
+            sample,
+            OutputRateSample {
+                tokens: 300,
+                active_ns: 1_500_000_000,
+                estimated_tokens: false,
+            }
+        );
+        // 300 / 1.5 s, not 180 visible tokens and not 300 / 1.0 s of output.
+        assert_eq!(sample.tokens_per_second(), Some(200.0));
+    }
+
+    #[test]
+    fn output_rate_estimates_only_when_usage_is_missing_and_never_invents_an_origin() {
+        let origin = Instant::now();
+        let mut timing = ClientTiming::new(origin, ClientTimingScope::Request);
+        timing.observe_at(
+            &StreamEvent::TextDelta {
+                index: 0,
+                delta: "x".repeat(399),
+            },
+            origin + Duration::from_millis(100),
+        );
+        let client = timing.finish_at(0, origin + Duration::from_secs(2));
+        let sample = client.output_rate_sample().unwrap();
+        assert!(sample.estimated_tokens);
+        assert_eq!(sample.tokens, 100);
+        assert_eq!(sample.tokens_per_second(), Some(50.0));
+
+        for scope in [
+            ClientTimingScope::ResponseSegment,
+            ClientTimingScope::DeferredSubmit,
+            ClientTimingScope::DeferredPoll,
+        ] {
+            let timing = ClientTiming::new(origin, scope);
+            let client = timing.finish_at(100, origin + Duration::from_secs(1));
+            assert_eq!(client.output_rate_sample(), None, "{scope:?}");
+        }
     }
 
     #[test]

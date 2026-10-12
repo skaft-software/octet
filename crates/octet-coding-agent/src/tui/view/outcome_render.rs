@@ -42,10 +42,11 @@ fn completion_status_text(
 }
 
 pub(super) fn completion_rate_detail(generation: &super::RunGenerationRate) -> String {
-    let source = if generation.is_estimate {
-        "estimated decode (approx.)"
+    let approx = if generation.is_estimate { "~" } else { "" };
+    let estimated = if generation.is_estimate {
+        " (estimated tokens)"
     } else {
-        "server-reported generation"
+        ""
     };
     let response_label = if generation.responses == 1 {
         "response"
@@ -53,7 +54,7 @@ pub(super) fn completion_rate_detail(generation: &super::RunGenerationRate) -> S
         "responses"
     };
     format!(
-        "whole run · {source} {:.1} tok/s · {} {response_label}",
+        "{approx}{:.1} tok/s{estimated} · {} {response_label}",
         generation.tokens_per_second, generation.responses
     )
 }
@@ -366,14 +367,31 @@ mod tests {
 #[cfg(test)]
 mod inference_tests {
     use super::*;
+
+    fn client(tokens: u64, elapsed_ms: u64) -> octet_ai::ClientInferenceMetrics {
+        octet_ai::ClientInferenceMetrics {
+            scope: Some(octet_ai::ClientTimingScope::Request),
+            elapsed_ns: elapsed_ms * 1_000_000,
+            first_output_ns: Some(800_000_000),
+            last_output_ns: Some(elapsed_ms * 1_000_000),
+            reported_output_tokens: tokens,
+            text_bytes: 404,
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn completion_prefers_native_generation_and_never_displays_e2e() {
+    fn completion_shows_reported_output_over_dispatch_to_stream_end() {
         let theme = crate::tui::theme::test_theme();
+        // Server-native counters and a decode fit would both claim much faster
+        // speeds; the displayed rate is 100 reported tokens over the 2 s from
+        // dispatch to stream end.
         let metrics = octet_ai::InferenceMetrics {
+            client: Some(client(100, 2_000)),
             decode_estimate: Some(octet_ai::DecodeEstimate {
-                tokens_per_second: 100.0,
+                tokens_per_second: 400.0,
                 reported_visible_tokens: 100,
-                observed_ns: 1_000_000_000,
+                observed_ns: 250_000_000,
                 samples: 20,
                 relative_dispersion: 0.01,
                 reasoning_tokens_excluded: 0,
@@ -391,7 +409,7 @@ mod inference_tests {
         };
         let block = OutcomeBlock::new(
             RunOutcome::Completed {
-                elapsed: Duration::from_secs(2),
+                elapsed: Duration::from_secs(9),
                 summary: crate::presentation::RunSummary {
                     files_changed: 0,
                     tool_calls: 0,
@@ -405,16 +423,7 @@ mod inference_tests {
             .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(
-            text,
-            "✓ completed · 2.0s · whole run · server-reported generation 200.0 tok/s · 1 response"
-        );
-        assert!(!text.contains("E2E"), "{text}");
-        assert!(
-            !text.contains("estimated decode"),
-            "native source must win: {text}"
-        );
-        assert!(!text.contains("100.0"), "native source must win: {text}");
+        assert_eq!(text, "✓ completed · 9.0s · 50.0 tok/s · 1 response");
     }
 }
 
@@ -422,8 +431,7 @@ mod inference_tests {
 mod decode_estimate_tests {
     use super::*;
     #[test]
-    fn completion_and_copy_show_only_available_speed() {
-        let metrics = octet_ai::InferenceMetrics::default();
+    fn completion_and_copy_show_only_available_speed_and_mark_estimates() {
         let block = |inference| {
             OutcomeBlock::new(
                 RunOutcome::Completed {
@@ -437,6 +445,7 @@ mod decode_estimate_tests {
                 inference,
             )
         };
+        let metrics = octet_ai::InferenceMetrics::default();
         let missing_block = block(Some(metrics.clone()));
         let missing = completion_text(
             Duration::from_secs(60),
@@ -444,7 +453,7 @@ mod decode_estimate_tests {
             missing_block.generation.as_ref(),
         );
         assert_eq!(missing, "completed · 1m00s");
-        for inference in [None, Some(metrics.clone())] {
+        for inference in [None, Some(metrics)] {
             assert_eq!(
                 super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block(
                     inference
@@ -452,14 +461,14 @@ mod decode_estimate_tests {
                 missing
             );
         }
+        // No provider output usage: 400 streamed bytes are ~100 tokens over 2 s.
         let metrics = octet_ai::InferenceMetrics {
-            decode_estimate: Some(octet_ai::DecodeEstimate {
-                tokens_per_second: 100.0,
-                reported_visible_tokens: 205,
-                observed_ns: 2_000_000_000,
-                samples: 41,
-                relative_dispersion: 0.01,
-                reasoning_tokens_excluded: 10000,
+            client: Some(octet_ai::ClientInferenceMetrics {
+                scope: Some(octet_ai::ClientTimingScope::Request),
+                elapsed_ns: 2_000_000_000,
+                text_bytes: 400,
+                reported_output_tokens: 0,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -471,7 +480,7 @@ mod decode_estimate_tests {
         );
         assert_eq!(
             text,
-            "completed · 1m00s · whole run · estimated decode (approx.) 100.0 tok/s · 1 response"
+            "completed · 1m00s · ~50.0 tok/s (estimated tokens) · 1 response"
         );
         assert_eq!(
             super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(estimated_block)),

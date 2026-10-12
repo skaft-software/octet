@@ -5,9 +5,9 @@ use octet_ai::Usage;
 use super::terminal_text::sanitize_for_terminal;
 use super::{OctetTheme, PriceDisplay, ShellState};
 
-/// Client-observed end-to-end rate for a completed provider attempt. The token
-/// count includes reasoning; the interval must start at request start, not the
-/// first visible delta. This is not server-side generation speed.
+/// Output rate for a completed provider response when no AI-client metrics are
+/// available (legacy event producers). The token count includes reasoning; the
+/// interval starts at the request, not the first visible delta.
 pub(super) fn output_tokens_per_second(output_tokens: u64, elapsed: Duration) -> Option<f64> {
     (output_tokens > 0 && !elapsed.is_zero())
         .then(|| output_tokens as f64 / elapsed.as_secs_f64())
@@ -85,8 +85,16 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
         state.last_turn_generated_tokens,
         state.last_turn_provider_elapsed,
     ) {
+        let (approx, basis) = if state.last_turn_tokens_estimated {
+            (
+                "~",
+                "estimated output tokens from streamed bytes; provider reported no usage",
+            )
+        } else {
+            ("", "provider-reported output tokens incl. reasoning")
+        };
         lines.push(format!(
-            "Throughput     {rate:.1} tok/s end-to-end, last attempt ({tokens} reported output tokens / {:.2}s request-to-completion; not server speed)",
+            "Throughput     {approx}{rate:.1} tok/s, last response ({approx}{tokens} {basis} / {:.2}s request-to-stream-end; excludes tool time)",
             elapsed.as_secs_f64()
         ));
     } else if let Some(started) = state.turn_requested_at {

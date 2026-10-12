@@ -106,8 +106,8 @@ pub use faux::{
 pub use host_transport::{HostStreamModel, HostStreamTransport};
 pub use inference::{
     ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
-    InferenceMetrics, ReportedTimingUnit, ServerGenerationMetrics, ServerTimingSource,
-    ServerTimingUnavailable,
+    InferenceMetrics, OutputRateSample, ReportedTimingUnit, ServerGenerationMetrics,
+    ServerTimingSource, ServerTimingUnavailable,
 };
 
 pub use images::{
