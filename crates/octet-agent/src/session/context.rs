@@ -416,7 +416,9 @@ impl Session {
             })
             .collect();
         messages.extend(newest_first.into_iter().rev());
-        Ok(coalesce_tool_results(messages))
+        let mut messages = coalesce_tool_results(messages);
+        bound_tool_result_images(&mut messages);
+        Ok(messages)
     }
 
     /// Preview the proposed checkpoint without touching the durable branch.
@@ -713,19 +715,116 @@ fn merge_tool_result_turn(previous: &mut UserMessage, current: &[UserPart]) {
     );
 }
 
+/// How many of the newest tool-result images stay in the model-visible context.
+///
+/// Long computer-use runs otherwise resend every earlier window screenshot on
+/// every turn, which grows each request (cost, latency and provider limits)
+/// without bound. Older images are replaced in the projection only: the
+/// journal keeps every image, so reopening, export and audit are unchanged.
+/// Images the user attached to a prompt are not counted or replaced here; they
+/// are bounded at admission.
+pub const MODEL_VISIBLE_TOOL_IMAGE_LIMIT: usize = 4;
+
+/// Text sent in place of a tool-result image that fell out of the window.
+pub const TOOL_IMAGE_PLACEHOLDER: &str =
+    "[earlier screenshot omitted from this request; only the most recent tool-result images are sent]";
+
+fn is_tool_image(part: &octet_ai::ToolResultPart) -> bool {
+    matches!(
+        part,
+        octet_ai::ToolResultPart::Media(octet_ai::Media::Image(_))
+    )
+}
+
+fn turn_has_tool_images(turn: &UserMessage) -> bool {
+    is_tool_result_turn(turn)
+        && turn.content.iter().any(|part| match part {
+            UserPart::Media(octet_ai::Media::Image(_)) => true,
+            UserPart::ToolResult(result) => result.content.iter().any(is_tool_image),
+            _ => false,
+        })
+}
+
+/// Replaces tool-result images older than the newest
+/// [`MODEL_VISIBLE_TOOL_IMAGE_LIMIT`] with [`TOOL_IMAGE_PLACEHOLDER`] text.
+///
+/// Counts newest first across tool-result content and the protocol-adjacent
+/// media that follows coalesced results. An omitted adjacent image is removed
+/// (the turn keeps its tool-result shape so later results still coalesce) and
+/// its placeholder is attached to the turn's last result.
+fn bound_tool_result_images(messages: &mut [Message]) {
+    let mut kept = 0usize;
+    for message in messages.iter_mut().rev() {
+        let Message::User(turn) = message else {
+            continue;
+        };
+        if !turn_has_tool_images(turn) {
+            continue;
+        }
+        let mut omitted_adjacent = 0usize;
+        let mut index = turn.content.len();
+        while index > 0 {
+            index -= 1;
+            match &mut turn.content[index] {
+                UserPart::Media(octet_ai::Media::Image(_)) => {
+                    if kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
+                        kept += 1;
+                    } else {
+                        turn.content.remove(index);
+                        omitted_adjacent += 1;
+                    }
+                }
+                UserPart::ToolResult(result) => {
+                    for part in result.content.iter_mut().rev() {
+                        if is_tool_image(part) {
+                            if kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
+                                kept += 1;
+                            } else {
+                                *part = octet_ai::ToolResultPart::Text(
+                                    TOOL_IMAGE_PLACEHOLDER.to_owned(),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if omitted_adjacent > 0 {
+            if let Some(result) = turn.content.iter_mut().rev().find_map(|part| match part {
+                UserPart::ToolResult(result) => Some(result),
+                _ => None,
+            }) {
+                for _ in 0..omitted_adjacent {
+                    result.content.push(octet_ai::ToolResultPart::Text(
+                        TOOL_IMAGE_PLACEHOLDER.to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Appends one newly persisted message to an already materialized context.
 pub(super) fn append_context_message(messages: &mut Vec<Message>, message: &Message) {
+    let adds_tool_images = matches!(message, Message::User(turn) if turn_has_tool_images(turn));
     if let Message::User(current) = message {
         if is_tool_result_turn(current) {
             if let Some(Message::User(previous)) = messages.last_mut() {
                 if is_tool_result_turn(previous) {
                     merge_tool_result_turn(previous, &current.content);
+                    if adds_tool_images {
+                        bound_tool_result_images(messages);
+                    }
                     return;
                 }
             }
         }
     }
     messages.push(message.clone());
+    if adds_tool_images {
+        bound_tool_result_images(messages);
+    }
 }
 
 /// Merges consecutive user messages that contain tool results and their

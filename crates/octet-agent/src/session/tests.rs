@@ -148,4 +148,6 @@ mod replay;
 #[cfg(test)]
 mod store;
 #[cfg(test)]
+mod tool_images;
+#[cfg(test)]
 mod usage;

@@ -269,6 +269,7 @@ pub use session::{
     SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
     UsageUncertaintyBound, UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
     MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
+    MODEL_VISIBLE_TOOL_IMAGE_LIMIT, TOOL_IMAGE_PLACEHOLDER,
 };
 pub use skills::{
     ContentHash, LoadedSkill, SkillActivationId, SkillDescriptor, SkillId, SkillLoadError,
