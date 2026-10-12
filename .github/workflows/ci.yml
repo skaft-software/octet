@@ -581,6 +581,12 @@ jobs:
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
           retention-days: 14
+          # The dogfood manifest checksums every extracted payload file with
+          # `-Force`, dotfiles included (extension `.gitignore`/`.gitattributes`
+          # and `node_modules/.package-lock.json`). upload-artifact skips hidden
+          # files unless told otherwise, which left four manifest entries with
+          # no file in the downloaded artifact.
+          include-hidden-files: true
 
   release-candidate:
     # Unsigned release-candidate archives for attended testing. Built like
