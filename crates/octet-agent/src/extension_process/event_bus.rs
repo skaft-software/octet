@@ -995,8 +995,8 @@ mod tests {
         }
     }
 
-    fn never_polled() -> impl std::future::Future<Output = Result<(), String>> {
-        async { panic!("a delivery invalidated before its write must not start writing") }
+    async fn never_polled() -> Result<(), String> {
+        panic!("a delivery invalidated before its write must not start writing")
     }
 
     #[tokio::test]
