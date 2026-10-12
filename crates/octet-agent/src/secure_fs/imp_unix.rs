@@ -81,6 +81,11 @@ fn validate_private_file_identity(
     if metadata.uid() != effective_user_id() {
         return Err(insecure_private("file is not owned by the current user"));
     }
+    if metadata.nlink() == 0 {
+        // The opened file was unlinked after open: a concurrent writer
+        // replaced it. That is a change, not an insecure extra link.
+        return Err(SecureFileError::Changed);
+    }
     if metadata.nlink() != 1 {
         return Err(insecure_private("file has additional hard links"));
     }
