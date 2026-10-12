@@ -178,15 +178,19 @@ async fn powershell_reports_exit_codes_and_job_cleanup_bounds_a_timeout() {
     let sandbox = powershell_sandbox(&workspace);
     let tool = octet_agent::tools::PowerShellTool::default();
 
-    let output = tool
+    // A nonzero exit is a tool error with the same shape as bash's.
+    let error = tool
         .execute(
             json!({"command": "[Console]::Error.WriteLine('boom'); exit 7"}),
             &context(&workspace, &sandbox),
         )
         .await
-        .expect("PowerShell exit status");
-    assert!(output.text.starts_with("exit=7"), "{}", output.text);
-    assert!(output.text.contains("boom"), "{}", output.text);
+        .expect_err("PowerShell nonzero exit");
+    assert!(
+        error.message.starts_with("error nonzero_exit\nexit=7"),
+        "{error}"
+    );
+    assert!(error.message.contains("boom"), "{error}");
 
     let started = Instant::now();
     let error = tool
