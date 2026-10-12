@@ -126,13 +126,19 @@ test('real adapter transport registers after initialize and emits the native acc
     streamSimple: (_, context, options) => (async function* () {
       if (options.apiKey !== 'explicit-local-dummy') throw new Error('local key missing');
       const partial = { content: [{type:'text',text:''}] };
-      yield {type:'start',partial};
       if (context.systemPrompt === 'cancel-native') {
-        // The cancel can land before this listener exists; check first.
-        if (!options.signal.aborted) await new Promise(resolve => options.signal.addEventListener('abort', resolve, {once:true}));
-        writeFileSync(${JSON.stringify(cancelledPath)}, String(options.signal.aborted));
+        // The host may cancel while this generator is still suspended at
+        // 'start' (the adapter then closes it with return()), or after it
+        // resumes; record the observed abort either way.
+        try {
+          yield {type:'start',partial};
+          if (!options.signal.aborted) await new Promise(resolve => options.signal.addEventListener('abort', resolve, {once:true}));
+        } finally {
+          writeFileSync(${JSON.stringify(cancelledPath)}, String(options.signal.aborted));
+        }
         return;
       }
+      yield {type:'start',partial};
       yield {type:'text_start',contentIndex:0,partial};
       partial.content[0].text = 'local';
       yield {type:'text_delta',contentIndex:0,delta:'local',partial};
