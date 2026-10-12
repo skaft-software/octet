@@ -3458,10 +3458,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 34641,
+    "cache_read": 34365,
     "cache_write_5m": 0,
-    "input": 415686,
-    "output": 831372,
+    "input": 412380,
+    "output": 824760,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3910,6 +3910,13 @@
     "cache_write_5m": 0,
     "input": 100000,
     "output": 200000,
+    "reasoning": null
+  },
+  "openrouter/meta/muse-wonder": {
+    "cache_read": 200000,
+    "cache_write_5m": 0,
+    "input": 4000000,
+    "output": 20000000,
     "reasoning": null
   },
   "openrouter/microsoft/phi-4": {
@@ -5600,10 +5607,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 666,
+    "cache_read": 33600,
     "cache_write_5m": 0,
-    "input": 33300,
-    "output": 133200,
+    "input": 33600,
+    "output": 1188000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
@@ -5635,10 +5642,10 @@
     "reasoning": 12000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 550000,
+    "cache_read": 300000,
     "cache_write_5m": 0,
-    "input": 730000,
-    "output": 10000000,
+    "input": 720000,
+    "output": 24000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {

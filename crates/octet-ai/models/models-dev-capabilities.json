@@ -14471,6 +14471,41 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/meta/muse-wonder": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf",
+        "audio"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Muse Wonder",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/microsoft/phi-4": {
     "limit": {
       "context": 16384,
@@ -20535,7 +20570,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
