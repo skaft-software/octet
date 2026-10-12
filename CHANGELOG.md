@@ -13,6 +13,12 @@ and known limitations.
   key, or a custom provider, after a confirmation that defaults to Cancel. The
   provider behind the current model is refused, and environment variables are
   never changed.
+- Themes choose how verbose the transcript is by default. `thinking_expanded`
+  shows the thinking trace as it streams (and on resume) instead of a collapsed
+  `Thinking` line: the built-in `pi` theme and Pi palette projections set it, and
+  the default theme still collapses it. `quiet_tool_summaries`, which `Still` uses
+  to group read-only calls into `Explored` rows, is now documented with it in
+  [themes](docs/themes.md#tool-call-and-thinking-verbosity).
 - Pickers such as Settings keep a usable window of options when a long
   transcript leaves little room, instead of showing one row.
 - Quieter startup and reloads: only what you must act on is shown. Best-effort

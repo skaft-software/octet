@@ -224,3 +224,22 @@ fn pi_simple_extension_footer_replaces_native_metadata_and_withdrawal_restores_i
             .contains("Stock model"));
     }
 }
+
+#[test]
+fn pi_themes_stream_thinking_expanded_and_the_default_theme_collapses_it() {
+    for theme in themes() {
+        assert_eq!(
+            theme.resolve::<bool>("thinking_expanded"),
+            Some(true),
+            "every Pi source (built-in, native projection, adapter output) expands thinking"
+        );
+    }
+    let default = compiled_theme_for_selector(
+        crate::tui::theme::DEFAULT_THEME_NAME,
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        TerminalBackground::Dark,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(default.resolve::<bool>("thinking_expanded"), Some(true));
+}

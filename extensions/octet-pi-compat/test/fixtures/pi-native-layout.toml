@@ -49,6 +49,7 @@ syntax_punctuation = "#00aaff"
 prompt_wash = false
 margin_markers = false
 thinking_spinner = true
+thinking_expanded = true
 splash_compact = true
 assistant_msg_text = "#ddeeff"
 model_assistant = "#ddeeff"

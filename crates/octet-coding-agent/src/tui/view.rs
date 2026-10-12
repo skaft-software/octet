@@ -3042,6 +3042,15 @@ impl ShellState {
             .unwrap_or(false)
     }
 
+    /// Whether a new thinking trace starts expanded. Themes choose their own
+    /// verbosity: the compiled default collapses to a `Thinking` line, Pi
+    /// themes show the trace as it streams. Ctrl+O still expands a collapsed one.
+    fn thinking_expanded_by_default(&self) -> bool {
+        self.theme
+            .resolve::<bool>("thinking_expanded")
+            .unwrap_or(false)
+    }
+
     fn seal_activity_group(&mut self) {
         let Some(position) = self.activity_groups.iter().rposition(|view| view.open) else {
             return;
@@ -3252,6 +3261,7 @@ impl ShellState {
             OutputChannel::Reasoning => self.active_reasoning,
         };
         if let Some(index) = active_index {
+            let expand_thinking = self.thinking_expanded_by_default();
             let updated = match self.transcript.get_mut(index) {
                 Some(TranscriptBlock::Assistant(existing)) if channel == OutputChannel::Text => {
                     existing.append(text);
@@ -3274,6 +3284,7 @@ impl ShellState {
                         // reasoning content.
                         existing.reasoning_heading = None;
                         existing.show_reasoning_hint = true;
+                        existing.reasoning_expanded = expand_thinking;
                     }
                     existing.append_reasoning(text);
                     true
@@ -3326,6 +3337,7 @@ impl ShellState {
             )),
             OutputChannel::Reasoning => TranscriptBlock::Reasoning(Box::new(
                 AssistantBlock::streaming_reasoning(text)
+                    .with_reasoning_expanded(self.thinking_expanded_by_default())
                     .with_model_lab(model_lab)
                     .with_activity_started_at(activity_started_at),
             )),

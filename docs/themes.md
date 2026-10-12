@@ -123,6 +123,26 @@ also change perceived contrast.
 
 </details>
 
+## Tool call and thinking verbosity
+
+A theme chooses how much of the agent's work the transcript shows by default.
+Both settings are boolean tokens in the theme's `[colors]` table:
+
+| Token | Default | Effect |
+| --- | --- | --- |
+| `quiet_tool_summaries` | `false` | Groups consecutive read-only tool calls into one summary row such as `Explored 3 files · 1 command`, with edits, web, MCP and other activity summarized the same way. `Still` sets it. Press Ctrl+O to open the individual calls. |
+| `thinking_expanded` | `false` | Shows the model's thinking trace as it streams, and when you resume a session, instead of a collapsed `Thinking` line. The built-in `pi` theme and every Pi palette projection set it, as Pi does. |
+
+The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+O
+expands it. A theme that sets `thinking_expanded = true` starts every thinking
+trace open, and `[layout] show_reasoning = false` still hides thinking entirely.
+
+```toml
+[colors]
+quiet_tool_summaries = true
+thinking_expanded = false
+```
+
 ## Startup and terminal replies
 
 The first branded frame waits for resolved model and setup state, workspace and

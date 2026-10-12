@@ -302,6 +302,12 @@ impl AssistantBlock {
         block
     }
 
+    /// Start the thinking trace expanded (the theme's `thinking_expanded`).
+    pub(super) fn with_reasoning_expanded(mut self, expanded: bool) -> Self {
+        self.reasoning_expanded = expanded;
+        self
+    }
+
     pub(super) fn with_model_lab(mut self, lab: Option<crate::tui::theme::ModelLab>) -> Self {
         self.model_lab = lab;
         self

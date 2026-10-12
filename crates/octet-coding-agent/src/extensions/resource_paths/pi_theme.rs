@@ -207,6 +207,8 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
         ("prompt_wash", toml::Value::Boolean(false)),
         ("margin_markers", toml::Value::Boolean(false)),
         ("thinking_spinner", toml::Value::Boolean(true)),
+        // Pi shows the thinking trace as it streams rather than a collapsed line.
+        ("thinking_expanded", toml::Value::Boolean(true)),
         ("splash_compact", toml::Value::Boolean(true)),
         ("assistant_msg_text", palette["text"].clone()),
         ("model_assistant", palette["text"].clone()),

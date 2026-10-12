@@ -580,6 +580,8 @@ fn compile(
         .expect("Pi projection colors");
     for (key, value) in [
         ("prompt_wash", toml::Value::Boolean(false)),
+        // Pi shows the thinking trace as it streams rather than a collapsed line.
+        ("thinking_expanded", toml::Value::Boolean(true)),
         ("prompt_rail_model_adaptive", toml::Value::Boolean(false)),
         ("splash_model_adaptive", toml::Value::Boolean(false)),
         (

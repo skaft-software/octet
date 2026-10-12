@@ -84,6 +84,7 @@ test('adapter snapshots preserve the native Pi presentation contract', async () 
   const converted = piThemeToNativeToml({ name: 'Pi presentation QA', appearance: 'dark', colors });
   assert.equal(converted.toml, await readFile(new URL('./fixtures/pi-native-layout.toml', import.meta.url), 'utf8'));
   assert.match(converted.toml, /thinking_spinner = true/);
+  assert.match(converted.toml, /thinking_expanded = true/);
   assert.match(converted.toml, /\[roles\."extension\.pi\.accent"\]/);
   assert.match(converted.toml, /\[surfaces\.user\]\nchrome = "band"\npadding = 1/);
   assert.match(converted.toml, /\[surfaces\.reasoning\]\nchrome = "plain"\npadding = 0/);

@@ -1012,3 +1012,93 @@ fn reasoning_is_subdued_without_losing_inline_code_colour() {
         "ordinary response prose must not inherit reasoning dim"
     );
 }
+
+/// Whether the thinking blocks a streamed turn produced started expanded.
+fn streamed_thinking_starts_expanded(source: &str, placeholder_first: bool) -> Vec<bool> {
+    let mut shell =
+        InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_from_source(source));
+    let id = shell.begin_run("test");
+    shell.on_run_event(id, &AgentEvent::TurnStarted);
+    if placeholder_first {
+        // The empty "Working" status becomes a thinking block on first content.
+        shell.on_run_event(
+            id,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: String::new(),
+            },
+        );
+    }
+    shell.on_run_event(
+        id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "Considering the options.".into(),
+        },
+    );
+    let state = shell.state.borrow();
+    state
+        .transcript
+        .iter()
+        .filter_map(|block| match block {
+            TranscriptBlock::Reasoning(reasoning) if !reasoning.text.is_empty() => {
+                Some(reasoning.reasoning_expanded)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_theme_chooses_whether_live_thinking_streams_expanded() {
+    for placeholder_first in [false, true] {
+        assert_eq!(
+            streamed_thinking_starts_expanded("[colors]\n", placeholder_first),
+            [false],
+            "the default collapses thinking (placeholder first: {placeholder_first})"
+        );
+        assert_eq!(
+            streamed_thinking_starts_expanded(
+                "[colors]\nthinking_expanded = true",
+                placeholder_first
+            ),
+            [true],
+            "thinking_expanded shows the trace (placeholder first: {placeholder_first})"
+        );
+    }
+}
+
+#[test]
+fn an_expanding_theme_paints_the_trace_while_the_default_paints_a_collapsed_line() {
+    let rendered = |source: &str| {
+        let mut shell = InteractiveShell::test_shell_with_theme(
+            crate::tui::theme::test_theme_from_source(source),
+        );
+        let run_id = shell.begin_run("openai");
+        shell.on_run_event(
+            run_id,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: "Weighing the two migration paths.".into(),
+            },
+        );
+        let rows = shell
+            .state
+            .borrow()
+            .rendered_transcript(80)
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect::<Vec<_>>();
+        rows.join("\n")
+    };
+
+    let collapsed = rendered("[colors]\n");
+    assert!(collapsed.contains("ctrl+o to expand"), "{collapsed}");
+
+    let expanded = rendered("[colors]\nthinking_expanded = true");
+    assert!(
+        expanded.contains("Weighing the two migration paths."),
+        "{expanded}"
+    );
+    assert!(!expanded.contains("ctrl+o to expand"), "{expanded}");
+}

@@ -125,7 +125,7 @@ export function piThemeToNativeToml(input) {
     `name = ${JSON.stringify(palette.name)}`, 'description = "Pi colors and shaded transcript surfaces; native input and ownership"',
     `terminal = ${JSON.stringify(palette.appearance ?? 'any')}`, 'adaptive = false', '', '[colors]'];
   for (const [pi, octet] of Object.entries(nativeTokenProjection)) lines.push(`${octet} = ${JSON.stringify(native(palette.colors[pi]))}`);
-  lines.push('prompt_wash = false', 'margin_markers = false', 'thinking_spinner = true', 'splash_compact = true',
+  lines.push('prompt_wash = false', 'margin_markers = false', 'thinking_spinner = true', 'thinking_expanded = true', 'splash_compact = true',
     `assistant_msg_text = ${JSON.stringify(native(palette.colors.text))}`, `model_assistant = ${JSON.stringify(native(palette.colors.text))}`,
     `model_accent = ${JSON.stringify(native(palette.colors.accent))}`, 'md_code_bg = "default"', 'md_code_inline_bg = "default"',
     '', '[model]', 'use_lab_color = false', '', '[layout]', 'transcript_inset = 0');

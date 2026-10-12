@@ -123,8 +123,9 @@ pub(super) fn append_hydrated_items(
                 )));
             }
             TranscriptItem::Reasoning(text) => {
+                let expanded = state.thinking_expanded_by_default();
                 state.push_block(TranscriptBlock::Reasoning(Box::new(
-                    AssistantBlock::finalized_reasoning(text),
+                    AssistantBlock::finalized_reasoning(text).with_reasoning_expanded(expanded),
                 )));
             }
             TranscriptItem::ToolActivityGroup(group) => {
@@ -326,6 +327,31 @@ mod tests {
     use super::*;
     use octet_ai::ToolCallId;
     use sexy_tui_rs::strip_terminal_sequences;
+
+    fn thinking_blocks_start_expanded(source: &str) -> Vec<bool> {
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(source),
+            ..Default::default()
+        };
+        append_hydrated_items(&mut state, [TranscriptItem::Reasoning("a thought".into())]);
+        state
+            .transcript
+            .iter()
+            .filter_map(|block| match block {
+                TranscriptBlock::Reasoning(reasoning) => Some(reasoning.reasoning_expanded),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_theme_chooses_whether_resumed_thinking_starts_expanded() {
+        assert_eq!(thinking_blocks_start_expanded("[colors]\n"), [false]);
+        assert_eq!(
+            thinking_blocks_start_expanded("[colors]\nthinking_expanded = true"),
+            [true]
+        );
+    }
 
     #[test]
     fn grouped_exploration_replays_mixed_results_and_expands_child_details() {
