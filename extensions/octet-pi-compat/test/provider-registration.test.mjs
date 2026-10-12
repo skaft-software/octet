@@ -128,7 +128,8 @@ test('real adapter transport registers after initialize and emits the native acc
       const partial = { content: [{type:'text',text:''}] };
       yield {type:'start',partial};
       if (context.systemPrompt === 'cancel-native') {
-        await new Promise(resolve => options.signal.addEventListener('abort', resolve, {once:true}));
+        // The cancel can land before this listener exists; check first.
+        if (!options.signal.aborted) await new Promise(resolve => options.signal.addEventListener('abort', resolve, {once:true}));
         writeFileSync(${JSON.stringify(cancelledPath)}, String(options.signal.aborted));
         return;
       }
