@@ -62,7 +62,7 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/skill:NAME [arguments]` | Expand a skill as a user prompt when sent, not as a local slash command. During a run, Enter or Ctrl+S queues it, so it expands at the next idle prompt. |
 | `/extensions [status\|reload]` | Enable, disable and configure extensions (below), or show or reload extension state. Menu changes wait for idle during a run. |
 | `/subagents [list\|status\|inspect\|wait\|reattach\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents stop <name-or-id\|all>` requests owner-bound interruption immediately. Other operations wait for idle. |
-| `/settings [show\|theme\|images on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
+| `/settings [show\|theme\|tui fullscreen/inline\|steering one-at-a-time/all\|follow-up one-at-a-time/all\|images on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme, terminal screen, steering and follow-up modes and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model-cycling scope. Changes apply to Ctrl+P at once and persist as an exact ordered pattern list (`models` in the user config). `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/help [command]` | Help for a command. |
 | `/exit` | Exit octet. |
@@ -136,9 +136,10 @@ model input, and reading a report never approves an effect.
 ## Settings menu
 
 Bare `/settings` opens a filterable menu immediately, including during active
-work. Choose **Theme**, **Inline tool-result images (On/Off)**, **Default model
-for new sessions**, **Default reasoning for new sessions**, or **Show effective
-settings**. Up and Down select, typing filters, and Enter opens or applies the
+work. Choose **Theme**, **Terminal screen** (fullscreen, the default, or
+inline), **Steering mode**, **Follow-up mode**, **Inline tool-result images
+(On/Off)**, **Default model for new sessions**, **Default reasoning for new
+sessions**, or **Show effective settings**. Up and Down select, typing filters, and Enter opens or applies the
 highlighted choice. Child menus offer **Back**; Escape closes the menu without
 changing a preference.
 
@@ -151,14 +152,25 @@ label the current session or launch selection as a saved default. Selected
 changes use the same safe display or deferred settings dispatch as explicit
 commands; opening and browsing the menu does not interrupt active work.
 
+**Steering mode** and **Follow-up mode** are Pi's `steeringMode` and
+`followUpMode` (config keys `steering_mode` and `follow_up_mode`). Both default to
+`one-at-a-time`, as in Pi. Steering messages are sent while the agent works:
+`one-at-a-time` delivers one per turn boundary, `all` delivers every queued
+message at the next boundary. Follow-ups wait until the agent finishes:
+`one-at-a-time` runs each as its own turn, `all` sends consecutive queued prompts
+together in one turn (slash commands, `!` shell commands and `/answer` still run
+on their own). A change applies from the next run. **Terminal screen** chooses
+fullscreen (no scrollback replay or flicker) or the inline, differential renderer;
+`--tui-mode` overrides it for one launch.
+
 **Show effective settings**, or `/settings show`, opens read-only diagnostics.
 **Configured model** is a launch fact and **Active reasoning** is session state;
 neither is presented as the saved default for new sessions. In narrower terminal
 panes, settings, extension and setup menus put descriptions below their bold
 action labels instead of squeezing both into one row. Native Tern sheets keep
 bold action labels in the list and wrap the full selected description below it.
-Existing explicit `/settings theme`, `images`, `default model`, `default
-reasoning`, `transport` and `padding` forms keep their behavior. Transport,
+Explicit `/settings theme`, `tui`, `steering`, `follow-up`, `images`, `default
+model`, `default reasoning`, `transport` and `padding` forms are also available. Transport,
 padding, permissions and project trust are not editable menu preferences, and
 the menu adds no cache-policy controls.
 

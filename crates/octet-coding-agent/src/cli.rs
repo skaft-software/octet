@@ -69,6 +69,75 @@ pub fn persist_tui_mode(mode: config::TuiMode) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which Pi message queue a delivery mode governs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueKind {
+    Steering,
+    FollowUp,
+}
+
+impl QueueKind {
+    fn config_key(self) -> &'static str {
+        match self {
+            Self::Steering => "steering_mode",
+            Self::FollowUp => "follow_up_mode",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Steering => "steering",
+            Self::FollowUp => "follow-up",
+        }
+    }
+}
+
+/// Saved queue delivery modes for this process (0 = one-at-a-time, 1 = all).
+static STEERING_MODE: AtomicU8 = AtomicU8::new(0);
+static FOLLOW_UP_MODE: AtomicU8 = AtomicU8::new(0);
+
+fn queue_mode_slot(kind: QueueKind) -> &'static AtomicU8 {
+    match kind {
+        QueueKind::Steering => &STEERING_MODE,
+        QueueKind::FollowUp => &FOLLOW_UP_MODE,
+    }
+}
+
+fn store_queue_mode(kind: QueueKind, mode: octet_agent::QueueDeliveryMode) {
+    queue_mode_slot(kind).store(
+        u8::from(mode == octet_agent::QueueDeliveryMode::All),
+        Ordering::Relaxed,
+    );
+}
+
+/// The effective delivery mode for one queue: the saved preference or Pi's
+/// one-at-a-time default.
+pub fn queue_mode(kind: QueueKind) -> octet_agent::QueueDeliveryMode {
+    match queue_mode_slot(kind).load(Ordering::Relaxed) {
+        1 => octet_agent::QueueDeliveryMode::All,
+        _ => octet_agent::QueueDeliveryMode::OneAtATime,
+    }
+}
+
+pub fn persist_queue_mode(
+    kind: QueueKind,
+    mode: octet_agent::QueueDeliveryMode,
+) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot persist the {} mode: user home directory is unavailable",
+            kind.label()
+        )
+    })?;
+    persist_key_to_path(
+        kind.config_key(),
+        config::queue_delivery_mode_label(mode),
+        &path,
+    )?;
+    store_queue_mode(kind, mode);
+    Ok(())
+}
+
 fn resolve_tui_mode(
     cli: Option<&str>,
     saved: Option<&str>,
@@ -476,6 +545,10 @@ struct ConfigLayer {
     show_cache_miss_notices: Option<bool>,
     theme: Option<String>,
     tui_mode: Option<String>,
+    /// Pi's `steeringMode`: `one-at-a-time` (default) or `all`.
+    steering_mode: Option<String>,
+    /// Pi's `followUpMode`: `one-at-a-time` (default) or `all`.
+    follow_up_mode: Option<String>,
     color: Option<String>,
     mouse: Option<String>,
     tern: Option<String>,
@@ -539,6 +612,8 @@ impl ConfigLayer {
         override_some!(show_cache_miss_notices);
         override_some!(theme);
         override_some!(tui_mode);
+        override_some!(steering_mode);
+        override_some!(follow_up_mode);
         override_some!(color);
         override_some!(mouse);
         override_some!(tern);
@@ -1379,6 +1454,8 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         show_cache_miss_notices: None,
         theme: env_value("OCTET_THEME"),
         tui_mode: None,
+        steering_mode: None,
+        follow_up_mode: None,
         color: env_value("OCTET_COLOR"),
         mouse: env_value("OCTET_MOUSE"),
         tern: env_value("OCTET_TERN").or_else(|| env_value("OCTET_TUI_TERN")),
@@ -1531,6 +1608,18 @@ fn build_config_with_global_path_and_diagnostics(
         resolve_tui_mode(cli.tui_mode.as_deref(), values.tui_mode.as_deref())?;
     store_tui_mode(tui_mode);
     TUI_MODE_EXPLICIT.store(tui_mode_explicit, Ordering::Relaxed);
+    for (kind, saved) in [
+        (QueueKind::Steering, values.steering_mode.as_deref()),
+        (QueueKind::FollowUp, values.follow_up_mode.as_deref()),
+    ] {
+        store_queue_mode(
+            kind,
+            saved
+                .map(config::parse_queue_delivery_mode)
+                .transpose()?
+                .unwrap_or_default(),
+        );
+    }
     if report_diagnostics {
         report_config_diagnostics(
             &diagnostics,

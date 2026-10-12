@@ -57,6 +57,28 @@ impl ComposedInput {
             })
     }
 
+    /// Ordinary prompt text that may share one turn with other queued
+    /// follow-ups. Commands, shell escapes and answer-only requests keep their
+    /// own dispatch.
+    pub fn joins_follow_up_batch(&self) -> bool {
+        let text = self.display_text.trim_start();
+        !self.answer_only && !text.starts_with('/') && !text.starts_with('!')
+    }
+
+    /// Append another queued follow-up so both are sent as one turn, the way
+    /// Pi's `followUpMode: "all"` delivers every queued message together.
+    pub fn append_follow_up(&mut self, next: ComposedInput) {
+        const SEPARATOR: &str = "\n\n";
+        self.display_text.push_str(SEPARATOR);
+        self.display_text.push_str(&next.display_text);
+        self.transcript_text.push_str(SEPARATOR);
+        self.transcript_text.push_str(&next.transcript_text);
+        self.parts.push(InputPart::Text(SEPARATOR.to_owned()));
+        self.parts.extend(next.parts);
+        self.custom_messages.extend(next.custom_messages);
+        self.attachments.extend(next.attachments);
+    }
+
     pub fn into_user_input(self) -> UserInput {
         let mut input = UserInput::from(self.parts);
         input.custom_messages = self.custom_messages;

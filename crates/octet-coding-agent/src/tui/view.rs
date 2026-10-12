@@ -5654,16 +5654,36 @@ impl InteractiveShell {
     }
 
     /// Called by the idle owner after the old Run and its children have settled.
-    pub fn take_ready_follow_up(&mut self) -> Option<ComposedInput> {
+    /// The next queued follow-up. With `all` (Pi's `followUpMode: "all"`),
+    /// consecutive ordinary prompts are sent together as one turn; commands,
+    /// shell escapes and answer-only requests still run on their own.
+    pub fn take_ready_follow_up(&mut self, all: bool) -> Option<ComposedInput> {
         let mut state = self.state.borrow_mut();
         if !std::mem::take(&mut state.follow_up_ready) {
             return None;
         }
-        let next = Arc::make_mut(&mut state.follow_up_queue).pop_front();
+        let queue = Arc::make_mut(&mut state.follow_up_queue);
+        let first = queue.pop_front()?;
+        let mut batch = vec![first];
+        if all && batch[0].composed.joins_follow_up_batch() {
+            while queue
+                .front()
+                .is_some_and(|entry| entry.composed.joins_follow_up_batch())
+            {
+                batch.extend(queue.pop_front());
+            }
+        }
         drop(state);
         // Execution admission may need an owned value while a paint still
         // references the old queue; never copy that payload under the UI lock.
-        next.map(|entry| Arc::unwrap_or_clone(entry).composed)
+        let mut entries = batch
+            .into_iter()
+            .map(|entry| Arc::unwrap_or_clone(entry).composed);
+        let mut next = entries.next()?;
+        for entry in entries {
+            next.append_follow_up(entry);
+        }
+        Some(next)
     }
 
     /// Recall the newest eligible pending input without overwriting a draft.

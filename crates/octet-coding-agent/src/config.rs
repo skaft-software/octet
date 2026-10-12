@@ -86,6 +86,24 @@ impl TuiMode {
     }
 }
 
+/// Pi's `steeringMode` / `followUpMode` values: deliver queued messages one per
+/// boundary, or every queued message together. Pi defaults both to
+/// one-at-a-time.
+pub fn parse_queue_delivery_mode(value: &str) -> anyhow::Result<octet_agent::QueueDeliveryMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "one-at-a-time" => Ok(octet_agent::QueueDeliveryMode::OneAtATime),
+        "all" => Ok(octet_agent::QueueDeliveryMode::All),
+        _ => anyhow::bail!("invalid queue delivery mode {value:?}; use one-at-a-time or all"),
+    }
+}
+
+pub fn queue_delivery_mode_label(mode: octet_agent::QueueDeliveryMode) -> &'static str {
+    match mode {
+        octet_agent::QueueDeliveryMode::OneAtATime => "one-at-a-time",
+        octet_agent::QueueDeliveryMode::All => "all",
+    }
+}
+
 /// Tern Surface Protocol rendering policy for the interactive frontend.
 //////
 /// `Auto` (the default) negotiates native surfaces only when the terminal
@@ -753,6 +771,24 @@ mod tests {
         assert!(!MouseMode::Terminal.application_owned());
         assert!(!MouseMode::Off.application_owned());
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn queue_delivery_modes_use_pis_values() {
+        use octet_agent::QueueDeliveryMode;
+        for (text, mode) in [
+            ("one-at-a-time", QueueDeliveryMode::OneAtATime),
+            ("all", QueueDeliveryMode::All),
+            (" ALL ", QueueDeliveryMode::All),
+        ] {
+            assert_eq!(parse_queue_delivery_mode(text).unwrap(), mode);
+        }
+        assert_eq!(
+            queue_delivery_mode_label(QueueDeliveryMode::OneAtATime),
+            "one-at-a-time"
+        );
+        assert!(parse_queue_delivery_mode("batch").is_err());
+        assert_eq!(QueueDeliveryMode::default(), QueueDeliveryMode::OneAtATime);
     }
 
     #[test]

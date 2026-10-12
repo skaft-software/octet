@@ -2500,6 +2500,7 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::SettingsCommand::Theme(None)
                 | commands::SettingsCommand::Images(None)
                 | commands::SettingsCommand::TuiMode(None)
+                | commands::SettingsCommand::QueueMode(_, None)
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -3059,7 +3060,11 @@ where
             match sub {
                 commands::SettingsCommand::Menu => {
                     let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
-                    shell.open_panel(settings_menu::root_panel(show_images, crate::cli::tui_mode()));
+                    shell.open_panel(settings_menu::root_panel(
+                        show_images,
+                        crate::cli::tui_mode(),
+                        settings_menu::QueueModes::saved(),
+                    ));
                 }
                 commands::SettingsCommand::Show => {
                     let mut settings = inspection.settings.clone();
@@ -3080,6 +3085,7 @@ where
                     );
                 }
                 commands::SettingsCommand::TuiMode(None) => shell.notice(tui_mode_report()),
+                commands::SettingsCommand::QueueMode(kind, None) => shell.notice(queue_mode_report(kind)),
                 commands::SettingsCommand::Transport => shell.notice(format!(
                     "transport {} (declared by the {} route; not a user preference)",
                     inspection.settings.transport, inspection.settings.endpoint,
@@ -9477,6 +9483,14 @@ fn tui_mode_report() -> String {
     )
 }
 
+fn queue_mode_report(kind: crate::cli::QueueKind) -> String {
+    format!(
+        "{} mode: {} (saved preference or Pi's one-at-a-time default; applies from the next run)",
+        kind.label(),
+        crate::config::queue_delivery_mode_label(crate::cli::queue_mode(kind)),
+    )
+}
+
 /// Menu destinations are navigation only. Explicit slash-command None forms
 /// retain their existing report/toggle semantics outside this selection path.
 fn open_settings_destination(
@@ -9490,8 +9504,13 @@ fn open_settings_destination(
 ) -> bool {
     use commands::SettingsCommand as Sub;
     let panel = match sub {
-        Sub::Menu => settings_menu::root_panel(show_images, tui_mode),
+        Sub::Menu => {
+            settings_menu::root_panel(show_images, tui_mode, settings_menu::QueueModes::saved())
+        }
         Sub::TuiMode(None) => settings_menu::tui_mode_panel(tui_mode),
+        Sub::QueueMode(kind, None) => {
+            settings_menu::queue_mode_panel(*kind, crate::cli::queue_mode(*kind))
+        }
         Sub::Images(None) => settings_menu::images_panel(show_images),
         Sub::DefaultModel(None) => {
             let presentation = pickers::model_picker_presentation(catalog);
@@ -9717,6 +9736,22 @@ async fn apply_settings_command(
             "editor padding is compiled into the active theme layout; octet persists no padding override"
                 .to_owned(),
         ),
+        Sub::QueueMode(kind, None) => shell.notice(queue_mode_report(kind)),
+        Sub::QueueMode(kind, Some(mode)) => {
+            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
+                crate::cli::persist_queue_mode(kind, mode)
+            })
+            .await
+            {
+                shell.error(format!("failed to save the {} mode: {error}", kind.label()));
+                return Ok(());
+            }
+            shell.notice(format!(
+                "{} mode saved as {}; it applies from the next run",
+                kind.label(),
+                crate::config::queue_delivery_mode_label(mode),
+            ));
+        }
         Sub::TuiMode(None) => shell.notice(tui_mode_report()),
         Sub::TuiMode(Some(mode)) => {
             if crate::cli::tui_mode_is_explicit() {
@@ -12695,7 +12730,10 @@ async fn run_interactive_once(
             extension_status_shown = false;
         }
         let queued_input = if startup_input.is_none() {
-            shell.take_ready_follow_up()
+            shell.take_ready_follow_up(
+                crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
+                    == octet_agent::QueueDeliveryMode::All,
+            )
         } else {
             None
         };
@@ -13165,6 +13203,13 @@ async fn run_interactive_once(
                 shell.set_awaiting_provider(run_id);
                 shell.render();
                 let control = run.control();
+                // Pi's saved delivery modes; a fresh run has room for both sends.
+                control
+                    .set_steering_mode(crate::cli::queue_mode(crate::cli::QueueKind::Steering))
+                    .await?;
+                control
+                    .set_follow_up_mode(crate::cli::queue_mode(crate::cli::QueueKind::FollowUp))
+                    .await?;
                 inspection.cache_warming_control = Some(control.clone());
                 let mut quit_requested = false;
                 let mut made_tool_call = false;

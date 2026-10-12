@@ -277,12 +277,12 @@ async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands()
     assert!(pending.is_empty());
     assert_eq!(shell.queued_follow_up_len(), 2);
     assert_eq!(
-        shell.take_ready_follow_up().unwrap().transcript_text,
+        shell.take_ready_follow_up(false).unwrap().transcript_text,
         "/skill:review inspect"
     );
     shell.settle_queued_follow_ups(true);
     assert_eq!(
-        shell.take_ready_follow_up().unwrap().transcript_text,
+        shell.take_ready_follow_up(false).unwrap().transcript_text,
         "/skill:review "
     );
     assert!(!format!("{:?}", agent.session().context().unwrap()).contains("/skill:"));
@@ -1107,8 +1107,10 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
         ("/settings images on", vec![], "dark"),
         (
             "/settings",
-            // Terminal screen is now the second root row; images is third.
+            // Images follows terminal screen, steering and follow-up modes.
             vec![
+                KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,

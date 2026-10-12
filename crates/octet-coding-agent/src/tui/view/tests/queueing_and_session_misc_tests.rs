@@ -17,18 +17,18 @@ fn queued_follow_ups_stay_with_their_session_across_hydration() {
     shell.settle_queued_follow_ups(true);
     shell.hydrate(&second).unwrap();
     assert_eq!(shell.queued_follow_up_len(), 0);
-    assert!(shell.take_ready_follow_up().is_none());
+    assert!(shell.take_ready_follow_up(false).is_none());
     shell.queue_follow_up(ComposedInput::from_text("second session only".into()));
     shell.settle_queued_follow_ups(true);
     shell.hydrate(&first).unwrap();
     assert_eq!(shell.queued_follow_up_len(), 1);
     assert!(
-        shell.take_ready_follow_up().is_none(),
+        shell.take_ready_follow_up(false).is_none(),
         "another session's settlement cannot authorize dispatch"
     );
     shell.settle_queued_follow_ups(true);
     assert_eq!(
-        shell.take_ready_follow_up().unwrap().transcript_text,
+        shell.take_ready_follow_up(false).unwrap().transcript_text,
         "first session only"
     );
     shell.hydrate(&second).unwrap();
@@ -94,7 +94,7 @@ fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
     shell.edit_queued_message();
     assert_eq!(shell.pending(), display);
     assert_eq!(shell.state.borrow().follow_up_queue.len(), 1);
-    assert!(shell.take_ready_follow_up().is_none());
+    assert!(shell.take_ready_follow_up(false).is_none());
     let edited = shell.drain_composed();
     assert!(
         matches!(edited.parts.as_slice(), [octet_agent::InputPart::Text(text)] if text == &large)
@@ -102,15 +102,18 @@ fn queued_follow_up_editing_preserves_payloads_and_never_overwrites_a_draft() {
     shell.queue_follow_up(edited);
     shell.settle_queued_follow_ups(true);
     assert_eq!(
-        shell.take_ready_follow_up().unwrap().transcript_text,
+        shell.take_ready_follow_up(false).unwrap().transcript_text,
         "oldest"
     );
     assert!(
-        shell.take_ready_follow_up().is_none(),
+        shell.take_ready_follow_up(false).is_none(),
         "only one prompt per settled run"
     );
     shell.settle_queued_follow_ups(true);
-    assert_eq!(shell.take_ready_follow_up().unwrap().transcript_text, large);
+    assert_eq!(
+        shell.take_ready_follow_up(false).unwrap().transcript_text,
+        large
+    );
 }
 
 #[test]
@@ -616,4 +619,34 @@ fn linux_clipboard_writers_follow_the_declared_display() {
         ["wl-copy", "xclip", "xsel"]
     );
     assert_eq!(writers(&["TERMUX_VERSION"]), ["termux-clipboard-set"]);
+}
+
+#[test]
+fn follow_up_all_mode_sends_queued_prompts_together_but_keeps_commands_separate() {
+    let mut shell = InteractiveShell::test_shell();
+    for text in ["first", "second", "/compact", "third", "!ls"] {
+        shell.queue_follow_up(ComposedInput::from_text(text.into()));
+    }
+    let next = |shell: &mut InteractiveShell, all| {
+        shell.settle_queued_follow_ups(true);
+        shell.take_ready_follow_up(all).unwrap()
+    };
+    let batch = next(&mut shell, true);
+    assert_eq!(batch.transcript_text, "first\n\nsecond");
+    let texts = batch
+        .into_user_input()
+        .parts
+        .into_iter()
+        .map(|part| match part {
+            octet_agent::InputPart::Text(text) => text,
+            octet_agent::InputPart::Media(_) => panic!("text-only follow-ups"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["first", "\n\n", "second"]);
+    // A command is never merged into a prompt and keeps its queue position.
+    assert_eq!(next(&mut shell, true).transcript_text, "/compact");
+    // One-at-a-time still releases a single prompt.
+    assert_eq!(next(&mut shell, false).transcript_text, "third");
+    assert_eq!(next(&mut shell, true).transcript_text, "!ls");
+    assert_eq!(shell.queued_follow_up_len(), 0);
 }

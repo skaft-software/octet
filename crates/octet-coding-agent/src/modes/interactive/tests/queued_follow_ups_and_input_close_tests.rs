@@ -107,11 +107,11 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         assert_eq!(agent.session().checkpoints().len(), 1);
         assert_eq!(
             shell
-                .take_ready_follow_up()
+                .take_ready_follow_up(false)
                 .map(|input| input.transcript_text),
             dispatch.then(|| "queued first".to_owned())
         );
-        assert!(shell.take_ready_follow_up().is_none());
+        assert!(shell.take_ready_follow_up(false).is_none());
         shell.edit_queued_message();
         assert_eq!(shell.pending(), "queued second edited");
     }

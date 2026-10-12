@@ -202,7 +202,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             assert!(shell.pending().is_empty());
             assert_eq!(shell.queued_follow_up_len(), 1);
             assert!(
-                shell.take_ready_follow_up().is_none(),
+                shell.take_ready_follow_up(false).is_none(),
                 "Ctrl+C must revoke dispatch after root settlement"
             );
         } else {

@@ -145,6 +145,32 @@ fn pi_compatibility_commands_parse_exactly_and_reject_malformed_forms() {
 
 #[test]
 fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
+    use crate::cli::QueueKind;
+    use octet_agent::QueueDeliveryMode;
+    for (input, expected) in [
+        (
+            "/settings steering",
+            SettingsCommand::QueueMode(QueueKind::Steering, None),
+        ),
+        (
+            "/settings steering all",
+            SettingsCommand::QueueMode(QueueKind::Steering, Some(QueueDeliveryMode::All)),
+        ),
+        (
+            "/settings follow-up",
+            SettingsCommand::QueueMode(QueueKind::FollowUp, None),
+        ),
+        (
+            "/settings followup one-at-a-time",
+            SettingsCommand::QueueMode(QueueKind::FollowUp, Some(QueueDeliveryMode::OneAtATime)),
+        ),
+    ] {
+        assert_eq!(parse(input), Command::Settings(expected), "{input}");
+    }
+    assert!(matches!(
+        parse("/settings steering batch"),
+        Command::Unknown(_)
+    ));
     assert_eq!(parse("/settings"), Command::Settings(SettingsCommand::Menu));
     assert_eq!(
         parse(" /settings  \n"),
@@ -451,6 +477,8 @@ fn settings_text_reports_effective_values_without_claiming_saved_defaults() {
         endpoint: "codex".into(),
         show_images: true,
         cache_warming: octet_agent::CacheWarmMode::Streaming,
+        steering_mode: octet_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: octet_agent::QueueDeliveryMode::OneAtATime,
     };
     let text = settings_text(&surface);
     for expected in [
@@ -473,6 +501,8 @@ fn settings_text_reports_effective_values_without_claiming_saved_defaults() {
         endpoint: "custom".into(),
         show_images: false,
         cache_warming: octet_agent::CacheWarmMode::Streaming,
+        steering_mode: octet_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: octet_agent::QueueDeliveryMode::OneAtATime,
     };
     let text = settings_text(&empty);
     assert!(

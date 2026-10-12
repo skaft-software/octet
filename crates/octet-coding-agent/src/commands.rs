@@ -169,6 +169,11 @@ pub enum SettingsCommand {
     DefaultReasoning(Option<String>),
     /// Select, or report, the persisted interactive terminal screen policy.
     TuiMode(Option<TuiMode>),
+    /// Select, or report, Pi's steering or follow-up delivery mode.
+    QueueMode(
+        crate::cli::QueueKind,
+        Option<octet_agent::QueueDeliveryMode>,
+    ),
     /// Report the active endpoint's declared transport.
     Transport,
     /// Report the editor-padding policy.
@@ -1052,6 +1057,18 @@ pub fn parse(input: &str) -> Command {
                 Ok(mode) => Command::Settings(SettingsCommand::TuiMode(Some(mode))),
                 Err(_) => Command::Unknown(input.to_owned()),
             },
+            [queue] if queue_kind(queue).is_some() => {
+                Command::Settings(SettingsCommand::QueueMode(queue_kind(queue).unwrap(), None))
+            }
+            [queue, value] if queue_kind(queue).is_some() => {
+                match crate::config::parse_queue_delivery_mode(value) {
+                    Ok(mode) => Command::Settings(SettingsCommand::QueueMode(
+                        queue_kind(queue).unwrap(),
+                        Some(mode),
+                    )),
+                    Err(_) => Command::Unknown(input.to_owned()),
+                }
+            }
             ["default", "model"] => Command::Settings(SettingsCommand::DefaultModel(None)),
             ["default", "model", id] => {
                 Command::Settings(SettingsCommand::DefaultModel(Some((*id).to_owned())))
@@ -1645,6 +1662,8 @@ pub struct SettingsSurface {
     pub endpoint: String,
     pub show_images: bool,
     pub cache_warming: octet_agent::CacheWarmMode,
+    pub steering_mode: octet_agent::QueueDeliveryMode,
+    pub follow_up_mode: octet_agent::QueueDeliveryMode,
 }
 
 impl SettingsSurface {
@@ -1658,7 +1677,19 @@ impl SettingsSurface {
             endpoint: app.model.endpoint.id.0.clone(),
             show_images: app.config.show_images,
             cache_warming: app.agent.cache_warming_mode(),
+            steering_mode: crate::cli::queue_mode(crate::cli::QueueKind::Steering),
+            follow_up_mode: crate::cli::queue_mode(crate::cli::QueueKind::FollowUp),
         }
+    }
+}
+
+/// `/settings steering` and `/settings follow-up` (Pi's `steeringMode` and
+/// `followUpMode`; `followup` is accepted as a spelling).
+fn queue_kind(word: &str) -> Option<crate::cli::QueueKind> {
+    match word {
+        "steering" | "steer" => Some(crate::cli::QueueKind::Steering),
+        "follow-up" | "followup" | "follow_up" => Some(crate::cli::QueueKind::FollowUp),
+        _ => None,
     }
 }
 
@@ -1680,15 +1711,19 @@ pub fn settings_text(surface: &SettingsSurface) -> String {
          Transport          {} (declared by the {} route; not a user preference)\n\
          Inline images      {}\n\
          Cache warming      {} (user-only billable policy; /cache-warming)\n\
+         Steering mode      {} (messages sent while the agent works)\n\
+         Follow-up mode     {} (messages queued for after it finishes)\n\
          Editor padding     compiled theme layout (no persisted override)\n\n\
          Project trust is deliberately not persisted here: workspace trust comes from --workspace-trusted or the interactive startup prompt.\n\n\
-         Change: /settings tui <fullscreen|inline> · /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
+         Change: /settings tui <fullscreen|inline> · /settings steering <one-at-a-time|all> · /settings follow-up <one-at-a-time|all> · /settings theme <auto|light|dark> · /settings images <on|off> · /settings default model <id> · /settings default reasoning <level>",
         surface.reasoning,
         surface.theme.as_deref().unwrap_or("auto"),
         surface.transport,
         surface.endpoint,
         if surface.show_images { "on" } else { "off" },
         crate::config::cache_warming_label(surface.cache_warming),
+        crate::config::queue_delivery_mode_label(surface.steering_mode),
+        crate::config::queue_delivery_mode_label(surface.follow_up_mode),
     )
 }
 

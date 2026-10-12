@@ -291,7 +291,7 @@ async fn native_pi_messages_images_persist_resume_and_emit_committed_events() {
             assert!(requests.lock().unwrap().is_empty());
             assert_custom_lifecycle(&app).await;
             if wake {
-                shell.take_ready_follow_up().unwrap().into_user_input()
+                shell.take_ready_follow_up(false).unwrap().into_user_input()
             } else {
                 let mut input = ComposedInput::from_text("NEXT_IMAGE_PROMPT".into());
                 shell.attach_next_turn(&mut input);
@@ -412,7 +412,7 @@ async fn native_pi_messages_send_user_image_is_native_media_not_custom_or_text()
     )
     .await
     .unwrap());
-    let input = shell.take_ready_follow_up().unwrap().into_user_input();
+    let input = shell.take_ready_follow_up(false).unwrap().into_user_input();
     drive(&mut app, &mut shell, input).await;
     assert_provider_image(&requests.lock().unwrap()[0]);
     assert!(custom_entries(app.agent.session()).is_empty());
@@ -473,7 +473,7 @@ export default pi => pi.registerCommand('probe', { handler: () => pi.sendMessage
     .await
     .unwrap());
     let input = shell
-        .take_ready_follow_up()
+        .take_ready_follow_up(false)
         .expect("custom message must wake without editor input");
     drive(&mut app, &mut shell, input.into_user_input()).await;
     app.executable_extensions.shutdown().await;

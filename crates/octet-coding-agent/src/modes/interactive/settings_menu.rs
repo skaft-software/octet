@@ -13,9 +13,11 @@
 //! these builders never discover models, resolve credentials, persist preferences,
 //! or infer saved defaults from the active model/reasoning or launch config.
 
+use crate::cli::QueueKind;
 use crate::commands::SettingsCommand;
-use crate::config::{ThinkingLevel, TuiMode};
+use crate::config::{queue_delivery_mode_label, ThinkingLevel, TuiMode};
 use crate::tui::view::{OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, Panel, PanelAction};
+use octet_agent::QueueDeliveryMode;
 use octet_ai::ModelId;
 
 type Row = (String, String, SettingsCommand);
@@ -47,8 +49,42 @@ fn back() -> Row {
     )
 }
 
+/// Saved Pi steering and follow-up delivery modes, supplied by the owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct QueueModes {
+    pub(super) steering: QueueDeliveryMode,
+    pub(super) follow_up: QueueDeliveryMode,
+}
+
+impl QueueModes {
+    pub(super) fn saved() -> Self {
+        Self {
+            steering: crate::cli::queue_mode(QueueKind::Steering),
+            follow_up: crate::cli::queue_mode(QueueKind::FollowUp),
+        }
+    }
+}
+
+fn queue_description(kind: QueueKind) -> &'static str {
+    match kind {
+        QueueKind::Steering => {
+            "Messages sent while the agent works: deliver one per turn, or all together"
+        }
+        QueueKind::FollowUp => {
+            "Messages queued for after the agent finishes: run one at a time, or all together"
+        }
+    }
+}
+
+fn queue_title(kind: QueueKind) -> &'static str {
+    match kind {
+        QueueKind::Steering => "Steering mode",
+        QueueKind::FollowUp => "Follow-up mode",
+    }
+}
+
 /// Root destinations. `show_images` is effective display state, not a saved default.
-pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode) -> Panel {
+pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode, queues: QueueModes) -> Panel {
     panel(
         OrdinarySurfaceMetadata::with_purpose(
             "Settings",
@@ -64,6 +100,24 @@ pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode) -> Panel {
                 format!("Terminal screen ({})", tui_mode.as_str()),
                 "Choose the saved fullscreen/inline preference; --tui-mode overrides it for this invocation".into(),
                 SettingsCommand::TuiMode(None),
+            ),
+            (
+                format!(
+                    "{} ({})",
+                    queue_title(QueueKind::Steering),
+                    queue_delivery_mode_label(queues.steering)
+                ),
+                queue_description(QueueKind::Steering).into(),
+                SettingsCommand::QueueMode(QueueKind::Steering, None),
+            ),
+            (
+                format!(
+                    "{} ({})",
+                    queue_title(QueueKind::FollowUp),
+                    queue_delivery_mode_label(queues.follow_up)
+                ),
+                queue_description(QueueKind::FollowUp).into(),
+                SettingsCommand::QueueMode(QueueKind::FollowUp, None),
             ),
             (
                 format!(
@@ -120,6 +174,44 @@ pub(super) fn tui_mode_panel(tui_mode: TuiMode) -> Panel {
             TuiMode::Fullscreen => 0,
             TuiMode::Inline => 1,
         },
+    )
+}
+
+/// One-at-a-time/all choices plus Back; the saved mode applies to the next run.
+pub(super) fn queue_mode_panel(kind: QueueKind, current: QueueDeliveryMode) -> Panel {
+    let rows = [QueueDeliveryMode::OneAtATime, QueueDeliveryMode::All]
+        .into_iter()
+        .map(|mode| {
+            (
+                format!(
+                    "{}{}",
+                    queue_delivery_mode_label(mode),
+                    if mode == current { " (current)" } else { "" },
+                ),
+                match (kind, mode) {
+                    (QueueKind::Steering, QueueDeliveryMode::OneAtATime) => {
+                        "Deliver one queued steering message at each turn boundary"
+                    }
+                    (QueueKind::Steering, QueueDeliveryMode::All) => {
+                        "Deliver every queued steering message at the next turn boundary"
+                    }
+                    (QueueKind::FollowUp, QueueDeliveryMode::OneAtATime) => {
+                        "Run each queued follow-up as its own turn"
+                    }
+                    (QueueKind::FollowUp, QueueDeliveryMode::All) => {
+                        "Send every queued follow-up together in one turn"
+                    }
+                }
+                .into(),
+                SettingsCommand::QueueMode(kind, Some(mode)),
+            )
+        })
+        .chain(std::iter::once(back()))
+        .collect();
+    panel(
+        OrdinarySurfaceMetadata::with_purpose(queue_title(kind), queue_description(kind)),
+        rows,
+        usize::from(current == QueueDeliveryMode::All),
     )
 }
 
@@ -249,12 +341,18 @@ mod tests {
 
     #[test]
     fn root_has_only_the_approved_destinations_and_no_inferred_defaults() {
-        let (items, commands, selected) = parts(root_panel(false, TuiMode::Fullscreen));
+        let (items, commands, selected) = parts(root_panel(
+            false,
+            TuiMode::Fullscreen,
+            QueueModes::default(),
+        ));
         assert_eq!(
             items,
             vec![
                 "Theme",
                 "Terminal screen (fullscreen)",
+                "Steering mode (one-at-a-time)",
+                "Follow-up mode (one-at-a-time)",
                 "Inline tool-result images (Off)",
                 "Default model for new sessions",
                 "Default reasoning for new sessions",
@@ -266,6 +364,8 @@ mod tests {
             vec![
                 SettingsCommand::Theme(None),
                 SettingsCommand::TuiMode(None),
+                SettingsCommand::QueueMode(QueueKind::Steering, None),
+                SettingsCommand::QueueMode(QueueKind::FollowUp, None),
                 SettingsCommand::Images(None),
                 SettingsCommand::DefaultModel(None),
                 SettingsCommand::DefaultReasoning(None),
@@ -274,9 +374,31 @@ mod tests {
         );
         assert_eq!(selected, 0);
         assert_eq!(
-            parts(root_panel(true, TuiMode::Fullscreen)).0[2],
+            parts(root_panel(true, TuiMode::Fullscreen, QueueModes::default())).0[4],
             "Inline tool-result images (On)"
         );
+    }
+
+    #[test]
+    fn queue_mode_choices_preselect_the_saved_mode_and_offer_back() {
+        for kind in [QueueKind::Steering, QueueKind::FollowUp] {
+            for mode in [QueueDeliveryMode::OneAtATime, QueueDeliveryMode::All] {
+                let (items, commands, selected) = parts(queue_mode_panel(kind, mode));
+                assert_eq!(
+                    commands[selected],
+                    SettingsCommand::QueueMode(kind, Some(mode))
+                );
+                assert!(items[selected].ends_with(" (current)"));
+                assert_eq!(commands.last(), Some(&SettingsCommand::Menu));
+            }
+        }
+        let modes = QueueModes {
+            steering: QueueDeliveryMode::All,
+            follow_up: QueueDeliveryMode::OneAtATime,
+        };
+        let items = parts(root_panel(false, TuiMode::Fullscreen, modes)).0;
+        assert_eq!(items[2], "Steering mode (all)");
+        assert_eq!(items[3], "Follow-up mode (one-at-a-time)");
     }
 
     #[test]
@@ -351,7 +473,11 @@ mod tests {
             shell.open_panel(panel);
             filter(&mut shell, "back");
             assert_eq!(confirm(&mut shell).1, SettingsCommand::Menu);
-            shell.open_panel(root_panel(false, TuiMode::Fullscreen));
+            shell.open_panel(root_panel(
+                false,
+                TuiMode::Fullscreen,
+                QueueModes::default(),
+            ));
             assert!(matches!(
                 shell.panel_input(&key(KeyCode::Esc)),
                 Some((PanelResult::Cancel, PanelAction::SelectSettings(_))),
@@ -380,7 +506,11 @@ mod tests {
     #[test]
     fn no_filter_matches_keeps_the_menu_open_until_cancelled() {
         let mut shell = InteractiveShell::test_shell();
-        shell.open_panel(root_panel(false, TuiMode::Fullscreen));
+        shell.open_panel(root_panel(
+            false,
+            TuiMode::Fullscreen,
+            QueueModes::default(),
+        ));
         filter(&mut shell, "does-not-match");
         assert!(shell.panel_input(&key(KeyCode::Enter)).is_none());
         assert!(shell.has_panel());

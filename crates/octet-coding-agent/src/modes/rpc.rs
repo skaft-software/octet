@@ -238,8 +238,14 @@ struct RpcSettings {
 impl Default for RpcSettings {
     fn default() -> Self {
         Self {
-            steering_mode: "one-at-a-time".into(),
-            follow_up_mode: "one-at-a-time".into(),
+            steering_mode: crate::config::queue_delivery_mode_label(crate::cli::queue_mode(
+                crate::cli::QueueKind::Steering,
+            ))
+            .into(),
+            follow_up_mode: crate::config::queue_delivery_mode_label(crate::cli::queue_mode(
+                crate::cli::QueueKind::FollowUp,
+            ))
+            .into(),
             auto_retry_enabled: true,
             registered_tools: Vec::new(),
         }
