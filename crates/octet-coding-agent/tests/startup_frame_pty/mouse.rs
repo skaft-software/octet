@@ -212,7 +212,17 @@ fn wrapped_multirow_copy(octet: &mut PtyOctet, parser: &mut vt100::Parser, consu
     let before = octet.pty.output.len();
     octet.pty.write_input(&sgr(0, 0, row, false));
     octet.pty.write_input(&sgr(32, 79, row + 1, false));
-    settle(octet, parser, consumed);
+    // The highlight is a later repaint; on a loaded runner it can follow one
+    // fixed settle window, so wait for it within a bound.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        settle(octet, parser, consumed);
+        if (0..80).any(|col| parser.screen().cell(row + 1, col).unwrap().inverse())
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+    }
     assert!((0..80).any(|col| parser.screen().cell(row + 1, col).unwrap().inverse()));
     octet.pty.write_input(&sgr(0, 79, row + 1, true));
     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
@@ -245,12 +255,20 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
         octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
         settle(&mut octet, &mut parser, &mut consumed);
-        // Pick a row only from the scrolled repaint: a pre-scroll frame still
-        // on screen would aim the drag at a row the wheel has since moved.
+        // Pick a row only from the repaint at the final scroll position. The
+        // half-page PageUp above also paints a "N rows back" frame, and
+        // PageDown returns to the tail, so the four wheel steps of three rows
+        // leave exactly 12 rows back. Any earlier frame still on screen would
+        // aim the drag at a row the wheel has since moved.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !parser.screen().contents().contains("rows back") && Instant::now() < deadline {
+        while !parser.screen().contents().contains("12 rows back") && Instant::now() < deadline {
             settle(&mut octet, &mut parser, &mut consumed);
         }
+        assert!(
+            parser.screen().contents().contains("12 rows back"),
+            "the wheel's final repaint never reached the screen: {}",
+            parser.screen().contents()
+        );
         for legacy in [false, true] {
             // Search upward: rows above an inline frame can hold stale
             // scrollback the application does not own, and where the frame
