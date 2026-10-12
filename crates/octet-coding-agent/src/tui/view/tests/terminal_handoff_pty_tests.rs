@@ -33,6 +33,19 @@ async fn terminal_handoff_pty_fixture() {
         crate::tui::terminal::TerminalInput::new().with_cede_flag(shell.terminal_input_parking());
     signal("ready");
 
+    // Stay in raw mode until the probe has inspected it. Suspending a fixed
+    // delay after "ready" would race a probe that a loaded host schedules late,
+    // and it would then observe the already-restored terminal.
+    let acknowledged = directory.join("raw-checked");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !acknowledged.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe never acknowledged the raw-mode check"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     // Arm the real host reader before cancellation and cede. Merely parking
     // before the first poll misses EventStream's detached background reader.
     assert!(
