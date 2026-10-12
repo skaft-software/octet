@@ -1,6 +1,18 @@
 //! The existing input owner pumps reverse UI while the resource phase waits.
 use super::*;
 
+/// The user pressed the close key while the resource phase was waiting. That is
+/// a normal exit, not a failure: the shell has already been asked to close, so
+/// the public entry points report it as success instead of an error.
+#[derive(Debug)]
+struct ResourceDiscoveryClosed;
+impl std::fmt::Display for ResourceDiscoveryClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("resource discovery closed")
+    }
+}
+impl std::error::Error for ResourceDiscoveryClosed {}
+
 async fn pump<F, T, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -36,7 +48,8 @@ where
                         anyhow::bail!("resource discovery cancelled");
                     }
                     Event::Key(key) if keymap::is_close_key(&key) => {
-                        shell.request_close(); anyhow::bail!("resource discovery closed");
+                        shell.request_close();
+                        return Err(anyhow::Error::new(ResourceDiscoveryClosed));
                     }
                     Event::Resize(columns, rows) => shell.set_size(columns, rows),
                     event => {
@@ -52,6 +65,20 @@ where
 }
 
 pub(super) async fn refresh_resource_paths<S>(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    match refresh_resource_paths_until_closed(app, shell, input).await {
+        Err(error) if error.is::<ResourceDiscoveryClosed>() => Ok(()),
+        result => result,
+    }
+}
+
+async fn refresh_resource_paths_until_closed<S>(
     app: &mut App,
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -114,7 +141,13 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let work = app.executable_extensions.prepare_resource_process_reload();
-    let results = pump(shell, input, app, async move { Ok(work.await) }).await?;
+    let results = match pump(shell, input, app, async move { Ok(work.await) }).await {
+        Ok(results) => results,
+        Err(error) if error.is::<ResourceDiscoveryClosed>() => {
+            return Ok(crate::extensions::ExtensionReloadReport::default());
+        }
+        Err(error) => return Err(error),
+    };
     let report = app
         .executable_extensions
         .finish_resource_process_reload(results)
@@ -127,6 +160,7 @@ where
 mod tests {
     use super::*;
     use crate::extensions::resource_paths::consumer_tests::{fixture, hold_session_start};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn already_chosen_close_does_not_dispatch_resource_work() {
@@ -143,6 +177,35 @@ mod tests {
         assert!(app.resource_paths_pending());
         process.shutdown().await;
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_while_resource_discovery_waits_is_a_clean_exit_not_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (mut app, process, _) = fixture(&root).await;
+        // The extension's session start never completes, so the phase is
+        // still waiting when the user presses Ctrl+D.
+        let (_hold, wait) = tokio::sync::oneshot::channel();
+        hold_session_start(&mut app, wait);
+        let mut shell = InteractiveShell::test_shell();
+        let input = futures_util::stream::iter([Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        )))])
+        .chain(futures_util::stream::pending());
+        tokio::pin!(input);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            refresh_resource_paths(&mut app, &mut shell, &mut input),
+        )
+        .await
+        .expect("the phase must end when the user closes octet")
+        .expect("closing during resource discovery is not an error");
+        assert!(shell.close_requested());
+        let reload = reload_resource_processes(&mut app, &mut shell, &mut input).await;
+        assert!(reload.is_ok(), "{reload:?}");
+        process.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_interactive_phase_pumps_resize_before_deferred_start_then_publishes_native_theme()
     {
