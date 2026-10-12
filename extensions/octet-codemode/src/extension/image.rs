@@ -2,10 +2,10 @@
 //! executable entrypoints only through initialization, then removes that path.
 //! Guest processes must use this private lifetime-owned copy, never a mutable
 //! bundle path, PATH lookup, or a subsequently missing current_exe().
+use super::platform;
 use anyhow::{ensure, Context, Result};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -25,13 +25,10 @@ impl LaunchImage {
             before.is_file(),
             "Launch image must be a regular non-symlink file"
         );
-        let mut source = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
+        let mut source = platform::open_no_follow(path)?;
         let opened = source.metadata()?;
         ensure!(
-            opened.is_file() && opened.dev() == before.dev() && opened.ino() == before.ino(),
+            opened.is_file() && platform::same_file(&before, &opened),
             "Launch image identity changed while opening"
         );
         ensure!(
@@ -49,13 +46,9 @@ impl LaunchImage {
         } else {
             builder.tempdir()?
         };
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        platform::make_private_dir(directory.path())?;
         let executable = directory.path().join("runner");
-        let mut destination = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&executable)?;
+        let mut destination = platform::create_private_executable(&executable)?;
         let copied = std::io::copy(
             &mut Read::by_ref(&mut source).take(MAX_IMAGE_BYTES + 1),
             &mut destination,
@@ -65,14 +58,11 @@ impl LaunchImage {
             copied == opened.len()
                 && copied <= MAX_IMAGE_BYTES
                 && after.len() == opened.len()
-                && after.mtime() == opened.mtime()
-                && after.mtime_nsec() == opened.mtime_nsec()
-                && after.ctime() == opened.ctime()
-                && after.ctime_nsec() == opened.ctime_nsec(),
+                && platform::unchanged(&opened, &after),
             "Launch image changed while copying"
         );
         destination.flush()?;
-        destination.set_permissions(fs::Permissions::from_mode(0o500))?;
+        platform::seal_executable(&destination)?;
         // Executable files must not remain open for writing when spawned.
         drop(destination);
         Ok(Self {
@@ -85,6 +75,8 @@ impl LaunchImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn pin_survives_source_removal_and_replacement_and_cleans_up() {
         let root = tempfile::tempdir().unwrap();

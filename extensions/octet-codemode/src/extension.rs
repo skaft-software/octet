@@ -2,6 +2,7 @@
 //! authority; each script runs in a disposable copy of this executable.
 mod boundaries;
 mod image;
+mod platform;
 mod transport;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -1118,6 +1119,35 @@ async fn read_runner(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>
     }
 }
 
+/// Resolve on the host asking the adapter to stop: SIGTERM/SIGINT on Unix,
+/// Ctrl-C/Ctrl-Break on Windows. Handlers register before the first frame.
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            biased;
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+    })
+}
+#[cfg(windows)]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+    let mut interrupt = ctrl_c()?;
+    let mut brk = ctrl_break()?;
+    Ok(async move {
+        tokio::select! {
+            biased;
+            _ = interrupt.recv() => {},
+            _ = brk.recv() => {},
+        }
+    })
+}
+
 /// Serve the feature-negotiated API 0.4 wire. No Python, Node, runtime JS files,
 /// SDK extensions or local tools are loaded by this adapter.
 pub async fn run(engine: String) -> Result<()> {
@@ -1126,8 +1156,8 @@ pub async fn run(engine: String) -> Result<()> {
         "expected native or wasi"
     );
     LocalSet::new().run_until(async move {
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let shutdown_signal = shutdown_signal()?;
+        tokio::pin!(shutdown_signal);
         let scratch_root = std::env::var_os("OCTET_EXTENSION_SCRATCH").map(PathBuf::from);
         let image = image::LaunchImage::pin_current(scratch_root.as_deref())?;
         let mut input = transport::reader()?;
@@ -1140,8 +1170,7 @@ pub async fn run(engine: String) -> Result<()> {
         let result = loop {
             tokio::select! {
                 biased;
-                _ = terminate.recv() => { runtime.lost.set(true); break Ok(()); },
-                _ = interrupt.recv() => { runtime.lost.set(true); break Ok(()); },
+                _ = &mut shutdown_signal => { runtime.lost.set(true); break Ok(()); },
                 _ = writer_failure.changed() => {
                     runtime.lost.set(true);
                     break Err(anyhow!(writer_failure.borrow().clone().unwrap_or_else(|| "Protocol writer stopped".into())));

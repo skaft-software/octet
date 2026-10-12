@@ -21,6 +21,7 @@ tokio = { version = "=1.53.1", features = ["io-util", "io-std", "macros", "rt", 
 sha2 = "=0.10.9"
 base64 = "=0.22.1"
 tempfile = "=3.27.0"
+getrandom = "=0.4.3"
 
 [profile.dev]
 debug = 0

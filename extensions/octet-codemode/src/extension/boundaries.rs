@@ -1,10 +1,10 @@
+use super::platform;
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -498,17 +498,11 @@ pub(super) fn read_host_file(reference: &Value, scratch: &Path) -> Result<Value>
             before.is_file(),
             "Composition scratch file is not a regular non-symlink file"
         );
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)?;
+        let file = platform::open_no_follow(&path)?;
         let after = file.metadata()?;
         let size = reference["bytes"].as_u64().unwrap();
         ensure!(
-            after.is_file()
-                && after.len() == size
-                && after.dev() == before.dev()
-                && after.ino() == before.ino(),
+            after.is_file() && after.len() == size && platform::same_file(&before, &after),
             "Composition scratch-file size/type/identity mismatch"
         );
         let mut data = Vec::with_capacity(size as usize);
@@ -575,7 +569,7 @@ impl Scratch {
             let directory = tempfile::Builder::new()
                 .prefix("codemode-")
                 .tempdir_in(&self.root)?;
-            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+            platform::make_private_dir(directory.path())?;
             self.directory = Some(directory);
         }
         let mut file = tempfile::Builder::new()
@@ -717,6 +711,7 @@ pub(super) fn format_result(output: Output, scratch: &mut Scratch) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     fn offer() -> Value {
         json!({"api_version":"0.4","octet_version":"0.9.0","extension":{"name":"octet-codemode","version":"0.9.0"},"protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["tool_composition_v1","request_progress","artifacts"],"limits":{"max_concurrent_requests":8,"resource_refs_v1":{"max_records":128,"max_registrations_per_parent":16}},"bulk_objects_v1":{"profile":"local-file.v1"}},"flag_values":[]})
     }

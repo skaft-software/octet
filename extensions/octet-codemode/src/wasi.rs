@@ -92,6 +92,9 @@ fn host_timezone_offset(hi: i32, lo: i32) -> i32 {
             }
         }
     }
+    // Windows guests see UTC until a host zone lookup is wired in.
+    #[cfg(not(unix))]
+    let _ = (hi, lo);
     0
 }
 
@@ -157,24 +160,13 @@ fn imports(engine: &WasmiEngine) -> Result<Linker<State>> {
         "wasi_snapshot_preview1",
         "random_get",
         |mut c: Caller<'_, State>, ptr: i32, len: i32| -> i32 {
-            // libc's OS random source, not inherited descriptors or guest access.
+            // The OS random source, not inherited descriptors or guest access.
             if len < 0 || len as usize > IPC_BYTES {
                 return 28;
             }
             let mut bytes = vec![0; len as usize];
-            #[cfg(unix)]
-            {
-                use std::io::Read;
-                if std::fs::File::open("/dev/urandom")
-                    .and_then(|mut f| f.read_exact(&mut bytes))
-                    .is_err()
-                {
-                    return 29;
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                return 52;
+            if getrandom::fill(&mut bytes).is_err() {
+                return 29;
             }
             if mem(&c).write(&mut c, ptr as u32 as usize, &bytes).is_ok() {
                 0
