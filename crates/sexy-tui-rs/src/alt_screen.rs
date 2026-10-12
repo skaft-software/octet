@@ -19,8 +19,10 @@
 //! [`Terminal`] the caller owns, and `enter` refuses a terminal that cannot
 //! address the cursor (the caller then stays on the primary screen).
 
+use crate::images::{ImageAnchor, ImageProtocol};
 use crate::terminal::Terminal;
 use crate::utils::slice_by_column;
+use std::collections::BTreeSet;
 
 /// Enter the alternate screen.
 pub const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
@@ -59,6 +61,24 @@ pub struct AlternateScreen {
     active: bool,
     window: Vec<String>,
     last_size: Option<(u16, u16)>,
+    /// Kitty placements the last frame left on screen. Erasing a row never
+    /// removes a graphics placement, so these are deleted explicitly.
+    placements: Vec<Placement>,
+}
+
+/// One Kitty image the terminal holds at a window row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Placement {
+    row: usize,
+    id: u32,
+    rows: usize,
+}
+
+impl Placement {
+    /// The window rows this placement covers, clamped to the viewport.
+    fn footprint(&self, height: usize) -> std::ops::Range<usize> {
+        self.row..self.row.saturating_add(self.rows.max(1)).min(height)
+    }
 }
 
 impl AlternateScreen {
@@ -69,6 +89,7 @@ impl AlternateScreen {
             active: false,
             window: Vec::new(),
             last_size: None,
+            placements: Vec::new(),
         }
     }
 
@@ -115,6 +136,7 @@ impl AlternateScreen {
         self.active = true;
         self.window.clear();
         self.last_size = None;
+        self.placements.clear();
         true
     }
 
@@ -148,11 +170,15 @@ impl AlternateScreen {
         if self.options.synchronized_output {
             buffer.push_str(BEGIN_SYNCHRONIZED_OUTPUT);
         }
+        let (stale_images, dirty) = self.plan_rows(&rows, usize::from(height), full_redraw);
+        for id in &stale_images {
+            buffer.push_str(&delete_kitty_image(*id));
+        }
         if full_redraw {
             buffer.push_str("\x1b[2J");
         }
         for (row, line) in rows.iter().enumerate() {
-            if !full_redraw && self.window.get(row) == Some(line) {
+            if !dirty[row] {
                 continue;
             }
             buffer.push_str(&format!(
@@ -180,8 +206,54 @@ impl AlternateScreen {
             buffer.push_str(END_SYNCHRONIZED_OUTPUT);
         }
         terminal.write(&buffer);
+        self.placements = placements_in(&rows);
         self.window = rows;
         self.last_size = Some((width, height));
+    }
+
+    /// Decide what this frame must write: the Kitty images to delete first and
+    /// which rows to address.
+    ///
+    /// A placement is anchored to screen cells, and erasing or overwriting
+    /// those cells leaves it behind, so a row that scrolls or changes under an
+    /// image would show a stale copy next to the repainted one. An image whose
+    /// rows changed (or any image, on a full redraw) is therefore deleted by id,
+    /// and every row that anchors a deleted id is addressed again so it is
+    /// placed at its current position. Rows and images that did not change are
+    /// left alone, which keeps a status tick to its own row.
+    fn plan_rows(
+        &self,
+        rows: &[String],
+        height: usize,
+        full_redraw: bool,
+    ) -> (BTreeSet<u32>, Vec<bool>) {
+        let mut dirty: Vec<bool> = rows
+            .iter()
+            .enumerate()
+            .map(|(row, line)| full_redraw || self.window.get(row) != Some(line))
+            .collect();
+        let placed = placements_in(rows);
+        let mut stale = BTreeSet::new();
+        loop {
+            let mut changed = false;
+            for old in &self.placements {
+                if !stale.contains(&old.id)
+                    && (full_redraw || old.footprint(height).any(|row| dirty[row]))
+                {
+                    stale.insert(old.id);
+                    changed = true;
+                }
+            }
+            for new in &placed {
+                if stale.contains(&new.id) && !dirty[new.row] {
+                    dirty[new.row] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return (stale, dirty);
+            }
+        }
     }
 
     /// Leave the alternate screen.
@@ -205,6 +277,14 @@ impl AlternateScreen {
         let mut buffer = String::new();
         if self.options.synchronized_output {
             buffer.push_str(BEGIN_SYNCHRONIZED_OUTPUT);
+        }
+        for id in self
+            .placements
+            .iter()
+            .map(|placement| placement.id)
+            .collect::<BTreeSet<_>>()
+        {
+            buffer.push_str(&delete_kitty_image(id));
         }
         if preserve_screen {
             buffer.push_str(EXIT_ALT_SCREEN);
@@ -230,7 +310,30 @@ impl AlternateScreen {
         self.active = false;
         self.window.clear();
         self.last_size = None;
+        self.placements.clear();
     }
+}
+
+/// Every Kitty image anchored in a window, with the rows its placement covers.
+fn placements_in(rows: &[String]) -> Vec<Placement> {
+    rows.iter()
+        .enumerate()
+        .flat_map(|(row, line)| {
+            ImageAnchor::parse_all(line)
+                .into_iter()
+                .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
+                .map(move |anchor| Placement {
+                    row,
+                    id: anchor.id().get(),
+                    rows: usize::from(anchor.layout().rows()),
+                })
+        })
+        .collect()
+}
+
+/// Kitty graphics escape that deletes one image and all of its placements.
+fn delete_kitty_image(id: u32) -> String {
+    format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
 }
 
 fn window_rows(lines: &[String], height: usize) -> Vec<String> {

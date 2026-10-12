@@ -163,6 +163,13 @@ and known limitations.
 
 ### Fixed
 
+- Fullscreen: scrolling with PgUp/PgDn no longer leaves stale or duplicated
+  inline images (Kitty-protocol terminals such as Ghostty). The fullscreen painter
+  erased and rewrote rows but never deleted the image placements anchored to them,
+  so every scroll stacked another copy and left old ones over the text. A placement
+  whose rows change or scroll is now deleted and placed again at its new position,
+  and images are removed when you leave the fullscreen view. A status tick that does
+  not touch an image's rows leaves it alone.
 - Pi images work on the real host, including nested `ctx.executeTool` results,
   and Pi's `agent_settled` event fires once after `agent_end`.
 - Pi footers and widgets can ask whether the active model uses OAuth; the host

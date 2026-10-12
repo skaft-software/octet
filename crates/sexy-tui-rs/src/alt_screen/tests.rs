@@ -223,3 +223,176 @@ fn a_paint_before_enter_is_a_no_op() {
     session.paint(&mut terminal, &["row".to_owned()], 20, 3, None, false);
     assert!(writes.borrow().is_empty());
 }
+
+/// The internal anchor a retained renderer puts on the row a Kitty image starts.
+fn anchor(id: u32, rows: u16) -> String {
+    use crate::images::{ImageId, ImageLayout};
+    ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(id).unwrap(),
+        ImageLayout::new(20, rows).unwrap(),
+    )
+    .marker()
+}
+
+fn delete(id: u32) -> String {
+    format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
+/// A session that has painted `frame` once, plus the writes of later paints.
+fn painted(
+    frame: &[String],
+    size: (u16, u16),
+) -> (
+    AlternateScreen,
+    RecordingTerminal,
+    Rc<RefCell<String>>,
+    Rc<Cell<bool>>,
+) {
+    let (mut terminal, writes, clear) = recording(size);
+    let mut session = AlternateScreen::new(options(false));
+    assert!(session.enter(&mut terminal));
+    session.paint(&mut terminal, frame, size.0, size.1, None, false);
+    clear.set(true);
+    (session, terminal, writes, clear)
+}
+
+fn rows(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+#[test]
+fn a_scrolled_image_is_deleted_before_it_is_placed_at_its_new_row() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    // PgUp/PgDn: every row moves, and the image starts one row lower.
+    let after = rows(&["", "header", &image, "", "", "tail"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    let deleted = output
+        .find(&delete(7))
+        .expect("the old placement is deleted");
+    let placed = output.find(&image).expect("the image is placed again");
+    assert!(
+        deleted < placed,
+        "delete must precede placement: {output:?}"
+    );
+    assert!(
+        output.contains(&format!("\x1b[3;1H\x1b[2K{image}")),
+        "the image is placed at its new row: {output:?}"
+    );
+    assert_eq!(output.matches(&image).count(), 1, "{output:?}");
+}
+
+#[test]
+fn a_status_tick_away_from_the_image_neither_deletes_nor_replaces_it() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "clock 1"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    let after = rows(&["header", &image, "", "", "tail", "clock 2"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    assert!(!output.contains("\x1b_G"), "{output:?}");
+    assert!(!output.contains(&image), "{output:?}");
+    assert!(output.contains("clock 2"), "{output:?}");
+}
+
+#[test]
+fn changing_a_row_an_image_covers_replaces_that_image() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    // Row 3 is one of the image's reserved rows; text now lands under it.
+    let after = rows(&["header", &image, "", "overlay", "tail", "end"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    assert!(output.contains(&delete(7)), "{output:?}");
+    assert!(output.contains(&image), "{output:?}");
+}
+
+#[test]
+fn an_image_scrolled_out_of_the_window_is_deleted_and_not_replaced() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    let after = rows(&["", "", "tail", "end", "more", "last"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    assert!(output.contains(&delete(7)), "{output:?}");
+    assert!(!output.contains(&image), "{output:?}");
+}
+
+#[test]
+fn deleting_an_image_id_replaces_every_visible_placement_of_that_id() {
+    // The same screenshot read twice shares one image id. Deleting it removes
+    // both placements, so the one that did not move must be placed again.
+    let image = anchor(7, 2);
+    let before = rows(&[&image, "", "middle", &image, "", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    let after = rows(&[&image, "", "middle", "text", "more", "end"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    assert!(output.contains(&delete(7)), "{output:?}");
+    assert_eq!(output.matches(&image).count(), 1, "{output:?}");
+    assert!(
+        output.contains(&format!("\x1b[1;1H\x1b[2K{image}")),
+        "the unmoved placement is placed again: {output:?}"
+    );
+}
+
+#[test]
+fn a_full_redraw_deletes_the_images_it_is_about_to_repaint() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    // A resize repaints every row; the old placement is at stale cells.
+    session.paint(&mut terminal, &before, 30, 6, None, false);
+    let output = writes.borrow().clone();
+
+    let deleted = output
+        .find(&delete(7))
+        .expect("the old placement is deleted");
+    let placed = output.find(&image).expect("the image is placed again");
+    assert!(deleted < placed, "{output:?}");
+
+    // `invalidate` forces the same full redraw and must not forget the image.
+    clear_writes(&writes);
+    session.invalidate();
+    session.paint(&mut terminal, &before, 30, 6, None, false);
+    assert!(
+        writes.borrow().contains(&delete(7)),
+        "{:?}",
+        writes.borrow()
+    );
+}
+
+#[test]
+fn leaving_the_alternate_screen_deletes_placed_images() {
+    let image = anchor(7, 3);
+    let before = rows(&["header", &image, "", "", "tail", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    session.exit(&mut terminal, &before, true);
+    let output = writes.borrow().clone();
+    assert!(output.contains(&delete(7)), "{output:?}");
+    assert!(
+        output.find(&delete(7)) < output.find(EXIT_ALT_SCREEN),
+        "{output:?}"
+    );
+}
+
+fn clear_writes(writes: &Rc<RefCell<String>>) {
+    writes.borrow_mut().clear();
+}
