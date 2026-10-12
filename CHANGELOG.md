@@ -22,6 +22,12 @@ and known limitations.
   a green dot with `reload succeeded` (explicit `/reload` only) or a red dot with
   `reload failed: reason (+N more)`. An extension notice that repeats identically
   is shown once per 30 seconds instead of on every event.
+- An explicit `--extension-dir` that does not exist is now a startup error naming
+  the path, instead of silently falling back to the installed extensions (which
+  hid an unfinished Pi mirror setup).
+- With the stock `octet-pi-compat` bundle enabled and no Pi setup mirrored, every
+  prompt no longer prints `Pi compatibility error: not_foreground_owner lifecycle
+  notification` lines.
 - Default fullscreen launches now capture the wheel and trackpad (`mouse = "auto"`
   follows the surface), so the transcript scrolls without a flag. Inline sessions
   keep native selection and scrollback; `--mouse terminal` and `--mouse off`

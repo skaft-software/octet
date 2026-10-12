@@ -1555,6 +1555,24 @@ fn build_config_with_global_path_and_diagnostics(
         );
     }
 
+    // An explicit --extension-dir that does not exist almost always means a setup
+    // step did not complete (for example a Pi mirror that was previewed but never
+    // written). Starting anyway silently falls back to whatever is installed and
+    // looks like the extension failing to render, so refuse with the path.
+    for dir in &cli.extension_dirs {
+        let path = if dir.is_absolute() {
+            dir.clone()
+        } else {
+            invocation_cwd.join(dir)
+        };
+        if !path.is_dir() {
+            anyhow::bail!(
+                "--extension-dir {}: not a directory. Create it, or finish the setup step that writes it (for a Pi mirror, rerun configure.mjs with its --expected-fingerprint).",
+                dir.display()
+            );
+        }
+    }
+
     let model_explicit = cli.model.is_some();
     let reasoning_explicit = cli.reasoning.is_some();
     let reasoning_mode_explicit = cli.reasoning_mode.is_some();

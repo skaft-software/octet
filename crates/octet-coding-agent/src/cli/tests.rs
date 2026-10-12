@@ -437,6 +437,37 @@ fn colour_policy_resolves_from_cli() {
 }
 
 #[test]
+fn an_explicit_extension_dir_must_exist() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.extension_dirs = vec![directory.path().join("never-created")];
+    let error = config_with_empty_global(cli, directory.path()).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("--extension-dir") && text.contains("never-created"),
+        "{text}"
+    );
+
+    // A file is not a directory either.
+    let file = directory.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.extension_dirs = vec![file];
+    assert!(config_with_empty_global(cli, directory.path()).is_err());
+
+    // An existing directory (absolute, or relative to the invocation directory) is fine.
+    std::fs::create_dir(directory.path().join("exts")).unwrap();
+    for dir in [directory.path().join("exts"), "exts".into()] {
+        let mut cli = base();
+        cli.workspace = Some(directory.path().into());
+        cli.extension_dirs = vec![dir];
+        config_with_empty_global(cli, directory.path()).unwrap();
+    }
+}
+
+#[test]
 fn mouse_policy_owner_decision_defaults_to_auto_preserving_native_gestures() {
     let directory = cwd();
     let mut cli = base();
