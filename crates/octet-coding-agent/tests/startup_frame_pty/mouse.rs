@@ -121,6 +121,47 @@ fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
 }
 
 #[test]
+fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
+    let _lock = pty_test_lock().lock().unwrap();
+    // No --mouse and no saved screen policy: the real defaults (fullscreen
+    // surface, mouse = auto). The alternate screen has no terminal scrollback,
+    // so without capture the trackpad could not scroll anything.
+    let mut octet = PtyOctet::spawn_default_fullscreen(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Default,
+        StartupFixture::MouseHistory,
+    );
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
+    let mut consumed = 0;
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "MOUSE-END",
+        STARTUP_TIMEOUT,
+    );
+    assert!(uses_alternate_screen(&octet.pty.output));
+    assert!(
+        contains_bytes(&octet.pty.output, b"\x1b[?1000h")
+            || contains_bytes(&octet.pty.output, b"\x1b[?1002h"),
+        "default fullscreen did not enable mouse reporting"
+    );
+    assert!(contains_bytes(&octet.pty.output, b"\x1b[?1006h"));
+    assert!(!parser.screen().contents().contains("rows back"));
+    octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "rows back",
+        STARTUP_TIMEOUT,
+    );
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+}
+
+#[test]
 fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     let _lock = pty_test_lock().lock().unwrap();
     let (mut octet, mut parser, mut consumed) = history(MouseMode::App, 100, 24);

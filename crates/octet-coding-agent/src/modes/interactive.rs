@@ -12495,8 +12495,11 @@ async fn run_interactive_once(
     // Published before the frontend starts: the renderer thread and the shared
     // input filter both read the resolved policy, and neither carries Config.
     crate::tui::view::tern::set_policy(config.tern);
-    let mut shell =
-        InteractiveShell::enter_with_mouse(theme, size, config.mouse.application_owned())?;
+    let mut shell = InteractiveShell::enter_with_mouse(
+        theme,
+        size,
+        config.mouse.captures_mouse_on(crate::cli::tui_mode()),
+    )?;
     shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
     // Best-effort re-exec support: a host that cannot report its own executable
     // keeps the resources-only `/reload`.

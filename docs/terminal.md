@@ -133,26 +133,27 @@ another input. See [all keys](commands.md#keys).
 
 ```sh
 octet --color auto
-octet --mouse app   # opt in to in-app scrolling and drag selection
+octet --mouse app   # always capture the mouse, including inline
 ```
 
-By default octet stays inline (`mouse = "auto"`) on the primary screen and
-leaves mouse reporting off, so your terminal keeps drag selection and
-wheel/touchpad history. `--mouse terminal` and `--mouse off` also preserve native
-gestures. Inline, the renderer follows the height of the content, not a fixed
-full-screen composer and footer; it loads the complete resumed branch and appends
-to native scrollback. Explicit `--mouse app` (or `mouse = "app"` in configuration)
-opts into the bounded semantic viewport, captures the wheel and drag selection,
-and lets a resumed session load newest-first. Explicit CLI choices take precedence
-over configured mouse policy.
+By default octet uses the fullscreen (alternate-screen) surface with `mouse = "auto"`.
+Fullscreen has no terminal scrollback, so `auto` captures the wheel/trackpad and
+drag selection there: scrolling and selecting work with no flag, as in Pi.
+`--tui-mode inline` (or `tui_mode = "inline"`) keeps octet on the primary screen,
+where `auto` leaves mouse reporting off so your terminal keeps drag selection and
+wheel/touchpad history. `--mouse terminal` and `--mouse off` never capture the
+mouse on either surface; `--mouse app` always does. Inline, the renderer follows
+the height of the content, not a fixed full-screen composer and footer; it loads
+the complete resumed branch and appends to native scrollback. Explicit
+`--mouse app` (or `mouse = "app"` in configuration) opts inline sessions into the
+bounded semantic viewport as well, and lets a resumed session load newest-first.
+Explicit CLI choices take precedence over configured mouse policy.
 
-This is **not Pi-style fullscreen by default**. A `pi` theme changes presentation,
-not viewport ownership. `--mouse app` is an explicit primary-screen viewport
-choice, not an alternate-screen/fullscreen switch. Native Tern surfaces negotiate
-their own layout; their large pickers and report overlays do not change the
-ordinary ANSI launch default.
+A `pi` theme changes presentation, not viewport ownership. Native Tern surfaces
+negotiate their own layout; their large pickers and report overlays do not change
+the ordinary ANSI launch default.
 
-With capture on (`--mouse app`), wheel/touchpad events scroll the transcript by
+With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release
 copies it, or use Ctrl+Shift+C to copy the current selection again; Ctrl+C keeps

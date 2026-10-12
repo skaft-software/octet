@@ -8,6 +8,10 @@ and known limitations.
 
 ### Added
 
+- Default fullscreen launches now capture the wheel and trackpad (`mouse = "auto"`
+  follows the surface), so the transcript scrolls without a flag. Inline sessions
+  keep native selection and scrollback; `--mouse terminal` and `--mouse off`
+  never capture.
 - Custom providers pointed at a first-party endpoint octet already declares
   (for example `https://api.cerebras.ai/v1`) now get the reviewed catalog's
   context window and output limit for models whose `/v1/models` entry carries

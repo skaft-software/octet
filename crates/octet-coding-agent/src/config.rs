@@ -53,10 +53,19 @@ impl MouseMode {
         }
     }
 
-    /// Whether octet captures mouse gestures. Semantic keyboard viewport
-    /// ownership is intentionally independent of this setting.
-    pub fn application_owned(self) -> bool {
-        matches!(self, Self::App)
+    /// Whether octet captures the mouse on the given terminal surface.
+    ///
+    /// `auto` follows the surface: the fullscreen (alternate-screen) default has
+    /// no terminal scrollback, so the wheel/trackpad must scroll the in-app
+    /// transcript; inline keeps reporting off so the terminal retains native
+    /// selection and scrollback. `app` always captures; `terminal` and `off`
+    /// never do.
+    pub fn captures_mouse_on(self, surface: TuiMode) -> bool {
+        match self {
+            Self::App => true,
+            Self::Auto => surface == TuiMode::Fullscreen,
+            Self::Terminal | Self::Off => false,
+        }
     }
 }
 
@@ -766,11 +775,25 @@ mod tests {
         assert_eq!(MouseMode::parse("app").unwrap(), MouseMode::App);
         assert_eq!(MouseMode::parse("terminal").unwrap(), MouseMode::Terminal);
         assert_eq!(MouseMode::parse("off").unwrap(), MouseMode::Off);
-        assert!(!MouseMode::Auto.application_owned());
-        assert!(MouseMode::App.application_owned());
-        assert!(!MouseMode::Terminal.application_owned());
-        assert!(!MouseMode::Off.application_owned());
+        assert!(!MouseMode::Auto.captures_mouse_on(TuiMode::Inline));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Inline));
+        assert!(!MouseMode::Terminal.captures_mouse_on(TuiMode::Inline));
+        assert!(!MouseMode::Off.captures_mouse_on(TuiMode::Inline));
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn auto_mouse_captures_on_the_fullscreen_surface_only() {
+        // Default fullscreen has no terminal scrollback: the wheel must scroll
+        // the in-app transcript. Inline keeps native selection and scrollback.
+        assert!(MouseMode::Auto.captures_mouse_on(TuiMode::Fullscreen));
+        assert!(!MouseMode::Auto.captures_mouse_on(TuiMode::Inline));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Fullscreen));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Inline));
+        for mode in [MouseMode::Terminal, MouseMode::Off] {
+            assert!(!mode.captures_mouse_on(TuiMode::Fullscreen), "{mode:?}");
+            assert!(!mode.captures_mouse_on(TuiMode::Inline), "{mode:?}");
+        }
     }
 
     #[test]

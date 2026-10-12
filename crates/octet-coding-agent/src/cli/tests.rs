@@ -444,7 +444,9 @@ fn mouse_policy_owner_decision_defaults_to_auto_preserving_native_gestures() {
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     // Owner decision: omitted mouse policy preserves native scrollback/selection.
     assert_eq!(config.mouse, config::MouseMode::Auto);
-    assert!(!config.mouse.application_owned());
+    assert!(!config
+        .mouse
+        .captures_mouse_on(crate::config::TuiMode::Inline));
 
     // An explicit inline mode still resolves normally.
     let mut cli = base();
@@ -452,14 +454,18 @@ fn mouse_policy_owner_decision_defaults_to_auto_preserving_native_gestures() {
     cli.mouse = Some("auto".into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(config.mouse, config::MouseMode::Auto);
-    assert!(!config.mouse.application_owned());
+    assert!(!config
+        .mouse
+        .captures_mouse_on(crate::config::TuiMode::Inline));
 
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
     cli.mouse = Some("app".into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(config.mouse, config::MouseMode::App);
-    assert!(config.mouse.application_owned());
+    assert!(config
+        .mouse
+        .captures_mouse_on(crate::config::TuiMode::Inline));
 }
 
 #[test]
