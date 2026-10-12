@@ -16,6 +16,11 @@ import tempfile
 import termios
 import time
 
+# A harness started as a background job (a non-interactive shell's `cmd &`) is
+# handed SIGINT as "ignored", and children inherit that. The interrupt scenario
+# below must see the default disposition, as it does in a terminal or CI.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+
 binary = sys.argv[1]
 entry = "update::progress::tests::progress_subprocess_fixture"
 argv = [binary, "--exact", entry, "--nocapture"]
