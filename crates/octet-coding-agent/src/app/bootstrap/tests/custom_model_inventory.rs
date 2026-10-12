@@ -775,3 +775,99 @@ fn fixed_custom_reasoning_is_the_only_octet_thinking_option() {
     };
     assert!(custom_reasoning_capability(&configurable).is_some());
 }
+
+fn id_only_model(api_name: &str) -> crate::auth::custom::CustomModel {
+    // The shape a generic OpenAI-compatible `/v1/models` list produces: ids
+    // only, every limit a fallback.
+    crate::auth::custom::CustomModel {
+        api_name: api_name.to_owned(),
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+        ..Default::default()
+    }
+}
+
+fn custom_credential_at(base_url: &str) -> crate::auth::custom::CustomCredential {
+    crate::auth::custom::CustomCredential {
+        base_url: base_url.into(),
+        api_key: "fixture".into(),
+        api_name: String::new(),
+        headers: Vec::new(),
+        models: Vec::new(),
+        auto_discover: true,
+    }
+}
+
+#[test]
+fn a_custom_provider_on_a_first_party_endpoint_gets_catalog_context_for_id_only_models() {
+    for base in [
+        "https://api.cerebras.ai/v1/",
+        "https://api.cerebras.ai/v1",
+        "https://API.CEREBRAS.AI:443/v1/",
+    ] {
+        let models = apply_known_custom_model_defaults(
+            &custom_credential_at(base),
+            vec![id_only_model("gpt-oss-120b"), id_only_model("qwen-3.8-27b")],
+        );
+        for model in &models {
+            assert_eq!(
+                custom_model_effective_context_window(model),
+                Some(131_072),
+                "{base} {}",
+                model.api_name
+            );
+            assert_eq!(model.max_output_tokens, 40_960, "{base}");
+            assert!(model.max_output_tokens_asserted);
+        }
+    }
+}
+
+#[test]
+fn catalog_context_never_replaces_configured_or_asserted_values_or_guesses() {
+    let cred = custom_credential_at("https://api.cerebras.ai/v1/");
+    let configured = crate::auth::custom::CustomModel {
+        context_window: 8_192,
+        context_window_configured: true,
+        ..id_only_model("gpt-oss-120b")
+    };
+    let asserted = crate::auth::custom::CustomModel {
+        context_window: 65_536,
+        context_window_asserted: true,
+        discovered_context_window: Some(65_536),
+        ..id_only_model("qwen-3.8-27b")
+    };
+    let models = apply_known_custom_model_defaults(
+        &cred,
+        vec![configured, asserted, id_only_model("not-in-the-catalog")],
+    );
+    assert_eq!(
+        custom_model_effective_context_window(&models[0]),
+        Some(8_192)
+    );
+    assert_eq!(
+        custom_model_effective_context_window(&models[1]),
+        Some(65_536)
+    );
+    // A model the reviewed catalog does not know stays unknown, not guessed.
+    assert_eq!(custom_model_effective_context_window(&models[2]), None);
+}
+
+#[test]
+fn catalog_context_applies_only_to_the_exact_declared_endpoint() {
+    for base in [
+        "http://127.0.0.1:9/v1/",
+        "https://api.cerebras.ai/v2/",
+        "http://api.cerebras.ai/v1/",
+        "https://api.cerebras.ai.example.test/v1/",
+    ] {
+        let models = apply_known_custom_model_defaults(
+            &custom_credential_at(base),
+            vec![id_only_model("gpt-oss-120b")],
+        );
+        assert_eq!(
+            custom_model_effective_context_window(&models[0]),
+            None,
+            "{base}"
+        );
+    }
+}

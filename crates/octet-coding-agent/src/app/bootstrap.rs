@@ -4991,10 +4991,86 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
     })
 }
 
+/// Whether two endpoint base URLs name the same HTTP(S) origin and path,
+/// ignoring case in the host, default ports and a trailing slash.
+fn same_endpoint_base(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+        return false;
+    };
+    matches!(left.scheme(), "http" | "https")
+        && left.scheme() == right.scheme()
+        && left.host_str().map(str::to_ascii_lowercase)
+            == right.host_str().map(str::to_ascii_lowercase)
+        && left.port_or_known_default() == right.port_or_known_default()
+        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+}
+
+/// A custom provider pointed at a first-party endpoint octet already declares
+/// (for example `https://api.cerebras.ai/v1`) gets the reviewed catalog's
+/// context window and output limit for any model whose own inventory gave none.
+///
+/// Generic OpenAI-compatible `/v1/models` lists carry ids only, so without this
+/// every such model would have an unknown context and be unselectable. Only
+/// *missing* facts are filled: a context the user configured or the endpoint
+/// asserted is never replaced, and an unrecognized endpoint or model is left
+/// exactly as discovered.
+fn apply_declared_endpoint_catalog_limits(
+    cred: &crate::auth::custom::CustomCredential,
+    models: Vec<crate::auth::custom::CustomModel>,
+) -> Vec<crate::auth::custom::CustomModel> {
+    let Some(declaration) =
+        crate::providers::BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|declaration| {
+                declaration.base_url_environment.is_empty()
+                    && same_endpoint_base(declaration.base_url, &cred.base_url)
+            })
+    else {
+        return models;
+    };
+    models
+        .into_iter()
+        .map(|mut model| {
+            if model.context_window_configured || model.context_window_asserted {
+                return model;
+            }
+            let Some(limit) = octet_ai::model_metadata::model_capability_metadata(
+                declaration.id,
+                &model.api_name,
+            )
+            .and_then(|record| record.get("limit").cloned()) else {
+                return model;
+            };
+            let Some(context) = limit
+                .get("context")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|context| *context > 0)
+            else {
+                return model;
+            };
+            model.context_window = context;
+            model.context_window_asserted = true;
+            model.discovered_context_window = Some(context);
+            if !model.max_output_tokens_asserted {
+                if let Some(output) = limit
+                    .get("output")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|output| *output > 0)
+                {
+                    model.max_output_tokens = output.min(context);
+                    model.max_output_tokens_asserted = true;
+                }
+            }
+            model
+        })
+        .collect()
+}
+
 fn apply_known_custom_model_defaults(
     cred: &crate::auth::custom::CustomCredential,
     models: Vec<crate::auth::custom::CustomModel>,
 ) -> Vec<crate::auth::custom::CustomModel> {
+    let models = apply_declared_endpoint_catalog_limits(cred, models);
     if !is_apple_foundation_models_endpoint(&cred.base_url) {
         return models;
     }
@@ -5375,17 +5451,10 @@ fn register_custom_openai_provider(
     let (models, unknown_context_models): (Vec<_>, Vec<_>) = models
         .into_iter()
         .partition(|model| custom_model_effective_context_window(model).is_some());
-    let missing_context_count = unknown_context_models.len();
-    let mut context_diagnostics =
-        crate::output::DiagnosticCheck::new(crate::output::DiagnosticComponent::Bootstrap(
-            format!("custom-context-required:{provider_id}"),
-        ));
-    if missing_context_count > 0 {
-        context_diagnostics.problem(format!(
-            "warning: custom provider {provider_id:?} has {missing_context_count} model(s) with unknown effective context; configure a positive context in provider setup before selecting them"
-        ));
-    }
-    context_diagnostics.finish(true);
+    // Models with no known context stay out of the picker without a startup
+    // warning: the notice was noise for endpoints whose inventory simply lists
+    // ids. Configure a context in provider setup to make one selectable.
+    drop(unknown_context_models);
     if models.is_empty() {
         return Ok(());
     }
@@ -5805,7 +5874,9 @@ fn discover_models(
     //   "Cannot drop a runtime in a context where blocking is not allowed."
     let cred = cred.clone();
     let provider_id = provider_id.to_owned();
-    std::thread::spawn(move || discover_models_blocking(&cred, &provider_id, true))
+    // Startup discovery is best-effort and silent: if the endpoint is down or
+    // returns an error, using one of its models reports that error then.
+    std::thread::spawn(move || discover_models_blocking(&cred, &provider_id, false))
         .join()
         .unwrap_or_default()
 }
