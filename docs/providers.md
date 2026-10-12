@@ -975,3 +975,33 @@ testing). Only native completion settles calls: a missing
 tool-call end or successful reply. No POST is replayed. The built-in Mistral
 preset above still uses Chat. Conversations discovery, presets and broader
 native capabilities are separate work, not implied by these codec repairs.
+
+## Provider request trace
+
+When a provider rejects a request with an opaque status (for example an HTTP 400
+whose body is only "Bad Request"), set `OCTET_PROVIDER_REQUEST_TRACE` to a file
+path (or `stderr`) before starting octet. Each request then appends one JSON
+line describing only its shape, and a rejection appends one line with the status
+and the provider's request id:
+
+- transport (`http` or `websocket`), the frame type, the API model name and the
+  body size;
+- the length of every top-level array, and whether `previous_response_id` is set
+  (never its value);
+- for Responses requests, the count of each input item type, the trailing item
+  type, image counts by kind (inline, URL, file id) with inline wire bytes, how
+  many reasoning items carry `encrypted_content` (never its content), and how
+  many `computer_call_output` items carry no screenshot.
+
+The trace never records prompts, tool arguments or output, headers, URLs,
+credentials, response ids, image data or reasoning content, so a trace is
+suitable to attach to an issue. Leave the variable unset to disable it.
+
+## Model-visible tool-result images
+
+A long computer-use run produces many screenshots. Only the newest four
+tool-result images (`MODEL_VISIBLE_TOOL_IMAGE_LIMIT`) are sent to the model;
+older ones are replaced in the request with a short text placeholder. The
+session journal keeps every image, so reopening, export and audit are
+unchanged. Images you attach to a prompt are not affected.
+

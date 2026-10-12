@@ -8,6 +8,15 @@ and known limitations.
 
 ### Added
 
+- `OCTET_PROVIDER_REQUEST_TRACE=<file|stderr>` appends a redacted trace of each
+  provider request's shape (item types and counts, image counts and bytes,
+  reasoning `encrypted_content` presence, transport, `previous_response_id`
+  presence) and of any rejection's status, without prompts, tool output, headers
+  or credentials. See [Provider request trace](docs/providers.md#provider-request-trace).
+- Only the newest four tool-result images (typically computer-use screenshots)
+  are sent to the model on each request; older ones become a text placeholder
+  while the session journal keeps them. See
+  [Model-visible tool-result images](docs/providers.md#model-visible-tool-result-images).
 - Pi compatibility notifications now identify their originating extension via the negotiated `notification_source_v1` contract; info notices omit redundant severity while warnings and errors retain it.
 - `OCTET_TRACE_REMOTE_UI_LIFECYCLE=1` opts into timestamped remote UI mount, retirement,
   and stale-operation traces carrying the session, process instance, generation, and surface.
