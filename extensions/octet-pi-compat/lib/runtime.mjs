@@ -948,7 +948,12 @@ export class Runtime {
     } else if (!event) throw rpcError(-32601, `unsupported_feature notification ${message.method}`);
     if (event) this.require(['turn/started', 'turn/settled', 'tool/started', 'tool/settled'].includes(message.method) ? 'lifecycle_events' : 'lifecycle_events_v2');
     const state = p.resource_owner ? this.states.get(ownerKey(p.resource_owner)) : this.foreground;
-    if (!state?.alive) throw rpcError(-32002, 'not_foreground_owner lifecycle notification');
+    // A lifecycle notification has no reply. An owner the adapter never bound (an
+    // empty bridge subscribes to no hook, so the host never sends it session_start)
+    // or one already retired has nothing to deliver to: refuse it quietly, as the
+    // editor-state snapshot above does, rather than raising one user-visible
+    // error per lifecycle event.
+    if (!state?.alive) return;
     const store = { id: state.parent, state, controller: new AbortController(), pending: new Set(), errors: [], live: false, method: message.method };
     if (p.host) state.host = { ...state.host, ...p.host };
     if (message.method === 'model/selected' && p.model) state.host.model = p.model;
