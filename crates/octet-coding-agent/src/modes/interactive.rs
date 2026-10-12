@@ -75,6 +75,7 @@ use crate::tui::view::{
 mod extension_menu;
 mod model_controls;
 mod onboarding;
+mod provider_removal;
 mod session_tree_menu;
 mod settings_menu;
 
@@ -2006,6 +2007,13 @@ async fn setup_provider(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
 ) -> anyhow::Result<App> {
+    match provider_removal::choose_setup_action(shell, input).await? {
+        provider_removal::SetupChoice::Add => {}
+        provider_removal::SetupChoice::Remove => {
+            return provider_removal::remove_provider(app, shell, input).await;
+        }
+        provider_removal::SetupChoice::Closed => return Ok(app),
+    }
     let Some(result) = onboarding::configure(shell, input, &app.config, false).await? else {
         return Ok(app);
     };

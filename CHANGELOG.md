@@ -8,6 +8,13 @@ and known limitations.
 
 ### Added
 
+- `/setup` can remove what octet saved: pick **Remove a provider or sign-in** to
+  delete a ChatGPT/Codex, Copilot or other subscription sign-in, a built-in API
+  key, or a custom provider, after a confirmation that defaults to Cancel. The
+  provider behind the current model is refused, and environment variables are
+  never changed.
+- Pickers such as Settings keep a usable window of options when a long
+  transcript leaves little room, instead of showing one row.
 - Default fullscreen launches now capture the wheel and trackpad (`mouse = "auto"`
   follows the surface), so the transcript scrolls without a flag. Inline sessions
   keep native selection and scrollback; `--mouse terminal` and `--mouse off`

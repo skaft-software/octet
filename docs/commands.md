@@ -41,7 +41,7 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/verbose [on\|off]` | Expand or collapse reasoning, compaction and tool output. |
 | `/reload` | Reload your keybindings, instructions, prompts, skills and enabled extensions at a safe point. Host re-exec is **opt-in**: only `/reload --force` (or an executable change with `reload_host = true`) triggers it, and a moved or replaced binary is confirmed before it's probed. Refused while a model turn, tool call, shell child, effect approval, in-flight session write or subagent is active. |
 | `/login [provider]` | Sign in to a subscription provider. |
-| `/setup` | Open the provider setup wizard at any time, to add or replace a built-in API key, sign in with a supported subscription, or set up a local endpoint. During a run it waits for the idle point, and your current model and session aren't switched. |
+| `/setup` | Open the provider setup wizard at any time, to add or replace a built-in API key, sign in with a supported subscription, or set up a local endpoint, or to remove a saved key, sign-in or custom provider. During a run it waits for the idle point, and your current model and session aren't switched. |
 | `/logout [provider]` | Remove its stored credential. |
 | `/status` | Active model, context, capabilities and diagnostics. |
 | `/session [info]` | Read-only session identity, file, branch, checkpoints and accounting. |

@@ -822,6 +822,28 @@ impl CredentialStore {
             .with_context(|| format!("writing {}", self.path.display()))
     }
 
+    /// Remove one provider from the registry and its cached model inventory,
+    /// leaving every other provider untouched. The registry is rewritten only if
+    /// it is unchanged since it was read; removing the last provider deletes the
+    /// registry and all of its caches. Returns whether the provider existed.
+    pub(crate) fn remove_provider(&self, provider_id: &str) -> Result<bool> {
+        let snapshot = self.load_registry_snapshot()?;
+        let Some(mut registry) = snapshot.registry.clone() else {
+            return Ok(false);
+        };
+        if registry.providers.remove(provider_id).is_none() {
+            return Ok(false);
+        }
+        if registry.providers.is_empty() {
+            self.delete()?;
+            return Ok(true);
+        }
+        self.save_registry_if_unchanged(&snapshot, &registry)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        remove_if_present(&self.model_cache_path_for(provider_id))?;
+        Ok(true)
+    }
+
     pub fn delete(&self) -> Result<()> {
         remove_if_present(&self.path)?;
         remove_if_present(&self.model_cache_path())?;
@@ -1182,6 +1204,97 @@ mod tests {
             loaded.providers["legacy"].credential.models[0].pricing,
             None
         );
+    }
+
+    fn provider_at(label: &str, base_url: &str) -> CustomProvider {
+        CustomProvider {
+            label: label.into(),
+            credential: CustomCredential {
+                base_url: base_url.into(),
+                api_key: "sk-secret-value".into(),
+                api_name: String::new(),
+                headers: Vec::new(),
+                models: vec![CustomModel {
+                    api_name: "m".into(),
+                    ..Default::default()
+                }],
+                auto_discover: false,
+            },
+            auth: None,
+            api_key_env: None,
+            cache: None,
+            startup_timeout_secs: None,
+            lifecycle_feedback: false,
+        }
+    }
+
+    #[test]
+    fn removing_one_provider_keeps_the_others_and_drops_only_its_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        let mut registry = CustomRegistry::single("alpha", provider_at("Alpha", "http://a/v1/"));
+        registry
+            .providers
+            .insert("beta".into(), provider_at("Beta", "http://b/v1/"));
+        store.save_registry(&registry).unwrap();
+        store.save_model_cache_for("alpha", b"alpha-cache").unwrap();
+        store.save_model_cache_for("beta", b"beta-cache").unwrap();
+
+        assert!(store.remove_provider("alpha").unwrap());
+        let loaded = store.load_registry().unwrap().unwrap();
+        assert_eq!(
+            loaded.providers.keys().collect::<Vec<_>>(),
+            vec!["beta"],
+            "only the removed provider disappears"
+        );
+        assert!(store.load_model_cache_for("alpha").unwrap().is_none());
+        assert_eq!(
+            store.load_model_cache_for("beta").unwrap().as_deref(),
+            Some(b"beta-cache".as_slice())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the rewritten registry stays owner-only");
+        }
+    }
+
+    #[test]
+    fn removing_the_last_provider_deletes_the_registry_and_every_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        store
+            .save_registry(&CustomRegistry::single(
+                "only",
+                provider_at("Only", "http://o/v1/"),
+            ))
+            .unwrap();
+        store.save_model_cache_for("only", b"cache").unwrap();
+
+        assert!(store.remove_provider("only").unwrap());
+        assert!(!path.exists());
+        assert!(store.load_registry().unwrap().is_none());
+        assert!(store.load_model_cache_for("only").unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_an_unknown_provider_or_from_an_empty_store_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        assert!(!store.remove_provider("ghost").unwrap());
+        store
+            .save_registry(&CustomRegistry::single(
+                "alpha",
+                provider_at("Alpha", "http://a/v1/"),
+            ))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(!store.remove_provider("ghost").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

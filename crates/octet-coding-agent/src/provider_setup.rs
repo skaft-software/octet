@@ -160,6 +160,27 @@ impl BuiltinApiKeyStore {
         Ok(path)
     }
 
+    /// Built-in API-key providers that currently have a stored key. Presence
+    /// only: no key is read, so nothing secret can reach a menu.
+    pub(crate) fn configured_providers(&self) -> Vec<ApiKeyProvider> {
+        builtin_api_key_providers()
+            .into_iter()
+            .filter(|provider| {
+                self.path(provider.id)
+                    .is_ok_and(|path| path.try_exists().unwrap_or(false))
+            })
+            .collect()
+    }
+
+    /// Delete one provider's stored key. Only declaration-owned ids resolve to a
+    /// path, and the file is removed without following links. Returns whether a
+    /// key was present; an environment variable is never touched.
+    pub(crate) fn remove(&self, provider_id: &str) -> Result<bool, ProviderSetupError> {
+        let path = self.path(provider_id)?;
+        octet_agent::secure_fs::remove_regular_file_if_exists(&path)
+            .map_err(|_| ProviderSetupError::Storage)
+    }
+
     /// Private runtime lookup; callers must never place the result in a public
     /// provider definition. Environment precedence is decided by provider auth.
     pub(crate) fn load(&self, provider_id: &str) -> Result<Option<String>, ProviderSetupError> {
@@ -2111,6 +2132,53 @@ mod tests {
             .save("anthropic", "synthetic-key".into(), false)
             .is_err());
         assert!(!store.directory.join("anthropic.json").exists());
+    }
+
+    #[test]
+    fn removing_a_stored_api_key_lists_only_configured_providers_and_deletes_one_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        assert!(store.configured_providers().is_empty());
+        store
+            .save("openai", "synthetic-key-1".into(), false)
+            .unwrap();
+        store
+            .save("anthropic", "synthetic-key-2".into(), false)
+            .unwrap();
+        let configured: Vec<_> = store
+            .configured_providers()
+            .iter()
+            .map(|provider| provider.id)
+            .collect();
+        assert_eq!(configured.len(), 2);
+        assert!(configured.contains(&"openai") && configured.contains(&"anthropic"));
+
+        assert!(store.remove("openai").unwrap());
+        assert!(store.load("openai").unwrap().is_none());
+        assert_eq!(
+            store.load("anthropic").unwrap().as_deref(),
+            Some("synthetic-key-2"),
+            "other providers' keys are untouched"
+        );
+        assert!(!store.remove("openai").unwrap(), "removal is idempotent");
+        assert!(
+            store.remove("../escape").is_err() && store.remove("not-a-provider").is_err(),
+            "only declaration-owned ids resolve to a file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_stored_api_key_never_follows_a_link_out_of_the_store() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        std::fs::create_dir_all(&store.directory).unwrap();
+        let target = directory.path().join("unrelated");
+        std::fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, store.directory.join("openai.json")).unwrap();
+        let _ = store.remove("openai");
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
     }
 
     #[test]

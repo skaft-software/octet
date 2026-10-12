@@ -107,6 +107,41 @@ pub(super) async fn run_setup(
     input: &mut EventStream,
     boot: &mut Bootstrap,
 ) -> anyhow::Result<()> {
+    // With no model configured there is no active provider to protect, so any
+    // saved credential can be removed here (a stale key is the usual reason).
+    match super::provider_removal::choose_setup_action(shell, input).await? {
+        super::provider_removal::SetupChoice::Add => {}
+        super::provider_removal::SetupChoice::Remove => {
+            if let Some(entry) =
+                super::provider_removal::pick_confirmed_entry(shell, input, None).await?
+            {
+                if let Some((catalog, notes, notice)) = super::provider_removal::delete_and_rebuild(
+                    shell,
+                    input,
+                    &entry,
+                    boot.config.offline,
+                )
+                .await?
+                {
+                    install_result(
+                        boot,
+                        SetupResult {
+                            catalog,
+                            notes,
+                            model: None,
+                            configured_endpoint: None,
+                        },
+                    );
+                    shell.set_runtime_config(boot.config.clone());
+                    shell.clear_error();
+                    shell.notice(notice);
+                    shell.render();
+                }
+            }
+            return Ok(());
+        }
+        super::provider_removal::SetupChoice::Closed => return Ok(()),
+    }
     if let Some(result) = configure(shell, input, &boot.config, true).await? {
         let notice = match &result.model {
             Some(model) => format!("provider setup saved · {}", model.0),

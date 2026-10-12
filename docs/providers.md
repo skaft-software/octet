@@ -39,7 +39,14 @@ In the TUI, `/setup` opens the same wizard on demand, even with a configured
 provider. A saved provider refreshes the model catalog but keeps your current
 session, active model and default model, so use `/model` to switch. If you
 replace the active route's stored key, reselect that model to rebuild its
-credential. A credential environment variable still takes precedence, and the
+credential. When octet has something saved, `/setup` first asks whether to add or remove.
+**Remove a provider or sign-in** lists only what octet stored (ChatGPT/Codex,
+GitHub Copilot and other subscription sign-ins, built-in API keys, custom
+providers), asks you to confirm (Cancel is the default), deletes it through the
+same private-file path it was saved with, and refreshes the model list. It
+refuses to remove the provider behind your current model (switch with `/model`
+first) and never changes an environment variable, so a provider can still work
+through one afterwards. A credential environment variable still takes precedence, and the
 wizard warns before saving a fallback key. Print and RPC don't open the wizard.
 Subscription sign-in needs an online launch, and `--offline` isn't a
 local-inference guarantee. After a credential is saved the catalog refreshes and
