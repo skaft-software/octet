@@ -8,6 +8,16 @@ and known limitations.
 
 ### Added
 
+- Custom providers pointed at a first-party endpoint octet already declares
+  (for example `https://api.cerebras.ai/v1`) now get the reviewed catalog's
+  context window and output limit for models whose `/v1/models` entry carries
+  none, instead of losing those models as "unknown effective context". A
+  context you configured or the endpoint asserted is never replaced.
+- Startup no longer prints a warning when a custom provider's models have no
+  known context or when its `/v1/models` discovery fails; a failing endpoint is
+  reported when you use it.
+- Pressing Ctrl+D while extension resource discovery is still running now exits
+  cleanly instead of printing `Error: resource discovery closed`.
 - `OCTET_PROVIDER_REQUEST_TRACE=<file|stderr>` appends a redacted trace of each
   provider request's shape (item types and counts, image counts and bytes,
   reasoning `encrypted_content` presence, transport, `previous_response_id`
