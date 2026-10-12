@@ -1175,9 +1175,15 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
         octet.pty.drain_for(Duration::from_millis(350));
         let before = octet.pty.output.len();
         octet.pty.write_input(b"/prompt\r");
-        octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
-            contains_bytes(&output[before..], b"Prompt templates:")
-        });
+        // An automatic reload pass may be applying at the idle prompt; the
+        // typed command must still complete, so wait out the overall budget
+        // rather than one short attempt.
+        octet.wait_until(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(RELOAD_ATTEMPT_TIMEOUT),
+            |output| contains_bytes(&output[before..], b"Prompt templates:"),
+        );
         octet.pty.drain_for(DRAIN_TIME);
         let loaded = contains_bytes(&octet.pty.output[before..], b"/reload-probe");
         octet.pty.write_input(b"\x1b");
