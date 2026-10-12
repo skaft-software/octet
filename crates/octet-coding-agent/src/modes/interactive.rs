@@ -10170,14 +10170,19 @@ async fn run_idle_command_inner(
             }
         }
         Command::Export(output) => {
-            let id = app
+            // A refused export (for example an empty session) is a report,
+            // never a reason to end the interactive session.
+            let Some(id) = app
                 .agent
                 .session()
                 .path()
                 .file_stem()
                 .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow::anyhow!("current session has no valid id"))?;
-            let report = commands::export_for_frontend(
+            else {
+                shell.error("current session has no valid id".into());
+                return Ok(IdleCommandOutcome::Continue(app));
+            };
+            match commands::export_for_frontend(
                 &app.sessions,
                 id,
                 output,
@@ -10187,17 +10192,19 @@ async fn run_idle_command_inner(
                 } else {
                     "dark"
                 },
-            )?;
-            shell.show_overlay_text(format!(
-                "Exported {}\nRedacted {} potentially sensitive values{}",
-                report.destination.display(),
-                report.redaction_count,
-                if report.ignored_torn_tail {
-                    "\nIgnored an interrupted final append; use `octet sessions repair`."
-                } else {
-                    ""
-                }
-            ));
+            ) {
+                Ok(report) => shell.show_overlay_text(format!(
+                    "Exported {}\nRedacted {} potentially sensitive values{}",
+                    report.destination.display(),
+                    report.redaction_count,
+                    if report.ignored_torn_tail {
+                        "\nIgnored an interrupted final append; use `octet sessions repair`."
+                    } else {
+                        ""
+                    }
+                )),
+                Err(error) => shell.error(error.to_string()),
+            }
         }
         Command::Prompt(None) => shell.show_overlay_text(prompt_templates_text(&app)),
         Command::Answer(instruction) => {

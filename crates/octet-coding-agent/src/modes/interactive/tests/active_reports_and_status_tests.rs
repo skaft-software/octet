@@ -153,6 +153,42 @@ async fn active_name_updates_the_foreground_title_without_waiting_for_run_settle
 }
 
 #[tokio::test]
+async fn idle_export_of_an_empty_session_reports_instead_of_ending_the_session() {
+    let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = EventStream::from_stream(futures_util::stream::pending());
+    let app = transition(app, &mut shell, &mut input, Reconfig::NewSession)
+        .await
+        .unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let destination = output.path().join("empty.json");
+    let mut goal_deadline = None;
+    let mut idle_input = EventStream::new();
+    let mut reload =
+        crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
+    let outcome = run_idle_command(
+        app,
+        &mut shell,
+        &mut idle_input,
+        Command::Export(Some(destination.display().to_string())),
+        &mut goal_deadline,
+        None,
+        &mut reload,
+    )
+    .await
+    .expect("a refused export must not end the interactive session");
+    assert!(matches!(outcome, IdleCommandOutcome::Continue(_)));
+    assert!(
+        shell
+            .debug_error()
+            .is_some_and(|error| error.contains("no resumable conversation")),
+        "error: {:?}",
+        shell.debug_error()
+    );
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
 async fn foreground_title_tracks_idle_name_new_resume_fork_and_clear() {
     let (_workspace, app) = crate::compaction::tests::app_for_estimate();
     let mut shell = InteractiveShell::test_shell();
