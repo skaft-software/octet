@@ -278,6 +278,12 @@ impl NativePty {
                 Ok(read) => {
                     self.pending.extend_from_slice(&buffer[..read]);
                     self.output.extend_from_slice(&buffer[..read]);
+                    // Fail instead of draining forever if output never pauses.
+                    assert!(
+                        self.output.len() < 4 * 1024 * 1024,
+                        "unbounded native output: {:?}",
+                        String::from_utf8_lossy(&self.output[self.output.len() - 4096..])
+                    );
                 }
                 Err(error)
                     if error.kind() == io::ErrorKind::WouldBlock
