@@ -347,6 +347,7 @@ jobs:
             secure_fs `
             session::tests::journal `
             tools::bash::tests `
+            tools::powershell::tests `
             extension_process::tests::python_script_detection_uses_the_extension_or_interpreter_line `
             extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter `
             extension_process::tests::compaction_strategy_negotiates_and_renders_through_host

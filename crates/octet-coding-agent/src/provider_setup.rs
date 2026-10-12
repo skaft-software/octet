@@ -716,10 +716,11 @@ pub(crate) struct SetupAuthority {
 
 impl SetupAuthority {
     pub(crate) fn from_config(config: &crate::config::Config) -> Self {
-        let tools = ["read", "edit", "write", "bash"]
+        let tools = ["read", "edit", "write", "bash", "powershell"]
             .into_iter()
             .filter(|name| config.tool_available(name))
             .collect::<Vec<_>>();
+        let shell = crate::config::ShellPlatform::host().default_shell_tool();
         Self {
             session_dir: bounded_copy(
                 &config.session_dir.display().to_string(),
@@ -727,7 +728,7 @@ impl SetupAuthority {
             ),
             workspace_trusted: config.workspace_trusted,
             enabled_tools: if tools.is_empty() {
-                "none of read, edit, write, or bash".to_owned()
+                format!("none of read, edit, write, or {shell}")
             } else {
                 tools.join(", ")
             },

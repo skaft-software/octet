@@ -1484,10 +1484,17 @@ impl ExtensionHost {
         scoped.duplicate_compaction_strategy = self.duplicate_compaction_strategy;
         scoped.persistence_metadata_hooks = self.persistence_metadata_hooks.clone();
         scoped.invalid_metadata_namespaces = self.invalid_metadata_namespaces.clone();
+        // Child scopes name the standard shell `bash`. Where the parent's only
+        // shell is `powershell` (the Windows default), that request resolves to
+        // it rather than leaving the child without a shell.
+        let shell_alias = allowed.contains("bash")
+            && !available
+                .iter()
+                .any(|tool| tool.definition().name == "bash");
         let mut effective = Vec::new();
         for tool in available {
             let name = tool.definition().name;
-            if allowed.contains(&name) {
+            if allowed.contains(&name) || (shell_alias && name == "powershell") {
                 effective.push(name);
                 scoped.tool_arc(tool);
             }
@@ -1966,6 +1973,26 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["read".to_owned(), "search".to_owned(), "write".to_owned()])
         );
+    }
+
+    #[test]
+    fn child_bash_scope_resolves_to_powershell_only_when_it_is_the_parent_shell() {
+        let allowed = BTreeSet::from(["read".to_owned(), "bash".to_owned()]);
+        let mut windows = ExtensionHost::new();
+        windows.tool(NamedTool("read"));
+        windows.tool(NamedTool("powershell"));
+        let (_, effective) = windows.scoped_tool_snapshot(&allowed).unwrap();
+        assert_eq!(effective, vec!["powershell", "read"]);
+        // Once accepted, the resolved scope is stable on re-admission.
+        let resolved = effective.into_iter().collect::<BTreeSet<_>>();
+        let (_, again) = windows.scoped_tool_snapshot(&resolved).unwrap();
+        assert_eq!(again, vec!["powershell", "read"]);
+
+        let mut both = ExtensionHost::new();
+        both.tool(NamedTool("bash"));
+        both.tool(NamedTool("powershell"));
+        let (_, effective) = both.scoped_tool_snapshot(&allowed).unwrap();
+        assert_eq!(effective, vec!["bash"]);
     }
 
     #[test]

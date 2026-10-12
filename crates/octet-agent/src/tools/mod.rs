@@ -162,7 +162,9 @@ impl Extension for CoreTools {
         host.builtin_tool(EditTool);
         host.builtin_tool(WriteTool);
         host.builtin_tool(BashTool);
-        // Optional at the product allowlist boundary; never a bash fallback.
+        // Windows-only. The product allowlist publishes exactly one of the two
+        // shells by default (powershell on Windows, bash elsewhere); the
+        // registry never substitutes one for the other at execution time.
         #[cfg(windows)]
         host.builtin_tool(PowerShellTool::default());
     }

@@ -706,7 +706,7 @@ impl EffectBroker {
                     APPROVAL_RESPONSE_TIMEOUT,
                     progress.confirmation_with_technical_detail(
                         match intent.tool.as_str() {
-                            "bash" => "Run this command?",
+                            "bash" | "powershell" => "Run this command?",
                             "write" => "Write this file?",
                             "edit" => "Edit this file?",
                             _ => "Allow this action?",
@@ -758,7 +758,9 @@ impl EffectBroker {
             );
         }
 
-        let is_bash = intent.tool() == "bash";
+        // `powershell` is the Windows default shell tool: it shares bash's
+        // process authority and admission path, never a weaker one.
+        let is_bash = matches!(intent.tool(), "bash" | "powershell");
         let bash_requires_approval = match self.policy {
             EffectPolicy::UnsafeHost => false,
             EffectPolicy::ControlledBashApproval => is_bash,
@@ -817,8 +819,12 @@ impl Default for EffectBroker {
 }
 
 fn requires_bash_host_process_approval(tool: &str, arguments: &serde_json::Value) -> bool {
-    if tool != "bash" {
-        return false;
+    match tool {
+        "bash" => {}
+        // The known-safe analysis parses Bash syntax only. PowerShell commands
+        // are never auto-approved by it, so controlled mode always confirms.
+        "powershell" => return true,
+        _ => return false,
     }
     let Some(values) = arguments.as_object() else {
         return true;
@@ -1083,7 +1089,7 @@ fn approval_human_detail(
     arguments: &serde_json::Value,
 ) -> Result<String, EffectBrokerError> {
     let fields: &[(&str, &str)] = match tool {
-        "bash" => &[("command", "Command"), ("cwd", "Working directory")],
+        "bash" | "powershell" => &[("command", "Command"), ("cwd", "Working directory")],
         _ => &[("path", "File")],
     };
     let mut detail = String::new();
@@ -2087,6 +2093,45 @@ mod tests {
             broker.authorize(&safe, None).await,
             Err(EffectBrokerError::ApprovalUnavailable { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn powershell_is_admitted_like_bash_but_never_auto_approved_as_known_safe() {
+        let intent = |command: &str| {
+            EffectIntent::new(
+                "principal",
+                "run-1",
+                1,
+                "call-1",
+                "powershell",
+                ToolEffect::HostProcess,
+                serde_json::json!({"command": command}),
+            )
+            .unwrap()
+        };
+        // Bash's known-safe parser never classifies PowerShell syntax, so a
+        // read-only looking command still needs approval in controlled mode,
+        // instead of being denied as an unbrokered native process.
+        for policy in [
+            EffectPolicy::Controlled,
+            EffectPolicy::ControlledBashApproval,
+        ] {
+            assert!(matches!(
+                EffectBroker::new(policy)
+                    .authorize(&intent("ls"), None)
+                    .await,
+                Err(EffectBrokerError::ApprovalUnavailable { .. })
+            ));
+        }
+        assert!(EffectBroker::new(EffectPolicy::UnsafeHost)
+            .authorize(&intent("Get-ChildItem"), None)
+            .await
+            .is_ok());
+        assert_eq!(
+            approval_human_detail("powershell", &serde_json::json!({"command": "Get-Date"}))
+                .unwrap(),
+            approval_human_detail("bash", &serde_json::json!({"command": "Get-Date"})).unwrap()
+        );
     }
 
     #[test]

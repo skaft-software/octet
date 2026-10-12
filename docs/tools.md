@@ -38,7 +38,8 @@ content searches; other enabled tools do not depend on them.
 | `read` | Reads text files line by line, within a size limit. Also handles [supported media](media.md). | On |
 | `edit` | Exact replacements that detect stale file content. | On |
 | `write` | Creates or replaces whole files. | On |
-| `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On |
+| `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On, except on Windows |
+| `powershell` | Runs PowerShell (`pwsh.exe`, else Windows PowerShell 5.1) with the same limits, timeout, cancellation and Job Object cleanup. | On Windows only, in place of `bash` ([Windows](windows.md#powershell)) |
 
 A tool you turn off is never advertised to the model. Having a tool isn't
 permission to use it. When the model batches calls in one response, reads run
@@ -92,8 +93,8 @@ Pick a policy with `effect_policy`, `OCTET_EFFECT_POLICY` or `--effect-policy`:
 | Value | What happens |
 | --- | --- |
 | `unsafe_host` | The default. Full access for effects octet can classify. |
-| `controlled` | Workspace reads and pure calls run freely. File changes and bash calls not on the safe list ask first. Known-safe read-only bash calls may be auto-approved. Other effects are denied. |
-| `controlled_bash_approval` | File changes ask first, and **every** bash call asks first, once. Other effects are denied. |
+| `controlled` | Workspace reads and pure calls run freely. File changes and bash calls not on the safe list ask first. Known-safe read-only bash calls may be auto-approved; `powershell` calls always ask, because the safe list only understands Bash syntax. Other effects are denied. |
+| `controlled_bash_approval` | File changes ask first, and **every** bash or powershell call asks first, once. Other effects are denied. |
 
 Full access implicitly grants host authority to the executable extensions you
 select, but they stay **disabled by default** until you enable them. A grant

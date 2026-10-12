@@ -398,8 +398,9 @@ pub struct Cli {
     pub tools: Option<Vec<String>>,
     /// Add the Windows PowerShell tool to the model-visible allowlist.
     ///
-    /// Opt-in only, additive to the default allowlist, and never a `bash`
-    /// fallback: the entry stays inert on a host that cannot run it.
+    /// PowerShell is already the default shell on Windows; this keeps it
+    /// beside `bash` when a Bash-compatible shell_path selects Bash. It is
+    /// additive and stays inert on a host that cannot run it.
     #[arg(long, conflicts_with_all = ["tools", "no_tools"])]
     pub powershell: bool,
     /// Remove tools from the active set (comma-separated).
@@ -426,7 +427,8 @@ pub struct Cli {
     /// Allow `read` to fetch public HTTPS image/audio URLs.
     #[arg(long, conflicts_with = "offline")]
     pub allow_remote_read: bool,
-    /// Bash-compatible shell executable used by the `bash` tool.
+    /// Bash-compatible shell executable used by the `bash` tool. On Windows,
+    /// setting it selects the `bash` tool instead of the default `powershell`.
     #[arg(long, value_name = "PATH")]
     pub shell_path: Option<PathBuf>,
     /// Do not load global or workspace AGENTS.md files.
@@ -1739,11 +1741,18 @@ fn build_config_with_global_path_and_diagnostics(
     let mut tools = match cli.tools {
         Some(names) => ToolPolicy::only(names)?,
         None if cli.no_tools => ToolPolicy::only(Vec::new())?,
-        None => ToolPolicy::default(),
+        // Windows publishes `powershell` as its only shell unless a
+        // Bash-compatible shell_path was configured (CLI, environment or
+        // settings), which selects `bash` instead.
+        None => ToolPolicy::default_for_shell(
+            crate::config::ShellPlatform::host(),
+            sandbox.shell_path.is_some(),
+        ),
     };
     if cli.powershell {
-        // Additive opt-in: this registers one extra allowlist entry and never
-        // replaces or degrades `bash`. The tool itself remains Windows-gated.
+        // Additive opt-in: this adds one allowlist entry and never removes
+        // `bash`. It is already the default shell on Windows, where it matters
+        // only beside an explicit Bash opt-in. The tool remains Windows-gated.
         tools.include("powershell")?;
         if !cfg!(windows) {
             crate::output::stderr_line(
@@ -1763,6 +1772,7 @@ fn build_config_with_global_path_and_diagnostics(
     }
     if cli.no_process || cli.no_shell {
         tools.exclude("bash")?;
+        tools.exclude("powershell")?;
     }
     if !sandbox.allow_edit {
         tools.exclude("edit")?;
@@ -1772,6 +1782,7 @@ fn build_config_with_global_path_and_diagnostics(
     }
     if !(sandbox.allow_process && sandbox.allow_shell) {
         tools.exclude("bash")?;
+        tools.exclude("powershell")?;
     }
 
     let mut compaction = CompactionPolicy::default();

@@ -306,6 +306,57 @@ fn base_prompt_handles_every_core_tool_subset_exactly() {
 }
 
 #[test]
+fn windows_prompt_offers_powershell_and_never_mentions_bash() {
+    use crate::config::{ShellPlatform, ToolPolicy};
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path().to_owned(), root.path().to_owned());
+    config.tools = ToolPolicy::default_for(ShellPlatform::Windows);
+
+    let prompt = base_prompt_for(&config, ShellPlatform::Windows);
+    assert!(
+        prompt.contains("Configured core tools: read, edit, write, powershell."),
+        "{prompt}"
+    );
+    assert!(prompt.contains(
+        "Use `powershell` for shell commands and repository content search; commands run in PowerShell"
+    ));
+    assert!(prompt.contains(
+        "Prefer `rg` when available, otherwise use `Get-ChildItem -Recurse -File` and `Select-String`."
+    ));
+    assert!(prompt.contains(
+        "Relative tool paths and `powershell` without an explicit `cwd` resolve from the workspace root."
+    ));
+    assert!(!prompt.to_ascii_lowercase().contains("bash"), "{prompt}");
+    assert!(!prompt.contains("`grep`"));
+
+    // Without process authority no shell is advertised, still without Bash.
+    config.sandbox.allow_process = false;
+    let prompt = base_prompt_for(&config, ShellPlatform::Windows);
+    assert!(prompt.contains("Configured core tools: read, edit, write."));
+    assert!(!prompt.to_ascii_lowercase().contains("bash"), "{prompt}");
+
+    // The POSIX surface and wording are unchanged.
+    let mut posix = self::config(root.path().to_owned(), root.path().to_owned());
+    posix.tools = ToolPolicy::default_for(ShellPlatform::Posix);
+    assert_eq!(
+        base_prompt_for(&posix, ShellPlatform::Posix),
+        expected_base_prompt(&posix, "read, edit, write, bash")
+    );
+}
+
+#[test]
+fn windows_prompt_respects_an_explicit_bash_opt_in() {
+    use crate::config::{ShellPlatform, ToolPolicy};
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path().to_owned(), root.path().to_owned());
+    config.tools = ToolPolicy::default_for_shell(ShellPlatform::Windows, true);
+    assert_eq!(
+        base_prompt_for(&config, ShellPlatform::Windows),
+        expected_base_prompt(&config, "read, edit, write, bash")
+    );
+}
+
+#[test]
 fn context_paths_are_safe_xml_attributes() {
     assert_eq!(
         xml_attribute("one & \"two\" <three>"),

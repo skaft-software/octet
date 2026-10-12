@@ -205,21 +205,73 @@ pub struct ToolPolicy {
     allow_discovered_extensions: bool,
 }
 
+/// The platform whose shell the default model tool surface exposes.
+///
+/// The host value comes from the build target; tests inject the other value
+/// to check the Windows surface and prompt on any CI host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellPlatform {
+    /// Unix-like hosts: the model shell is `bash`.
+    Posix,
+    /// Native Windows: the model shell is `powershell`.
+    Windows,
+}
+
+impl ShellPlatform {
+    /// The platform this binary was built for.
+    pub const fn host() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Posix
+        }
+    }
+
+    /// The built-in shell tool published by default on this platform.
+    pub const fn default_shell_tool(self) -> &'static str {
+        match self {
+            Self::Posix => "bash",
+            Self::Windows => "powershell",
+        }
+    }
+}
+
 impl Default for ToolPolicy {
     fn default() -> Self {
+        Self::default_for(ShellPlatform::host())
+    }
+}
+
+impl ToolPolicy {
+    /// The default allowlist for `platform`: every supported built-in with
+    /// exactly one shell. Windows publishes `powershell` and never `bash`, so
+    /// a model there is not offered a shell whose syntax it cannot rely on;
+    /// other platforms publish `bash` and never `powershell`.
+    pub fn default_for(platform: ShellPlatform) -> Self {
+        let shell = platform.default_shell_tool();
         Self {
             enabled: SUPPORTED_TOOL_NAMES
                 .into_iter()
-                // PowerShell is explicit-only and Windows-gated: it is an
-                // alternative shell for one platform, not part of the
-                // portable surface.
-                .filter(|name| !matches!(*name, "powershell"))
+                .filter(|name| !matches!(*name, "bash" | "powershell") || *name == shell)
                 .map(str::to_owned)
                 .collect(),
             excluded: BTreeSet::new(),
             requested: None,
             allow_discovered_extensions: true,
         }
+    }
+
+    /// The default allowlist after the host's shell opt-in. On Windows an
+    /// explicitly configured Bash-compatible `shell_path` is the user's
+    /// choice of Bash, so `bash` replaces `powershell`; elsewhere the opt-in
+    /// changes nothing.
+    pub fn default_for_shell(platform: ShellPlatform, bash_shell_configured: bool) -> Self {
+        let mut policy = Self::default_for(platform);
+        if platform == ShellPlatform::Windows && bash_shell_configured {
+            policy.enabled.remove("powershell");
+            policy.enabled.insert("bash".to_owned());
+        }
+        policy
     }
 }
 
@@ -586,13 +638,30 @@ impl Config {
     /// Whether a tool will survive both the model-visible allowlist and the
     /// matching execution capability gate for this process.
     pub fn tool_available(&self, name: &str) -> bool {
+        self.tool_available_on(name, ShellPlatform::host())
+    }
+
+    /// The shell tool whose live output is checkpointed into the session:
+    /// `bash` when it is published, otherwise the Windows `powershell` tool.
+    pub fn checkpointed_shell_tool(&self) -> &'static str {
+        if !self.tool_available("bash") && self.tool_available("powershell") {
+            "powershell"
+        } else {
+            "bash"
+        }
+    }
+
+    /// [`Self::tool_available`] as it would be decided on `platform`.
+    pub fn tool_available_on(&self, name: &str, platform: ShellPlatform) -> bool {
         self.tools.enabled(name)
             && match name {
                 "edit" => self.sandbox.allow_edit,
                 "write" => self.sandbox.allow_write,
                 // Process mode deliberately has shell-equivalent authority.
                 "bash" => self.sandbox.process_execution_allowed(),
-                "powershell" => cfg!(windows) && self.sandbox.process_execution_allowed(),
+                "powershell" => {
+                    platform == ShellPlatform::Windows && self.sandbox.process_execution_allowed()
+                }
                 _ => true,
             }
     }
@@ -816,7 +885,7 @@ mod tests {
 
     #[test]
     fn powershell_opt_in_is_additive_and_removable_again() {
-        let mut policy = ToolPolicy::default();
+        let mut policy = ToolPolicy::default_for(ShellPlatform::Posix);
         assert!(!policy.enabled("powershell"));
         policy.include("powershell").unwrap();
         // The opt-in never replaces the default allowlist and is not an
@@ -832,7 +901,7 @@ mod tests {
 
     #[test]
     fn default_tool_policy_omits_builtin_search_and_keeps_powershell_explicit() {
-        let policy = ToolPolicy::default();
+        let policy = ToolPolicy::default_for(ShellPlatform::Posix);
         for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
         }
@@ -846,6 +915,63 @@ mod tests {
         // Removal from the built-in inventory does not reserve an extension
         // name: the default policy still permits discovered extension tools.
         assert!(policy.enabled("search"));
+    }
+
+    #[test]
+    fn host_default_tool_policy_matches_the_build_platform() {
+        assert_eq!(
+            ShellPlatform::host(),
+            if cfg!(windows) {
+                ShellPlatform::Windows
+            } else {
+                ShellPlatform::Posix
+            }
+        );
+        assert_eq!(
+            ToolPolicy::default(),
+            ToolPolicy::default_for(ShellPlatform::host())
+        );
+    }
+
+    #[test]
+    fn windows_default_tool_policy_replaces_bash_with_powershell() {
+        let policy = ToolPolicy::default_for(ShellPlatform::Windows);
+        for name in ["read", "edit", "write", "powershell"] {
+            assert!(policy.enabled(name), "{name}");
+        }
+        assert!(!policy.enabled("bash"));
+        assert!(policy.explicit_names().is_none());
+        assert_eq!(
+            policy
+                .names()
+                .filter(|name| matches!(*name, "bash" | "powershell"))
+                .collect::<Vec<_>>(),
+            vec!["powershell"],
+            "exactly one shell is published"
+        );
+    }
+
+    #[test]
+    fn windows_bash_is_an_explicit_opt_in() {
+        // A configured Bash-compatible shell_path selects bash instead.
+        let configured = ToolPolicy::default_for_shell(ShellPlatform::Windows, true);
+        assert!(configured.enabled("bash"));
+        assert!(!configured.enabled("powershell"));
+        // So does an explicit `--tools` allowlist naming it.
+        let explicit = ToolPolicy::only(["read".to_owned(), "bash".to_owned()]).unwrap();
+        assert!(explicit.enabled("bash"));
+        assert!(!explicit.enabled("powershell"));
+        // Without an opt-in, PowerShell is the Windows shell; POSIX is unchanged.
+        assert_eq!(
+            ToolPolicy::default_for_shell(ShellPlatform::Windows, false),
+            ToolPolicy::default_for(ShellPlatform::Windows)
+        );
+        for configured in [false, true] {
+            assert_eq!(
+                ToolPolicy::default_for_shell(ShellPlatform::Posix, configured),
+                ToolPolicy::default_for(ShellPlatform::Posix)
+            );
+        }
     }
 
     #[test]

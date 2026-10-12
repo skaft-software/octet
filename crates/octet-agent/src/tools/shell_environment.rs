@@ -120,7 +120,7 @@ impl Tool for SessionShellTool {
     }
     fn prompt_snippet(&self) -> Option<&str> {
         if self.powershell {
-            Some("Execute PowerShell commands")
+            Some(super::powershell::PROMPT_SNIPPET)
         } else {
             self.bash.prompt_snippet()
         }

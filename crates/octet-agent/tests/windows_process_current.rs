@@ -1,4 +1,5 @@
-//! Windows-only process-control qualification fixtures for `BashTool`.
+//! Windows-only process-control qualification fixtures for `BashTool` and the
+//! default Windows `PowerShellTool`.
 //!
 //! The fixtures are inert on non-Windows hosts: the whole crate is `cfg`-gated
 //! so a qualification run on another platform builds them as an empty target.
@@ -119,6 +120,85 @@ async fn windows_job_cleanup_bounds_an_infinite_bash_command() {
     assert!(error.message.contains("error timeout"), "{error}");
     assert!(
         started.elapsed() < Duration::from_secs(5),
+        "Windows Job Object cleanup exceeded the bounded timeout: {error}"
+    );
+}
+
+fn powershell_sandbox(workspace: &Path) -> SandboxConfig {
+    let mut sandbox = SandboxConfig::new(workspace);
+    sandbox.allow_process = true;
+    sandbox.allow_shell = true;
+    sandbox.bash_timeout = Duration::from_secs(30);
+    sandbox
+}
+
+#[tokio::test]
+async fn powershell_runs_encoded_commands_with_cwd_quotes_and_utf8_output() {
+    let directory = tempfile::tempdir().expect("temporary workspace");
+    let workspace = directory
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    std::fs::create_dir(workspace.join("subdir")).expect("subdirectory");
+    std::fs::write(workspace.join("subdir/needle.txt"), "powershell-marker\n").expect("fixture");
+    let sandbox = powershell_sandbox(&workspace);
+
+    // Quotes, `$`, backticks and non-ASCII text survive because the script
+    // travels as -EncodedCommand rather than through command-line quoting.
+    let output = octet_agent::tools::PowerShellTool::default()
+        .execute(
+            json!({
+                "command": "$name = \"it's `\"quoted`\"\"; Write-Output \"$name \u{fc}n\u{ef}c\u{f8}d\u{e9}\"\n(Get-Location).Path\n(Get-ChildItem -Recurse -File | Select-String -SimpleMatch 'powershell-marker').Filename",
+                "cwd": "subdir"
+            }),
+            &context(&workspace, &sandbox),
+        )
+        .await
+        .expect("PowerShell command");
+
+    assert!(output.text.starts_with("exit=0"), "{}", output.text);
+    assert!(
+        output
+            .text
+            .contains("it's \"quoted\" \u{fc}n\u{ef}c\u{f8}d\u{e9}"),
+        "{}",
+        output.text
+    );
+    assert!(output.text.contains("subdir"), "{}", output.text);
+    assert!(output.text.contains("needle.txt"), "{}", output.text);
+}
+
+#[tokio::test]
+async fn powershell_reports_exit_codes_and_job_cleanup_bounds_a_timeout() {
+    let directory = tempfile::tempdir().expect("temporary workspace");
+    let workspace = directory
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let sandbox = powershell_sandbox(&workspace);
+    let tool = octet_agent::tools::PowerShellTool::default();
+
+    let output = tool
+        .execute(
+            json!({"command": "[Console]::Error.WriteLine('boom'); exit 7"}),
+            &context(&workspace, &sandbox),
+        )
+        .await
+        .expect("PowerShell exit status");
+    assert!(output.text.starts_with("exit=7"), "{}", output.text);
+    assert!(output.text.contains("boom"), "{}", output.text);
+
+    let started = Instant::now();
+    let error = tool
+        .execute(
+            json!({"command": "while ($true) { }", "timeout_ms": 500}),
+            &context(&workspace, &sandbox),
+        )
+        .await
+        .expect_err("infinite PowerShell command must time out");
+    assert!(error.message.contains("error timeout"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
         "Windows Job Object cleanup exceeded the bounded timeout: {error}"
     );
 }

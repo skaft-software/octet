@@ -62,7 +62,7 @@ without assistant-message or turn events. Its usage is session-only.
 | Option | What it does |
 | --- | --- |
 | `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist or exclusions, such as `read,bash`. |
-| `--powershell` | Opt in to the Windows `powershell` tool, in addition to `bash`. It never replaces `bash`, can't be combined with an exclusive `--tools` or `--no-tools` list, and reports itself inert on hosts without PowerShell. |
+| `--powershell` | Add the Windows `powershell` tool. It is already the default Windows shell; the flag keeps it beside `bash` when `--shell-path` selects Bash. It never removes `bash`, can't be combined with an exclusive `--tools` or `--no-tools` list, and reports itself inert on hosts without PowerShell. |
 | `--models PATTERNS` | Ordered, comma-separated model scope for selection and Ctrl+P cycling: `provider/*`, a literal `provider/model`, or a bare-id glob, each with an optional real `:level` suffix. The first requested match is the default for a new session, and a miss warns without discarding the rest. `/scoped-models` saves the same ordered patterns. |
 | `--no-tools` | Disable all tools. Can't be combined with `--tools`. |
 | `--no-edit` | Disable `edit` and `write`. |
@@ -71,7 +71,7 @@ without assistant-message or turn events. Its usage is session-only.
 | `--allow-shell` | Turn on the shell capability. It doesn't bypass separate process or effect gates. |
 | `--effect-policy controlled_bash_approval\|controlled\|unsafe_host` | Set [effect admission](tools.md#authority-profiles). Default `unsafe_host`. |
 | `--safe-mode` | Approval for every bash call and file change. Forces external paths off and removes the implicit authority that starts enabled extensions, so an ungranted extension stays stopped while an explicitly granted one still starts. Can't be combined with `--effect-policy`. |
-| `--shell-path PATH` | Use this Bash-compatible shell. `$SHELL` isn't read. |
+| `--shell-path PATH` | Use this Bash-compatible shell. `$SHELL` isn't read. On Windows it also selects `bash` instead of the default `powershell` tool. |
 | `--bash-timeout-secs N`, `--exec-timeout-secs N` | Command timeout in seconds. The example config uses `120`. |
 | `--max-output-bytes N` | Output capture limit. The example config uses `1048576`. |
 | `--allow-remote-read` | Allow HTTPS image and audio reads. Off by default. Can't be combined with `--offline`. |

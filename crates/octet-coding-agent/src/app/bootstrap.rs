@@ -9012,7 +9012,7 @@ fn build_app_with_consumer(
     agent.set_cache_warming_mode(config.cache_warming)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
-        "bash",
+        config.checkpointed_shell_tool(),
         octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
     );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
@@ -9430,7 +9430,7 @@ pub fn rebuild_app(
     agent.set_service_tier(service_tier)?;
     #[cfg(any(unix, windows))]
     agent.enable_session_partial_output_checkpoints(
-        "bash",
+        config.checkpointed_shell_tool(),
         octet_agent::tools::BASH_CHECKPOINT_INTERVAL,
     );
     agent.set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));

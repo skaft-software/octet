@@ -68,7 +68,7 @@ hello handshake, and gates on the Windows-relevant suites: terminal detection
 and frame writing, ConPTY scenarios against both the test and release
 binaries, the renderer, private file access, partial-assistant journal settlement
 and genuine interrupted-reasoning recovery, Python extension launch, Windows
-Bash process control, the Python SDK, the computer-use extension (no driver
+Bash and PowerShell process control, the Python SDK, the computer-use extension (no driver
 installed), and release tooling. It starts the packaged executables with only
 the Windows system directories on `PATH` and as a freshly created standard
 (non-administrator) account, and uploads an artifact named
@@ -202,8 +202,9 @@ Windows Terminal. Use a disposable workspace and `--safe-mode`.
 3. **Streaming**: with a configured provider, ask for a long answer. The
    transcript grows without full-screen flashes, flicker of earlier rows, or
    the composer jumping.
-4. **Tool updates**: ask for a command that prints for several seconds (bash
-   through Git Bash, or `--powershell`). Live tool output updates in place and
+4. **Tool updates**: ask for a command that prints for several seconds
+   (the default `powershell` tool, or bash through Git Bash with
+   `--shell-path`). Live tool output updates in place and
    finishes with a clean final block.
 5. **Scrolling**: during and after streaming, use the mouse wheel and
    `PageUp`/`PageDown`; history is intact and the live tail returns cleanly.
@@ -253,9 +254,70 @@ not qualify them:
   each mode. Check the complete pinned Pi Settings row matrix against actual
   behavior, not only the presence of labels.
 
+## PowerShell
+
+On Windows the model's shell is the `powershell` tool. The default tool surface
+is exactly `read`, `edit`, `write` and `powershell`: the `bash` tool is not
+registered, and neither the tool list, the tool descriptions nor the system
+prompt mention Bash, so the model does not spend calls on Bash syntax that
+would fail. The system prompt says:
+
+- `Configured core tools: read, edit, write, powershell.`
+- `Use powershell for shell commands and repository content search; commands
+  run in PowerShell, so use PowerShell syntax (; between statements,
+  $env:NAME for environment variables). Prefer rg when available, otherwise
+  use Get-ChildItem -Recurse -File and Select-String.`
+- `Relative tool paths and powershell without an explicit cwd resolve from the
+  workspace root.`
+
+The tool takes the same arguments as `bash` (`command`, optional `cwd` and
+`timeout_ms`) and shares its implementation: effect classification, output
+limits and spill files, `bash_timeout_secs`, cancellation, Job Object
+process-tree cleanup, the workspace working directory, and the sanitized child
+environment. It runs `pwsh.exe` (PowerShell 7) when it is on `PATH`, otherwise
+`powershell.exe` on `PATH`, otherwise the inbox
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, with
+`-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand`.
+The command travels as UTF-16LE base64, so quotes, `$`, backticks and newlines
+are never re-quoted, and a short prelude sets `[Console]::OutputEncoding` and
+`$OutputEncoding` to UTF-8 so output decodes the same under both versions.
+
+Approval is the same as for `bash`, with one difference: under
+`--effect-policy controlled` every `powershell` call asks first, because the
+known-safe command list parses only Bash syntax. Under `unsafe_host` (the
+default) and `controlled_bash_approval`/`--safe-mode` the two shells behave
+identically. `--no-process`, `--no-shell` and `--exclude-tools powershell`
+remove it.
+
+### Using Bash on Windows instead
+
+Bash is used only when you ask for it:
+
+- set a Bash-compatible `shell_path` (`--shell-path`, `OCTET_SHELL_PATH`, or
+  the `shell_path` setting). The default surface then has `bash` instead of
+  `powershell`; add `--powershell` to keep both;
+- or name it in an explicit allowlist, such as
+  `--tools read,edit,write,bash` (add `powershell` to keep both).
+
+### Extensions and Bash-named tools
+
+- Subagent and Pi extension child sessions that request the standard `bash`
+  tool get `powershell` when it is the parent's only shell, so such a child
+  still has a shell. Commands the child writes must then be PowerShell.
+- Pi extensions that override the `bash` builtin, or that wait for `bash` tool
+  results (`isBashToolResult`), see no `bash` calls on a default Windows
+  surface; shell results arrive under `powershell` (`isPowerShellToolResult`).
+  Nothing fails at startup.
+- codemode exposes the tools the host enables, so on Windows it offers
+  `tools.powershell` with the same structured results and no `tools.bash`; a
+  script calling `tools.bash` gets an ordinary unknown-tool rejection.
+- The interactive `!<command>` escape is a user command, not a model tool, and
+  still uses the Bash-compatible shell described below.
+
 ## Shell selection order
 
-Bash execution on Windows requires a **Bash-compatible** shell. `cmd.exe` and
+When the `bash` tool is enabled on Windows (see above), it requires a
+**Bash-compatible** shell. `cmd.exe` and
 PowerShell are never implicit fallbacks; when no Bash-compatible shell is found
 the tool fails closed with an `error unsupported_platform` message.
 
@@ -271,14 +333,6 @@ For most users [Git for Windows](https://git-scm.com/download/win) is enough. An
 explicit path must still provide Bash-compatible `-c` semantics; octet does not
 reinterpret it as `cmd.exe` or PowerShell. Commands run in a private Job Object,
 so cancellation and timeouts end the whole process tree.
-
-## PowerShell
-
-Use `--powershell` to add the opt-in `powershell` tool on Windows. It prefers
-`pwsh.exe` over Windows PowerShell and runs with `-NoProfile -NonInteractive
--ExecutionPolicy Bypass`, bounded output, and process-tree cleanup. This is
-additive: it does not replace Bash or relax the configured process/effect policy.
-The flag is inert on non-Windows hosts.
 
 ## Interactive shell commands
 
