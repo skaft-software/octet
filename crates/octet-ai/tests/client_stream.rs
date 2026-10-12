@@ -903,6 +903,64 @@ fn fallback_responses_body() -> String {
 }
 
 #[tokio::test]
+async fn request_trace_records_the_websocket_continuation_shape_without_content() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body()).await;
+    let model = websocket_test_model(&server.base_url);
+    let client = AiClient::new();
+    let session_id = "session-ws-trace";
+    client
+        .prewarm_responses(
+            &model,
+            responses_request(vec![user_message("first")], Some(session_id)),
+        )
+        .await
+        .unwrap();
+
+    let trace_path =
+        std::env::temp_dir().join(format!("octet-ws-trace-{}.jsonl", std::process::id()));
+    let overrides = octet_ai::RequestOverrides {
+        env: std::collections::BTreeMap::from([(
+            "OCTET_PROVIDER_REQUEST_TRACE".to_owned(),
+            trace_path.to_string_lossy().into_owned(),
+        )]),
+        ..Default::default()
+    };
+    let mut stream = client
+        .stream_with_overrides(
+            &model,
+            responses_request(
+                vec![user_message("first"), user_message("SECRET second prompt")],
+                Some(session_id),
+            ),
+            overrides,
+        )
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+
+    let written = std::fs::read_to_string(&trace_path).unwrap();
+    std::fs::remove_file(&trace_path).unwrap();
+    assert!(!written.contains("SECRET"), "prompt leaked: {written}");
+    assert!(
+        !written.contains("resp-prewarm"),
+        "continuation id leaked: {written}"
+    );
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{written}");
+    assert_eq!(lines[0]["event"], "request");
+    assert_eq!(lines[0]["transport"], "websocket");
+    assert_eq!(lines[0]["previous_response_id"], true);
+    assert_eq!(lines[0]["input_items"], 1);
+    assert_eq!(lines[0]["item_types"]["message"], 1);
+}
+
+#[tokio::test]
 async fn responses_websocket_decodes_events_and_uses_continuation_suffix() {
     let server =
         TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body()).await;

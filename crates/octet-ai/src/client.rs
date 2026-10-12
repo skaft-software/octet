@@ -777,6 +777,7 @@ impl AiClient {
                 )),
                 None,
                 Some(operation),
+                crate::request_trace::RequestTrace::from_env(&std::collections::BTreeMap::new()),
             )
             .await
             .map_err(|e| sanitize_ai_error(&redactor, e))?;
@@ -1097,6 +1098,7 @@ impl AiClient {
             diagnostic_redactor: diagnostic_redactor.clone(),
             on_response: host_options.on_response.clone(),
             provider_hooks,
+            trace: crate::request_trace::RequestTrace::from_env(environment),
         };
 
         // Responses WebSockets are deliberately opt-in per endpoint. A
@@ -1165,6 +1167,7 @@ impl AiClient {
                         model.endpoint.timeout,
                         connect_timeout,
                         resumer,
+                        fallback_request.trace.clone(),
                     )
                     .await;
                 match result {

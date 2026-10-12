@@ -163,7 +163,7 @@ where
                         };
                         if let Some(update) = update { publish(&command.reply, update).await?; }
                         if let Some(id) = &current {
-                            send_waiting(socket, &command.reply, ledger, id, command.liveness.acknowledgement_timeout).await?;
+                            send_waiting(socket, &command.reply, ledger, id, command.liveness.acknowledgement_timeout, command.trace.as_ref()).await?;
                         }
                     }
                     Some(Command::Continue { mut body, request: next_request, reply }) => {
@@ -174,6 +174,9 @@ where
                         let object = body.as_object_mut().ok_or_else(|| invalid("continuation body must be an object"))?;
                         object.insert("type".into(), Value::String("response.create".into()));
                         object.insert("previous_response_id".into(), Value::String(current.clone().expect("checked response")));
+                        if let Some(trace) = &command.trace {
+                            trace.request("websocket", body.get("model").and_then(Value::as_str).unwrap_or(""), &body);
+                        }
                         let sent = send_json(socket, body, command.liveness.acknowledgement_timeout).await;
                         if let Err(error) = sent {
                             let _ = reply.send(Err(invalid("continuation send failed; acceptance unknown")));
@@ -266,6 +269,7 @@ where
                 ledger,
                 id,
                 command.liveness.acknowledgement_timeout,
+                command.trace.as_ref(),
             )
             .await?;
         }
@@ -278,6 +282,7 @@ async fn send_waiting<S>(
     ledger: &Ledger,
     current: &str,
     timeout: Duration,
+    trace: Option<&crate::request_trace::RequestTrace>,
 ) -> Result<(), AiError>
 where
     S: futures_util::Sink<Message, Error = tungstenite::Error> + Unpin,
@@ -302,7 +307,11 @@ where
             return Ok(());
         };
         publish(reply, update).await?;
-        send_json(socket, serde_json::json!({"type":"response.steer", "previous_response_id":current, "input":input}), timeout).await?;
+        let frame = serde_json::json!({"type":"response.steer", "previous_response_id":current, "input":input});
+        if let Some(trace) = trace {
+            trace.request("websocket", "", &frame);
+        }
+        send_json(socket, frame, timeout).await?;
     }
 }
 

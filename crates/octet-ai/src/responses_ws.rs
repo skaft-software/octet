@@ -495,6 +495,8 @@ fn update_continuation(full_body: &Value, value: &Value, continuation: &mut Opti
 }
 
 struct RequestCommand {
+    /// Redacted request trace, recorded against the exact frame sent.
+    trace: Option<crate::request_trace::RequestTrace>,
     steering: Option<SteeringOperation>,
     body: Value,
     reply: EventSender,
@@ -708,6 +710,7 @@ impl ResponsesWsPool {
         startup_timeout: Duration,
         connect_timeout: Option<Duration>,
         resumer: Option<ResponseResumer>,
+        trace: Option<crate::request_trace::RequestTrace>,
     ) -> Result<EventReceiver, AiError> {
         self.request_operation(
             key,
@@ -719,6 +722,7 @@ impl ResponsesWsPool {
             connect_timeout,
             resumer,
             None,
+            trace,
         )
         .await
     }
@@ -738,6 +742,7 @@ impl ResponsesWsPool {
         connect_timeout: Option<Duration>,
         resumer: Option<ResponseResumer>,
         steering: Option<SteeringOperation>,
+        trace: Option<crate::request_trace::RequestTrace>,
     ) -> Result<EventReceiver, AiError> {
         let deadline = tokio::time::Instant::now() + startup_timeout;
         // Only this future owns connection establishment; no generation command
@@ -758,7 +763,7 @@ impl ResponsesWsPool {
         // without letting that outer timer misclassify a handshake timeout.
         tokio::time::timeout_at(
             deadline,
-            self.send_request_operation(key, connection, body, liveness, resumer, steering),
+            self.send_request_operation(key, connection, body, liveness, resumer, steering, trace),
         )
         .await
         .map_err(|_| {
@@ -771,6 +776,10 @@ impl ResponsesWsPool {
         })?
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Forwards the operation entry's explicit request, resume, steering and trace policies"
+    )]
     async fn send_request_operation(
         &self,
         key: Option<&str>,
@@ -779,10 +788,12 @@ impl ResponsesWsPool {
         liveness: ResponsesWsLiveness,
         resumer: Option<ResponseResumer>,
         steering: Option<SteeringOperation>,
+        trace: Option<crate::request_trace::RequestTrace>,
     ) -> Result<EventReceiver, AiError> {
         let (reply, events) = event_channel(EVENT_CHANNEL_CAPACITY);
         let (started, started_result) = oneshot::channel();
         let command = RequestCommand {
+            trace,
             steering,
             body,
             reply,
@@ -863,6 +874,7 @@ impl ResponsesWsPool {
                 liveness,
                 startup_timeout,
                 Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
+                None,
                 None,
             )
             .await?;
@@ -1633,6 +1645,11 @@ async fn run_connection<S>(
             "type".to_owned(),
             Value::String("response.create".to_owned()),
         );
+        if let Some(trace) = &command.trace {
+            // The frame after continuation rewriting is what the provider sees.
+            let api_model = payload.get("model").and_then(Value::as_str).unwrap_or("");
+            trace.request("websocket", api_model, &Value::Object(payload.clone()));
+        }
         let text = match serde_json::to_string(&Value::Object(payload)) {
             Ok(text) => text,
             Err(error) => {

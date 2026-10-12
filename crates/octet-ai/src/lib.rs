@@ -50,6 +50,7 @@ mod json_repair;
 pub mod media;
 pub mod model_metadata;
 pub mod pricing;
+mod request_trace;
 pub mod responses;
 mod responses_ws;
 pub mod runtime;

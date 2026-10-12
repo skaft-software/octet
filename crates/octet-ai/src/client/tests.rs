@@ -101,6 +101,7 @@ async fn client_generated_websocket_errors_fence_pool_before_publication() {
                 Duration::from_secs(5),
                 Some(DEFAULT_CONNECT_TIMEOUT),
                 None,
+                None,
             )
             .await
             .unwrap_err();

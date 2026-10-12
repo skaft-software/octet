@@ -55,6 +55,8 @@ pub(super) struct HttpStreamRequest {
     /// Optional host hook observing the HTTP response before its body is read.
     pub(super) on_response: Option<Arc<dyn crate::runtime::ResponseHook>>,
     pub(super) provider_hooks: Option<super::hooks::ProviderRequestAttempt>,
+    /// Redacted request trace, when the environment enables one.
+    pub(super) trace: Option<crate::request_trace::RequestTrace>,
 }
 
 /// Falling back is replay-safe only when opening the WebSocket failed before
@@ -284,6 +286,7 @@ pub(super) async fn stream_http(
         mut diagnostic_redactor,
         on_response,
         provider_hooks,
+        trace,
     } = request;
     let lifecycle_feedback = parts.streaming
         && model.spec.protocol == Protocol::OpenAiChat
@@ -316,6 +319,13 @@ pub(super) async fn stream_http(
             } else if let Some(key) = &current_key {
                 headers.append(key.clone(), value);
             }
+        }
+    }
+
+    if let Some(trace) = &trace {
+        match serde_json::from_slice::<serde_json::Value>(&parts.body) {
+            Ok(body) => trace.request("http", &model.spec.api_name, &body),
+            Err(_) => trace.request_bytes("http", &model.spec.api_name, parts.body.len()),
         }
     }
 
@@ -357,6 +367,15 @@ pub(super) async fn stream_http(
 
     // 4. Handle non-2xx HTTP errors
     if !status.is_success() {
+        if let Some(trace) = &trace {
+            trace.error_response(
+                status.as_u16(),
+                res.headers()
+                    .get("x-request-id")
+                    .or_else(|| res.headers().get("request-id"))
+                    .and_then(|value| value.to_str().ok()),
+            );
+        }
         // Extract only the two headers needed for the structured error
         // before consuming the response. Cloning the whole HeaderMap
         // here adds an allocation on every non-2xx response.

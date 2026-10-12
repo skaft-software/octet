@@ -68,6 +68,7 @@ async fn expired_actor_drops_queued_command_before_send_and_does_not_disable_key
     let (started, start_result) = oneshot::channel();
     sender
         .send(RequestCommand {
+            trace: None,
             body: json!({"model": "fixture", "input": []}),
             reply,
             started: Some(started),
@@ -443,6 +444,7 @@ async fn actor_exit_before_start_is_a_replay_safe_open_failure() {
                 Duration::from_secs(2),
                 Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
                 None,
+                None,
             )
             .await
         }
@@ -492,6 +494,7 @@ async fn queued_request_deadline_closes_receiver_without_replaying() {
             ResponsesWsLiveness::for_response_idle(Duration::from_secs(60)),
             Duration::from_millis(20),
             Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
+            None,
             None,
         )
         .await
@@ -610,6 +613,7 @@ async fn dropping_an_active_response_retires_the_socket_and_provider_work() {
     connection
         .sender
         .send(RequestCommand {
+            trace: None,
             steering: None,
             body: serde_json::json!({"model": "gpt", "input": []}),
             reply,
@@ -667,6 +671,7 @@ async fn send_failure_retires_before_start_error_with_a_contended_pool() {
     connection
         .sender
         .send(RequestCommand {
+            trace: None,
             steering: None,
             body: serde_json::json!({"model": "gpt", "input": []}),
             reply,
@@ -741,6 +746,7 @@ async fn fatal_events_retire_before_publishing_with_a_contended_pool() {
         connection
             .sender
             .send(RequestCommand {
+                trace: None,
                 steering: None,
                 body: serde_json::json!({"model": "gpt", "input": []}),
                 reply,
@@ -842,6 +848,7 @@ async fn failed_terminals_retire_before_publication_for_text_and_binary() {
             connection
                 .sender
                 .send(RequestCommand {
+                    trace: None,
                     steering: None,
                     body: serde_json::json!({"model": "gpt", "input": []}),
                     reply,
@@ -1063,6 +1070,7 @@ async fn drive_command_with_resumer(
     connection
         .sender
         .send(RequestCommand {
+            trace: None,
             steering: None,
             body: test_generation_request(),
             reply,
@@ -1368,6 +1376,7 @@ async fn a_pending_resume_opener_obeys_receiver_cancellation_and_absolute_budget
         connection
             .sender
             .send(RequestCommand {
+                trace: None,
                 body: test_generation_request(),
                 reply,
                 started: None,
@@ -1524,6 +1533,7 @@ async fn a_mid_stream_drop_resumes_from_the_cursor_with_each_delta_once() {
             liveness(),
             Duration::from_secs(5),
             Some(crate::client::DEFAULT_CONNECT_TIMEOUT),
+            None,
             None,
         )
         .await
