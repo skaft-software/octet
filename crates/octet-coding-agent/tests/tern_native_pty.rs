@@ -103,6 +103,8 @@ struct NativePty {
     hello: bool,
     options: Options,
     acknowledge: bool,
+    // Set once close() hands the terminal back; late acknowledgements may race exit.
+    closing: bool,
     withheld: Vec<Value>,
 }
 
@@ -218,6 +220,7 @@ impl NativePty {
             hello: false,
             options,
             acknowledge: true,
+            closing: false,
             withheld: Vec::new(),
         }
     }
@@ -233,6 +236,8 @@ impl NativePty {
                     assert!(Instant::now() < deadline, "PTY input stayed blocked");
                     thread::sleep(Duration::from_millis(2));
                 }
+                // macOS reports EIO once the child closed its terminal.
+                Err(error) if self.closing && error.raw_os_error() == Some(libc::EIO) => return,
                 Err(error) => panic!("PTY input: {error}"),
             }
         }
@@ -492,6 +497,7 @@ impl NativePty {
     fn close(&mut self) {
         // macOS reports EIO for a write after the child closed its terminal;
         // an already-exited child still has to have exited successfully.
+        self.closing = true;
         match self.master.write(&[4]) {
             Ok(_) => self.master.flush().unwrap(),
             Err(error) if error.raw_os_error() == Some(libc::EIO) => {}
