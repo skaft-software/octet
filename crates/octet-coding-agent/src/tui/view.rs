@@ -2505,6 +2505,23 @@ impl ShellState {
         images
     }
 
+    /// Release the oldest retained tool images until `bytes` fits, retiring
+    /// their terminal placements and payloads. Long-running computer use keeps
+    /// its most recent screenshots in view; the session journal is unchanged.
+    fn release_oldest_tool_images(&mut self, budget: &mut ToolImageBudget, bytes: usize) {
+        let released = budget.release_oldest(
+            bytes,
+            self.transcript.iter_mut().flat_map(|block| match block {
+                TranscriptBlock::Tool(panel) => panel.images.as_mut_slice(),
+                _ => &mut [],
+            }),
+        );
+        for id in released {
+            let _ = self.image_registry.delete(id);
+            self.terminal_images.release(id);
+        }
+    }
+
     /// Retire IDs before their semantic anchors are replaced. `ImageRegistry`
     /// never reuses a retired value, so a replay cannot mistake stale terminal
     /// pixels for a newly hydrated image with the same logical position.
@@ -2532,26 +2549,40 @@ impl ShellState {
         self.tool_image_budget = ToolImageBudget::default();
     }
 
-    /// Rebuild IDs/store after deferred history materialization. The walk is
-    /// chronological, so an active local tail consumes whatever remains after
-    /// the durable snapshot and cannot exceed the same session budget.
+    /// Rebuild IDs/store after deferred history materialization. The newest
+    /// images, including an active local tail, are kept within the session
+    /// retention bound; older ones are released.
     fn rebuild_terminal_images(&mut self) {
         self.retire_tool_image_ids();
         self.terminal_images.clear();
         let store = self.terminal_images.clone();
         let registry = &mut self.image_registry;
+        // Decide from the newest image backwards so the most recent images
+        // stay in view; older ones beyond the bound are released.
         let mut budget = ToolImageBudget::default();
+        for image in self
+            .transcript
+            .iter_mut()
+            .rev()
+            .flat_map(|block| match block {
+                TranscriptBlock::Tool(panel) => panel.images.iter_mut().rev().collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+        {
+            image.clear_id();
+            let Some(bytes) = image.byte_len() else {
+                continue;
+            };
+            if budget.retain_existing(bytes).is_err() {
+                image.replace_with_placeholder(ToolImagePlaceholder::OlderImageReleased);
+            }
+        }
         for block in &mut self.transcript {
             let TranscriptBlock::Tool(panel) = block else {
                 continue;
             };
             for image in &mut panel.images {
-                image.clear_id();
-                let Some(bytes) = image.byte_len() else {
-                    continue;
-                };
-                if let Err(reason) = budget.retain_existing(bytes) {
-                    image.replace_with_placeholder(reason);
+                if image.byte_len().is_none() {
                     continue;
                 }
                 let Some(terminal_image) = image.terminal_image() else {
@@ -5199,7 +5230,16 @@ impl InteractiveShell {
                 let completed_images = if index.is_some() {
                     match result {
                         Ok(output) => {
-                            project_tool_output_images(output, &mut state.tool_image_budget)
+                            let mut budget = std::mem::take(&mut state.tool_image_budget);
+                            let images = project_tool_output_images(
+                                output,
+                                &mut budget,
+                                &mut |budget, bytes| {
+                                    state.release_oldest_tool_images(budget, bytes)
+                                },
+                            );
+                            state.tool_image_budget = budget;
+                            images
                         }
                         Err(_) => Vec::new(),
                     }

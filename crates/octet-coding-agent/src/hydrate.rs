@@ -21,9 +21,12 @@ pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES_PER_ITEM: usize = 4 * 1024 * 1024;
 /// Maximum validated images retained for one tool result.
 pub(crate) const MAX_TOOL_RESULT_IMAGES_PER_ITEM: usize = 4;
-/// Maximum validated tool-result images retained in one interactive session.
+/// Maximum validated tool-result images retained at once in one interactive
+/// session. Older images are released to make room for newer ones, so a
+/// long-running computer-use session always shows its most recent screenshots.
 pub(crate) const MAX_SESSION_TOOL_RESULT_IMAGES: usize = 32;
-/// Maximum inline image payload bytes retained in one interactive session.
+/// Maximum inline image payload bytes retained at once in one interactive
+/// session; the oldest retained images are released first.
 pub(crate) const MAX_SESSION_TOOL_RESULT_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// A bounded, opaque image projection for one tool result.
@@ -156,6 +159,8 @@ pub(crate) enum ToolImagePlaceholder {
     SessionImageLimit,
     SessionByteLimit,
     TerminalRegistryLimit,
+    /// Released to keep the newest images within the session retention bound.
+    OlderImageReleased,
     /// Coarse live-owner omission, not exact parity with durable-image reasons.
     OwnerPresentationBoundary,
 }
@@ -172,6 +177,7 @@ impl ToolImagePlaceholder {
             Self::SessionImageLimit => "[image unavailable: session image limit]",
             Self::SessionByteLimit => "[image unavailable: session byte limit]",
             Self::TerminalRegistryLimit => "[image unavailable: terminal image limit]",
+            Self::OlderImageReleased => "[older image released: newer images are kept in view]",
         }
     }
 }
@@ -192,6 +198,40 @@ impl ToolImageBudget {
             return Err(ToolImagePlaceholder::SessionByteLimit);
         }
         Ok(())
+    }
+
+    fn fits(&self, bytes: usize) -> bool {
+        self.can_retain(bytes).is_ok()
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.image_count = self.image_count.saturating_sub(1);
+        self.image_bytes = self.image_bytes.saturating_sub(bytes);
+    }
+
+    /// Release the oldest retained images, in the given order, until an image
+    /// of `bytes` fits. Returns the terminal IDs of released placements so the
+    /// caller can retire them; the session journal is never touched.
+    pub(crate) fn release_oldest<'a>(
+        &mut self,
+        bytes: usize,
+        oldest_first: impl IntoIterator<Item = &'a mut ToolResultImage>,
+    ) -> Vec<ImageId> {
+        let mut released = Vec::new();
+        for image in oldest_first {
+            if self.fits(bytes) {
+                break;
+            }
+            let Some(len) = image.byte_len() else {
+                continue;
+            };
+            if let Some(id) = image.id() {
+                released.push(id);
+            }
+            image.replace_with_placeholder(ToolImagePlaceholder::OlderImageReleased);
+            self.release(len);
+        }
+        released
     }
 
     fn retain(&mut self, bytes: usize) {
@@ -224,6 +264,7 @@ pub(crate) fn tool_image_limits() -> ImageLimits {
 pub(crate) fn project_tool_images<'a>(
     media: impl IntoIterator<Item = &'a Media>,
     session_budget: &mut ToolImageBudget,
+    make_room: &mut dyn FnMut(&mut ToolImageBudget, usize),
 ) -> Vec<ToolResultImage> {
     let mut images = Vec::new();
     let mut item_count = 0usize;
@@ -251,6 +292,9 @@ pub(crate) fn project_tool_images<'a>(
         } else if item_bytes.saturating_add(bytes) > MAX_TOOL_RESULT_IMAGE_BYTES_PER_ITEM {
             Some(ToolImagePlaceholder::PerItemByteLimit)
         } else {
+            if !session_budget.fits(bytes) {
+                make_room(session_budget, bytes);
+            }
             session_budget.can_retain(bytes).err()
         };
         if let Some(placeholder) = placeholder {
@@ -275,8 +319,9 @@ pub(crate) fn project_tool_images<'a>(
 pub(crate) fn project_tool_output_images(
     output: &octet_agent::ToolOutput,
     session_budget: &mut ToolImageBudget,
+    make_room: &mut dyn FnMut(&mut ToolImageBudget, usize),
 ) -> Vec<ToolResultImage> {
-    let mut images = project_tool_images(output.media(), session_budget);
+    let mut images = project_tool_images(output.media(), session_budget, make_room);
     if output.presentation_images_omitted() {
         images.push(ToolResultImage::Placeholder(
             ToolImagePlaceholder::OwnerPresentationBoundary,
@@ -678,28 +723,40 @@ fn push_message(
                         } else {
                             None
                         };
+                        // Hydration keeps the newest images: older retained
+                        // ones are released as later results need room.
+                        let images = project_tool_images(
+                            result
+                                .content
+                                .iter()
+                                .filter_map(|part| match part {
+                                    ToolResultPart::Media(media) => Some(media),
+                                    ToolResultPart::Text(_) => None,
+                                })
+                                .chain(adjacent_tool_media.iter().filter_map(|part| match part {
+                                    UserPart::Media(media) => Some(media),
+                                    _ => None,
+                                })),
+                            image_budget,
+                            &mut |budget, bytes| {
+                                budget.release_oldest(
+                                    bytes,
+                                    items.iter_mut().flat_map(|item| match item {
+                                        TranscriptItem::ToolResult { images, .. } => {
+                                            images.as_mut_slice()
+                                        }
+                                        _ => &mut [],
+                                    }),
+                                );
+                            },
+                        );
                         items.push(TranscriptItem::ToolResult {
                             id: result.tool_call_id.clone(),
                             text: tool_result_text(&result.content),
                             is_error: result.is_error,
                             duration_ms: tool_result_duration_ms(metadata),
                             diff: tool_result_diff(metadata),
-                            images: project_tool_images(
-                                result
-                                    .content
-                                    .iter()
-                                    .filter_map(|part| match part {
-                                        ToolResultPart::Media(media) => Some(media),
-                                        ToolResultPart::Text(_) => None,
-                                    })
-                                    .chain(adjacent_tool_media.iter().filter_map(
-                                        |part| match part {
-                                            UserPart::Media(media) => Some(media),
-                                            _ => None,
-                                        },
-                                    )),
-                                image_budget,
-                            ),
+                            images,
                         });
                         if let Some(presentation) = presentation {
                             items.push(TranscriptItem::ToolPresentation {
@@ -1339,6 +1396,35 @@ mod tests {
             assert!(items.iter().any(|item| matches!(item, TranscriptItem::User { text, .. } if text.contains("[image image/png"))));
             assert!(!items.iter().any(|item| matches!(item, TranscriptItem::ToolResult { images, .. } if !images.is_empty())));
         }
+    }
+
+    #[test]
+    fn tool_image_budget_releases_oldest_images_to_keep_the_newest() {
+        let mut budget = ToolImageBudget::default();
+        let mut retained: Vec<ToolResultImage> = Vec::new();
+        for _ in 0..(MAX_SESSION_TOOL_RESULT_IMAGES * 3) {
+            let media = synthetic_png();
+            let images = project_tool_images([&media], &mut budget, &mut |budget, bytes| {
+                budget.release_oldest(bytes, retained.iter_mut());
+            });
+            assert!(
+                matches!(images.as_slice(), [ToolResultImage::Ready { .. }]),
+                "every new screenshot stays displayable: {images:?}"
+            );
+            retained.extend(images);
+        }
+        let ready = retained
+            .iter()
+            .filter(|image| image.byte_len().is_some())
+            .count();
+        assert_eq!(ready, MAX_SESSION_TOOL_RESULT_IMAGES);
+        assert!(retained[retained.len() - MAX_SESSION_TOOL_RESULT_IMAGES..]
+            .iter()
+            .all(|image| image.byte_len().is_some()));
+        assert!(retained[..retained.len() - MAX_SESSION_TOOL_RESULT_IMAGES]
+            .iter()
+            .all(|image| *image
+                == ToolResultImage::Placeholder(ToolImagePlaceholder::OlderImageReleased)));
     }
 
     #[test]

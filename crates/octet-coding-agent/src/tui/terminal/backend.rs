@@ -66,6 +66,18 @@ impl TerminalImageStore {
             .retain(|key, _| key.id != id.get());
     }
 
+    /// Drop a released image's payload and any placements encoded from it.
+    pub(crate) fn release(&self, id: ImageId) {
+        self.images
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .remove(&id.get());
+        self.encoded
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .retain(|key, _| key.id != id.get());
+    }
+
     fn get(&self, id: ImageId) -> Option<Arc<TerminalImage>> {
         self.images
             .lock()
