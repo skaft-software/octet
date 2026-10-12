@@ -149,45 +149,6 @@ pub(super) async fn delete_entry(kind: &Removable) -> anyhow::Result<Option<Stri
     }
 }
 
-/// The first `/setup` choice. Offered only when octet has something saved to
-/// remove; a fresh setup goes straight to adding a provider.
-pub(super) enum SetupChoice {
-    Add,
-    Remove,
-    Closed,
-}
-
-pub(super) async fn choose_setup_action(
-    shell: &mut InteractiveShell,
-    input: &mut EventStream,
-) -> anyhow::Result<SetupChoice> {
-    if removable_entries().is_empty() {
-        return Ok(SetupChoice::Add);
-    }
-    Ok(
-        match provider_setup_picker(
-            shell,
-            input,
-            "Provider setup",
-            vec![
-                "Add or update a provider".to_owned(),
-                "Remove a provider or sign-in".to_owned(),
-            ],
-            vec![
-                Some("Add an API key, sign in, or set up a local endpoint".into()),
-                Some("Delete a saved key, sign-in or custom provider".into()),
-            ],
-            0,
-        )
-        .await?
-        {
-            Some(0) => SetupChoice::Add,
-            Some(1) => SetupChoice::Remove,
-            _ => SetupChoice::Closed,
-        },
-    )
-}
-
 /// Pick, guard and confirm one removal. `None` means nothing was removed (the
 /// user backed out, the provider is in use, or there was nothing to remove);
 /// the reason has already been shown.

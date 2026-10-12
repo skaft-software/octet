@@ -1999,15 +1999,12 @@ async fn setup_provider(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
 ) -> anyhow::Result<App> {
-    match provider_removal::choose_setup_action(shell, input).await? {
-        provider_removal::SetupChoice::Add => {}
-        provider_removal::SetupChoice::Remove => {
+    let result = match onboarding::configure(shell, input, &app.config, false).await? {
+        Some(onboarding::SetupOutcome::Configured(result)) => *result,
+        Some(onboarding::SetupOutcome::Remove) => {
             return provider_removal::remove_provider(app, shell, input).await;
         }
-        provider_removal::SetupChoice::Closed => return Ok(app),
-    }
-    let Some(result) = onboarding::configure(shell, input, &app.config, false).await? else {
-        return Ok(app);
+        None => return Ok(app),
     };
     let active_route_updated = result.configured_endpoint == Some(app.model.endpoint.id.0.as_str())
         || result.model.as_ref() == Some(&app.model.spec.id);
@@ -5446,10 +5443,26 @@ async fn persist_configuration<T>(
     Ok(result)
 }
 
+/// Reload resources; only failures reach the transcript.
 async fn reload_resources<S>(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<(App, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    reload_resources_announcing(app, shell, input, false).await
+}
+
+/// Reload resources; `announce_success` adds the green `reload succeeded` note
+/// for a reload somebody asked for (`/reload`), never for routine passes such
+/// as the file watcher or an extension toggle.
+async fn reload_resources_announcing<S>(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
+    announce_success: bool,
 ) -> anyhow::Result<(App, bool)>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -5473,13 +5486,14 @@ where
     })
     .await?;
     let problems = resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
-    shell.report_reload_outcome(&problems, true);
     shell.set_theme(load_theme_for_background(&app.config, background));
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     app.executable_extensions
         .refresh_frontend_keybindings(shell);
     shell.hydrate(app.agent.session())?;
+    // After hydration: it rebuilds the transcript, which would drop the note.
+    shell.report_reload_outcome(&problems, announce_success);
     app.executable_extensions
         .activate_session_lifecycle_driver();
     update_status(shell, &app);
@@ -5552,7 +5566,7 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let before = app.executable_extensions.running_generations();
-    let (mut app, applied) = reload_resources(app, shell, input).await?;
+    let (mut app, applied) = reload_resources_announcing(app, shell, input, true).await?;
     if !applied {
         return Ok((app, None, false));
     }

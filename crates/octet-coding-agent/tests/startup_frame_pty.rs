@@ -1202,6 +1202,7 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
         "live reload: applied",
         "resources reloaded",
         "reload pass #",
+        "reload succeeded",
         "instructions, prompts, skills, extensions, and keybindings reloaded",
     ] {
         assert!(
@@ -1211,12 +1212,17 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
         );
     }
 
-    // Explicit reload still acknowledges completion; details stay on demand.
+    // An explicit reload ends in one success note; details stay on demand.
     let before = octet.pty.output.len();
     octet.pty.write_input(b"/reload\r");
     octet.wait_until(STARTUP_TIMEOUT, |output| {
-        contains_bytes(&output[before..], b"resources reloaded")
+        contains_bytes(&output[before..], b"reload succeeded")
     });
+    assert!(
+        !contains_bytes(&octet.pty.output[before..], b"resources reloaded"),
+        "explicit reload must not print the old multi-part summary: {}",
+        visible_bytes(&octet.pty.output[before..])
+    );
     octet.pty.write_input(b"/reload --dry-run\r");
     octet.wait_until(STARTUP_TIMEOUT, |output| {
         contains_bytes(output, b"poll 1000 ms") && contains_bytes(output, b"reload preview")

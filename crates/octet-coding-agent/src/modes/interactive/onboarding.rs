@@ -15,6 +15,16 @@ enum SetupRoute {
     ApiKey,
     Subscription,
     Local,
+    /// Offered only when octet has something saved to remove.
+    Remove,
+}
+
+/// What a finished or abandoned setup wizard asks its caller to do.
+pub(super) enum SetupOutcome {
+    Configured(Box<SetupResult>),
+    /// The user chose to remove a saved provider or sign-in. The caller owns the
+    /// state removal needs (the active model, the catalog).
+    Remove,
 }
 
 async fn choose_route<S>(
@@ -24,31 +34,31 @@ async fn choose_route<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let removable = !super::provider_removal::removable_entries().is_empty();
+    let mut choices: Vec<String> = FIRST_RUN_CHOICES
+        .iter()
+        .map(|choice| (*choice).to_owned())
+        .collect();
+    let mut descriptions = vec![
+        Some("Choose a provider and paste its API key; no environment variables needed".into()),
+        Some("Use an existing ChatGPT or GitHub Copilot subscription".into()),
+        Some("Set up LM Studio or an OpenAI-compatible endpoint".into()),
+        Some("Open read-only without writing provider data".into()),
+    ];
+    if removable {
+        choices.push("Remove a provider or sign-in".to_owned());
+        descriptions.push(Some(
+            "Delete a saved key, sign-in or custom provider".into(),
+        ));
+    }
     Ok(
-        match provider_setup_picker(
-            shell,
-            input,
-            "Set up a provider",
-            FIRST_RUN_CHOICES
-                .iter()
-                .map(|choice| (*choice).to_owned())
-                .collect(),
-            vec![
-                Some(
-                    "Choose a provider and paste its API key; no environment variables needed"
-                        .into(),
-                ),
-                Some("Use an existing ChatGPT or GitHub Copilot subscription".into()),
-                Some("Set up LM Studio or an OpenAI-compatible endpoint".into()),
-                Some("Open read-only without writing provider data".into()),
-            ],
-            0,
-        )
-        .await?
+        match provider_setup_picker(shell, input, "Set up a provider", choices, descriptions, 0)
+            .await?
         {
             Some(0) => Some(SetupRoute::ApiKey),
             Some(1) => Some(SetupRoute::Subscription),
             Some(2) => Some(SetupRoute::Local),
+            Some(4) if removable => Some(SetupRoute::Remove),
             _ => None,
         },
     )
@@ -107,11 +117,23 @@ pub(super) async fn run_setup(
     input: &mut EventStream,
     boot: &mut Bootstrap,
 ) -> anyhow::Result<()> {
-    // With no model configured there is no active provider to protect, so any
-    // saved credential can be removed here (a stale key is the usual reason).
-    match super::provider_removal::choose_setup_action(shell, input).await? {
-        super::provider_removal::SetupChoice::Add => {}
-        super::provider_removal::SetupChoice::Remove => {
+    match configure(shell, input, &boot.config, true).await? {
+        Some(SetupOutcome::Configured(result)) => {
+            let result = *result;
+            let notice = match &result.model {
+                Some(model) => format!("provider setup saved · {}", model.0),
+                None => "provider configured; select a model to get started".to_owned(),
+            };
+            install_result(boot, result);
+            shell.set_runtime_config(boot.config.clone());
+            shell.clear_error();
+            shell.notice(notice);
+            shell.render();
+        }
+        // With no model configured there is no active provider to protect, so
+        // any saved credential can be removed here (a stale key is the usual
+        // reason to want that).
+        Some(SetupOutcome::Remove) => {
             if let Some(entry) =
                 super::provider_removal::pick_confirmed_entry(shell, input, None).await?
             {
@@ -138,20 +160,8 @@ pub(super) async fn run_setup(
                     shell.render();
                 }
             }
-            return Ok(());
         }
-        super::provider_removal::SetupChoice::Closed => return Ok(()),
-    }
-    if let Some(result) = configure(shell, input, &boot.config, true).await? {
-        let notice = match &result.model {
-            Some(model) => format!("provider setup saved · {}", model.0),
-            None => "provider configured; select a model to get started".to_owned(),
-        };
-        install_result(boot, result);
-        shell.set_runtime_config(boot.config.clone());
-        shell.clear_error();
-        shell.notice(notice);
-        shell.render();
+        None => {}
     }
     Ok(())
 }
@@ -163,12 +173,13 @@ pub(super) async fn configure(
     input: &mut EventStream,
     config: &Config,
     persist_local_model: bool,
-) -> anyhow::Result<Option<SetupResult>> {
+) -> anyhow::Result<Option<SetupOutcome>> {
     while !shell.close_requested() {
         let Some(route) = choose_route(shell, input).await? else {
             return Ok(None);
         };
         let result = match route {
+            SetupRoute::Remove => return Ok(Some(SetupOutcome::Remove)),
             SetupRoute::Local => guided_provider_setup(shell, input, config, persist_local_model)
                 .await?
                 .map(|completed| SetupResult {
@@ -196,8 +207,8 @@ pub(super) async fn configure(
                 refresh_catalog(shell, input, config.offline, target).await?
             }
         };
-        if result.is_some() {
-            return Ok(result);
+        if let Some(result) = result {
+            return Ok(Some(SetupOutcome::Configured(Box::new(result))));
         }
     }
     Ok(None)
