@@ -245,6 +245,12 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
         octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
         settle(&mut octet, &mut parser, &mut consumed);
+        // Pick a row only from the scrolled repaint: a pre-scroll frame still
+        // on screen would aim the drag at a row the wheel has since moved.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !parser.screen().contents().contains("rows back") && Instant::now() < deadline {
+            settle(&mut octet, &mut parser, &mut consumed);
+        }
         for legacy in [false, true] {
             // Search upward: rows above an inline frame can hold stale
             // scrollback the application does not own, and where the frame
