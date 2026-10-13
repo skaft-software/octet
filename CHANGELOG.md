@@ -163,6 +163,61 @@ and known limitations.
 
 ### Fixed
 
+- A stalled Pi extension no longer takes the mirror down with it. Every Pi hook
+  runs on one ordered queue, so one factory whose handler never settled (a network
+  call, a child process, an MCP connection) held it forever: startup failed with
+  `resources_discover failed … requires successful settled session_start`,
+  `/reload` failed, and the next prompt failed with `before_prompt hook exceeded
+  5s` and stayed in the composer. A handler now has a time budget (5 s for
+  lifecycle events; 2 s each and 4 s in total for the prompt hooks). One that
+  outlives it keeps running, is named once in `[Extension issues]`, and is skipped
+  while it stays busy; a tool guard that cannot answer in time blocks the call
+  rather than letting it through. A prompt sent while an extension is still
+  starting waits up to 12 s for it, then continues without it. With
+  `OCTET_STARTUP_TRACE=1`, each handler prints one `pi-compat.handler` line with
+  its factory and duration, which names the slow one.
+- Enabling `octet-pi-compat` is the whole Pi setup: it mirrors this machine's Pi
+  setup at every start with nothing to configure and no folder to be in. A
+  factory whose own setup never finishes is cut off after 8 s, left out of the
+  mirror and named in `[Extension issues]` (it used to stall the whole start),
+  and an extension left out of the mirror is now named at start instead of only
+  in quiet diagnostics.
+- A tool name that clashes with a first-party tool no longer turns the whole
+  `octet-pi-compat` bridge off: only the clashing tools are withheld, and one note
+  names them. Other extensions keep the old behavior.
+- `configure.mjs --mirror` leaves an unsupported factory out and lists it instead
+  of refusing the entire mirror; `--strict` keeps the all-or-nothing review. A
+  registration collision still needs your decision.
+- Pi footers show their context and cost segments. `ctx.getContextUsage()`
+  returns the model's capacity with unknown usage (and a measured zero for an
+  empty conversation) instead of nothing, and `ctx.modelRegistry.isUsingOAuth`
+  now has an answer from the host (Codex, subscription and Copilot logins are
+  OAuth; API keys and Vertex are not) instead of always throwing. Footers such as
+  `powerline-footer` read both inside one `try`, so the throw used to drop their
+  context and cost segments.
+- An extension on API 0.3 now starts in a session that already has a measured
+  reply, for example after `/reload`, a resume, or enabling it mid-session. The
+  host state in its initialize request carried a fractional context percentage,
+  which 0.3's integer-only canonical JSON refused, so the startup handshake
+  failed. `context_usage` is not part of the 0.3 contract and is no longer sent.
+- The completed-turn line no longer ends with `· N responses`.
+- A prompt card keeps its painted top and bottom padding after a completion line,
+  and the working indicator is separated from a card by a neutral row. The layout
+  treated a card's painted padding as blank spacing and merged it into its
+  neighbour.
+- Every `/settings` choice takes effect the moment you make it, mid-run or idle:
+  steering and follow-up mode (which also reaches the running turn), default
+  model, default reasoning and the screen mode. Theme and image display change
+  at once and their saved preference follows at the idle boundary. Commands that
+  change the running agent itself (`/model`, `/thinking`, `/fast`,
+  `/auto-compact`, `/scoped-models`, sessions) still wait for the idle boundary.
+- Pasted-text and attachment chips are ordinary text: Backspace edits them one
+  character at a time like the text around them, in the terminal composer and the
+  native editor. A chip that is still intact when you submit resolves to its
+  payload; an edited one is plain text. Undo restores it.
+- OpenCode Go shows its current catalog. It now uses live `/models` discovery
+  with Messages (Claude, Qwen) and Responses (GPT) routes, instead of ten
+  hand-kept models, two of which the service no longer serves.
 - Fullscreen: scrolling with PgUp/PgDn no longer leaves stale or duplicated
   inline images (Kitty-protocol terminals such as Ghostty). The fullscreen painter
   erased and rewrote rows but never deleted the image placements anchored to them,
