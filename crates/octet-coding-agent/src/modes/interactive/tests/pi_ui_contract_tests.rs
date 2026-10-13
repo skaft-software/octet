@@ -322,6 +322,62 @@ export default function(pi) {
     app.executable_extensions.shutdown().await;
 }
 
+/// A mounted Pi editor answers its calls synchronously through the shell. An
+/// input hook that reads it must finish while the prompt waits, not stall
+/// both sides until the hook's deadline ("extension input hook timed out").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_hook_reading_a_mounted_pi_editor_completes_while_the_prompt_waits() {
+    let (directory, mut app, mut shell) = live_ui_app(
+        r#"
+import { appendFileSync } from 'node:fs';
+import { Editor } from '@earendil-works/pi-tui';
+let editor;
+export default function(pi) {
+  pi.registerCommand('mount', {handler: async (_, ctx) => {
+    ctx.ui.setEditorComponent((tui, theme) => (editor = new Editor(tui, theme)));
+    ctx.ui.setEditorText('mounted-draft');
+  }});
+  pi.on('input', event => {
+    appendFileSync(TRACE, JSON.stringify({input: event.text, editor: editor?.getText()}) + '\n');
+    return { action: 'continue' };
+  });
+}
+"#,
+    )
+    .await;
+    command(&mut app, &mut shell, "mount").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("mounted-draft")
+    })
+    .await;
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let started = Instant::now();
+    let processed = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut frontend = ShellPromptFrontend::new(&mut shell, &mut input);
+        app.executable_extensions
+            .process_input_with_frontend(
+                "submitted".into(),
+                None,
+                "interactive",
+                None,
+                Some(&mut frontend),
+            )
+            .await
+    })
+    .await
+    .expect("the input hook waited on its own editor call")
+    .expect("the input hook succeeded")
+    .expect("the input continues");
+    assert_eq!(processed.text, "submitted");
+    assert!(started.elapsed() < Duration::from_secs(4));
+    let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap();
+    assert_eq!(
+        trace.trim(),
+        r#"{"input":"submitted","editor":"mounted-draft"}"#
+    );
+    app.executable_extensions.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_chrome_controls_existing_loader_title_and_tool_disclosure() {
     let (directory, mut app, mut shell) = live_ui_app(

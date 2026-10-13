@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::{Stream, StreamExt};
+use futures_util::{FutureExt, Stream, StreamExt};
 use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
 #[cfg(windows)]
 use octet_agent::extension_process::WindowsProcessLaunch;
@@ -1390,6 +1390,72 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     shell.render();
     false
+}
+
+/// The shell's side of a prompt hook wait: it keeps answering the extensions'
+/// remote UI (a Pi custom editor's calls are synchronous) and takes the same
+/// cancel keys as any other cancellable wait.
+struct ShellPromptFrontend<'a, S> {
+    shell: &'a mut InteractiveShell,
+    input: &'a mut S,
+    input_open: bool,
+}
+
+impl<'a, S> ShellPromptFrontend<'a, S> {
+    fn new(shell: &'a mut InteractiveShell, input: &'a mut S) -> Self {
+        Self {
+            shell,
+            input,
+            input_open: true,
+        }
+    }
+}
+
+impl<S> crate::extensions::PromptFrontend for ShellPromptFrontend<'_, S>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    fn serve(&mut self, extensions: &mut crate::extensions::ExecutableExtensions) -> bool {
+        if crate::tui::terminal::received_shutdown_signal().is_some() {
+            self.shell.request_close();
+            return false;
+        }
+        if apply_extension_background(self.shell, extensions) {
+            self.shell.render();
+        }
+        while self.input_open {
+            let Some(next) = self.input.next().now_or_never() else {
+                break;
+            };
+            match next {
+                Some(Ok(event)) => {
+                    if extensions.route_remote_ui_event(self.shell, &event, false)
+                        || self.shell.intercept_transcript_input(&event)
+                    {
+                        continue;
+                    }
+                    if handle_cancellable_wait_input(self.shell, event) {
+                        return false;
+                    }
+                }
+                Some(Err(error)) => {
+                    self.shell.error(format!("terminal input failed: {error}"));
+                    self.shell.request_close();
+                    return false;
+                }
+                None => self.input_open = false,
+            }
+        }
+        true
+    }
+}
+
+/// A prompt wait's result, with a frontend cancellation as `None`.
+fn prompt_wait_result<T>(result: anyhow::Result<T>) -> Option<anyhow::Result<T>> {
+    match result {
+        Err(error) if error.is::<crate::extensions::PromptWaitCancelled>() => None,
+        result => Some(result),
+    }
 }
 
 async fn after_response_with_frontend<S>(
@@ -13088,21 +13154,24 @@ async fn run_interactive_once(
                     // before the ordinary idle pump has observed it.
                     refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
                 }
-                let transformed = await_with_ctrl_c(
-                    app.executable_extensions.process_input(
-                        composed.transcript_text.clone(),
-                        (!input_images.is_empty()).then_some(input_images),
-                        if queued_submission {
-                            "extension"
-                        } else {
-                            "interactive"
-                        },
-                        None,
-                    ),
-                    &mut shell,
-                    &mut input,
-                )
-                .await;
+                let transformed = {
+                    let mut frontend = ShellPromptFrontend::new(&mut shell, &mut input);
+                    prompt_wait_result(
+                        app.executable_extensions
+                            .process_input_with_frontend(
+                                composed.transcript_text.clone(),
+                                (!input_images.is_empty()).then_some(input_images),
+                                if queued_submission {
+                                    "extension"
+                                } else {
+                                    "interactive"
+                                },
+                                None,
+                                Some(&mut frontend),
+                            )
+                            .await,
+                    )
+                };
                 let transformed = match transformed {
                     Some(Ok(Some(transformed))) => transformed,
                     Some(Ok(None)) => {
@@ -13160,14 +13229,18 @@ async fn run_interactive_once(
                         shutdown_for_exit(&mut app, &mut shell).await;
                         break 'interactive;
                     }
-                    result = await_with_ctrl_c(
-                        app.executable_extensions.compose_prompt(
-                            &app.system,
-                            model_prompt,
-                        ),
-                        &mut shell,
-                        &mut input,
-                    ) => result,
+                    result = async {
+                        let mut frontend = ShellPromptFrontend::new(&mut shell, &mut input);
+                        prompt_wait_result(
+                            app.executable_extensions
+                                .compose_prompt_with_frontend(
+                                    &app.system,
+                                    model_prompt,
+                                    Some(&mut frontend),
+                                )
+                                .await,
+                        )
+                    } => result,
                 };
                 let Some(composition) = composition else {
                     shell.restore_composed(composed);

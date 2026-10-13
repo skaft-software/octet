@@ -69,15 +69,50 @@ fn publish_host_state<'a>(
     }
 }
 
+/// The interactive frontend's share of a prompt wait. A Pi custom editor makes
+/// its native editor calls synchronously through the shell, so while a prompt
+/// hook is awaited the shell must keep answering them; otherwise the bridge
+/// blocks on the call, never reads the hook, and the hook misses its deadline.
+pub(crate) trait PromptFrontend {
+    /// Serve pending frontend work once. `false` means the user cancelled.
+    fn serve(&mut self, extensions: &mut ExecutableExtensions) -> bool;
+}
+
+/// A prompt wait the user cancelled from the frontend.
+#[derive(Debug)]
+pub(crate) struct PromptWaitCancelled;
+
+impl std::fmt::Display for PromptWaitCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("prompt cancelled")
+    }
+}
+
+impl std::error::Error for PromptWaitCancelled {}
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
+    #[cfg_attr(not(test), allow(dead_code))] // headless callers; the shell serves its own frontend
     pub async fn process_input(
         &mut self,
         text: String,
         images: Option<Vec<octet_ai::Media>>,
         source: &str,
         streaming_behavior: Option<&str>,
+    ) -> anyhow::Result<Option<ExtensionInput>> {
+        self.process_input_with_frontend(text, images, source, streaming_behavior, None)
+            .await
+    }
+
+    /// [`Self::process_input`] while `frontend` keeps serving the extensions.
+    pub(crate) async fn process_input_with_frontend(
+        &mut self,
+        text: String,
+        images: Option<Vec<octet_ai::Media>>,
+        source: &str,
+        streaming_behavior: Option<&str>,
+        mut frontend: Option<&mut dyn PromptFrontend>,
     ) -> anyhow::Result<Option<ExtensionInput>> {
         anyhow::ensure!(
             ["interactive", "rpc", "extension"].contains(&source),
@@ -104,8 +139,13 @@ impl ExecutableExtensions {
             let mut waited = Vec::new();
             let started = std::time::Instant::now();
             let idle = self
-                .await_prompt_work(process.wait_until_idle(SESSION_START_WAIT), &mut waited)
-                .await;
+                .await_prompt_work(
+                    process.wait_until_idle(SESSION_START_WAIT),
+                    &mut waited,
+                    frontend.as_deref_mut(),
+                )
+                .await
+                .ok_or(PromptWaitCancelled)?;
             // Notices drained while waiting belong to the transcript: keep them
             // for the next drain instead of dropping them with this prompt.
             self.held_messages.append(&mut waited);
@@ -121,17 +161,26 @@ impl ExecutableExtensions {
                 ));
                 continue;
             }
-            let output = tokio::time::timeout(
-                PROMPT_RPC_DEADLINE,
-                process.run_hook(
-                    ExtensionHook::BeforePrompt,
-                    serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
-                    "source":source, "streaming_behavior":streaming_behavior}),
-                    extension_execution_context(&process, self.resource_owner.as_deref()),
-                ),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+            let execution = extension_execution_context(&process, self.resource_owner.as_deref());
+            let mut served = Vec::new();
+            let output = self
+                .await_prompt_work(
+                    tokio::time::timeout(
+                        PROMPT_RPC_DEADLINE,
+                        process.run_hook(
+                            ExtensionHook::BeforePrompt,
+                            serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
+                            "source":source, "streaming_behavior":streaming_behavior}),
+                            execution,
+                        ),
+                    ),
+                    &mut served,
+                    frontend.as_deref_mut(),
+                )
+                .await
+                .ok_or(PromptWaitCancelled)?
+                .map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+            self.held_messages.append(&mut served);
             anyhow::ensure!(
                 output.disposition == ExtensionHookDisposition::Continue,
                 "extension input hook refused input"
@@ -606,19 +655,33 @@ impl ExecutableExtensions {
     /// its response. This drain never borrows a shell: an interactive consumer
     /// queues those requests for its next shell pump, and a host without one
     /// refuses them.
-    async fn await_prompt_work<F: std::future::Future>(
+    /// `None` when the frontend reports that the user cancelled the wait.
+    async fn await_prompt_work<'f, F: std::future::Future>(
         &mut self,
         work: F,
         notifications: &mut Vec<String>,
-    ) -> F::Output {
+        mut frontend: Option<&mut (dyn PromptFrontend + 'f)>,
+    ) -> Option<F::Output> {
         tokio::pin!(work);
+        // A synchronous editor call wakes the frontend at once; the tick only
+        // bounds how long anything else waits.
+        let wake = frontend.as_ref().and_then(|_| self.remote_ui_wake());
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
-                result = &mut work => return result,
-                _ = tick.tick() => notifications.extend(self.drain_events()),
+                result = &mut work => return Some(result),
+                _ = super::remote_ui::notified(&wake) => {}
+                _ = tick.tick() => {}
+            }
+            match frontend.as_deref_mut() {
+                Some(frontend) => {
+                    if !frontend.serve(self) {
+                        return None;
+                    }
+                }
+                None => notifications.extend(self.drain_events()),
             }
         }
     }
@@ -627,6 +690,17 @@ impl ExecutableExtensions {
         &mut self,
         base_system: &str,
         prompt: String,
+    ) -> anyhow::Result<ExtensionPromptComposition> {
+        self.compose_prompt_with_frontend(base_system, prompt, None)
+            .await
+    }
+
+    /// [`Self::compose_prompt`] while `frontend` keeps serving the extensions.
+    pub(crate) async fn compose_prompt_with_frontend(
+        &mut self,
+        base_system: &str,
+        prompt: String,
+        mut frontend: Option<&mut dyn PromptFrontend>,
     ) -> anyhow::Result<ExtensionPromptComposition> {
         let mut notifications = self.drain_events();
         let mut effective_system = base_system.to_owned();
@@ -661,8 +735,10 @@ impl ExecutableExtensions {
                     .await_prompt_work(
                         process.wait_until_idle(SESSION_START_WAIT),
                         &mut notifications,
+                        frontend.as_deref_mut(),
                     )
                     .await
+                    .ok_or(PromptWaitCancelled)?
                 {
                     notifications.extend(waited_note(&process, started.elapsed()));
                 } else {
@@ -693,8 +769,10 @@ impl ExecutableExtensions {
                         ),
                     ),
                     &mut notifications,
+                    frontend.as_deref_mut(),
                 )
                 .await
+                .ok_or(PromptWaitCancelled)?
                 .map_err(|_| {
                     anyhow::anyhow!(
                         "extension {:?} before_prompt hook exceeded {:?}",
@@ -754,8 +832,10 @@ impl ExecutableExtensions {
                             process.collect_context(Some(prompt.clone()), execution),
                         ),
                         &mut notifications,
+                        frontend.as_deref_mut(),
                     )
                     .await
+                    .ok_or(PromptWaitCancelled)?
                     .map_err(|_| {
                         anyhow::anyhow!(
                             "extension {:?} context collection exceeded {:?}",

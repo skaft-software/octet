@@ -119,7 +119,7 @@ mod summaries;
 mod transcript_renderers;
 mod trust_policy;
 mod turns;
-pub(crate) use self::turns::PreparedSessionSnapshot;
+pub(crate) use self::turns::{PreparedSessionSnapshot, PromptFrontend, PromptWaitCancelled};
 mod ui_projection;
 
 use self::admission::*;
