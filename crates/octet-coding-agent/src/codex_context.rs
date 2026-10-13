@@ -49,7 +49,7 @@ pub const CODEX_LEGACY_CONTEXT_WINDOW: u64 = 272_000;
 /// Context window octet uses for the `gpt-5.6-*` family.
 pub const CODEX_5_6_CONTEXT_WINDOW: u64 = 372_000;
 
-/// Advertised/entitled ceiling for `gpt-6-astra`.
+/// Advertised/entitled ceiling for GPT-6 Codex models.
 pub const CODEX_ASTRA_MAX_CONTEXT_WINDOW: u64 = 872_000;
 
 /// Advertised/entitled ceiling for Pro/ProLite `gpt-5.4` and `codex-auto-review`.
@@ -61,6 +61,13 @@ pub const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
 /// Model identifier with an input envelope distinct from its 128K output
 /// contract.
 pub const CODEX_ASTRA_MODEL_ID: &str = "gpt-6-astra";
+
+fn codex_gpt_6_model(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+    )
+}
 
 /// The one family whose conservative working window is 372K rather than 272K.
 pub const CODEX_LUNA_MODEL_ID: &str = "gpt-5.6-luna";
@@ -399,7 +406,7 @@ impl CodexContextWindow {
 /// Every window octet prints goes through this label so a user never has to
 /// guess which bare number means what.
 pub fn context_window_label(tokens: u64) -> String {
-    if tokens >= 1_000 && tokens % 1_000 == 0 {
+    if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
         format!("{}K", tokens / 1_000)
     } else {
         tokens.to_string()
@@ -477,7 +484,7 @@ pub fn working_context_window(model_id: &str) -> u64 {
 /// response remains authoritative for plan-specific advertised limits, and the
 /// advertised maximum is what bounds the explicit override.
 pub fn entitled_context_windows(model_id: &str) -> (u64, u64) {
-    if model_id == CODEX_ASTRA_MODEL_ID {
+    if codex_gpt_6_model(model_id) {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
     } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)

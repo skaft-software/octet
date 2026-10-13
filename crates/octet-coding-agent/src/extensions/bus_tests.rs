@@ -387,7 +387,11 @@ tools = ["probe_{name}"]
         ("alpha", &alpha, alpha_generation, alpha_instance.as_str()),
         ("beta", &beta, beta_generation, beta_instance.as_str()),
     ] {
-        assert!(process.is_running(), "{name} stopped across the switch");
+        assert!(
+            process.is_running(),
+            "{name} stopped across the switch\n{}\n{diagnostics}",
+            extensions.status_summary(),
+        );
         assert_eq!(
             process.health_snapshot().generation,
             generation,

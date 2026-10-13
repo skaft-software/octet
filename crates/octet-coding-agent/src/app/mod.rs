@@ -2,6 +2,8 @@
 
 pub mod bootstrap;
 mod delegation_models;
+pub(crate) mod resource_paths;
+pub(crate) mod subscriptions;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -439,6 +441,7 @@ pub enum Reconfig {
     },
     NewSession,
     Resume(PathBuf),
+    Fork(PathBuf),
 }
 
 /// Apply one consuming configuration transition at an idle boundary.
@@ -478,6 +481,13 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
             None,
             Some(bootstrap::SessionSelection::OpenExisting(path)),
         ),
+        Reconfig::Fork(path) => bootstrap::rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(bootstrap::SessionSelection::Forked(path)),
+        ),
     }
 }
 
@@ -496,9 +506,13 @@ pub struct App {
     pub reasoning_mode: ReasoningMode,
     pub system: String,
     pub system_tokens: u64,
+    /// Session-only keybinding overrides contributed by enabled extensions with
+    /// the live resource binding. Never persisted; cleared on withdrawal.
+    pub user_keybindings: std::collections::BTreeMap<String, Vec<String>>,
     pub skills: Arc<dyn octet_agent::skills::SkillRegistry>,
     pub prompts: Arc<PromptRegistry>,
     pub executable_extensions: crate::extensions::ExecutableExtensions,
+    pub(crate) resource_paths: resource_paths::ResourcePathConsumer,
     pub goal_store: Arc<DurableGoalStore>,
     pub goal_driver: GoalDriver,
     pub goal_session_id: String,
@@ -536,6 +550,67 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
 }
 
 impl App {
+    /// Attaches every extension process whose handshake has settled.
+    ///
+    /// The first interactive frame is drawn before the extension host is ready
+    /// (`ExtensionStartupTiming::AfterFirstFrame`), so an interactive frontend
+    /// calls this at its idle boundary: each extension joins the live host as
+    /// it registers, and a deferred failure becomes a visible notice instead of
+    /// a silent disappearance.
+    pub(crate) async fn pump_extension_startup(
+        &mut self,
+    ) -> anyhow::Result<crate::extensions::DeferredStartupProgress> {
+        let service_available = self.executable_extensions.has_agent_session_service();
+        let (host, session) = self.agent.extension_host_and_session();
+        let mut progress = self
+            .executable_extensions
+            .pump_deferred_startup(host, session)
+            .await;
+        // Providers the new processes registered join the catalog before the
+        // caller re-resolves resources: a mirrored Pi default model names one.
+        if !progress.attached.is_empty() {
+            progress
+                .notices
+                .extend(self.synchronize_extension_provider_catalog());
+        }
+        self.activate_resource_paths_consumer();
+        if !service_available && self.executable_extensions.has_agent_session_service() {
+            self.executable_extensions
+                .bind_agent_sessions(&self.agent)?;
+        }
+        Ok(progress)
+    }
+
+    /// Waits for the deferred extensions that registered a `before_prompt`
+    /// hook, and only those.
+    ///
+    /// A prompt submitted before the host is ready must still run the hooks
+    /// that own it; it must never wait for an unrelated extension. Extensions
+    /// that already attached are never waited for again. Returns the notices
+    /// from projecting the providers of what attached.
+    pub(crate) async fn await_extension_prompt_hooks(&mut self) -> anyhow::Result<Vec<String>> {
+        let service_available = self.executable_extensions.has_agent_session_service();
+        let attached = self.executable_extensions.attached_count();
+        let (host, session) = self.agent.extension_host_and_session();
+        let result = self
+            .executable_extensions
+            .await_pending_prompt_hooks(host, session)
+            .await;
+        let notices = if self.executable_extensions.attached_count() > attached {
+            self.synchronize_extension_provider_catalog()
+        } else {
+            Vec::new()
+        };
+        self.activate_resource_paths_consumer();
+        // This wait also installs completed non-hook activations. Bind even
+        // when another prompt-hook owner times out after subagents attached.
+        if !service_available && self.executable_extensions.has_agent_session_service() {
+            self.executable_extensions
+                .bind_agent_sessions(&self.agent)?;
+        }
+        result.map(|()| notices)
+    }
+
     /// Resolve an invocation's ordered patterns against this effective catalog.
     /// This only controls cycling; explicit model selection remains available.
     pub fn set_model_scope_patterns(&mut self, patterns: Option<&str>) -> anyhow::Result<()> {

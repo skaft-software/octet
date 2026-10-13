@@ -187,7 +187,7 @@ verification["validate"](inspection, version)
 verification["check_documentation_bytes"](inspection, pathlib.Path(installed), npm_install=True)
 print(f"installed documentation: {len(verification['DOCUMENTATION_FILES'])} inventoried files match tarball bytes (npm ignore-metadata naming)")
 PYDOCS
-[[ ! -e "$hoisted_root/share/octet/extensions/octet-browse/extension.py" ]]
+[[ ! -e "$hoisted_root/share/octet/extensions/octet-mcp/extension.py" ]]
 
 [[ "$(run_isolated octet --version)" == "octet $version" ]]
 mkdir -p "$(dirname "$nested_root")"

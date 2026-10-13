@@ -277,10 +277,12 @@ async fn custom_discovery_round_trip_and_explicit_override_preserve_contract() {
     assert_eq!(models[0].reasoning_values, ["none", "low", "high"]);
     assert_eq!(models[0].reasoning_default, "high");
     let configured = serde_json::from_value(json!({"api_name":"future-local","context_window":4096,"max_output_tokens":512,"tools":false,"vision":false,"reasoning":false})).unwrap();
-    // Discovery enabled: the live 96k window wins over the 4k pin while the
-    // tighter 512-token output cap and the configured capability flags are kept.
+    // The explicit 4k operational pin is independent of the live 96k endpoint
+    // fact. Keep the tighter output cap and configured capability flags too.
     let merged = apply_configured_custom_model_overrides(models, &[configured], true);
-    assert_eq!(merged[0].context_window, 96000);
+    assert_eq!(merged[0].context_window, 4096);
+    assert!(merged[0].context_window_configured);
+    assert_eq!(merged[0].discovered_context_window, Some(96000));
     assert_eq!(merged[0].max_output_tokens, 512);
     assert!(!merged[0].tools && !merged[0].vision && !merged[0].reasoning);
 }

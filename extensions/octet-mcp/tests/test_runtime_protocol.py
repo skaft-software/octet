@@ -97,6 +97,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                         "commands": ["mcp"],
                         "ui": ["status"],
                         "presentation": True,
+                        "menu": True,
                     },
                     "host": {
                         "session_id": "fixture-session",

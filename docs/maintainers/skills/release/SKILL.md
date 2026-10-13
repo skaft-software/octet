@@ -14,8 +14,8 @@ tags:
 Run repository commands from the repo root. This skill is a checklist over the
 existing release tooling; read each script or workflow **before** running it.
 
-Versioning: the workspace version in `Cargo.toml` is the single source of truth
-(`Cargo.toml:13`). `patch` = fixes and additions, `minor` = breaking changes.
+Versioning: `[workspace.package] version` in `Cargo.toml` is the single source of
+truth. `patch` = fixes and additions, `minor` = breaking changes.
 Extension manifests pin `requires_octet` separately
 (`extensions/*/extension.toml`).
 
@@ -37,7 +37,7 @@ scripts/package-octet-release.sh TARGET /tmp/octet-release vX.Y.Z "$PWD"
 
 Supporting generators: `scripts/generate-octet-release-metadata.py`,
 `scripts/create-source-archive.py`, `scripts/package-octet-npm.sh`,
-`scripts/generate-homebrew-formula.py`, `scripts/package-octet-serve-release.sh`.
+`scripts/generate-homebrew-formula.py`.
 
 ## 3. Local smoke test
 

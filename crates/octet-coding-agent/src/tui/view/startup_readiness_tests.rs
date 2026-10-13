@@ -17,6 +17,14 @@ fn plain(lines: &[String]) -> String {
     strip_terminal_sequences(&lines.join("\n"))
 }
 
+fn composer_rules(lines: &[String], width: u16) -> usize {
+    let rule = "─".repeat(usize::from(width));
+    lines
+        .iter()
+        .filter(|line| strip_terminal_sequences(line) == rule)
+        .count()
+}
+
 fn assert_unbranded(lines: &[String]) {
     let text = plain(lines);
     assert!(!text.contains("octet"), "{text}");
@@ -30,9 +38,13 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
     for application_viewport in [false, true] {
         let mut shell = pending_shell();
         let component = ShellComponent::new(shell.state.clone(), application_viewport);
-        assert_unbranded(&component.render(96));
+        let pending = component.render(96);
+        assert_unbranded(&pending);
+        assert_eq!(composer_rules(&pending, 96), 0);
         shell.set_identity("cerebras", "cerebras/gemma-4-31b", "off");
-        assert_unbranded(&component.render_update(96).unwrap().replacement);
+        let identified = component.render_update(96).unwrap().replacement;
+        assert_unbranded(&identified);
+        assert_eq!(composer_rules(&identified, 96), 0);
         shell.set_workspace(PathBuf::from("/startup-fixture/workspace"));
         shell.set_theme(test_theme_for(
             TerminalBackground::Dark,
@@ -42,7 +54,6 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
         {
             let state = shell.state.borrow();
             assert!(state.startup_card_started_at.is_none());
-            assert!(!welcome_card::welcome_animating(&state, Instant::now()));
             assert!(state.transcript_cache.borrow().width.is_none());
         }
 
@@ -54,6 +65,8 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
             "setup rows are not a retained prefix"
         );
         let text = plain(&update.replacement);
+        assert!(text.contains("octet v"), "{text}");
+        assert!(text.contains("full access"), "{text}");
         assert!(text.contains("cerebras/gemma-4-31b"), "{text}");
         assert!(text.contains("/startup-fixture/workspace"), "{text}");
         assert!(!text.contains("selecting model"), "{text}");
@@ -61,11 +74,12 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
         let state = shell.state.borrow();
         let started = state.startup_card_started_at.unwrap();
         assert!(started >= ready);
-        assert!(welcome_card::welcome_animating(&state, started));
-        assert!(!welcome_card::welcome_animating(
-            &state,
-            started + Duration::from_secs(3)
-        ));
+        let welcome = welcome_card::render_welcome_card(&state, 96, 10, started);
+        assert_eq!(
+            welcome,
+            welcome_card::render_welcome_card(&state, 96, 10, started + Duration::from_secs(3)),
+            "welcome bytes must be static"
+        );
         assert_eq!(state.model_lab, Some(ModelLab::Google));
         let accent = state.theme.model_rgb(state.model_lab).unwrap();
         assert!(accent.1 > accent.0 && accent.1 > accent.2, "Gemma is green");
@@ -153,7 +167,11 @@ fn startup_lifecycle_waits_paint_the_draft_without_provisional_model_chrome() {
             shell.set_size(width, height);
             let frame = component.render(width);
             assert_unbranded(&frame);
-            assert_eq!(frame.len(), usize::from(height));
+            if application_viewport {
+                assert_eq!(frame.len(), usize::from(height));
+            } else {
+                assert!(frame.len() <= usize::from(height));
+            }
             assert!(frame
                 .iter()
                 .all(|line| visible_width(line) <= usize::from(width)));
@@ -199,7 +217,7 @@ fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     );
     assert!(!text.contains("selecting model"), "{text}");
     assert_eq!(state.transcript_cache.borrow().last_update_start, 0);
-    assert_eq!(state.transcript_cache.borrow().block_starts, [7]);
+    assert_eq!(state.transcript_cache.borrow().block_starts, [6]);
 }
 
 #[test]
@@ -224,7 +242,95 @@ fn renderer_reconstruction_preserves_pending_and_ready_startup_state() {
 }
 
 #[test]
-fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
+fn startup_draft_geometry_survives_readiness_and_late_update() {
+    for application_viewport in [false, true] {
+        for (width, height) in [(24, 8), (48, 8), (80, 24), (120, 40)] {
+            let mut shell = pending_shell();
+            shell.set_size(width, height);
+            shell.state.borrow_mut().editor.set_text("early draft");
+            let component = ShellComponent::new(shell.state.clone(), application_viewport);
+            let pending = component.render(width);
+            assert_unbranded(&pending);
+            let cursor_row = |rows: &[String]| {
+                rows.iter()
+                    .position(|row| row.contains(CURSOR_MARKER))
+                    .unwrap()
+            };
+            let initial_row = cursor_row(&pending);
+            assert_eq!(
+                cursor_row(&component.render_update(width).unwrap().replacement),
+                initial_row
+            );
+            shell.set_identity("custom", "custom/probe", "off");
+            shell.finish_startup();
+            let ready = component.render(width);
+            assert_eq!(
+                cursor_row(&ready),
+                initial_row,
+                "{width}x{height}, app={application_viewport}"
+            );
+            assert!(plain(&ready).contains("early draft"));
+            assert!(plain(&ready).contains("full access"));
+            shell.state.borrow_mut().available_update = Some(semver::Version::new(9, 9, 9));
+            shell.state.borrow_mut().invalidate_transcript();
+            assert_eq!(
+                cursor_row(&component.render(width)),
+                initial_row,
+                "update moved draft"
+            );
+        }
+    }
+}
+
+#[test]
+fn startup_reserves_a_custom_identity_header_without_moving_the_draft() {
+    for application_viewport in [false, true] {
+        for (width, height) in [(48, 8), (80, 24)] {
+            let mut shell = pending_shell();
+            shell.set_theme(crate::tui::theme::test_theme_from_source(
+                "[metadata]\nname = \"Header fixture\"\n[layout]\nshow_header = true\n",
+            ));
+            shell.set_size(width, height);
+            shell.state.borrow_mut().editor.set_text("early draft");
+            let component = ShellComponent::new(shell.state.clone(), application_viewport);
+            let cursor_row = |rows: &[String]| {
+                rows.iter()
+                    .position(|row| row.contains(CURSOR_MARKER))
+                    .unwrap()
+            };
+            let pending = component.render(width);
+            assert_unbranded(&pending);
+            let row = cursor_row(&pending);
+            shell.state.borrow_mut().run_label = "discovering models".into();
+            assert_eq!(cursor_row(&component.render(width)), row);
+            shell.set_identity("custom", "custom/probe", "off");
+            shell.finish_startup();
+            assert_eq!(
+                cursor_row(&component.render(width)),
+                row,
+                "themed header moved draft"
+            );
+        }
+    }
+}
+
+#[test]
+fn static_welcome_never_reflows_historical_rows_for_a_draft_edit() {
+    let mut shell = pending_shell();
+    shell.set_identity("custom", "custom/probe", "off");
+    shell.finish_startup();
+    shell.notice("retained history sentinel");
+    let original = shell.state.borrow().rendered_transcript(96).clone();
+    {
+        let mut state = shell.state.borrow_mut();
+        state.editor.set_text("line\n".repeat(40));
+        state.invalidate_transcript();
+    }
+    assert_eq!(*shell.state.borrow().rendered_transcript(96), original);
+}
+
+#[test]
+fn silent_startup_keeps_an_unframed_editable_composer_in_both_viewport_modes() {
     for application_viewport in [false, true] {
         let mut shell = pending_shell();
         let component = ShellComponent::new(shell.state.clone(), application_viewport);
@@ -234,7 +340,12 @@ fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
                 shell.state.borrow_mut().editor.set_text(draft);
                 let frame = component.render(width);
                 assert_unbranded(&frame);
-                assert_eq!(frame.len(), usize::from(height));
+                assert_eq!(composer_rules(&frame, width), 0, "half-loaded composer");
+                if application_viewport {
+                    assert_eq!(frame.len(), usize::from(height));
+                } else {
+                    assert!(frame.len() <= usize::from(height));
+                }
                 assert!(frame.iter().any(|row| row.contains(CURSOR_MARKER)));
                 assert!(frame
                     .iter()
@@ -243,6 +354,28 @@ fn silent_startup_keeps_a_visible_composer_in_both_viewport_modes() {
                 assert!(!plain(&frame).contains("extensions"));
                 assert!(!plain(&frame).contains("discovering"));
             }
+            shell.clear_editor();
+            shell.apply_edit(EditAction::Paste("editable draftX".into()));
+            shell.apply_edit(EditAction::Backspace);
+            assert_eq!(shell.pending(), "editable draft");
+            let edited = component.render_update(width).unwrap().replacement;
+            assert_unbranded(&edited);
+            assert_eq!(composer_rules(&edited, width), 0);
+            assert!(plain(&edited).contains("editable draft"));
+            assert!(edited.iter().any(|row| row.contains(CURSOR_MARKER)));
+        }
+        shell.set_size(96, 18);
+        let resized = component.render(96);
+        assert_eq!(composer_rules(&resized, 96), 0);
+        assert!(plain(&resized).contains("editable draft"));
+        shell.set_identity("custom", "custom/probe", "off");
+        assert_eq!(composer_rules(&component.render(96), 96), 0);
+        shell.finish_startup();
+        let ready = component.render_update(96).unwrap();
+        assert_eq!(ready.stable_prefix, 0);
+        assert_eq!(composer_rules(&ready.replacement, 96), 2);
+        for expected in ["octet v", "full access", "custom/probe", "editable draft"] {
+            assert!(plain(&ready.replacement).contains(expected));
         }
     }
 }

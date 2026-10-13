@@ -31,6 +31,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Mapping, Optional, Protocol, Sequence, Tuple, Union
 
+from octet_computer_use.windows_security import IS_WINDOWS, is_link_or_reparse_point, opened_at
+
 
 SCREENSHOT_SCHEMA = "octet.computer-use.screenshot.v1"
 PROJECTION_SCHEMA = "octet.computer-use.screenshot-projection.v1"
@@ -902,7 +904,7 @@ class HostArtifactTransport:
                 "artifacts_unavailable",
                 "The host artifact scratch directory is unavailable.",
             ) from error
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        if is_link_or_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
             raise ArtifactTransportError("unsafe_artifact_path", "The host artifact scratch directory is unsafe.")
         return raw
 
@@ -922,7 +924,7 @@ class HostArtifactTransport:
             metadata = directory.lstat()
         except OSError as error:
             raise ArtifactTransportError("unsafe_artifact_path", "The screenshot staging directory is unsafe.") from error
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        if is_link_or_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
             raise ArtifactTransportError("unsafe_artifact_path", "The screenshot staging directory is unsafe.")
         try:
             directory.chmod(0o700)
@@ -931,11 +933,30 @@ class HostArtifactTransport:
         return directory
 
     @staticmethod
-    def _write_private(path: Path, data: bytes) -> None:
+    def _write_private(path: Path, data: bytes, *, expected_path: Optional[str] = None) -> None:
+        """Create ``path`` exclusively and write ``data`` without following links.
+
+        POSIX uses ``O_NOFOLLOW``. Windows has no such flag: ``O_EXCL`` still
+        refuses any existing name (including a symlink or junction), and the
+        opened file's final path must equal ``expected_path``, which is derived
+        from the resolved scratch root, so a junction swapped into a parent is
+        rejected after the fact. Other platforms without ``O_NOFOLLOW`` fail
+        closed.
+        """
+
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        if not nofollow:
+        verify_final_path = not nofollow and IS_WINDOWS and expected_path is not None
+        if not nofollow and not verify_final_path:
             raise ArtifactTransportError("unsafe_artifact_path", "The screenshot staging path cannot be safely opened.")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0)
+        )
         try:
             fd = os.open(str(path), flags, 0o600)
         except OSError as error:
@@ -943,7 +964,13 @@ class HostArtifactTransport:
         failed = False
         try:
             metadata = os.fstat(fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or is_link_or_reparse_point(metadata)
+            ):
+                raise ArtifactTransportError("unsafe_artifact_path", "The screenshot staging file is unsafe.")
+            if verify_final_path and not opened_at(fd, expected_path):
                 raise ArtifactTransportError("unsafe_artifact_path", "The screenshot staging file is unsafe.")
             view = memoryview(data)
             while view:
@@ -1002,11 +1029,17 @@ class HostArtifactTransport:
         directory = self._stage_directory(root)
         filename = self._owned_prefix + uuid.uuid4().hex + ".bin"
         destination = directory / filename
+        # The resolved root, not the staging directory, anchors the Windows
+        # final-path check: a junction swapped in for the staging directory
+        # after it was inspected cannot also move this expectation.
+        expected_path = (
+            os.path.join(os.path.realpath(root), self._STAGE_DIRECTORY, filename) if IS_WINDOWS else None
+        )
         with self._stage_lock:
             self._active_stages.add(filename)
         staged = False
         try:
-            self._write_private(destination, data)
+            self._write_private(destination, data, expected_path=expected_path)
             staged = True
             relative = (Path(self._STAGE_DIRECTORY) / filename).as_posix()
             arguments["path"] = relative
@@ -1029,7 +1062,7 @@ class HostArtifactTransport:
                 root = self._scratch_root()
                 directory = root / self._STAGE_DIRECTORY
                 metadata = directory.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                if is_link_or_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
                     return
                 children = list(directory.iterdir())
             except (ArtifactTransportError, OSError):
@@ -1044,7 +1077,7 @@ class HostArtifactTransport:
                     and child.name not in self._active_stages
                     and child.name.endswith(".bin")
                     and stat.S_ISREG(child_metadata.st_mode)
-                    and not stat.S_ISLNK(child_metadata.st_mode)
+                    and not is_link_or_reparse_point(child_metadata)
                     and child_metadata.st_nlink == 1
                 ):
                     self._unlink(child)

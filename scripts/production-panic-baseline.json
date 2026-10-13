@@ -3,7 +3,7 @@
   "tool": "cargo clippy",
   "status": "uncollected",
   "scope": {
-    "rust_msrv": "1.86",
+    "rust_msrv": "1.88",
     "diagnostic_format": "cargo-jsonl",
     "feature_selection": "all-features",
     "lint_level": "warning",

@@ -76,8 +76,9 @@ owner-private record of its own for the restore pass:
 - **Silent failure.** Every error is swallowed; there is no retry queue, no
   background thread, and no user-visible diagnostic.
 - **TUI only.** The reporter is owned by the interactive terminal frontend.
-  `--print`, `--rpc`, plain/headless runs, and Serve never report — the
-  equivalent of the `ctx.mode !== "tui"` gate the Pi extension applies.
+  `--print`, `--rpc`, plain/headless runs, and other non-TUI frontends never
+  report — the equivalent of the `ctx.mode !== "tui"` gate the Pi extension
+  applies.
 - **Released on exit.** When octet leaves the terminal it releases the same
   source's lifecycle authority, so a late report cannot reclaim a pane whose
   agent has exited. Herdr's Pi integration relies on process-exit detection

@@ -490,7 +490,7 @@ class FakeAgentSessions:
                 not policy["tools"]
                 or len(set(policy["tools"])) != len(policy["tools"])
                 or any(
-                    tool not in {"read", "search", "edit", "write", "bash"}
+                    tool not in {"read", "edit", "write", "bash"}
                     for tool in policy["tools"]
                 )
             ):

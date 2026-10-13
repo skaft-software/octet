@@ -1,0 +1,34 @@
+name = "octet-pi-compat"
+version = "0.9.0"
+api_version = "0.4"
+requires_octet = "=0.9.0"
+description = "Mirror this machine's Pi setup automatically when enabled; runs its enabled factories"
+
+[entrypoint]
+# CommonJS string input: the dynamic import reaches the runner without
+# `--input-type`, which node rejects for any file-based worker entry.
+command = "node"
+args = ["--eval", "import(process.env.OCTET_EXTENSION_DIR + '/runner.mjs').catch(error => { console.error('[pi-compat startup]', error); process.exit(1); })"]
+
+[entrypoint.env]
+# Native activation prepares a private session catalog after trust/policy checks.
+# Installation and discovery never execute Pi factories.
+OCTET_PI_AUTO_MIRROR = "1"
+
+# Enabling opts into the installed Pi setup, including its builtin replacements.
+# Trusted factories retain normal OS authority; these declarations are not a sandbox.
+[capabilities]
+filesystem = "unrestricted"
+process = true
+network = true
+system_prompt = true
+builtin_tool_overrides = ["read", "edit", "write", "bash", "powershell"]
+
+[contributes]
+tools = []
+commands = []
+hooks = []
+tool_renderers = []
+notifications = true
+confirmations = true
+providers = true

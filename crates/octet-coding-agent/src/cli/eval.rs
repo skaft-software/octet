@@ -874,6 +874,10 @@ fn newest_transcript(root: &Path) -> Option<PathBuf> {
     newest.map(|(_, path)| path)
 }
 
+/// Effective context pinned for the loopback fixture model; custom models
+/// without a configured or discovered context are refused at startup.
+const EVAL_FIXTURE_CONTEXT_WINDOW: u64 = 131_072;
+
 /// The one credential the child can see: this run's own loopback fixture.
 fn write_injected_credential(path: &Path, base_url: &str) -> anyhow::Result<()> {
     let record = serde_json::json!({
@@ -882,7 +886,11 @@ fn write_injected_credential(path: &Path, base_url: &str) -> anyhow::Result<()> 
         "api_name": EVAL_FIXTURE_MODEL,
         "headers": [],
         "auto_discover": false,
-        "models": [{"api_name": EVAL_FIXTURE_MODEL}],
+        "models": [{
+            "api_name": EVAL_FIXTURE_MODEL,
+            "context_window": EVAL_FIXTURE_CONTEXT_WINDOW,
+            "context_window_configured": true,
+        }],
     });
     octet_agent::secure_fs::write_private_atomic(
         path,

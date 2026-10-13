@@ -12,8 +12,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use octet_ai::{AudioFormat, Media, Modality, ModalitySet};
-use sexy_tui_rs::TextEditor;
-use unicode_segmentation::UnicodeSegmentation;
 
 use super::paste::explicit_dropped_paths;
 
@@ -243,55 +241,6 @@ impl AttachmentLedger {
     /// Discard every pending attachment while preserving the monotonic chip ID.
     pub fn clear(&mut self) {
         self.entries.clear();
-    }
-
-    /// Handle Backspace on a registered chip, removing its mask and payload.
-    /// Returns false without mutation when ordinary editor Backspace should run.
-    ///
-    /// Any exact occurrence of a registered chip is eligible, including a
-    /// copied duplicate. Removing one revokes its ledger entry, so remaining
-    /// copies are literal text and cannot unexpectedly submit the deleted
-    /// payload.
-    pub fn backspace_chip(&mut self, editor: &mut TextEditor) -> bool {
-        if self.entries.is_empty() {
-            return false;
-        }
-        let text = editor.text();
-        let cursor = editor.cursor();
-        let Some((target, _)) = text[..cursor].grapheme_indices(true).next_back() else {
-            return false;
-        };
-        let Some((index, start, end)) =
-            self.entries.iter().enumerate().find_map(|(index, entry)| {
-                text.match_indices(&entry.chip).find_map(|(start, _)| {
-                    let end = start + entry.chip.len();
-                    (start < cursor && target < end).then_some((index, start, end))
-                })
-            })
-        else {
-            return false;
-        };
-
-        // A neighboring combining mark can share a grapheme with a bracket.
-        // Replace complete graphemes as required by TextEditor, but preserve
-        // every byte outside the chip rather than deleting neighboring text.
-        let mut range_start = 0;
-        let mut range_end = text.len();
-        for (boundary, _) in text.grapheme_indices(true) {
-            if boundary <= start {
-                range_start = boundary;
-            }
-            if boundary >= end {
-                range_end = boundary;
-                break;
-            }
-        }
-        let replacement = format!("{}{}", &text[range_start..start], &text[end..range_end]);
-        if !editor.replace_range(range_start..range_end, &replacement) {
-            return false;
-        }
-        self.entries.remove(index);
-        true
     }
 
     /// Collapse a large paste into a chip; the text returns at compose time.

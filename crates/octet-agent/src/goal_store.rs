@@ -23,7 +23,12 @@ const MAX_CREATED_AT_BYTES: usize = 64;
 const MAX_TURN_BUDGET: u32 = 100_000;
 /// Maximum number of continuation turns accepted by the durable store.
 pub const MAX_GOAL_TURN_BUDGET: u32 = MAX_TURN_BUDGET;
+/// POSIX mode bits for the private goal directory. Windows ACLs are applied by
+/// [`crate::secure_fs`] instead, so these are Unix-only.
+#[cfg(unix)]
 const GOAL_DIRECTORY_MODE: u32 = 0o700;
+/// POSIX mode bits for the private goal file. See [`GOAL_DIRECTORY_MODE`].
+#[cfg(unix)]
 const GOAL_FILE_MODE: u32 = 0o600;
 
 /// Maximum UTF-8 bytes accepted for a persistent objective.
@@ -662,9 +667,29 @@ fn map_lock_error(error: crate::secure_fs::SecureFileError) -> DurableGoalStoreE
 }
 
 fn sync_directory(path: &Path) -> Result<(), DurableGoalStoreError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(DurableGoalStoreError::Storage)
+    #[cfg(windows)]
+    {
+        // `File::open` yields a `GENERIC_READ` directory handle, and
+        // `FlushFileBuffers` on it fails with `ERROR_ACCESS_DENIED`.
+        // Directory durability is best-effort on Windows (file data is
+        // already `sync_all`'d before the rename), so attempt a write-capable
+        // open and ignore the outcome.
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let result = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all());
+        let _ = result;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(DurableGoalStoreError::Storage)
+    }
 }
 
 fn open_read_no_follow(path: &Path) -> Result<File, DurableGoalStoreError> {
@@ -770,7 +795,16 @@ mod tests {
     fn replace_lock_while_held(store: &DurableGoalStore) -> File {
         let old_lock = crate::secure_fs::open_private_lock_file(&store.inner.lock_path).unwrap();
         let error = fs2::FileExt::try_lock_exclusive(&old_lock).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        // `fs2` reports contention with the platform's lock error
+        // (`EWOULDBLOCK` on Unix, `ERROR_LOCK_VIOLATION` on Windows), so
+        // compare against its own contended error instead of assuming one
+        // `ErrorKind`.
+        let contended = fs2::lock_contended_error();
+        assert!(
+            error.raw_os_error() == contended.raw_os_error()
+                || matches!(error.kind(), std::io::ErrorKind::WouldBlock),
+            "unexpected lock contention error: {error:?}"
+        );
 
         std::fs::remove_file(&store.inner.lock_path).unwrap();
         let replacement = crate::secure_fs::open_private_lock_file(&store.inner.lock_path).unwrap();

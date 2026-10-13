@@ -1,0 +1,25 @@
+[package]
+name = "spice-host-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[test]]
+name = "spice"
+path = "tests/spice.rs"
+
+[profile.ci-test]
+inherits = "test"
+debug = "limited"
+incremental = false
+
+[dependencies]
+octet-agent = { path = "../../../../crates/octet-agent" }
+octet-ai = { path = "../../../../crates/octet-ai" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
+url = "2"
+wiremock = "=0.6.5"
+libc = "0.2"

@@ -1,24 +1,12 @@
-//! Host side of the API `0.4` component line-region protocol.
+//! Host-owned line cache for negotiated API `0.4` remote UI mounts.
 //!
-//! Pi is the spec (`packages/tui/src/tui.ts` `Component` interface ~line 111):
-//! a component owns `render(width) -> string[]`, optional `handleInput(data)`
-//! and `handleMouse(event)`, and `invalidate()`. Octet's out-of-process bridge
-//! (W4) instantiates the component factories; this module reserves one screen
-//! region per live component id, tracks invalidated ids with a per-frame
-//! coalescer, and folds rendered lines into the shell projection at the
-//! pi placements (`packages/coding-agent/src/modes/interactive/interactive-mode.ts`
-//! `extensionWidgetsAbove`/`extensionWidgetsBelow`/header/footer/editor).
-//!
-//! The wire operations are owned by the octet-agent protocol layer (W1:
-//! `component/invalidate`, `ui/widget_set`, `ui/header_set`, `ui/footer_set`,
-//! `ui/editor_component_set/get`, `ui/working_*`, `ui/hidden_thinking_label_set`,
-//! `ui/tools_expanded_get/set`, `terminal/title_set` and the host→bridge
-//! `component/render|input|mouse|dispose` requests). This module deliberately
-//! mirrors the contract's exact field names so the W1 drain is a mechanical
-//! adapter, and keeps every bound from the wire contract §3 so bridge payloads
-//! can be validated before they reserve screen state.
+//! Production uses register/store/read/remove only: input, slots, ownership and
+//! invalidation belong to `extensions::remote_ui`. There is no render RPC from
+//! the paint loop. The older proposed component/slot protocol below is retained
+//! solely as a test conformance model, not compiled or advertised as a service.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Wire bound: component id bytes.
 pub const MAX_COMPONENT_ID_BYTES: usize = 64;
@@ -29,16 +17,21 @@ pub const MAX_RENDER_LINES: usize = 256;
 /// Wire bound: one `component/render` response line bytes.
 pub const MAX_RENDER_LINE_BYTES: usize = 16 * 1024;
 /// Wire bound: `ui/widget_set` lines-form line count.
+#[cfg(test)]
 pub const MAX_WIDGET_LINES: usize = 64;
 /// Wire bound: one `ui/widget_set` lines-form line bytes.
+#[cfg(test)]
 pub const MAX_WIDGET_LINE_BYTES: usize = 8 * 1024;
 /// Wire bound: `ui/widget_set` key bytes.
+#[cfg(test)]
 pub const MAX_WIDGET_KEY_BYTES: usize = 64;
 /// Wire bound: terminal title bytes.
+#[cfg(test)]
 pub const MAX_TERMINAL_TITLE_BYTES: usize = 8 * 1024;
 
-/// Pi widget placement (`ExtensionWidgetOptions.placement`,
-/// `core/extensions/types.ts:105`).
+/// Pi widget placement (`ExtensionWidgetOptions.placement` in
+/// `core/extensions/types.ts`).
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WidgetPlacement {
     /// Default: rendered above the editor.
@@ -48,6 +41,7 @@ pub enum WidgetPlacement {
     BelowEditor,
 }
 
+#[cfg(test)]
 impl WidgetPlacement {
     /// Parse the wire spelling (`"aboveEditor" | "belowEditor"`).
     pub fn parse(value: &str) -> Option<Self> {
@@ -61,6 +55,7 @@ impl WidgetPlacement {
 
 /// One widget slot: either verbatim lines (pi's `string[]` overload) or a live
 /// component region (pi's factory overload).
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WidgetContent {
     /// Complete plain-text lines for the key.
@@ -132,7 +127,7 @@ pub struct ComponentRegion {
     /// Region width of the last accepted render, if any.
     pub width: Option<u16>,
     /// Last rendered lines (may be stale until the render round-trip lands).
-    pub lines: Vec<String>,
+    pub lines: Arc<Vec<String>>,
 }
 
 /// The per-extension component surface. One instance per extension process
@@ -144,28 +139,37 @@ pub struct ExtensionComponentSurface {
     /// Component ids invalidated since the last frame drain. Debounced per
     /// the wire contract: repeated `component/invalidate` for one id collapses
     /// to a single `component/render` request.
+    #[cfg(test)]
     invalidated: Vec<String>,
     /// Keyed widget slots in wire-arrival order.
+    #[cfg(test)]
     widgets: BTreeMap<String, (WidgetContent, WidgetPlacement)>,
     /// Header component id (`ui/header_set`; absent = built-in header).
+    #[cfg(test)]
     header: Option<String>,
     /// Footer component id (`ui/footer_set`; absent = built-in footer).
+    #[cfg(test)]
     footer: Option<String>,
     /// Editor component id (`ui/editor_component_set`; absent = default editor).
+    #[cfg(test)]
     editor_component: Option<String>,
     /// `ui/tools_expanded_get/set` state.
+    #[cfg(test)]
     tools_expanded: bool,
     /// `terminal/title_set` payload; the shell writes the OSC 2 sequence.
+    #[cfg(test)]
     terminal_title: Option<String>,
     /// `component/render` requests queued by the repaint loop, newest last.
     /// The drain forwards each as the host→bridge `component/render` request
     /// and stores the response with [`Self::store_render`].
+    #[cfg(test)]
     pending_renders: Vec<(String, u16)>,
 }
 
 impl ExtensionComponentSurface {
     /// Mark one component region dirty. Coalesced: an id already awaiting a
     /// render is not queued twice.
+    #[cfg(test)]
     pub fn invalidate(&mut self, id: &str) -> Result<(), ComponentSurfaceError> {
         bounded_id(id)?;
         if !self.components.contains_key(id) {
@@ -202,6 +206,7 @@ impl ExtensionComponentSurface {
     /// Take the ids invalidated since the last frame and queue one
     /// `component/render {id, width}` request per id. Called from the shell
     /// repaint loop at frame granularity, exactly once per frame.
+    #[cfg(test)]
     pub fn queue_renders_for_frame(&mut self, width: u16) {
         for id in std::mem::take(&mut self.invalidated) {
             self.pending_renders.push((id, width));
@@ -211,6 +216,7 @@ impl ExtensionComponentSurface {
     /// Drain the queued render requests. Each entry is one host→bridge
     /// `component/render` request; the response is stored with
     /// [`Self::store_render`].
+    #[cfg(test)]
     pub fn take_pending_renders(&mut self) -> Vec<(String, u16)> {
         std::mem::take(&mut self.pending_renders)
     }
@@ -230,11 +236,22 @@ impl ExtensionComponentSurface {
             MAX_RENDER_LINE_BYTES,
             "component render",
         )?;
+        let mut bytes = 0usize;
+        for line in &lines {
+            bytes += line.len();
+            if bytes > octet_agent::extension_remote_ui::MAX_EXTENSION_REMOTE_UI_FRAME_BYTES {
+                return Err(ComponentSurfaceError::BoundsExceeded(
+                    "component frame exceeds 512 KiB".into(),
+                ));
+            }
+            octet_agent::extension_remote_ui::validate_remote_ui_line(line)
+                .map_err(ComponentSurfaceError::BoundsExceeded)?;
+        }
         match self.components.get_mut(id) {
             Some(region) => {
-                let changed = region.width != Some(width) || region.lines != lines;
+                let changed = region.width != Some(width) || region.lines.as_ref() != &lines;
                 region.width = Some(width);
-                region.lines = lines;
+                region.lines = Arc::new(lines);
                 Ok(changed)
             }
             None => Err(ComponentSurfaceError::BoundsExceeded(format!(
@@ -245,6 +262,7 @@ impl ExtensionComponentSurface {
 
     /// `ui/widget_set`: exactly one of `component_id`/`lines`, neither clears
     /// the key. Key ≤64B; lines ≤64 × 8KiB; placement defaults to aboveEditor.
+    #[cfg(test)]
     pub fn widget_set(
         &mut self,
         key: &str,
@@ -282,6 +300,7 @@ impl ExtensionComponentSurface {
 
     /// `ui/header_set` / `ui/footer_set`. Absent id restores the built-in
     /// surface.
+    #[cfg(test)]
     pub fn slot_set(
         &mut self,
         slot: ComponentSlot,
@@ -301,31 +320,37 @@ impl ExtensionComponentSurface {
     }
 
     /// `ui/editor_component_get`.
+    #[cfg(test)]
     pub fn editor_component_id(&self) -> Option<&str> {
         self.editor_component.as_deref()
     }
 
     /// `ui/header_component_id` (host-local mirror of `ui/header_set`).
+    #[cfg(test)]
     pub fn header_component_id(&self) -> Option<&str> {
         self.header.as_deref()
     }
 
     /// `ui/footer_component_id` (host-local mirror of `ui/footer_set`).
+    #[cfg(test)]
     pub fn footer_component_id(&self) -> Option<&str> {
         self.footer.as_deref()
     }
 
     /// `ui/tools_expanded_get`.
+    #[cfg(test)]
     pub fn tools_expanded(&self) -> bool {
         self.tools_expanded
     }
 
     /// `ui/tools_expanded_set`.
+    #[cfg(test)]
     pub fn set_tools_expanded(&mut self, expanded: bool) {
         self.tools_expanded = expanded;
     }
 
     /// `terminal/title_set` (OSC 2). Absent title restores the host default.
+    #[cfg(test)]
     pub fn set_terminal_title(&mut self, title: Option<&str>) -> Result<(), ComponentSurfaceError> {
         if let Some(title) = title {
             if title.len() > MAX_TERMINAL_TITLE_BYTES {
@@ -340,11 +365,13 @@ impl ExtensionComponentSurface {
     }
 
     /// Current terminal title, for the OSC 2 writer in the shell chrome.
+    #[cfg(test)]
     pub fn terminal_title(&self) -> Option<&str> {
         self.terminal_title.as_deref()
     }
 
     /// `component/dispose` on clear/shutdown: drop every region and slot.
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.components.clear();
         self.invalidated.clear();
@@ -360,12 +387,14 @@ impl ExtensionComponentSurface {
     /// The component receiving keyboard focus: the editor component when one
     /// is installed, else none (the default composer keeps focus). Mirrors
     /// pi's focus rule where the editor component replaces the composer.
+    #[cfg(test)]
     pub fn keyboard_focus_id(&self) -> Option<&str> {
         self.editor_component.as_deref()
     }
 
     /// One widget's region lines for projection, when the widget is backed by
     /// a component with a completed render.
+    #[cfg(test)]
     pub fn widget_component_lines(&self, key: &str) -> Option<&[String]> {
         let (content, _) = self.widgets.get(key)?;
         match content {
@@ -376,6 +405,7 @@ impl ExtensionComponentSurface {
 
     /// All widget slots with their placement, in key order, for the layout
     /// pass that reserves regions above/below the editor.
+    #[cfg(test)]
     pub fn widgets(&self) -> impl Iterator<Item = (&String, &WidgetContent, WidgetPlacement)> + '_ {
         self.widgets
             .iter()
@@ -390,15 +420,18 @@ impl ExtensionComponentSurface {
     }
 
     /// Lines-form widgets above the editor, in stable key order.
+    #[cfg(test)]
     pub fn widget_lines_above_editor(&self) -> Vec<(String, Vec<String>)> {
         self.widget_lines_for_placement(WidgetPlacement::AboveEditor)
     }
 
     /// Lines-form widgets below the editor, in stable key order.
+    #[cfg(test)]
     pub fn widget_lines_below_editor(&self) -> Vec<(String, Vec<String>)> {
         self.widget_lines_for_placement(WidgetPlacement::BelowEditor)
     }
 
+    #[cfg(test)]
     fn widget_lines_for_placement(&self, placement: WidgetPlacement) -> Vec<(String, Vec<String>)> {
         self.widgets
             .iter()
@@ -408,12 +441,33 @@ impl ExtensionComponentSurface {
                 WidgetContent::Component(id) => self
                     .components
                     .get(id)
-                    .map(|region| (key.clone(), region.lines.clone())),
+                    .map(|region| (key.clone(), region.lines.as_ref().clone())),
             })
             .collect()
     }
 
+    /// Release a cached region without retaining an unmounted component.
+    pub(crate) fn remove_component(&mut self, id: &str) {
+        self.components.remove(id);
+        #[cfg(test)]
+        {
+            self.invalidated.retain(|pending| pending != id);
+            self.pending_renders.retain(|(pending, _)| pending != id);
+            self.widgets.retain(|_, (content, _)| !matches!(content, WidgetContent::Component(component) if component == id));
+            for slot in [
+                &mut self.header,
+                &mut self.footer,
+                &mut self.editor_component,
+            ] {
+                if slot.as_deref() == Some(id) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     /// Component ids whose regions should be dropped for a generation reset.
+    #[cfg(test)]
     pub fn component_ids(&self) -> impl Iterator<Item = &String> + '_ {
         self.components.keys()
     }
@@ -421,6 +475,7 @@ impl ExtensionComponentSurface {
 
 /// Addressable component slots (`ui/header_set`, `ui/footer_set`,
 /// `ui/editor_component_set`).
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComponentSlot {
     /// Header region above the transcript.
@@ -435,6 +490,7 @@ pub enum ComponentSlot {
 /// components expect from `handleInput(data)`. Pi components receive the raw
 /// bytes the terminal produced; this restores the standard ANSI/Kitty-less
 /// spellings for the keys octet decodes with crossterm.
+#[cfg(test)]
 pub fn raw_key_data(
     code: crossterm::event::KeyCode,
     modifiers: crossterm::event::KeyModifiers,
@@ -490,7 +546,8 @@ pub fn raw_key_data(
     }
 }
 
-/// The pi `TuiMouseEvent` wire shape (`packages/tui/src/tui.ts:25-44`).
+/// The pi `TuiMouseEvent` wire shape (`packages/tui/src/tui.ts`).
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TuiMouseWireEvent {
     /// `"press" | "release" | "move" | "drag" | "click" | "wheel"`.
@@ -524,8 +581,8 @@ pub struct TuiMouseWireEvent {
 
 /// Map one crossterm mouse event into pi's normalized shape with local
 /// coordinates for the region at `(origin_x, origin_y)` sized
-/// `(width, height)`. crossterm coordinates are 1-based cell coordinates;
-/// pi's are zero-based (`tui.ts:24`).
+/// `(width, height)`. Both crossterm and pi use zero-based cell coordinates.
+#[cfg(test)]
 pub fn mouse_wire_event(
     event: &crossterm::event::MouseEvent,
     origin: (u16, u16),
@@ -539,18 +596,18 @@ pub fn mouse_wire_event(
         Kind::Up(button) => ("release", button_name(button), None),
         Kind::Drag(button) => ("drag", button_name(button), None),
         Kind::Moved => ("move", "none", None),
-        Kind::ScrollDown => ("wheel", "none", Some(-1)),
-        Kind::ScrollUp => ("wheel", "none", Some(1)),
+        Kind::ScrollDown => ("wheel", "none", Some(1)),
+        Kind::ScrollUp => ("wheel", "none", Some(-1)),
         Kind::ScrollLeft => ("wheel", "none", Some(0)),
         Kind::ScrollRight => ("wheel", "none", Some(0)),
     };
     TuiMouseWireEvent {
         kind: kind.to_owned(),
         button: button_name.to_owned(),
-        x: event.column.saturating_sub(origin_x).saturating_sub(1),
-        y: event.row.saturating_sub(origin_y).saturating_sub(1),
-        screen_x: event.column.saturating_sub(1),
-        screen_y: event.row.saturating_sub(1),
+        x: event.column.saturating_sub(origin_x),
+        y: event.row.saturating_sub(origin_y),
+        screen_x: event.column,
+        screen_y: event.row,
         width,
         height,
         shift: event
@@ -567,6 +624,7 @@ pub fn mouse_wire_event(
     }
 }
 
+#[cfg(test)]
 fn button_name(button: crossterm::event::MouseButton) -> &'static str {
     use crossterm::event::MouseButton as Button;
     match button {
@@ -800,17 +858,17 @@ mod tests {
         let wire = mouse_wire_event(&event, (3, 2), (20, 5));
         assert_eq!(wire.kind, "wheel");
         assert_eq!(wire.button, "none");
-        assert_eq!(wire.x, 6);
-        assert_eq!(wire.y, 1);
-        assert_eq!(wire.screen_x, 9);
-        assert_eq!(wire.screen_y, 3);
+        assert_eq!(wire.x, 7);
+        assert_eq!(wire.y, 2);
+        assert_eq!(wire.screen_x, 10);
+        assert_eq!(wire.screen_y, 4);
         assert_eq!(wire.width, 20);
         assert_eq!(wire.height, 5);
-        assert_eq!(wire.wheel_delta, Some(1));
+        assert_eq!(wire.wheel_delta, Some(-1));
         assert!(wire.shift);
         let json = serde_json::to_string(&wire).unwrap();
-        assert!(json.contains("\"screenX\":9"));
-        assert!(json.contains("\"wheelDelta\":1"));
+        assert!(json.contains("\"screenX\":10"));
+        assert!(json.contains("\"wheelDelta\":-1"));
         let press = mouse_wire_event(
             &MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -823,7 +881,7 @@ mod tests {
         );
         assert_eq!(press.kind, "press");
         assert_eq!(press.button, "left");
-        assert_eq!(press.x, 0);
-        assert_eq!(press.y, 0);
+        assert_eq!(press.x, 1);
+        assert_eq!(press.y, 1);
     }
 }

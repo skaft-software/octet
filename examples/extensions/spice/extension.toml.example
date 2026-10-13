@@ -1,0 +1,18 @@
+# Local source template: replace the absolute script path before using.
+name = "spice"
+version = "0.1.0"
+api_version = "0.4"
+description = "Real ngspice RC transient with native resources and immutable bulk"
+
+[entrypoint]
+command = "python3"
+args = ["/absolute/path/to/octet/examples/extensions/spice/extension.py"]
+
+[capabilities]
+# Private scratch and host transfer files can be outside the workspace.
+filesystem = "unrestricted"
+process = true
+network = false
+
+[contributes]
+tools = ["spice_open", "spice_instantiate", "spice_transient", "spice_measure"]

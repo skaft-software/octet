@@ -65,6 +65,7 @@ fn once_finished(
         response_id: None,
         responses_output: None,
         deferred: None,
+        inference: None,
         diagnostics: Vec::new(),
     }))
 }
@@ -193,6 +194,9 @@ async fn successful_same_poll_cancellation_and_failed_settlement_never_erase_exp
                 assert!(matches!(result, Err(AgentError::Session(_))), "{result:?}");
                 assert!(agent.session.usage_records().is_empty());
                 assert_eq!(agent.session.usage_uncertainty_records().len(), 1);
+                // A failed settlement retains unknown usage, never a planning
+                // estimate mislabeled as the auxiliary request's upper bound.
+                assert!(agent.session.usage_uncertainty_exposure().is_none());
                 agent.set_max_session_cost_microdollars(Some(u64::MAX));
                 assert!(matches!(
                     agent.ensure_request_cost_capacity(&model, 1, 1),
@@ -271,6 +275,12 @@ async fn native_compact_success_handoff_keeps_guard_until_accounting_is_durable(
                 qualified: false,
                 enabled: true,
                 hard_budget: false,
+                exposure: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                token_limit: None,
+                cost_limit: None,
+                retention: CacheRetention::Short,
                 abort: &abort,
                 events: &events,
                 operation: crate::events::ProviderOperation::NativeCompaction,
@@ -328,11 +338,16 @@ async fn native_compact_success_handoff_keeps_guard_until_accounting_is_durable(
 }
 
 #[tokio::test]
-async fn omitted_output_caps_refuse_every_hard_ceiling_consumer_before_dispatch() {
-    for codex in [false, true] {
+async fn missing_input_or_output_bounds_refuse_every_hard_ceiling_consumer_before_dispatch() {
+    // All cases require zero sends. Share one recorder rather than invoking
+    // Wiremock's synchronous Drop verifier repeatedly within one Tokio poll
+    // (its async lock can exhaust the cooperative budget and deadlock Drop).
+    let server = wiremock::MockServer::start().await;
+    for route in ["omitted_output", "codex", "missing_input"] {
+        let codex = route == "codex";
+        let missing_output = route != "missing_input";
         for token_ceiling in [false, true] {
             for operation in ["main", "local", "branch", "gate", "prospective"] {
-                let server = wiremock::MockServer::start().await;
                 let (mut agent, transport, _directory) = fixture(None);
                 agent
                     .client
@@ -348,7 +363,7 @@ async fn omitted_output_caps_refuse_every_hard_ceiling_consumer_before_dispatch(
                     Arc::make_mut(&mut agent.model.endpoint)
                         .runtime
                         .responses_profile = ResponsesRuntimeProfile::Codex;
-                } else {
+                } else if missing_output {
                     spec.preset.supports_max_output_tokens = Some(false);
                 }
                 agent.inherit_max_output_tokens(128);
@@ -358,36 +373,46 @@ async fn omitted_output_caps_refuse_every_hard_ceiling_consumer_before_dispatch(
                     agent.set_max_session_cost_microdollars(Some(2048));
                 }
                 let model = agent.model.clone();
-                let result = match operation {
-                    "main" => agent.complete("small request").await.map(|_| ()),
-                    "local" => agent
-                        .summarize_with_retry(
-                            &model,
-                            "summary",
-                            Vec::new(),
-                            128,
-                            CancellationToken::default(),
-                            std::mem::drop,
-                        )
-                        .await
-                        .map(|_| ()),
-                    "branch" => agent
-                        .summarize_branch_with_retry(
-                            &crate::compaction::prepare_branch_handoff(
+                let result = tokio::time::timeout(Duration::from_secs(3), async {
+                    match operation {
+                        "main" => agent.complete("small request").await.map(|_| ()),
+                        "local" => agent
+                            .summarize_with_retry(
+                                &model,
+                                "summary",
                                 Vec::new(),
-                                &Default::default(),
-                            ),
-                            CancellationToken::default(),
-                            std::mem::drop,
-                        )
-                        .await
-                        .map(|_| ()),
-                    "gate" => gate(&mut agent, &AbortFlag::default()).await.map(|_| ()),
-                    _ => agent.ensure_request_cost_capacity(&model, 1, 128),
-                };
+                                128,
+                                CancellationToken::default(),
+                                std::mem::drop,
+                            )
+                            .await
+                            .map(|_| ()),
+                        "branch" => agent
+                            .summarize_branch_with_retry(
+                                &crate::compaction::prepare_branch_handoff(
+                                    Vec::new(),
+                                    &Default::default(),
+                                ),
+                                CancellationToken::default(),
+                                std::mem::drop,
+                            )
+                            .await
+                            .map(|_| ()),
+                        "gate" => gate(&mut agent, &AbortFlag::default()).await.map(|_| ()),
+                        _ => agent.ensure_request_cost_capacity(&model, 1, 128),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("admission did not settle: {operation}/{route}/{token_ceiling}")
+                });
                 assert!(
-                    matches!(result, Err(AgentError::OutputLimitUnavailable)),
-                    "{operation}/{codex}/{token_ceiling}: {result:?}"
+                    if missing_output {
+                        matches!(result, Err(AgentError::OutputLimitUnavailable))
+                    } else {
+                        matches!(result, Err(AgentError::InputLimitUnavailable))
+                    },
+                    "{operation}/{route}/{token_ceiling}: {result:?}"
                 );
                 assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
                 assert!(
@@ -399,10 +424,11 @@ async fn omitted_output_caps_refuse_every_hard_ceiling_consumer_before_dispatch(
             }
         }
     }
+    tokio::task::yield_now().await;
 }
 
 #[tokio::test]
-async fn capped_main_and_gate_reservations_match_the_actual_wire_fields() {
+async fn output_capped_uncapped_main_and_gate_match_wire_but_finite_input_budget_is_unsupported() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
@@ -436,9 +462,13 @@ async fn capped_main_and_gate_reservations_match_the_actual_wire_fields() {
         .max_output_tokens = 4096;
     agent.inherit_max_output_tokens(128);
     agent.set_completion_policy(CompletionPolicy::TerminalGate);
+    assert_eq!(agent.complete("small request").await.unwrap().text, "R");
     agent.set_max_session_tokens(Some(2048));
     agent.set_max_session_cost_microdollars(Some(2048));
-    assert_eq!(agent.complete("small request").await.unwrap().text, "R");
+    assert!(matches!(
+        agent.complete("finite ceiling").await,
+        Err(AgentError::InputLimitUnavailable)
+    ));
     let requests = server.received_requests().await.unwrap();
     let main: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     let gate: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();

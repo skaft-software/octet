@@ -159,6 +159,10 @@ fn resolution_error(error: anyhow::Error) -> AuthError {
 
 #[async_trait::async_trait]
 impl CredentialResolver for CodexResolver {
+    fn is_oauth(&self) -> Option<bool> {
+        Some(true)
+    }
+
     async fn resolve(&self) -> Result<ResolvedCredential, AuthError> {
         // AuthError deliberately drops details (they may contain credentials);
         // the actionable "run `octet --login codex`" guidance is surfaced at
@@ -197,6 +201,15 @@ mod tests {
             })
             .unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn oauth_metadata_does_not_read_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex.json");
+        let resolver = CodexResolver::new(CredentialStore::new(path.clone()));
+        assert_eq!(resolver.is_oauth(), Some(true));
+        assert!(!path.exists());
     }
 
     #[tokio::test]

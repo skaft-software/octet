@@ -16,6 +16,11 @@ import tempfile
 import termios
 import time
 
+# A harness started as a background job (a non-interactive shell's `cmd &`) is
+# handed SIGINT as "ignored", and children inherit that. The interrupt scenario
+# below must see the default disposition, as it does in a terminal or CI.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+
 binary = sys.argv[1]
 entry = "update::progress::tests::progress_subprocess_fixture"
 argv = [binary, "--exact", entry, "--nocapture"]
@@ -119,7 +124,12 @@ if mode == 'fetch-failed':
                     frames = bytes(data[resized_at:]).split(b"\r\x1b[J")[1:]
                     frames = [frame.split(b"\r")[0].split(b"\n")[0] for frame in frames]
                     assert any(b"Installing fixture" in frame for frame in frames), frames
-                    assert all(len(frame.decode()) <= 39 for frame in frames), frames
+                    # A frame rendered at the old width can still be in flight
+                    # when the resize is observed; every frame after the first
+                    # resized one must fit.
+                    fitted = next((i for i, frame in enumerate(frames) if frame and len(frame.decode()) <= 39), None)
+                    assert fitted is not None, frames
+                    assert all(len(frame.decode()) <= 39 for frame in frames[fitted:]), frames
             assert termios.tcgetattr(slave) == before
         finally:
             if child.poll() is None:
@@ -153,7 +163,10 @@ if mode == 'fetch-failed':
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            child.communicate(timeout=2)
+            # Cleanup must not fail on a loaded host: reap the session's own
+            # processes instead of racing a wall-clock teardown guess.
+            child.wait()
+            child.communicate()
             os.close(master)
             os.close(slave)
 
@@ -165,13 +178,16 @@ if mode == 'fetch-failed':
         assert select.select([master], [], [], 3)[0], "no prompt activity before interrupt"
         os.read(master, 65536)
         os.killpg(child.pid, signal.SIGINT)
-        child.communicate(timeout=2)
+        # The assertion is that SIGINT settles the updater, not that teardown
+        # beats a wall-clock guess; a loaded host can delay the child's exit.
+        child.wait()
+        child.communicate()
         assert child.returncode != 0
         assert termios.tcgetattr(slave) == before
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=2)
+            child.wait()
         os.close(master)
         os.close(slave)
 

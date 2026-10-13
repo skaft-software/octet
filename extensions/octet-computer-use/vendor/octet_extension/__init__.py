@@ -1,5 +1,13 @@
 """Public exports for the octet Python extension SDK."""
 
+from .cache_warming import (
+    CacheWarmingAction,
+    CacheWarmingDecision,
+    CacheWarmingDecisionHandler,
+    CacheWarmingDecisionPayload,
+    CacheWarmingDecisionResult,
+    cache_warming_decision,
+)
 from .extension import (
     API_V02_FEATURES,
     LIFECYCLE_METHODS,
@@ -35,6 +43,24 @@ from .event_bus import (
     TopicRegistry,
     TopicSpec,
 )
+from .diagnostics import (
+    ArtifactSource,
+    BlobSource,
+    Diagnostic,
+    DiagnosticAttachment,
+    DiagnosticEdit,
+    DiagnosticFix,
+    DiagnosticLocation,
+    DiagnosticRelated,
+    DiagnosticSpan,
+    WorkspaceSource,
+    diagnostic_summary,
+    validate_diagnostics,
+    with_diagnostics,
+)
+from .bulk import BlobDigest, BlobRef, Bulk
+from .resources import Resource
+from .typed import TypedResult
 from .protocol import (
     DEFAULT_API_VERSION,
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -46,6 +72,12 @@ from .protocol import (
 
 __all__ = [
     "API_V02_FEATURES",
+    "CacheWarmingAction",
+    "CacheWarmingDecision",
+    "CacheWarmingDecisionHandler",
+    "CacheWarmingDecisionPayload",
+    "CacheWarmingDecisionResult",
+    "cache_warming_decision",
     "BusEnvelope",
     "BusError",
     "BusLimits",
@@ -82,4 +114,22 @@ __all__ = [
     "provider_retry_delay",
     "text_content",
     "tool_result",
+    "BlobDigest",
+    "BlobRef",
+    "Bulk",
+    "Resource",
+    "TypedResult",
+    "ArtifactSource",
+    "BlobSource",
+    "Diagnostic",
+    "DiagnosticAttachment",
+    "DiagnosticEdit",
+    "DiagnosticFix",
+    "DiagnosticLocation",
+    "DiagnosticRelated",
+    "DiagnosticSpan",
+    "WorkspaceSource",
+    "diagnostic_summary",
+    "validate_diagnostics",
+    "with_diagnostics",
 ]

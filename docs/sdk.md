@@ -13,6 +13,25 @@ application embedding interface. It reports extension discovery diagnostics but
 never starts executable extensions. For extension authoring, see
 the [extension guide](extensions.md).
 
+## Cache warming
+
+Rust hosts select `Agent::set_cache_warming_mode(mode)?` (`streaming` by default)
+and, for idle mode, poll `Agent::drive_cache_warming()` while awaiting input.
+The future is cancellation-safe: scheduler/in-flight state lives in the Agent,
+not the temporary waiting future. Prioritize input and shutdown and treat
+maintenance transport failure as best-effort. `cache_warming_status()` exposes
+state, stop reason and next economic decision. `CacheWarmed { usage, cost,
+extension_override }` is session accounting, not generated output or an
+assistant-turn event.
+
+The native host reads user-level `cache_warming` and `show_cache_miss_notices`
+plus `OCTET_CACHE_WARMING`, not workspace config or session metadata. Protocol 1
+adds no request-side authority field. In idle mode it retains the latest settled
+app until a new run/EOF/shutdown and cancels it before opening another session
+writer. Refreshes after `final_result` update durable accounting and optional
+stderr notices, never reopen that request's event sequence. See
+[eligibility, billing and qualification limits](cache-warming.md).
+
 ## Handshake
 
 The example uses the **0.8.0** SDK version. Validate the version reported by
@@ -293,10 +312,13 @@ Streaming events include:
 
 - `model_delta`, `output_media`;
 - opt-in `provider_lifecycle` readiness telemetry;
+- `provider_inference` frozen client/server measurements (unreleased);
 - `provider_retry`, `provider_waiting_for_network`, `provider_operation_retry`,
   `provider_usage_uncertain`, `candidate_rejected`;
 - `tool_start`, `tool_policy`, `tool_progress`, `tool_finish`;
 - `model_step` usage/cost accounting;
+- `cache_warmed` auxiliary `usage`, exact integer `cost` and
+  `extension_override` (never an assistant step or generated text);
 - `steering_delivered`, `follow_up_delivered`;
 - `compaction_start`, `compaction_finish`;
 - `extension_notification`.
@@ -317,6 +339,18 @@ all host hooks and reservation commit gates finish.
 `provider_lifecycle.data` has `state` `queued`/`loading`/`ready` and nullable
 bounded `detail`. It emits only for explicitly opted-in configured endpoints,
 and is advisory telemetry, not model output or durable content.
+
+`provider_inference.data.metrics` carries independent `client`, `server` and
+`server_unavailable` observations. Offsets/durations are integer nanoseconds;
+client scopes distinguish request, steering successor, deferred submit and poll.
+The nullable server pair retains native source/unit provenance. The separately
+optional `decode_estimate` is a robust client-stream fit with visible-token basis,
+window, sample count and dispersion; `decode_unavailable` explains insufficient
+evidence. Missing native timing remains unavailable, never filled by an estimate. This additive event
+changes neither protocol `1`, assistant messages nor durable usage authority.
+CLI JSON/RPC uses `{"type":"provider_inference","metrics":{...}}` outside
+message updates. See [inference measurements](inference-metrics.md) for exact
+sources, boundaries, fields and qualification limits.
 
 `provider_retry.data` carries `attempt`, `max_attempts`, `delay_ms`, and sanitized
 `error`. Discard all provisional output/media from the failed attempt, including

@@ -10,16 +10,20 @@
 use super::*;
 use serde_json::json;
 
+#[path = "autocomplete_fallback_tests.rs"]
+mod autocomplete_fallback;
+
 const PROBE_EXTENSION: &str = "ui-probe";
 
 /// Records every UI surface the host delivers and answers one autocomplete
 /// query. It never initiates host work on its own.
 const UI_TRANSPORT_PROBE: &str = r#"import json
+import os
 import sys
 
 mode = sys.argv[1]
 state = {"editor": None, "resize": None, "ack": None, "complete": None,
-         "leases": 0, "responses": {}}
+         "leases": 0, "responses": {}, "pid": os.getpid(), "completions": []}
 
 
 def send(value):
@@ -31,15 +35,19 @@ for line in sys.stdin:
     method = request.get("method")
     if method == "initialize":
         features = ["request_cancellation", "content_parts"]
-        if mode == "ui":
+        if mode in ('ui', 'empty', 'edit'):
             features += ["editor_handoff", "terminal_input", "autocomplete"]
+        if mode == 'edit':
+            assert 'autocomplete_edit_v1' in request['params']['protocol']['optional_features']
+            features += ['autocomplete_edit_v1']
+        api = '0.4' if mode == 'edit' else '0.2'
         send({"jsonrpc": "2.0", "id": request["id"], "result": {
-            "api_version": "0.2",
+            "api_version": api,
             "tools": [{"name": "probe", "description": "UI transport probe",
                         "parameters": {"type": "object"}}],
-            "protocol": {"version": "0.2", "features": features,
+            "protocol": {"version": api, "features": features,
                           "limits": {"max_concurrent_requests": 1}}}})
-        if mode == "ui":
+        if mode in ('ui', 'empty', 'edit'):
             send({"jsonrpc": "2.0", "id": "register-1",
                   "method": "ui/autocomplete/register", "params": {"revision": 1}})
     elif method == "ui/editor-state":
@@ -48,9 +56,17 @@ for line in sys.stdin:
         state["resize"] = request["params"]
     elif method == "ui/autocomplete/complete":
         state["complete"] = request["params"]
-        send({"jsonrpc": "2.0", "id": request["id"], "result": {
-            "prefix": "fi",
-            "items": [{"value": "file.rs", "label": "file.rs", "description": "source"}]}})
+        state["completions"].append(request)
+        if mode == 'edit':
+            params = request['params']
+            prefix = params['text'].encode('utf-8')[:params['cursor']].decode('utf-8')
+            value = '文\n\t\r/"' if prefix.startswith('\n') else '文/"'
+            result = {'prefix': prefix, 'items': [{'value': value, 'label': 'directory',
+                'replace_after_bytes': 1, 'cursor_offset_bytes': len(value.encode('utf-8')) - 1}]}
+        else:
+            result = {"prefix": "" if mode == 'empty' else "fi",
+                "items": [] if mode == 'empty' else [{"value": "file.rs", "label": "file.rs", "description": "source"}]}
+        send({"jsonrpc": "2.0", "id": request["id"], "result": result})
     elif method == "tool/call":
         arguments = request["params"]["arguments"]
         if "operation" in arguments:
@@ -82,21 +98,27 @@ struct ProbeState {
     _root: tempfile::TempDir,
     extensions: ExecutableExtensions,
     process: ExtensionProcess,
+    // Reload reserves its replacement catalog through a weak host registration.
+    _host: ExtensionHost,
 }
 
 async fn start_probe(mode: &str) -> ProbeState {
+    start_named_probe(mode, PROBE_EXTENSION).await
+}
+
+async fn start_named_probe(mode: &str, name: &str) -> ProbeState {
     let root = tempfile::tempdir().unwrap();
     let extension_root = root.path().join("extensions");
-    let directory = extension_root.join(PROBE_EXTENSION);
+    let directory = extension_root.join(name);
     std::fs::create_dir_all(&directory).unwrap();
     let script = directory.join("probe.py");
     std::fs::write(&script, UI_TRANSPORT_PROBE).unwrap();
     std::fs::write(
         directory.join(EXTENSION_MANIFEST_FILENAME),
         format!(
-            r#"name = "{PROBE_EXTENSION}"
+            r#"name = "{name}"
 version = "0.1.0"
-api_version = "0.2"
+api_version = "{api}"
 [entrypoint]
 command = "python3"
 args = [{script}, {mode}]
@@ -104,12 +126,12 @@ args = [{script}, {mode}]
 tools = ["probe"]
 "#,
             script = serde_json::to_string(&script).unwrap(),
+            api = if mode == "edit" { "0.4" } else { "0.2" },
             mode = serde_json::to_string(mode).unwrap(),
         ),
     )
     .unwrap();
-    let mut config =
-        super::tests::executable_extension_config(root.path(), &extension_root, PROBE_EXTENSION);
+    let mut config = super::tests::executable_extension_config(root.path(), &extension_root, name);
     config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     config.sandbox.allow_process = true;
     config.sandbox.allow_shell = true;
@@ -145,6 +167,7 @@ tools = ["probe"]
         _root: root,
         extensions,
         process,
+        _host: host,
     }
 }
 

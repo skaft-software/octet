@@ -1,13 +1,12 @@
 use std::sync::Arc;
 use url::Url;
 
+use crate::test_fixtures::{base_request, reasoning_capability, token_budget_capability};
 use crate::{
-    AssistantMessage, AssistantPart, Auth, Capabilities, CompatibilityMode::Lossy,
-    CompatibilityMode::Strict, Endpoint, EndpointId, ImageMedia, ImageSource, Media, Message,
-    Modality, ModalitySet, Model, ModelId, ModelLimits, ModelSpec, OutputFormat, OutputModalities,
-    Protocol, ReasoningCapability, ReasoningConfig, ReasoningControl, ReasoningEffortBudgets,
-    ReasoningPart, ReasoningState, ReasoningStateKind, Request, ToolCall, ToolCallId, ToolChoice,
-    ToolResult, ToolResultPart, UserMessage, UserPart,
+    AssistantMessage, AssistantPart, Auth, Capabilities, CompatibilityMode::Lossy, Endpoint,
+    EndpointId, ImageMedia, ImageSource, Media, Message, Modality, ModalitySet, Model, ModelId,
+    ModelLimits, ModelSpec, Protocol, ReasoningPart, ReasoningState, ReasoningStateKind, Request,
+    ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
 };
 
 fn make_model(
@@ -44,30 +43,12 @@ fn make_model(
             tools: true,
             parallel_tool_calls: true,
             reasoning: if reasoning {
-                Some(ReasoningCapability {
-                    options: None,
-                    control: if protocol == Protocol::AnthropicMessages {
-                        ReasoningControl::TokenBudget
-                    } else {
-                        ReasoningControl::Effort
-                    },
-                    exposes_text: true,
-                    preserves_state: true,
-                    effort_budgets: if protocol == Protocol::AnthropicMessages {
-                        Some(ReasoningEffortBudgets {
-                            minimal: 1024,
-                            low: 2048,
-                            medium: 4096,
-                            high: 8192,
-                            xhigh: 16384,
-                            max: 32768,
-                        })
-                    } else {
-                        None
-                    },
-                    openai_chat_mode: crate::OpenAiChatReasoningMode::Standard,
-                    min_effort: crate::types::ReasoningEffort::Minimal,
-                    max_effort: crate::types::ReasoningEffort::High,
+                // Anthropic's route selects reasoning by token budget; every
+                // other protocol under test selects it by portable effort.
+                Some(if protocol == Protocol::AnthropicMessages {
+                    token_budget_capability()
+                } else {
+                    reasoning_capability()
                 })
             } else {
                 None
@@ -146,19 +127,7 @@ fn test_cross_protocol_canonical_immutability() {
                 content: vec![UserPart::ToolResult(tool_result)],
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     // Serialize to Chat Completions
@@ -175,7 +144,6 @@ fn test_cross_protocol_anthropic_message_merging() {
     let model = make_model(Protocol::AnthropicMessages, true, false, false, false);
 
     let req = Request {
-        system: None,
         messages: vec![
             Message::User(UserMessage {
                 content: vec![UserPart::Text("First user message".to_string())],
@@ -186,19 +154,7 @@ fn test_cross_protocol_anthropic_message_merging() {
                 )],
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     let parts = crate::protocol::anthropic::build_request(&model, &req).unwrap();
@@ -219,7 +175,6 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
     ] {
         let model = make_model(protocol, false, false, false, false);
         let req = Request {
-            system: None,
             messages: vec![
                 Message::Assistant(AssistantMessage {
                     content: vec![AssistantPart::ToolCall(ToolCall {
@@ -238,19 +193,8 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
                     protocol,
                 }),
             ],
-            tools: vec![],
-            tool_choice: ToolChoice::Auto,
-            max_output_tokens: None,
-            temperature: None,
-            stop: vec![],
-            reasoning: ReasoningConfig::Off,
-            reasoning_mode: crate::types::ReasoningMode::Standard,
-            responses: None,
-            output_format: OutputFormat::Text,
-            output_modalities: OutputModalities::Text,
             compatibility: Lossy,
-            cache_retention: crate::types::CacheRetention::Short,
-            session_id: None,
+            ..base_request()
         };
         let body: serde_json::Value = match protocol {
             Protocol::OpenAiResponses => serde_json::from_slice(
@@ -319,7 +263,6 @@ fn test_cross_protocol_reasoning_state_rejection() {
     };
 
     let req = Request {
-        system: None,
         messages: vec![
             Message::User(UserMessage {
                 content: vec![UserPart::Text("Hello".to_string())],
@@ -336,19 +279,7 @@ fn test_cross_protocol_reasoning_state_rejection() {
                 protocol: Protocol::AnthropicMessages,
             }),
         ],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     // In Strict mode, it should be rejected
@@ -406,23 +337,11 @@ fn constrained_sampling_wire_shape_across_codecs() {
     };
 
     let req_for = || Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".to_string())],
         })],
         tools: vec![strict_tool("strict_tool"), grammar_tool.clone()],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
 
     // Chat Completions: this fixture opts into strict tools; an unknown
@@ -565,23 +484,11 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         }),
     };
     let request = |tools: Vec<ToolDef>| Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("go".to_owned())],
         })],
         tools,
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
-        reasoning: ReasoningConfig::Off,
-        reasoning_mode: crate::types::ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
-        output_modalities: OutputModalities::Text,
-        compatibility: Strict,
-        cache_retention: crate::types::CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     };
     let body = |protocol: Protocol, tools: Vec<ToolDef>, tune: fn(&mut Model)| {
         let mut model = make_model(protocol, false, false, false, false);

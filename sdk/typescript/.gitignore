@@ -1,0 +1,3 @@
+# Local qualification artifacts; integration copies them to the run archive.
+run/
+handoffs/

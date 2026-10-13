@@ -14,11 +14,14 @@ use super::{collapsed_reasoning_lines, transcript_transition_rows, TranscriptBlo
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SurfacePlan<'a> {
     pub(super) kind: &'static str,
+    pub(super) content_role: &'static str,
     pub(super) chrome: ThemeSurfaceChrome,
     pub(super) heading: ThemeSurfaceHeading,
     pub(super) label: Option<&'a str>,
     pub(super) user_model_lab: Option<ModelLab>,
     pub(super) padding: u16,
+    /// Host-owned event breathing rows, not painted surface cushions.
+    pub(super) event_spacing: bool,
     pub(super) frame_left: u16,
     pub(super) frame_width: u16,
     /// Columns a borderless filled surface paints to the left of its frame and
@@ -109,7 +112,50 @@ pub(super) fn surface_roles(kind: &str) -> (&'static str, &'static str, &'static
     }
 }
 
-fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme) -> u16 {
+fn natural_surface_width(
+    block: &TranscriptBlock,
+    theme: &OctetTheme,
+    preferred_width: u16,
+    expanded_reasoning: bool,
+) -> u16 {
+    // A live Markdown surface needs a stable usable width: an empty status/copy
+    // projection must not lock subsequent prose into the 12-cell minimum. At
+    // completion, measure the actual rich rows (including numbered-list and
+    // code/table chrome), rather than the deliberately decoration-free copy.
+    let markdown = match block {
+        TranscriptBlock::Assistant(assistant) => Some((assistant, theme.rich_renderer())),
+        TranscriptBlock::Reasoning(reasoning)
+            if reasoning.reasoning_expanded || expanded_reasoning =>
+        {
+            Some((reasoning, theme.reasoning_renderer()))
+        }
+        _ => None,
+    };
+    if let Some((markdown, renderer)) = markdown {
+        if !markdown.finished || super::tool_render::looks_like_diff(&markdown.text) {
+            return preferred_width;
+        }
+        return u16::try_from(
+            renderer
+                .render(markdown.markdown.committed(), preferred_width)
+                .lines
+                .iter()
+                .map(|line| visible_width(line.plain.trim_end()))
+                .max()
+                .unwrap_or(1),
+        )
+        .unwrap_or(u16::MAX);
+    }
+    if let TranscriptBlock::Outcome(outcome) = block {
+        return u16::try_from(
+            super::outcome_render::render_outcome(outcome, theme, preferred_width, false)
+                .iter()
+                .map(|line| visible_width(line))
+                .max()
+                .unwrap_or(1),
+        )
+        .unwrap_or(u16::MAX);
+    }
     let copy = match block {
         TranscriptBlock::Reasoning(reasoning) if !reasoning.reasoning_expanded => {
             collapsed_reasoning_lines(theme, reasoning).join("\n")
@@ -136,11 +182,61 @@ fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme) -> u16 {
     u16::try_from(natural.saturating_add(inner_prefix)).unwrap_or(u16::MAX)
 }
 
+/// The host owns spacing for transient activity and settled event lines. Surface
+/// padding and density continue to govern ordinary prose, media and tools.
+fn has_event_spacing(block: &TranscriptBlock, expanded_reasoning: bool) -> bool {
+    match block {
+        TranscriptBlock::Reasoning(reasoning) => {
+            !reasoning.finished
+                && !reasoning.reasoning_expanded
+                && (!expanded_reasoning
+                    || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+        }
+        TranscriptBlock::Outcome(_)
+        | TranscriptBlock::Notice(_)
+        | TranscriptBlock::NoticeStatus {
+            tone: super::NoticeTone::Success | super::NoticeTone::Error,
+            ..
+        }
+        | TranscriptBlock::UpdateAvailable(_) => true,
+        _ => false,
+    }
+}
+
+fn whitespace_cushion(chrome: ThemeSurfaceChrome, theme: &OctetTheme) -> bool {
+    matches!(chrome, ThemeSurfaceChrome::Plain | ThemeSurfaceChrome::Band)
+        || (chrome == ThemeSurfaceChrome::Rail && theme.glyph("rail").trim().is_empty())
+}
+
+/// The stored model colour that washes a prompt's cell. Planning and painting
+/// read the same value, so a probe of a cushion row matches what is rendered.
+pub(super) fn block_prompt_color<'b>(
+    block: &'b TranscriptBlock,
+    theme: &OctetTheme,
+) -> Option<&'b str> {
+    match block {
+        TranscriptBlock::User { prompt_color, .. } => prompt_color
+            .as_deref()
+            .filter(|_| theme.uses_model_lab_color()),
+        _ => None,
+    }
+}
+
 pub(super) fn compile_surface_plan<'a>(
     previous: Option<&TranscriptBlock>,
     block: &TranscriptBlock,
     theme: &'a OctetTheme,
     outer_width: u16,
+) -> SurfacePlan<'a> {
+    compile_surface_plan_for_render(previous, block, theme, outer_width, false)
+}
+
+pub(super) fn compile_surface_plan_for_render<'a>(
+    previous: Option<&TranscriptBlock>,
+    block: &TranscriptBlock,
+    theme: &'a OctetTheme,
+    outer_width: u16,
+    expanded_reasoning: bool,
 ) -> SurfacePlan<'a> {
     let layout = theme.layout_for_width(outer_width);
     let presentation = PresentationLayout::new(theme, outer_width);
@@ -166,9 +262,16 @@ pub(super) fn compile_surface_plan<'a>(
         && theme
             .resolve::<bool>("quiet_tool_summaries")
             .unwrap_or(false);
-    let needs_marker_gutter = uses_event_marker_gutter(block)
-        || (full_width_user && !still_user_band)
-        || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail);
+    let needs_marker_gutter = if theme.is_pi_theme() {
+        // The loader alone owns a two-cell spinner/label grid. Cards and prose
+        // use Pi's one-cell padding, without Octet's event-marker gutter.
+        matches!(block, TranscriptBlock::Reasoning(reasoning)
+            if !reasoning.finished && !reasoning.reasoning_expanded && !expanded_reasoning)
+    } else {
+        uses_event_marker_gutter(block)
+            || (full_width_user && !still_user_band)
+            || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail)
+    };
     let marker_gutter_width = theme
         .resolve::<u16>("event_marker_gutter")
         .unwrap_or(PRIMARY_TEXT_GUTTER)
@@ -236,7 +339,13 @@ pub(super) fn compile_surface_plan<'a>(
     let frame_width = match resolved.width {
         ThemeSurfaceWidth::Full => frame_limit,
         ThemeSurfaceWidth::Content => {
-            let requested = natural_surface_width(block, theme).saturating_add(overhead);
+            let requested = natural_surface_width(
+                block,
+                theme,
+                frame_limit.saturating_sub(overhead).max(1),
+                expanded_reasoning,
+            )
+            .saturating_add(overhead);
             requested.max(frame_limit.min(12)).min(frame_limit)
         }
     };
@@ -285,29 +394,7 @@ pub(super) fn compile_surface_plan<'a>(
             || ((chrome == ThemeSurfaceChrome::Band || chrome == ThemeSurfaceChrome::Rail)
                 && padding > 0),
     );
-    let leading_rows = usize::from(has_heading_row) + vertical_padding_rows;
-    let trailing_rows = usize::from(has_bottom_row) + vertical_padding_rows;
-    let still = theme
-        .resolve::<bool>("quiet_tool_summaries")
-        .unwrap_or(false);
-    let compact_activity = |block: &TranscriptBlock| {
-        still
-            && matches!(
-                block,
-                TranscriptBlock::Tool(_)
-                    | TranscriptBlock::NoticeStatus {
-                        tone: super::NoticeTone::ToolActive
-                            | super::NoticeTone::ToolSuccess
-                            | super::NoticeTone::ToolError,
-                        ..
-                    }
-            )
-    };
-    let transition_rows = if compact_activity(block) && previous.is_some_and(compact_activity) {
-        0
-    } else {
-        transcript_transition_rows(previous, layout.density)
-    };
+    let event_spacing = has_event_spacing(block, expanded_reasoning);
     // A theme that caps the reading column would otherwise paint its band/rail
     // fills inside that column only, leaving terminal-coloured bars beside
     // them on a wide screen. Borderless filled chrome extends its fill to the
@@ -328,8 +415,24 @@ pub(super) fn compile_surface_plan<'a>(
     } else {
         (0, 0)
     };
-    SurfacePlan {
+    let content_role = if theme.is_pi_theme() {
+        match block {
+            TranscriptBlock::Tool(panel) if !panel.finished => "extension.pi.toolPendingBg",
+            TranscriptBlock::Tool(panel) if panel.is_error => "extension.pi.toolErrorBg",
+            TranscriptBlock::Tool(_) => "extension.pi.toolSuccessBg",
+            TranscriptBlock::Shell(shell) if shell.running => "extension.pi.toolPendingBg",
+            TranscriptBlock::Shell(shell) if shell.exit_code != 0 => "extension.pi.toolErrorBg",
+            TranscriptBlock::Shell(_) => "extension.pi.toolSuccessBg",
+            _ => surface_roles(kind).0,
+        }
+    } else {
+        surface_roles(kind).0
+    };
+    // Row counts are decided below, once the neighbouring seams are known; the
+    // draft only needs what the painter reads to answer "is my cushion filled?".
+    let mut surface = SurfacePlan {
         kind,
+        content_role,
         chrome,
         heading,
         label: resolved.label,
@@ -338,19 +441,139 @@ pub(super) fn compile_surface_plan<'a>(
             _ => None,
         },
         padding,
+        event_spacing,
         frame_left,
         frame_width,
         bleed_left,
         bleed_right,
         geometry: SurfaceGeometry {
-            transition_rows,
-            leading_rows,
-            trailing_rows,
+            transition_rows: 0,
+            leading_rows: 0,
+            trailing_rows: 0,
             content_left,
             content_width,
         },
-    }
+    };
+    // A filled cushion row is part of the surface (the card's own top and
+    // bottom edge), never spacing, so it must not merge with a neighbour's
+    // host-owned blank row.
+    let own_cushion_painted = super::surface_frame::cushion_row_is_painted(
+        &surface,
+        theme,
+        block_prompt_color(block, theme),
+    );
+    // Only decorative whitespace participates in seam collapse. A border/rail
+    // glyph or a media reservation is content, never a blank spacing row.
+    let previous_blank = previous.map_or(0, |previous| {
+        let plan =
+            compile_surface_plan_for_render(None, previous, theme, outer_width, expanded_reasoning);
+        if matches!(previous, TranscriptBlock::Reasoning(reasoning)
+            if !reasoning.reasoning_expanded && !expanded_reasoning
+                && super::reasoning_render::collapsed_reasoning_lines_sized(
+                    theme, reasoning, 0, 0, plan.geometry.content_width,
+                ).is_empty())
+            || plan.chrome == ThemeSurfaceChrome::Card
+        {
+            0
+        } else if plan.event_spacing {
+            if let TranscriptBlock::Reasoning(reasoning) = previous {
+                let rows = super::reasoning_render::collapsed_reasoning_lines_sized(
+                    theme,
+                    reasoning,
+                    0,
+                    0,
+                    plan.geometry.content_width,
+                );
+                usize::from(
+                    !rows.is_empty()
+                        && (rows.len() < 2 || rows.last().is_some_and(String::is_empty)),
+                )
+            } else {
+                1
+            }
+        } else if let TranscriptBlock::NoticeStatus {
+            tone: super::NoticeTone::ToolActive,
+            reserved_rows,
+            ..
+        } = previous
+        {
+            if !expanded_reasoning && whitespace_cushion(plan.chrome, theme) {
+                plan.geometry.trailing_rows + reserved_rows
+            } else {
+                plan.geometry.trailing_rows
+            }
+        } else if whitespace_cushion(plan.chrome, theme)
+            && !super::surface_frame::cushion_row_is_painted(
+                &plan,
+                theme,
+                block_prompt_color(previous, theme),
+            )
+        {
+            plan.geometry.trailing_rows
+        } else {
+            0
+        }
+    });
+    let leading_padding = if event_spacing {
+        // A heading separates the surface seam from the event itself; leave the
+        // breathing row after it. Borderless seams combine by max, not addition.
+        usize::from(has_heading_row || previous_blank == 0)
+    } else if previous.is_some_and(|previous| has_event_spacing(previous, expanded_reasoning))
+        && previous_blank > 0
+        && !has_heading_row
+        && whitespace_cushion(chrome, theme)
+        && !own_cushion_painted
+    {
+        0
+    } else {
+        vertical_padding_rows
+    };
+    let trailing_padding = if event_spacing {
+        // Working's blank/detail promotion slot belongs to the status content;
+        // completion/notice lines own one host row on their trailing edge.
+        usize::from(!matches!(block, TranscriptBlock::Reasoning(_)))
+    } else {
+        vertical_padding_rows
+    };
+    let leading_rows = usize::from(has_heading_row) + leading_padding;
+    let trailing_rows = usize::from(has_bottom_row) + trailing_padding;
+    let still = theme
+        .resolve::<bool>("quiet_tool_summaries")
+        .unwrap_or(false);
+    let compact_activity = |block: &TranscriptBlock| {
+        still
+            && matches!(
+                block,
+                TranscriptBlock::Tool(_)
+                    | TranscriptBlock::NoticeStatus {
+                        tone: super::NoticeTone::ToolActive
+                            | super::NoticeTone::ToolSuccess
+                            | super::NoticeTone::ToolError,
+                        ..
+                    }
+            )
+    };
+    let transition_rows = if event_spacing
+        || (previous.is_some_and(|previous| has_event_spacing(previous, expanded_reasoning))
+            && previous_blank > 0)
+        || (compact_activity(block) && previous.is_some_and(compact_activity))
+    {
+        0
+    } else {
+        transcript_transition_rows(previous, layout.density)
+    };
+    surface.geometry = SurfaceGeometry {
+        transition_rows,
+        leading_rows,
+        trailing_rows,
+        content_left,
+        content_width,
+    };
+    surface
 }
+
+#[cfg(test)]
+mod event_contract_tests;
 
 #[cfg(test)]
 mod tests {

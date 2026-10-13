@@ -214,7 +214,7 @@ ATOMIC_WRITER_CLAIM_BLOCKED_REASON = (
 )
 WORKER_PANE_BLOCKED_REASON = (
     "the host has not confirmed that this worker is launchable with no live task; "
-    "refresh through an owner-bound /subagents command for current status. "
+    "refresh the owner-bound worker list for current status. "
     "Pane execution still requires atomic host writer claim/settlement"
 )
 PARENT_PANE_BLOCKED_REASON = (
@@ -233,7 +233,7 @@ LIVE_WORKER_BLOCKED_REASON = (
 DETACHED_WORKER_NOT_OPENED_REASON = (
     "still owned by this session but detached from any host run, so its live "
     "session is not addressable and no stale pane is opened for it. Reattach it "
-    "with /subagents wait or subagent_status, then re-run open-all; a reattached "
+    "with Wait for workers or subagent_status, then re-run open-all; a reattached "
     "worker is planned again."
 )
 PARKED_WORKER_NOT_OPENED_REASON = (
@@ -482,6 +482,10 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
     return subprocess.run(  # noqa: S603 - argv list, shell=False, bounded timeout
         list(argv),
         shell=False,
+        # Never inherit stdin: inside octet it is the extension's JSON-RPC
+        # pipe, and on Windows a child sharing that pipe can stall at startup
+        # while the protocol reader is blocked on it.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT_SECONDS,
@@ -735,7 +739,7 @@ def render_outcome(
     for notice in outcome.notices:
         lines.append(notice)
     lines.append(
-        "The read-only parent-controlled /subagents panel is unchanged. "
+        "The read-only parent-controlled worker list is unchanged. "
         "Product pane execution remains Partial: atomic host writer "
         "claim/settlement unavailable."
     )

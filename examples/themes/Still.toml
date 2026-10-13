@@ -14,8 +14,9 @@
 # - Syntax stays near-monochrome; signal colours (diff, error, success) are
 #   muted rather than neon.
 #
-# Tool wording/grouping is owned by octet's TUI, not theme files; this theme
-# only changes supported presentation tokens and layout.
+# Tool wording/grouping is owned by octet's TUI, not theme files: Still groups
+# exploration, edits, web searches/fetches, MCP, and computer-use into quiet rows.
+# Delegation keeps its existing subagent presentation; Ctrl+O reveals details.
 
 [metadata]
 name = "Still"

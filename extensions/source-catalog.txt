@@ -1,0 +1,12 @@
+# First-party extensions that stay in the source checkout and are not published
+# as release bundles. Keep one lowercase package ID per line; CI discovers their
+# suites from this catalog so a source-only extension is not silently untested.
+#
+# These extensions are not attached to a canonical release, are not installed by
+# `octet extension install`, and must not be added to release-catalog.txt without
+# packaging and provenance for their artifacts.
+#
+# octet-snap-compact needs a Rust toolchain at or above 1.96 to build its
+# renderer, above octet's 1.86 MSRV, so its suite skips on older toolchains
+# instead of failing.
+octet-snap-compact

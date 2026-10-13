@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
     DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 
@@ -29,10 +29,10 @@ pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result
     cwd.canonicalize()
 }
 
-/// Mouse ownership policy. `Auto`, `Terminal`, and `Off` preserve terminal
-/// selection and uncaptured wheel history. `App` explicitly captures mouse
-/// gestures for octet's semantic viewport; keyboard navigation can claim that
-/// viewport independently in every mode.
+/// Mouse ownership policy. `Auto` (the default), `Terminal`, and `Off` stay
+/// inline and preserve terminal selection and uncaptured wheel history. `App`
+/// opts into the bounded semantic viewport and captures mouse gestures for it;
+/// keyboard navigation can claim the viewport independently in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
     #[default]
@@ -53,10 +53,102 @@ impl MouseMode {
         }
     }
 
-    /// Whether octet captures mouse gestures. Semantic keyboard viewport
-    /// ownership is intentionally independent of this setting.
-    pub fn application_owned(self) -> bool {
-        matches!(self, Self::App)
+    /// Whether octet captures the mouse on the given terminal surface.
+    ///
+    /// `auto` follows the surface: the fullscreen (alternate-screen) default has
+    /// no terminal scrollback, so the wheel/trackpad must scroll the in-app
+    /// transcript; inline keeps reporting off so the terminal retains native
+    /// selection and scrollback. `app` always captures; `terminal` and `off`
+    /// never do.
+    pub fn captures_mouse_on(self, surface: TuiMode) -> bool {
+        match self {
+            Self::App => true,
+            Self::Auto => surface == TuiMode::Fullscreen,
+            Self::Terminal | Self::Off => false,
+        }
+    }
+}
+
+/// Interactive terminal surface preference. Fullscreen is the product default;
+/// explicit CLI selection takes precedence over the saved user preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TuiMode {
+    #[default]
+    Fullscreen,
+    Inline,
+}
+
+impl TuiMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fullscreen" => Ok(Self::Fullscreen),
+            "inline" => Ok(Self::Inline),
+            _ => anyhow::bail!("invalid TUI mode {value:?}; use fullscreen or inline"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fullscreen => "fullscreen",
+            Self::Inline => "inline",
+        }
+    }
+}
+
+/// Pi's `steeringMode` / `followUpMode` values: deliver queued messages one per
+/// boundary, or every queued message together. Pi defaults both to
+/// one-at-a-time.
+pub fn parse_queue_delivery_mode(value: &str) -> anyhow::Result<octet_agent::QueueDeliveryMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "one-at-a-time" => Ok(octet_agent::QueueDeliveryMode::OneAtATime),
+        "all" => Ok(octet_agent::QueueDeliveryMode::All),
+        _ => anyhow::bail!("invalid queue delivery mode {value:?}; use one-at-a-time or all"),
+    }
+}
+
+pub fn queue_delivery_mode_label(mode: octet_agent::QueueDeliveryMode) -> &'static str {
+    match mode {
+        octet_agent::QueueDeliveryMode::OneAtATime => "one-at-a-time",
+        octet_agent::QueueDeliveryMode::All => "all",
+    }
+}
+
+/// Tern Surface Protocol rendering policy for the interactive frontend.
+//////
+/// `Auto` (the default) negotiates native surfaces only when the terminal
+/// advertises itself (`TERM_PROGRAM=tern`), so every other terminal keeps the
+/// ANSI renderer untouched. `On` forces negotiation regardless of detection,
+/// which is how a non-Tern host is exercised against the protocol path. `Off`
+/// disables the native backend outright and always renders ANSI, even inside
+/// Tern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TernMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl TernMode {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "on" | "true" | "yes" | "1" => Ok(Self::On),
+            "off" | "false" | "no" | "0" => Ok(Self::Off),
+            _ => anyhow::bail!("invalid tern mode {value:?}; use auto, on, or off"),
+        }
+    }
+
+    /// Whether octet may negotiate a native Tern surface at all. `Auto` still
+    /// requires terminal detection, so this is the cheap deny-first gate.
+    pub fn permitted(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether the terminal's own advertisement must be ignored and the
+    /// protocol path attempted unconditionally.
+    pub fn forced(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -116,9 +208,8 @@ impl Default for SandboxPolicy {
 }
 
 /// Tool names understood by the v0.1 coding product.
-pub const SUPPORTED_TOOL_NAMES: [&str; 9] = [
+pub const SUPPORTED_TOOL_NAMES: [&str; 8] = [
     "read",
-    "search",
     "edit",
     "write",
     "bash",
@@ -141,22 +232,73 @@ pub struct ToolPolicy {
     allow_discovered_extensions: bool,
 }
 
+/// The platform whose shell the default model tool surface exposes.
+///
+/// The host value comes from the build target; tests inject the other value
+/// to check the Windows surface and prompt on any CI host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellPlatform {
+    /// Unix-like hosts: the model shell is `bash`.
+    Posix,
+    /// Native Windows: the model shell is `powershell`.
+    Windows,
+}
+
+impl ShellPlatform {
+    /// The platform this binary was built for.
+    pub const fn host() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Posix
+        }
+    }
+
+    /// The built-in shell tool published by default on this platform.
+    pub const fn default_shell_tool(self) -> &'static str {
+        match self {
+            Self::Posix => "bash",
+            Self::Windows => "powershell",
+        }
+    }
+}
+
 impl Default for ToolPolicy {
     fn default() -> Self {
+        Self::default_for(ShellPlatform::host())
+    }
+}
+
+impl ToolPolicy {
+    /// The default allowlist for `platform`: every supported built-in with
+    /// exactly one shell. Windows publishes `powershell` and never `bash`, so
+    /// a model there is not offered a shell whose syntax it cannot rely on;
+    /// other platforms publish `bash` and never `powershell`.
+    pub fn default_for(platform: ShellPlatform) -> Self {
+        let shell = platform.default_shell_tool();
         Self {
             enabled: SUPPORTED_TOOL_NAMES
                 .into_iter()
-                // `bash` already provides faster, composable discovery through
-                // rg/find/ls. Keep the narrower search schema available for
-                // explicit allowlists without charging every default request.
-                // PowerShell is likewise explicit-only and Windows-gated.
-                .filter(|name| !matches!(*name, "search" | "powershell"))
+                .filter(|name| !matches!(*name, "bash" | "powershell") || *name == shell)
                 .map(str::to_owned)
                 .collect(),
             excluded: BTreeSet::new(),
             requested: None,
             allow_discovered_extensions: true,
         }
+    }
+
+    /// The default allowlist after the host's shell opt-in. On Windows an
+    /// explicitly configured Bash-compatible `shell_path` is the user's
+    /// choice of Bash, so `bash` replaces `powershell`; elsewhere the opt-in
+    /// changes nothing.
+    pub fn default_for_shell(platform: ShellPlatform, bash_shell_configured: bool) -> Self {
+        let mut policy = Self::default_for(platform);
+        if platform == ShellPlatform::Windows && bash_shell_configured {
+            policy.enabled.remove("powershell");
+            policy.enabled.insert("bash".to_owned());
+        }
+        policy
     }
 }
 
@@ -434,12 +576,20 @@ pub struct Config {
     /// True when the reasoning mode came from an explicit command-line override.
     pub reasoning_mode_explicit: bool,
     pub cache_retention: CacheRetention,
+    /// Billable prompt-cache refresh policy. Project configuration cannot override it.
+    pub cache_warming: CacheWarmMode,
+    /// Opt-in presentation of cache misses and successful warming; accounting is unconditional.
+    pub show_cache_miss_notices: bool,
     /// Host-owned admission policy for model-requested tool effects.
     pub effect_policy: EffectPolicy,
     pub sandbox: SandboxPolicy,
     /// Built-in appearance (auto, light, dark, Cards, Still) or a discovered TOML theme name.
     /// Unrecognized or malformed names fall back to the compiled default.
     pub theme: Option<String>,
+    /// CLI/environment or interactive choice for this invocation. A reviewed
+    /// extension's session-only startup preference may supersede a saved theme,
+    /// never this explicit choice, and never writes the saved configuration.
+    pub theme_explicit: bool,
     /// Explicit system prompt override. `None` uses composed built-in
     /// instructions, while `Some("")` intentionally blanks the system
     /// prompt.
@@ -451,6 +601,10 @@ pub struct Config {
     pub mouse: MouseMode,
     /// Force the chronological ASCII frontend even on a capable TTY.
     pub plain: bool,
+    /// Tern Surface Protocol policy for the interactive frontend. `Auto`
+    /// negotiates native surfaces only inside a Tern pane; `Off` always keeps
+    /// the ANSI renderer.
+    pub tern: TernMode,
     /// Opt in to bounded inline image placement for interactive tool results.
     /// Plain, print, and noninteractive frontends always remain payload-free.
     pub show_images: bool,
@@ -485,6 +639,10 @@ pub struct Config {
     pub trusted_extensions: Vec<String>,
     /// One-shot extension names trusted only for this process invocation.
     pub invocation_trusted_extensions: Vec<String>,
+    /// Whether this product surface may start executable extension processes
+    /// at all. The native-host protocol reports discovery only, whatever the
+    /// activation and host-authority grants in its request say.
+    pub start_extension_processes: bool,
     /// One-shot process-owner gate for experimental remote Streamable HTTP MCP.
     /// This is deliberately not loaded from configuration, environment, or sessions.
     pub experimental_streamable_http_mcp: bool,
@@ -507,13 +665,30 @@ impl Config {
     /// Whether a tool will survive both the model-visible allowlist and the
     /// matching execution capability gate for this process.
     pub fn tool_available(&self, name: &str) -> bool {
+        self.tool_available_on(name, ShellPlatform::host())
+    }
+
+    /// The shell tool whose live output is checkpointed into the session:
+    /// `bash` when it is published, otherwise the Windows `powershell` tool.
+    pub fn checkpointed_shell_tool(&self) -> &'static str {
+        if !self.tool_available("bash") && self.tool_available("powershell") {
+            "powershell"
+        } else {
+            "bash"
+        }
+    }
+
+    /// [`Self::tool_available`] as it would be decided on `platform`.
+    pub fn tool_available_on(&self, name: &str, platform: ShellPlatform) -> bool {
         self.tools.enabled(name)
             && match name {
                 "edit" => self.sandbox.allow_edit,
                 "write" => self.sandbox.allow_write,
                 // Process mode deliberately has shell-equivalent authority.
                 "bash" => self.sandbox.process_execution_allowed(),
-                "powershell" => cfg!(windows) && self.sandbox.process_execution_allowed(),
+                "powershell" => {
+                    platform == ShellPlatform::Windows && self.sandbox.process_execution_allowed()
+                }
                 _ => true,
             }
     }
@@ -562,6 +737,25 @@ pub fn parse_cache_retention(value: &str) -> anyhow::Result<CacheRetention> {
     }
 }
 
+/// Parse the user-owned billable cache-warming policy.
+pub fn parse_cache_warming(value: &str) -> anyhow::Result<CacheWarmMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(CacheWarmMode::Off),
+        "streaming" => Ok(CacheWarmMode::Streaming),
+        "idle" => Ok(CacheWarmMode::Idle),
+        _ => anyhow::bail!("invalid cache warming {value:?}; use off, streaming, or idle"),
+    }
+}
+
+/// Stable configuration and diagnostics spelling for a cache-warming mode.
+pub fn cache_warming_label(mode: CacheWarmMode) -> &'static str {
+    match mode {
+        CacheWarmMode::Off => "off",
+        CacheWarmMode::Streaming => "streaming",
+        CacheWarmMode::Idle => "idle",
+    }
+}
+
 /// Default location for persistent sessions.
 pub fn default_session_dir() -> PathBuf {
     dirs::home_dir()
@@ -576,16 +770,75 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn mouse_mode_defaults_to_native_selection_and_scrollback() {
+    fn mouse_mode_owner_decision_defaults_to_auto() {
         assert_eq!(MouseMode::default(), MouseMode::Auto);
         assert_eq!(MouseMode::parse("app").unwrap(), MouseMode::App);
         assert_eq!(MouseMode::parse("terminal").unwrap(), MouseMode::Terminal);
         assert_eq!(MouseMode::parse("off").unwrap(), MouseMode::Off);
-        assert!(!MouseMode::Auto.application_owned());
-        assert!(MouseMode::App.application_owned());
-        assert!(!MouseMode::Terminal.application_owned());
-        assert!(!MouseMode::Off.application_owned());
+        assert!(!MouseMode::Auto.captures_mouse_on(TuiMode::Inline));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Inline));
+        assert!(!MouseMode::Terminal.captures_mouse_on(TuiMode::Inline));
+        assert!(!MouseMode::Off.captures_mouse_on(TuiMode::Inline));
         assert!(MouseMode::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn auto_mouse_captures_on_the_fullscreen_surface_only() {
+        // Default fullscreen has no terminal scrollback: the wheel must scroll
+        // the in-app transcript. Inline keeps native selection and scrollback.
+        assert!(MouseMode::Auto.captures_mouse_on(TuiMode::Fullscreen));
+        assert!(!MouseMode::Auto.captures_mouse_on(TuiMode::Inline));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Fullscreen));
+        assert!(MouseMode::App.captures_mouse_on(TuiMode::Inline));
+        for mode in [MouseMode::Terminal, MouseMode::Off] {
+            assert!(!mode.captures_mouse_on(TuiMode::Fullscreen), "{mode:?}");
+            assert!(!mode.captures_mouse_on(TuiMode::Inline), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn queue_delivery_modes_use_pis_values() {
+        use octet_agent::QueueDeliveryMode;
+        for (text, mode) in [
+            ("one-at-a-time", QueueDeliveryMode::OneAtATime),
+            ("all", QueueDeliveryMode::All),
+            (" ALL ", QueueDeliveryMode::All),
+        ] {
+            assert_eq!(parse_queue_delivery_mode(text).unwrap(), mode);
+        }
+        assert_eq!(
+            queue_delivery_mode_label(QueueDeliveryMode::OneAtATime),
+            "one-at-a-time"
+        );
+        assert!(parse_queue_delivery_mode("batch").is_err());
+        assert_eq!(QueueDeliveryMode::default(), QueueDeliveryMode::OneAtATime);
+    }
+
+    #[test]
+    fn tui_mode_defaults_fullscreen_and_parses_only_supported_modes() {
+        assert_eq!(TuiMode::default(), TuiMode::Fullscreen);
+        assert_eq!(TuiMode::parse("fullscreen").unwrap(), TuiMode::Fullscreen);
+        assert_eq!(TuiMode::parse("inline").unwrap(), TuiMode::Inline);
+        assert_eq!(TuiMode::Inline.as_str(), "inline");
+        assert!(TuiMode::parse("auto").is_err());
+    }
+
+    #[test]
+    fn tern_mode_gates_native_surfaces_without_touching_detection() {
+        assert_eq!(TernMode::default(), TernMode::Auto);
+        assert_eq!(TernMode::parse("auto").unwrap(), TernMode::Auto);
+        assert_eq!(TernMode::parse("on").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("1").unwrap(), TernMode::On);
+        assert_eq!(TernMode::parse("off").unwrap(), TernMode::Off);
+        assert_eq!(TernMode::parse("0").unwrap(), TernMode::Off);
+        assert!(TernMode::parse("sometimes").is_err());
+        // Off denies negotiation outright; On forces it past detection; Auto
+        // still waits for the terminal to advertise itself.
+        assert!(!TernMode::Off.permitted());
+        assert!(TernMode::Auto.permitted());
+        assert!(!TernMode::Auto.forced());
+        assert!(TernMode::On.permitted());
+        assert!(TernMode::On.forced());
     }
 
     #[test]
@@ -605,6 +858,24 @@ mod tests {
         );
         assert_eq!(parse_cache_retention("long").unwrap(), CacheRetention::Long);
         assert!(parse_cache_retention("sometimes").is_err());
+    }
+
+    #[test]
+    fn cache_warming_accepts_only_the_three_modes() {
+        assert_eq!(CacheWarmMode::default(), CacheWarmMode::Streaming);
+        for mode in [
+            CacheWarmMode::Off,
+            CacheWarmMode::Streaming,
+            CacheWarmMode::Idle,
+        ] {
+            assert_eq!(
+                parse_cache_warming(cache_warming_label(mode)).unwrap(),
+                mode
+            );
+        }
+        for invalid in ["", "on", "none", "sometimes"] {
+            assert!(parse_cache_warming(invalid).is_err());
+        }
     }
 
     #[test]
@@ -650,12 +921,12 @@ mod tests {
 
     #[test]
     fn tool_policy_validates_and_filters_names() {
-        let mut policy = ToolPolicy::only(["read".to_owned(), "search".to_owned()]).unwrap();
-        policy.exclude("search").unwrap();
+        let mut policy = ToolPolicy::only(["read".to_owned(), "bash".to_owned()]).unwrap();
+        policy.exclude("bash").unwrap();
         assert_eq!(policy.names().collect::<Vec<_>>(), vec!["read"]);
         assert_eq!(
             policy.explicit_names().unwrap().collect::<Vec<_>>(),
-            vec!["read", "search"],
+            vec!["bash", "read"],
             "startup diagnostics must retain explicitly requested names removed by later gates"
         );
 
@@ -673,7 +944,7 @@ mod tests {
 
     #[test]
     fn powershell_opt_in_is_additive_and_removable_again() {
-        let mut policy = ToolPolicy::default();
+        let mut policy = ToolPolicy::default_for(ShellPlatform::Posix);
         assert!(!policy.enabled("powershell"));
         policy.include("powershell").unwrap();
         // The opt-in never replaces the default allowlist and is not an
@@ -688,19 +959,78 @@ mod tests {
     }
 
     #[test]
-    fn default_tool_policy_uses_bash_instead_of_a_redundant_search_schema() {
-        let policy = ToolPolicy::default();
+    fn default_tool_policy_omits_builtin_search_and_keeps_powershell_explicit() {
+        let policy = ToolPolicy::default_for(ShellPlatform::Posix);
         for name in ["read", "edit", "write", "bash"] {
             assert!(policy.enabled(name), "{name}");
         }
-        assert!(!policy.enabled("search"));
+        assert!(policy.explicit_names().is_none());
         assert!(!policy.enabled("powershell"));
         assert!(ToolPolicy::only(["powershell".to_owned()])
             .unwrap()
             .enabled("powershell"));
-        assert!(ToolPolicy::only(["search".to_owned()])
-            .unwrap()
-            .enabled("search"));
+        assert!(!policy.names().any(|name| name == "search"));
+        assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
+        // Removal from the built-in inventory does not reserve an extension
+        // name: the default policy still permits discovered extension tools.
+        assert!(policy.enabled("search"));
+    }
+
+    #[test]
+    fn host_default_tool_policy_matches_the_build_platform() {
+        assert_eq!(
+            ShellPlatform::host(),
+            if cfg!(windows) {
+                ShellPlatform::Windows
+            } else {
+                ShellPlatform::Posix
+            }
+        );
+        assert_eq!(
+            ToolPolicy::default(),
+            ToolPolicy::default_for(ShellPlatform::host())
+        );
+    }
+
+    #[test]
+    fn windows_default_tool_policy_replaces_bash_with_powershell() {
+        let policy = ToolPolicy::default_for(ShellPlatform::Windows);
+        for name in ["read", "edit", "write", "powershell"] {
+            assert!(policy.enabled(name), "{name}");
+        }
+        assert!(!policy.enabled("bash"));
+        assert!(policy.explicit_names().is_none());
+        assert_eq!(
+            policy
+                .names()
+                .filter(|name| matches!(*name, "bash" | "powershell"))
+                .collect::<Vec<_>>(),
+            vec!["powershell"],
+            "exactly one shell is published"
+        );
+    }
+
+    #[test]
+    fn windows_bash_is_an_explicit_opt_in() {
+        // A configured Bash-compatible shell_path selects bash instead.
+        let configured = ToolPolicy::default_for_shell(ShellPlatform::Windows, true);
+        assert!(configured.enabled("bash"));
+        assert!(!configured.enabled("powershell"));
+        // So does an explicit `--tools` allowlist naming it.
+        let explicit = ToolPolicy::only(["read".to_owned(), "bash".to_owned()]).unwrap();
+        assert!(explicit.enabled("bash"));
+        assert!(!explicit.enabled("powershell"));
+        // Without an opt-in, PowerShell is the Windows shell; POSIX is unchanged.
+        assert_eq!(
+            ToolPolicy::default_for_shell(ShellPlatform::Windows, false),
+            ToolPolicy::default_for(ShellPlatform::Windows)
+        );
+        for configured in [false, true] {
+            assert_eq!(
+                ToolPolicy::default_for_shell(ShellPlatform::Posix, configured),
+                ToolPolicy::default_for(ShellPlatform::Posix)
+            );
+        }
     }
 
     #[test]

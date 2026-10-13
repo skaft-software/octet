@@ -1,0 +1,93 @@
+{
+  "anthropic/claude-next": {
+    "cache_read": 300000,
+    "cache_write_5m": 3750000,
+    "input": 3000000,
+    "output": 15000000,
+    "reasoning": null
+  },
+  "baseten/zai-org/glm-5.2": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "baseten/zai-org/glm-5.2-fast": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "openai/example": {
+    "cache_read": 3000,
+    "cache_write_5m": 0,
+    "input": 150000,
+    "output": 600000,
+    "reasoning": null
+  },
+  "openai/gpt-9-preview": {
+    "cache_read": 125000,
+    "cache_write_5m": 1562500,
+    "input": 1250000,
+    "output": 10000000,
+    "reasoning": 12500000
+  },
+  "openai/mixed-case": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 1,
+    "output": 0,
+    "reasoning": null
+  },
+  "openai/unnamed": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "openrouter/vendor/model:free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
+  "qwen-token-plan-cn/qwen3.7-max": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "qwen-token-plan-individual/qwen3.7-max": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "qwen-token-plan/qwen3.7-max": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 200000,
+    "output": 1200000,
+    "reasoning": null
+  },
+  "together/example": {
+    "cache_read": 3000,
+    "cache_write_5m": 0,
+    "input": 150000,
+    "output": 600000,
+    "reasoning": null
+  },
+  "zai-coding-cn/glm-5.2": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 500000,
+    "output": 3000000,
+    "reasoning": null
+  }
+}

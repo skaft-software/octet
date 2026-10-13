@@ -427,7 +427,7 @@ def _validate_scope(scope: Any) -> None:
     if not isinstance(scope, dict):
         raise AuditError("baseline.scope must be an object")
     expected = {
-        "rust_msrv": "1.86",
+        "rust_msrv": "1.88",
         "diagnostic_format": "cargo-jsonl",
         "feature_selection": "all-features",
         "lint_level": "warning",
@@ -563,8 +563,8 @@ def _load_baseline(path: Path) -> Tuple[str, Dict[str, Finding]]:
         if set(collection) != {"toolchain", "artifacts"}:
             raise AuditError("baseline.collection has unexpected or missing fields")
         toolchain = _required_string(collection.get("toolchain"), "collection.toolchain")
-        if toolchain != "1.86.0":
-            raise AuditError("collection.toolchain must be Rust 1.86.0")
+        if toolchain != "1.88.0":
+            raise AuditError("collection.toolchain must be Rust 1.88.0")
         artifacts = collection.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             raise AuditError("collection.artifacts must be a non-empty list")
@@ -603,7 +603,7 @@ def audit(
     status, baseline = _load_baseline(Path(baseline_path))
     if status != "collected":
         raise AuditError(
-            "baseline is uncollected; real Rust 1.86 Cargo JSONL evidence must be "
+            "baseline is uncollected; real Rust 1.88 Cargo JSONL evidence must be "
             "reviewed before this gate can pass"
         )
 

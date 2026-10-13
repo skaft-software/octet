@@ -9,9 +9,9 @@
 //! in-crate tests, because `ChatGptPlan` is crate-private.
 
 use octet_sdk::codex_context::{
-    codex_context_session_note, resolve_codex_context_window, working_context_window,
-    CodexContextClamp, CodexContextClampReporter, CodexContextOverride, CodexContextTier,
-    CodexContextWindow, CodexContextWindowError, CODEX_5_6_CONTEXT_WINDOW,
+    codex_context_session_note, entitled_context_windows, resolve_codex_context_window,
+    working_context_window, CodexContextClamp, CodexContextClampReporter, CodexContextOverride,
+    CodexContextTier, CodexContextWindow, CodexContextWindowError, CODEX_5_6_CONTEXT_WINDOW,
     CODEX_ABOVE_STANDARD_TIER_OPERATION, CODEX_ASTRA_MAX_CONTEXT_WINDOW,
     CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
     CODEX_MAX_OUTPUT_TOKENS, CODEX_PRO_CONTEXT_WINDOW,
@@ -19,7 +19,10 @@ use octet_sdk::codex_context::{
 
 /// The checked-in discovery fallback windows for a Codex model.
 fn fallback(model_id: &str) -> (u64, u64) {
-    if model_id == "gpt-6-astra" {
+    if matches!(
+        model_id,
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+    ) {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
     } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)
@@ -65,9 +68,38 @@ fn extended_tier(model_id: &str) -> CodexContextWindow {
 }
 
 #[test]
+fn gpt_6_1_sol_has_the_same_deliberate_working_cap_and_entitlement() {
+    assert_eq!(working_context_window("gpt-6.1-sol"), 272_000);
+    assert_eq!(entitled_context_windows("gpt-6.1-sol"), (272_000, 872_000));
+    assert_eq!(default_tier("gpt-6.1-sol").context_window, 272_000);
+    let pro = extended_tier("gpt-6.1-sol");
+    assert_eq!(pro.context_window, 272_000);
+    assert_eq!(pro.entitled_max_context_window, 872_000);
+    assert!(pro.clamp.is_some());
+    let raised = resolve(
+        "gpt-6.1-sol",
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(872_000, true),
+    )
+    .unwrap();
+    assert_eq!(raised.context_window, 872_000);
+    assert_eq!(raised.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+    assert!(raised.has_uncertain_usage);
+    assert!(matches!(
+        resolve(
+            "gpt-6.1-sol",
+            CodexContextTier::Default,
+            CodexContextOverride::raising(872_000, true),
+        ),
+        Err(CodexContextWindowError::OverrideRequiresEntitlement { .. })
+    ));
+}
+
+#[test]
 fn deliberate_cap_holds_for_every_family_even_on_a_pro_plan() {
     for model_id in [
         "gpt-6-astra",
+        "gpt-6.1-sol",
         "gpt-5.4",
         "gpt-5.6-sol",
         "gpt-5.6-terra",

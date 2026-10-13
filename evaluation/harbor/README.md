@@ -230,6 +230,11 @@ PYTHONPATH="$YGG_REPO" uv run harbor trial start \
   --agent-kwarg ygg_binary_sha256="$YGG_SHA256"
 ```
 
+Omitting `--agent-kwarg reasoning` leaves the effort level to the adapter's
+model-aware default (octet uses the endpoint's declared level). Pass
+`--agent-kwarg reasoning=max` — explicitly, as these examples do — when a
+reported result must be pinned to one effort level.
+
 Run this from the Ygg checkout, or set `PYTHONPATH=/path/to/ygg` in the
 command environment if Harbor is started from another directory. The first
 run may take time to fetch the task image. The smoke run is only an adapter and

@@ -1,13 +1,13 @@
 # octet-web-search reference
 
-**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
+**Source candidate distribution: 0.9.0.** This bundle requires exactly octet 0.9.0.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. Reviewed source checkouts and local archives remain
-separate installation options.
+[0.9.0 candidate record](../../docs/releases/v0.9.0.md) for availability and
+remaining qualification. 0.9.0 assets are not published; use a reviewed source
+checkout or matching local archive until publication is approved.
 
 [Usage guide](README.md). This describes the bundled API `0.4` implementation,
-not a general extension-authoring tutorial. Bundle `0.8.0` requires exactly octet `0.8.0`.
+not a general extension-authoring tutorial. Bundle `0.9.0` requires exactly octet `0.9.0`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -17,16 +17,18 @@ computer-use authority.
 
 Installation and discovery are inert; the bundle is disabled by default. Default
 full access (`unsafe_host`) implicitly trusts the selected extension without
-saving a grant, but never enables it. `--safe-mode` removes implicit trust and
-keeps the process stopped even with explicit grants: executable startup still
-requires `unsafe_host` and the process gate. A running extension has the current
-user's OS authority; network and fixed user-state manifest declarations are
-visible consent metadata, not a sandbox.
+saving a grant, but never enables it. `--safe-mode` removes implicit trust:
+an enabled extension can start only with host authority for its selected source.
+Explicit grants permit startup, but `--no-process`/`--no-shell`, workspace trust,
+and source, compatibility and integrity checks still apply. Granted code runs
+with the current user's OS authority outside the tool-effect broker; safe mode
+is an approval policy, not an OS sandbox. Network and fixed user-state manifest
+declarations are visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-With [octet 0.8.0](../../docs/installation.md) and verified
-matching published assets, the catalog path is:
+After 0.9.0 publication is approved and matching assets are verified, the
+catalog path with [octet 0.9.0](../../docs/installation.md) is:
 
 ```console
 octet extension install octet-web-search
@@ -51,30 +53,38 @@ Or persist activation in user configuration:
 enabled_extensions = ["octet-web-search"]
 ```
 
-`--trust-extension` and source-bound `trusted_extensions` grants remain optional
-explicit trust decisions. They never enable the bundle or bypass safe mode, and
-full-access implicit trust is never copied into them.
+`--trust-extension octet-web-search` grants host authority to the selected source
+for one invocation without enabling it. Persistent `trusted_extensions` grants
+use a bare name only for the global bundle, or `NAME@/absolute/path/extension.toml`
+for an exact other source; a same-named project shadow never inherits a global
+grant. An explicit `--extension-dir` is itself an invocation-only authority grant,
+not activation. These grants permit enabled sources to start in safe mode;
+brokered tool effects still follow host policy, and full-access implicit trust
+is never copied into persistent grants. See [extension authority](../../docs/extensions.md#layout-and-discovery).
 
 The bundle includes `skills/octet-web-search/SKILL.md`. Bundle skill discovery is
 safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.8.0`, extension
-API `0.4`, exact octet `0.8.0`.
+Release compatibility is recorded in `extension.toml`: bundle `0.9.0`, extension
+API `0.4`, exact octet `0.9.0`.
 
 ## Choose a provider
 
-Open `/extensions` and select `octet-web-search`. Enabling a running trusted copy
-opens a second picker using the same interface:
+Open `/extensions` and select `octet-web-search` (a disabled copy is enabled
+first). Its options menu shows the current provider and offers:
 
-1. **Brave Search (recommended)**
-2. **SearXNG**
+1. **Use Brave Search** (recommended)
+2. **Use SearXNG**
+3. **Change the SearXNG endpoint**, once SearXNG is selected
+4. **Check status**
+5. **Log out of Brave Search**, while a key is stored
+6. **Disable octet-web-search**
 
-Selecting an already enabled `octet-web-search` opens that provider picker again
-and also offers to disable the extension. `/web-search status`,
-`/web-search setup brave`, `/web-search setup searxng`, and
-`/web-search logout` provide keyboard/scriptable fallbacks.
+The web UI has no options menu yet; there `/web-search status`,
+`/web-search setup brave`, `/web-search setup searxng`, `/web-search endpoint`,
+and `/web-search logout` do the same.
 
 ### Brave Search (recommended)
 

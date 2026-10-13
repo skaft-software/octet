@@ -409,6 +409,8 @@ async fn host_read_waves_are_bounded_and_keep_effect_and_result_order() {
         &session_dir.path().join("host-waves.jsonl"),
         extensions,
     );
+    // Pin the width: the default follows the machine's CPU count.
+    agent.set_parallel_read_wave_width(4);
 
     let mut run = agent.prompt("read six host files").await.unwrap();
     let mut events = Vec::new();
@@ -463,6 +465,159 @@ async fn host_read_waves_are_bounded_and_keep_effect_and_result_order() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
+}
+
+/// Every read in one wave waits for all the others, so the run only finishes
+/// when the whole wave is in flight at once.
+struct WideWaveState {
+    active: AtomicUsize,
+    maximum: AtomicUsize,
+    all_entered: Barrier,
+}
+
+struct WideWaveProbe {
+    state: Arc<WideWaveState>,
+}
+
+#[async_trait::async_trait]
+impl Tool for WideWaveProbe {
+    fn definition(&self) -> octet_ai::ToolDef {
+        octet_ai::ToolDef {
+            async_execution: false,
+            name: "wide_read_probe".into(),
+            description: "HostRead probe that waits for its whole wave".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"slot": {"type": "integer"}},
+                "required": ["slot"],
+                "additionalProperties": false
+            }),
+            constrained_sampling: None,
+        }
+    }
+
+    fn effect(
+        &self,
+        _arguments: &serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::HostRead)
+    }
+
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::Safe
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Parallel
+    }
+
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let state = &self.state;
+        let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+        state.maximum.fetch_max(active, Ordering::SeqCst);
+        let waited = tokio::time::timeout(Duration::from_secs(10), state.all_entered.wait()).await;
+        state.active.fetch_sub(1, Ordering::SeqCst);
+        waited.map_err(|_| ToolError::new("the wave never filled"))?;
+        Ok(ToolOutput::new(format!("slot={}", arguments["slot"])))
+    }
+}
+
+#[tokio::test]
+async fn a_wider_read_wave_runs_every_eligible_call_at_once() {
+    let server = MockServer::start().await;
+    let calls: Vec<_> = (0..6)
+        .map(|slot| {
+            (
+                format!("call_{slot}"),
+                "wide_read_probe",
+                serde_json::json!({ "slot": slot }),
+            )
+        })
+        .collect();
+    let borrowed: Vec<_> = calls
+        .iter()
+        .map(|(id, name, arguments)| (id.as_str(), *name, arguments.clone()))
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("messages"))
+        .respond_with(Script {
+            bodies: vec![
+                anthropic_tool_turn(&borrowed),
+                anthropic_text_turn("all wide reads completed"),
+            ],
+            next: AtomicUsize::new(0),
+        })
+        .mount(&server)
+        .await;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(WideWaveState {
+        active: AtomicUsize::new(0),
+        maximum: AtomicUsize::new(0),
+        all_entered: Barrier::new(6),
+    });
+    let mut extensions = ExtensionHost::new();
+    extensions.tool(WideWaveProbe {
+        state: Arc::clone(&state),
+    });
+    let mut agent = build_agent(
+        test_model(&server.uri(), Protocol::AnthropicMessages, false),
+        workspace_dir.path(),
+        &session_dir.path().join("wide-waves.jsonl"),
+        extensions,
+    );
+    agent.set_parallel_read_wave_width(6);
+    assert_eq!(agent.parallel_read_wave_width(), 6);
+
+    let mut run = agent.prompt("read six host files at once").await.unwrap();
+    let events = collect_run(&mut run).await;
+    drop(run);
+
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::RunFinished {
+            reason: FinishReason::Completed,
+            ..
+        })
+    ));
+    assert_eq!(state.maximum.load(Ordering::SeqCst), 6);
+    let finished: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolFinished { id, result, .. } => Some((id.0.clone(), result.is_ok())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        (0..6)
+            .map(|slot| (format!("call_{slot}"), true))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_read_wave_width_follows_the_machine_within_its_bounds() {
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let mut agent = build_agent(
+        test_model("http://127.0.0.1:9", Protocol::AnthropicMessages, false),
+        workspace_dir.path(),
+        &session_dir.path().join("width.jsonl"),
+        ExtensionHost::new(),
+    );
+    let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+    assert_eq!(agent.parallel_read_wave_width(), cpus.clamp(4, 32));
+    agent.set_parallel_read_wave_width(0);
+    assert_eq!(agent.parallel_read_wave_width(), 1);
+    agent.set_parallel_read_wave_width(1000);
+    assert_eq!(agent.parallel_read_wave_width(), 32);
 }
 
 struct BarrierState {

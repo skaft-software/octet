@@ -1,5 +1,11 @@
 //! Deterministic GPT-6 wire foundations; these tests do not qualify a live route.
 use super::*;
+use crate::stream::StreamEvent;
+use crate::test_fixtures::base_request;
+use crate::types::{
+    AssistantPart, CacheRetention, Message, Protocol, ReasoningConfig, Request, StopReason,
+    ToolCallId, ToolDef, UserPart,
+};
 use crate::{AssistantMessage, CompatibilityMode, ModelId, UserMessage};
 use crate::{
     ResponsesConfigurationUpdate, ResponsesFeatures, ResponsesInput, ResponsesItem,
@@ -29,35 +35,24 @@ fn model() -> crate::Model {
 
 fn request() -> Request {
     Request {
-        system: None,
         messages: vec![Message::User(UserMessage {
             content: vec![UserPart::Text("hello".into())],
         })],
-        tools: vec![],
-        tool_choice: ToolChoice::Auto,
-        max_output_tokens: None,
-        temperature: None,
-        stop: vec![],
         reasoning: ReasoningConfig::Effort(crate::ReasoningEffort::Low),
-        reasoning_mode: ReasoningMode::Standard,
-        responses: None,
-        output_format: OutputFormat::Text,
         output_modalities: crate::OutputModalities::Text,
-        compatibility: CompatibilityMode::Strict,
-        cache_retention: CacheRetention::Short,
-        session_id: None,
+        ..base_request()
     }
 }
 
 #[test]
 fn public_gpt6_cache_options_encode_documented_mode_and_ttl() {
-    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
         let model = crate::ModelCatalog::builtin()
             .unwrap()
             .resolve(&ModelId(name.into()))
             .unwrap();
         let mut req = request();
-        req.reasoning = if name == "gpt-6-astra" {
+        req.reasoning = if matches!(name, "gpt-6-astra" | "gpt-6.1-sol") {
             ReasoningConfig::Effort(crate::ReasoningEffort::Low)
         } else {
             ReasoningConfig::Off
@@ -266,6 +261,59 @@ fn ordered_updates_preserve_baseline_and_effective_reasoning() {
 }
 
 #[test]
+fn ordered_updates_preserve_optional_spec_ids_without_changing_baseline() {
+    let model = model();
+    for id in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!("cfg_1")),
+    ] {
+        let mut item =
+            serde_json::json!({"type":"configuration_update","reasoning":{"effort":"high"}});
+        if let Some(id) = id {
+            item["id"] = id;
+        }
+        let input =
+            ResponsesInput::new(vec![ResponsesItem::new(item.clone()).unwrap(), user_item()]);
+        // Opaque session replay must preserve the optional ID as well as effort.
+        let input: ResponsesInput =
+            serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
+        let mut req = request();
+        assert_eq!(
+            input.effective_reasoning(&req.reasoning).unwrap(),
+            ReasoningConfig::Effort(crate::ReasoningEffort::High)
+        );
+        req.responses = Some(crate::ResponsesOptions::full_replay(input));
+        let body: serde_json::Value =
+            serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["input"][0], item);
+    }
+}
+
+#[test]
+fn ordered_updates_reject_malformed_ids_and_extra_controls() {
+    let model = model();
+    for extra in [
+        serde_json::json!({"id": 123}),
+        serde_json::json!({"id": false}),
+        serde_json::json!({"id": {}}),
+        serde_json::json!({"temperature": 0.7}),
+    ] {
+        let mut item =
+            serde_json::json!({"type":"configuration_update","reasoning":{"effort":"high"}});
+        item.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let input = ResponsesInput::new(vec![ResponsesItem::new(item).unwrap(), user_item()]);
+        assert!(input.effective_reasoning(&request().reasoning).is_err());
+        assert!(
+            crate::validate_responses_input(&model, &input, &request().reasoning, false).is_err()
+        );
+    }
+}
+
+#[test]
 fn updates_reject_unsupported_efforts_adjacency_and_unqualified_compact() {
     let mut model = model();
     let baseline = request().reasoning;
@@ -359,6 +407,34 @@ fn sol_luna_sampling_depends_on_effective_not_baseline_effort_and_checks_presets
             url::Url::parse("https://third-party.invalid/v1/").unwrap();
         assert!(build_request(&model, &req).is_ok());
     }
+}
+
+#[test]
+fn public_gpt_6_1_sol_rejects_off_and_sampling_with_reasoning() {
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6.1-sol".into()))
+        .unwrap();
+    let mut req = request();
+    req.reasoning = ReasoningConfig::Off;
+    assert!(
+        build_request(&model, &req).is_err(),
+        "none is not a public 6.1 Sol choice"
+    );
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Minimal);
+    assert!(
+        build_request(&model, &req).is_err(),
+        "minimal is not a public 6.1 Sol choice"
+    );
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Medium);
+    req.temperature = Some(0.7);
+    assert!(build_request(&model, &req).is_err());
+    Arc::make_mut(&mut model.endpoint).base_url =
+        url::Url::parse("https://third-party.invalid/v1/").unwrap();
+    assert!(
+        build_request(&model, &req).is_ok(),
+        "a copied ID is not a qualified OpenAI route"
+    );
 }
 
 #[tokio::test]

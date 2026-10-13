@@ -13,11 +13,16 @@ live-provider availability or acceptance.
   exact provider/model models.dev record; this does not advertise availability
   or enrich custom/Codex inventories. Existing declaration-owned wire profiles,
   not names or booleans, determine which semantic options can be consumed.
+  Direct Anthropic model inventories may additionally publish account-scoped
+  `capabilities.thinking` and `capabilities.effort`: adaptive effort choices and
+  Off are admitted only from their exact supported flags. Budget-thinking models
+  keep their declaration-owned token-budget codec; these account assertions do
+  not apply to Anthropic-compatible gateways or qualify live inference.
 - CLI configuration keeps an unset preference distinct from explicit Off until
   model selection. New launches use the endpoint default or its first supported
   enabled choice; absent usable reasoning metadata stays Off without inventing
   wire controls. Explicit choices and resumed-session precedence remain intact.
-  Serve catalog defaults follow the same rule. This is an
+  This is an
   [octet 0.8.0 product fix](providers.md#defaults-unreleased), not a change to
   core `ReasoningConfig::Off` or native-host protocol 1 defaults.
 - Exact sets preserve holes: `low, high` does not imply `medium`. Off is distinct
@@ -77,7 +82,8 @@ public OpenAI qualification does not establish Codex support.
 | OpenRouter | Exact enabled effort in nested `reasoning`, or `enabled: true` for a boolean-only contract; Off omits the object (provider default, **not** guaranteed disabled). Mandatory endpoints reject explicit core Off; summaries select their advertised default. |
 | Together | Typed `reasoning.enabled`, plus effort only when its profile supports it |
 | Google native | Native thinking level or token-budget control, according to the selected capability; unsupported Off is not silently omitted |
-| Anthropic / Bedrock token thinking | Native enabled thinking and token budget; budget must leave output space for an answer |
+| Anthropic adaptive inventory | Native `thinking.type: adaptive` plus exact `output_config.effort`; `disabled` must be explicitly supported for Off |
+| Anthropic / Bedrock token thinking | Native enabled thinking and declaration-owned token budget; budget must leave output space for an answer |
 
 The pinned direct `deepseek-flash` supplement names DeepSeek V4.1 Flash and
 preserves Off/low/high/max, without inventing medium, xhigh, or a default. Source

@@ -15,6 +15,16 @@ enum SetupRoute {
     ApiKey,
     Subscription,
     Local,
+    /// Offered only when octet has something saved to remove.
+    Remove,
+}
+
+/// What a finished or abandoned setup wizard asks its caller to do.
+pub(super) enum SetupOutcome {
+    Configured(Box<SetupResult>),
+    /// The user chose to remove a saved provider or sign-in. The caller owns the
+    /// state removal needs (the active model, the catalog).
+    Remove,
 }
 
 async fn choose_route<S>(
@@ -24,31 +34,31 @@ async fn choose_route<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let removable = !super::provider_removal::removable_entries().is_empty();
+    let mut choices: Vec<String> = FIRST_RUN_CHOICES
+        .iter()
+        .map(|choice| (*choice).to_owned())
+        .collect();
+    let mut descriptions = vec![
+        Some("Choose a provider and paste its API key; no environment variables needed".into()),
+        Some("Use an existing ChatGPT or GitHub Copilot subscription".into()),
+        Some("Set up LM Studio or an OpenAI-compatible endpoint".into()),
+        Some("Open read-only without writing provider data".into()),
+    ];
+    if removable {
+        choices.push("Remove a provider or sign-in".to_owned());
+        descriptions.push(Some(
+            "Delete a saved key, sign-in or custom provider".into(),
+        ));
+    }
     Ok(
-        match provider_setup_picker(
-            shell,
-            input,
-            "Set up a provider",
-            FIRST_RUN_CHOICES
-                .iter()
-                .map(|choice| (*choice).to_owned())
-                .collect(),
-            vec![
-                Some(
-                    "Choose a provider and paste its API key; no environment variables needed"
-                        .into(),
-                ),
-                Some("Use an existing ChatGPT or GitHub Copilot subscription".into()),
-                Some("Set up LM Studio or an OpenAI-compatible endpoint".into()),
-                Some("Open read-only without writing provider data".into()),
-            ],
-            0,
-        )
-        .await?
+        match provider_setup_picker(shell, input, "Set up a provider", choices, descriptions, 0)
+            .await?
         {
             Some(0) => Some(SetupRoute::ApiKey),
             Some(1) => Some(SetupRoute::Subscription),
             Some(2) => Some(SetupRoute::Local),
+            Some(4) if removable => Some(SetupRoute::Remove),
             _ => None,
         },
     )
@@ -74,6 +84,9 @@ pub(super) struct SetupResult {
 enum SetupTarget {
     Endpoint(&'static str),
     ModelPrefix(&'static str),
+    /// An exact `<namespace>/<model>` prefix, so one provider id can never be
+    /// satisfied by a longer id that merely starts with the same text.
+    ModelNamespace(&'static str),
 }
 
 impl SetupTarget {
@@ -81,6 +94,9 @@ impl SetupTarget {
         catalog.models().any(|model| match self {
             Self::Endpoint(endpoint) => model.endpoint.0 == endpoint,
             Self::ModelPrefix(prefix) => model.id.0.starts_with(prefix),
+            Self::ModelNamespace(namespace) => {
+                model.id.0.split_once('/').map(|(prefix, _)| prefix) == Some(namespace)
+            }
         })
     }
 }
@@ -101,16 +117,51 @@ pub(super) async fn run_setup(
     input: &mut EventStream,
     boot: &mut Bootstrap,
 ) -> anyhow::Result<()> {
-    if let Some(result) = configure(shell, input, &boot.config, true).await? {
-        let notice = match &result.model {
-            Some(model) => format!("provider setup saved · {}", model.0),
-            None => "provider configured; select a model to get started".to_owned(),
-        };
-        install_result(boot, result);
-        shell.set_runtime_config(boot.config.clone());
-        shell.clear_error();
-        shell.notice(notice);
-        shell.render();
+    match configure(shell, input, &boot.config, true).await? {
+        Some(SetupOutcome::Configured(result)) => {
+            let result = *result;
+            let notice = match &result.model {
+                Some(model) => format!("provider setup saved · {}", model.0),
+                None => "provider configured; select a model to get started".to_owned(),
+            };
+            install_result(boot, result);
+            shell.set_runtime_config(boot.config.clone());
+            shell.clear_error();
+            shell.notice(notice);
+            shell.render();
+        }
+        // With no model configured there is no active provider to protect, so
+        // any saved credential can be removed here (a stale key is the usual
+        // reason to want that).
+        Some(SetupOutcome::Remove) => {
+            if let Some(entry) =
+                super::provider_removal::pick_confirmed_entry(shell, input, None).await?
+            {
+                if let Some((catalog, notes, notice)) = super::provider_removal::delete_and_rebuild(
+                    shell,
+                    input,
+                    &entry,
+                    boot.config.offline,
+                )
+                .await?
+                {
+                    install_result(
+                        boot,
+                        SetupResult {
+                            catalog,
+                            notes,
+                            model: None,
+                            configured_endpoint: None,
+                        },
+                    );
+                    shell.set_runtime_config(boot.config.clone());
+                    shell.clear_error();
+                    shell.notice(notice);
+                    shell.render();
+                }
+            }
+        }
+        None => {}
     }
     Ok(())
 }
@@ -122,12 +173,13 @@ pub(super) async fn configure(
     input: &mut EventStream,
     config: &Config,
     persist_local_model: bool,
-) -> anyhow::Result<Option<SetupResult>> {
+) -> anyhow::Result<Option<SetupOutcome>> {
     while !shell.close_requested() {
         let Some(route) = choose_route(shell, input).await? else {
             return Ok(None);
         };
         let result = match route {
+            SetupRoute::Remove => return Ok(Some(SetupOutcome::Remove)),
             SetupRoute::Local => guided_provider_setup(shell, input, config, persist_local_model)
                 .await?
                 .map(|completed| SetupResult {
@@ -155,8 +207,8 @@ pub(super) async fn configure(
                 refresh_catalog(shell, input, config.offline, target).await?
             }
         };
-        if result.is_some() {
-            return Ok(result);
+        if let Some(result) = result {
+            return Ok(Some(SetupOutcome::Configured(Box::new(result))));
         }
     }
     Ok(None)
@@ -194,7 +246,7 @@ where
             model: None,
             configured_endpoint: match target {
                 SetupTarget::Endpoint(endpoint) => Some(endpoint),
-                SetupTarget::ModelPrefix(_) => None,
+                SetupTarget::ModelPrefix(_) | SetupTarget::ModelNamespace(_) => None,
             },
         })),
         Ok(_) => {
@@ -387,11 +439,38 @@ where
     Ok(false)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Subscription {
     ChatGpt,
     Copilot,
+    /// One of the providers driven by the shared subscription framework.
+    Shared(std::sync::Arc<dyn crate::auth::subscription::flow::SubscriptionFlow>),
 }
+
+/// Menu labels for the subscription logins the shared framework owns.
+///
+/// Derived from the registry rather than written out here, so a provider added
+/// to the framework appears in onboarding without a second edit. The copy is
+/// the one thing that cannot be derived: it says what the user is buying, which
+/// is the question they are actually answering at this menu.
+const SHARED_SUBSCRIPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "grok",
+        "Grok (xAI subscription)",
+        "Sign in with SuperGrok or X Premium",
+    ),
+    ("kimi", "Kimi Code", "Sign in with a Kimi Code plan"),
+    (
+        "meta",
+        "Meta (Muse subscription)",
+        "Sign in with a Meta plan",
+    ),
+    (
+        "openrouter",
+        "OpenRouter",
+        "Sign in to OpenRouter to create a key",
+    ),
+];
 
 async fn sign_in<S>(
     shell: &mut InteractiveShell,
@@ -401,34 +480,55 @@ async fn sign_in<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    let mut items = vec![
+        "ChatGPT (OpenAI Codex)".to_owned(),
+        "GitHub Copilot".to_owned(),
+    ];
+    items.extend(
+        SHARED_SUBSCRIPTIONS
+            .iter()
+            .map(|(_, label, _)| (*label).to_owned()),
+    );
+    items.push("Back".to_owned());
+
+    let mut descriptions = vec![
+        Some("OpenAI's hosted device login; available models depend on your account".to_owned()),
+        Some("GitHub.com's device login; only supported Copilot routes are offered".to_owned()),
+    ];
+    descriptions.extend(
+        SHARED_SUBSCRIPTIONS
+            .iter()
+            .map(|(_, _, description)| Some((*description).to_owned())),
+    );
+    descriptions.push(Some("Return without starting sign-in".to_owned()));
+
     let selection = provider_setup_picker(
         shell,
         input,
         "Sign in with a subscription",
-        vec![
-            "ChatGPT (OpenAI Codex)".into(),
-            "GitHub Copilot".into(),
-            "Back".into(),
-        ],
-        vec![
-            Some("OpenAI's hosted device login; available models depend on your account".into()),
-            Some("GitHub.com's device login; only supported Copilot routes are offered".into()),
-            Some("Return without starting sign-in".into()),
-        ],
+        items,
+        descriptions,
         0,
     )
     .await?;
     let subscription = match selection {
         Some(0) => Subscription::ChatGpt,
         Some(1) => Subscription::Copilot,
-        _ => return Ok(None),
+        Some(index) => match SHARED_SUBSCRIPTIONS
+            .get(index - 2)
+            .and_then(|(selector, _, _)| crate::auth::subscription::registry::resolve(selector))
+        {
+            Some(flow) => Subscription::Shared(flow),
+            None => return Ok(None),
+        },
+        None => return Ok(None),
     };
     if offline {
         shell.error("Subscription sign-in requires a connection. Restart without --offline to sign in, or choose an API key/local endpoint.".into());
         shell.render();
         return Ok(None);
     }
-    // Reuse the real host-owned flows, including their browser/device-code
+    // Reuse the real login flows, including their browser/device-code
     // fallback. No credentials are imported from other applications.
     shell.set_run_label("signing in…");
     shell.render();
@@ -440,14 +540,18 @@ where
             Ok(false)
         }
         result = async {
-            match subscription {
+            match &subscription {
                 Subscription::ChatGpt => {
                     let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-                    crate::auth::codex::login(&store, false).await
+                    crate::auth::codex::login_without_prompt(&store).await
                 }
                 Subscription::Copilot => {
                     let store = crate::auth::copilot::CredentialStore::new(crate::auth::copilot::default_path()?);
                     crate::auth::copilot::login(&store, false).await
+                }
+                Subscription::Shared(flow) => {
+                    let store = crate::auth::subscription::store_for(flow);
+                    crate::auth::subscription::login::login(flow, &store, false).await
                 }
             }
         } => result.map(|()| true),
@@ -459,6 +563,10 @@ where
         Ok(true) => Ok(Some(match subscription {
             Subscription::ChatGpt => SetupTarget::Endpoint(crate::auth::codex::ENDPOINT_ID),
             Subscription::Copilot => SetupTarget::ModelPrefix("github-copilot/"),
+            // Verified by namespace: a subscription login may legitimately
+            // expose no models if the account has none, which must not read as
+            // a failure.
+            Subscription::Shared(flow) => SetupTarget::ModelNamespace(flow.provider_id()),
         })),
         Ok(false) => Ok(None),
         Err(_) => {

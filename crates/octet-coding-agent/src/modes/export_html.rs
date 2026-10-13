@@ -303,6 +303,26 @@ pub(crate) fn render(package: &Value, theme: &str) -> anyhow::Result<Vec<u8>> {
                 ));
             }
             message_parts(content, &mut html)?;
+        } else if record["type"] == "entry"
+            && matches!(
+                record["value"]["type"].as_str(),
+                Some("branch_summary" | "compaction")
+            )
+        {
+            let label = if record["value"]["type"] == "branch_summary" {
+                "Branch summary"
+            } else {
+                "Compaction summary"
+            };
+            html.push_str(&format!("<h2>{label}</h2>\n"));
+            if let Some(summary) = record["value"]["summary"].as_str() {
+                markdown(summary, &mut html);
+            }
+            if let Some(parent) = record["parent"].as_str().and_then(|id| anchors.get(id)) {
+                html.push_str(&format!(
+                    "<p class=\"notice\"><a href=\"#entry-{parent}\">Parent entry</a></p>\n"
+                ));
+            }
         } else if record["type"] == "usage_uncertainty" {
             html.push_str("<h2>Usage uncertain</h2><p>Recorded costs and tokens are known subtotals, not exact totals.</p>\n");
         }
@@ -435,6 +455,24 @@ mod tests {
             assert!(!html.contains("<script>"));
             assert!(html.contains("&lt;script&gt;tool output&lt;/script&gt;"));
         }
+    }
+
+    #[test]
+    fn native_branch_and_compaction_summaries_are_visible_and_inert() {
+        let package = json!({"metadata": {}, "records": [
+            {"type":"entry", "id":"b", "parent":null, "value": {
+                "type":"branch_summary", "summary":"**Branch handoff** <script>no</script>",
+                "from_entry":"foreign-head", "details":{"readFiles":[],"modifiedFiles":[]}}},
+            {"type":"entry", "id":"c", "parent":"b", "value": {
+                "type":"compaction", "summary":"## Compacted context"}}
+        ]});
+        let html = String::from_utf8(render(&package, "dark").unwrap()).unwrap();
+        assert!(html.contains("<h2>Branch summary</h2>"));
+        assert!(html.contains("<strong>Branch handoff</strong>"));
+        assert!(html.contains("<h2>Compaction summary</h2>"));
+        assert!(html.contains("<h2>Compacted context</h2>"));
+        assert!(html.contains("href=\"#entry-0\">Parent entry</a>"));
+        assert!(!html.contains("<script>"));
     }
 
     #[test]

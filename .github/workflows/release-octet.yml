@@ -43,7 +43,7 @@ jobs:
       core_workflow_commit: ${{ steps.release.outputs.core_workflow_commit }}
       mode: ${{ steps.release.outputs.mode }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - id: release
@@ -213,6 +213,38 @@ jobs:
             exit 1
           fi
 
+          # Qualification must name the immutable source, not this workflow's
+          # tooling SHA or a PR merge ref. Never accept an older successful run
+          # after a newer failure, or an incomplete/skipped required lane.
+          ci_run=$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$source_commit" -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
+          if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
+            echo "no source-bound CI qualification run for $source_commit" >&2
+            exit 1
+          fi
+          ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+            --jq '[.head_sha, .status, .conclusion] | @tsv')
+          if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
+            echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+            exit 1
+          fi
+          ci_jobs=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | [.name, .conclusion] | @tsv')
+          for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
+            'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
+            extension-api-v03 msrv smoke-install; do
+            qualified=$(awk -F '\t' -v check="$check" \
+              '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
+            if [[ "$qualified" != yes ]]; then
+              echo "CI run $ci_run lacks a successful required lane: $check" >&2
+              exit 1
+            fi
+          done
+          echo "qualified immutable source $source_commit with CI run $ci_run"
+
           if [[ "$mode" != installer ]]; then
             if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then
               environment_name=stable-release-provider-acceptance
@@ -278,27 +310,18 @@ jobs:
     if: needs.resolve.outputs.mode == 'binaries'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: apps/web/.node-version
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
-      - uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad
+      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
-      - run: cargo audit --file extensions/octet-serve/Cargo.lock
       - run: cargo deny check
-      - run: cargo deny --manifest-path extensions/octet-serve/Cargo.toml check
-      - run: npm ci
-        working-directory: apps/web
-      - run: npm audit --audit-level=high
-        working-directory: apps/web
 
   build:
     name: Build ${{ matrix.target }}
@@ -317,12 +340,12 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - name: Check out immutable release source and tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           path: source
           fetch-depth: 0
-      # Keep release optimization independent from the workspace's 1.86 MSRV.
+      # Keep release optimization independent from the workspace's 1.88 MSRV.
       # This immutable action revision installs Rust 1.97.1.
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:
@@ -376,16 +399,95 @@ jobs:
             echo "release archive contains a local-only asset" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: octet-core-${{ matrix.target }}
           path: ${{ runner.temp }}/octet-release/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'binaries'
+    runs-on: windows-2022
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          path: source
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Verify release Rust compiler
+        shell: pwsh
+        run: |
+          if ((rustc --version) -notmatch '^rustc 1\.97\.1(?: |$)' -or $LASTEXITCODE -ne 0) { throw 'unexpected Rust compiler' }
+      - name: Build and smoke-test native Windows binaries
+        working-directory: source
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p octet-coding-agent --bins
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
+          $release = 'target/x86_64-pc-windows-msvc/release'
+          if ((& "$release/octet.exe" --version) -ne "octet $env:VERSION") { throw 'Windows version smoke test failed' }
+          $request = '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}'
+          $hello = $request | & "$release/octet-host.exe"
+          if ($LASTEXITCODE -ne 0 -or $hello -notmatch '"type":"hello"') { throw 'Windows host smoke test failed' }
+      - name: Qualify native MSVC runtime and terminal
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC process qualification failed' }
+      - name: Package and qualify the MSVC archive
+        working-directory: source
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'target/x86_64-pc-windows-msvc/release'
+          python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+          python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release-repeat" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows repeat packaging failed' }
+          $name = "octet-$env:VERSION-x86_64-pc-windows-msvc"
+          $archive = "$env:RUNNER_TEMP/octet-release/$name.zip"
+          if ((Get-FileHash $archive).Hash -ne (Get-FileHash "$env:RUNNER_TEMP/octet-release-repeat/$name.zip").Hash) { throw 'Windows archives differ' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/windows-packaged"
+          $package = Join-Path "$env:RUNNER_TEMP/windows-packaged" $name
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            if ((& "$package/octet.exe" --version) -ne "octet $env:VERSION" -or $LASTEXITCODE -ne 0) { throw 'Packaged Windows version failed' }
+            $request = '{"protocol_version":1,"request_id":"packaged-smoke","command":"hello"}'
+            $hello = $request | & "$package/octet-host.exe"
+            if ($LASTEXITCODE -ne 0 -or ($hello | ConvertFrom-Json).type -ne 'hello') { throw 'Packaged Windows host failed' }
+          } finally {
+            $env:PATH = $savedPath
+          }
+          # Test the exact executable extracted from the publishable ZIP.
+          $env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged MSVC ConPTY qualification failed' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: octet-core-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/octet-release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Sign and attach octet binaries
-    needs: [resolve, build]
+    needs: [resolve, build, build-windows]
     if: needs.resolve.outputs.mode == 'binaries'
     runs-on: ubuntu-24.04
     # Human approval is required only when the immutable artifacts are ready to
@@ -400,11 +502,11 @@ jobs:
       id-token: write
     steps:
       - name: Check out immutable release source and tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: octet-core-*
           path: release-assets
@@ -456,9 +558,10 @@ jobs:
           grep -F "release_source_commit=\"$SOURCE_COMMIT\"" release-assets/install-octet.sh
           grep -F "release_workflow_commit=\"$WORKFLOW_COMMIT\"" release-assets/install-octet.sh
           release-assets/install-octet.sh --help | grep -F "Install octet ${{ needs.resolve.outputs.version }}."
-          ls -la release-assets/
+          cp scripts/install-octet.ps1 release-assets/install-octet.ps1
           ls -la release-assets/
           test "$(find release-assets -maxdepth 1 -name 'octet-*.tar.gz' | wc -l | tr -d ' ')" = 3
+          test "$(find release-assets -maxdepth 1 -name 'octet-*.zip' | wc -l | tr -d ' ')" = 1
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
@@ -468,8 +571,8 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum ./*.tar.gz ./install-octet.sh | sort -k2 > OCTET_SHA256SUMS
-          for artifact in ./*.tar.gz ./install-octet.sh; do
+          sha256sum ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1 | sort -k2 > OCTET_SHA256SUMS
+          for artifact in ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1; do
             cosign sign-blob \
               --yes \
               --bundle "${artifact}.sigstore.json" \
@@ -498,7 +601,7 @@ jobs:
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
-          for artifact in ./*.tar.gz ./install-octet.sh; do
+          for artifact in ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1; do
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               "${verify[@]}" \
@@ -529,7 +632,8 @@ jobs:
             "$WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
             release-assets/OCTET_SHA256SUMS \
-            release-assets/OCTET_RELEASE_METADATA.json
+            release-assets/OCTET_RELEASE_METADATA.json \
+            --include-windows-msvc
           cosign sign-blob \
             --yes \
             --bundle release-assets/OCTET_RELEASE_METADATA.json.sigstore.json \
@@ -687,10 +791,6 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"published-smoke","command":"hello"}' \
             | HOME="$test_home" "$host_binary" \
             | grep -F '"type":"hello"' >/dev/null
-          HOME="$test_home" "$binary" extension install octet-serve
-          HOME="$test_home" "$binary" extension list | grep -F "octet-serve"
-          HOME="$test_home" "$binary" extension remove octet-serve
-          test ! -e "$test_home/.octet/extensions/octet-serve"
 
   package-npm:
     name: Package verified npm artifacts
@@ -703,13 +803,13 @@ jobs:
       contents: read
     steps:
       - name: Check out immutable release tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           path: source
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: source/apps/web/.node-version
+          node-version: "22.13.0"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
           cosign-release: v3.1.3
@@ -732,8 +832,12 @@ jobs:
             --clobber \
             --pattern 'install-octet.sh' \
             --pattern 'install-octet.sh.sigstore.json' \
+            --pattern 'install-octet.ps1' \
+            --pattern 'install-octet.ps1.sigstore.json' \
             --pattern "octet-$VERSION-*.tar.gz" \
             --pattern "octet-$VERSION-*.tar.gz.sigstore.json" \
+            --pattern "octet-$VERSION-*.zip" \
+            --pattern "octet-$VERSION-*.zip.sigstore.json" \
             --pattern 'OCTET_SHA256SUMS' \
             --pattern 'OCTET_SHA256SUMS.sigstore.json' \
             --pattern 'OCTET_RELEASE_METADATA.json' \
@@ -760,7 +864,7 @@ jobs:
           }
           verify_release_blob OCTET_SHA256SUMS.sigstore.json OCTET_SHA256SUMS
           verify_release_blob OCTET_RELEASE_METADATA.json.sigstore.json OCTET_RELEASE_METADATA.json
-          for artifact in ./*.tar.gz ./install-octet.sh; do
+          for artifact in ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1; do
             name=${artifact#./}
             verify_release_blob "$name.sigstore.json" "$name"
           done
@@ -772,7 +876,8 @@ jobs:
             "$CORE_WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
             OCTET_SHA256SUMS \
-            "$RUNNER_TEMP/recomputed-release-metadata.json"
+            "$RUNNER_TEMP/recomputed-release-metadata.json" \
+            --include-windows-msvc
           cmp OCTET_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
       - name: Build and validate npm tarballs from the verified assets
         shell: bash
@@ -805,7 +910,7 @@ jobs:
             "$VERSION" \
             "$RUNNER_TEMP/npm-assets" \
             --json > "$RUNNER_TEMP/npm-verification.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: octet-npm
           path: ${{ runner.temp }}/npm-assets/*
@@ -824,13 +929,13 @@ jobs:
       id-token: write
     steps:
       - name: Check out immutable release tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           path: source
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: source/apps/web/.node-version
+          node-version: "22.13.0"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
           cosign-release: v3.1.3
@@ -856,7 +961,7 @@ jobs:
             --no-fund \
             "$npm_cli_archive"
           test "$(npm --version)" = "11.5.1"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: octet-npm
           path: npm-assets
@@ -889,8 +994,8 @@ jobs:
               raise SystemExit("npm manifest identity does not match the immutable candidate")
           if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None or re.fullmatch(r"[0-9a-f]{40}", workflow_commit) is None:
               raise SystemExit("npm manifest commit identity is malformed")
-          if len(manifest.get("packages", [])) != 4:
-              raise SystemExit("npm manifest does not describe all four packages")
+          if len(manifest.get("packages", [])) != 5:
+              raise SystemExit("npm manifest does not describe all five packages")
           PY
       - name: Preflight immutable npm versions
         shell: bash
@@ -902,7 +1007,8 @@ jobs:
             '@skaft/octet|octet-'"$VERSION"'.tgz' \
             '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
             '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
-            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz'; do
+            '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet-win32-x64|octet-win32-x64-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
             if existing=$(npm view "$package@$VERSION" dist.integrity --json --registry "$NPM_REGISTRY" 2>/dev/null); then
@@ -927,6 +1033,7 @@ jobs:
             '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
             '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
             '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet-win32-x64|octet-win32-x64-'"$VERSION"'.tgz' \
             '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             if npm view "$package@$VERSION" version --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
@@ -953,6 +1060,7 @@ jobs:
             '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
             '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
             '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet-win32-x64|octet-win32-x64-'"$VERSION"'.tgz' \
             '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
@@ -1060,11 +1168,11 @@ jobs:
       contents: read
     steps:
       - name: Check out immutable verifier
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version-file: apps/web/.node-version
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+          node-version: "22.13.0"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: octet-npm
           path: npm-assets
@@ -1083,6 +1191,7 @@ jobs:
             '@skaft/octet-darwin-arm64|octet-darwin-arm64-'"$VERSION"'.tgz' \
             '@skaft/octet-darwin-x64|octet-darwin-x64-'"$VERSION"'.tgz' \
             '@skaft/octet-linux-x64-gnu|octet-linux-x64-gnu-'"$VERSION"'.tgz' \
+            '@skaft/octet-win32-x64|octet-win32-x64-'"$VERSION"'.tgz' \
             '@skaft/octet|octet-'"$VERSION"'.tgz'; do
             IFS='|' read -r package artifact <<< "$descriptor"
             expected=$(node -e 'const fs=require("fs"); const crypto=require("crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));' "npm-assets/$artifact")
@@ -1149,7 +1258,7 @@ jobs:
           - os: macos-15
             target: macOS Apple silicon
     steps:
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.13.0
       - name: Install the exact public launcher without lifecycle scripts
@@ -1186,7 +1295,7 @@ jobs:
       id-token: write
     steps:
       - name: Check out immutable release source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
@@ -1298,9 +1407,11 @@ jobs:
           manifest_path, release_path, version = sys.argv[1:4]
           expected = {
               "install-octet.sh",
+              "install-octet.ps1",
               f"octet-{version}-aarch64-apple-darwin.tar.gz",
               f"octet-{version}-x86_64-apple-darwin.tar.gz",
               f"octet-{version}-x86_64-unknown-linux-gnu.tar.gz",
+              f"octet-{version}-x86_64-pc-windows-msvc.zip",
           }
           pattern = re.compile(r"^([0-9a-f]{64})  \./([A-Za-z0-9_.-]+)$")
           entries = {}
@@ -1478,7 +1589,3 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"portable-installer-smoke","command":"hello"}' \
             | HOME="$test_home" "$host_binary" \
             | grep -F "\"sdk_version\":\"$VERSION\"" >/dev/null
-          HOME="$test_home" "$binary" extension install octet-serve
-          HOME="$test_home" "$binary" extension list | grep -F "octet-serve"
-          HOME="$test_home" "$binary" extension remove octet-serve
-          test ! -e "$test_home/.octet/extensions/octet-serve"

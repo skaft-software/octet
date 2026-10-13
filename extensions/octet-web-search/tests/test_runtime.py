@@ -173,6 +173,7 @@ def initialize():
                 "commands": ["web-search"],
                 "ui": ["status"],
                 "presentation": True,
+                "menu": True,
             },
             "protocol": {
                 "version": "0.4",
@@ -434,6 +435,58 @@ class RuntimeTests(unittest.TestCase):
                 module.collect_status({"surface": "status"})["text"],
                 "web · SearXNG",
             )
+
+    def test_the_menu_offers_brave_first_and_logs_out_only_with_a_stored_key(self):
+        module = load_extension()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            module.RUNTIME = module.Runtime(root / "config.json", StubService(), root / "brave.key")
+            fresh = module.web_search_menu({}, {})
+            self.assertEqual(fresh["status"], {"state": "empty", "label": "Not set up"})
+            self.assertEqual(
+                [(item["id"], item["arguments"]) for item in fresh["items"]],
+                [("brave", ["setup", "brave"]), ("searxng", ["setup", "searxng"]),
+                 ("status", ["status"])],
+            )
+            self.assertTrue(fresh["items"][0]["recommended"])
+            self.assertIn("api.search.brave.com", fresh["detail"])
+
+            module.RUNTIME.store_brave_api_key("fixture-api-key")
+            module.RUNTIME.select_provider("brave")
+            ready = module.web_search_menu({}, {})
+            self.assertEqual(ready["status"], {"state": "active", "label": "Using Brave Search"})
+            self.assertEqual(ready["items"][0]["label"], "Brave Search (selected)")
+            self.assertFalse(any(item.get("recommended") for item in ready["items"]))
+            self.assertNotIn("detail", ready)
+            logout = ready["items"][-1]
+            self.assertEqual((logout["arguments"], logout["destructive"]), (["logout"], True))
+            self.assertNotIn("fixture-api-key", json.dumps(ready))
+
+    def test_the_searxng_endpoint_can_be_replaced_keeping_its_other_settings(self):
+        module = load_extension()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "version": 1,
+                "provider": {"kind": "searxng", "endpoint": "http://127.0.0.1:8888/search",
+                             "label": "Home SearXNG", "allow_private_endpoint": True},
+            }), encoding="utf-8")
+            config.chmod(0o600)
+            module.RUNTIME = module.Runtime(config, StubService(), root / "brave.key")
+            menu = module.web_search_menu({}, {})
+            self.assertIn("endpoint", [item["id"] for item in menu["items"]])
+            with mock.patch.object(module.ext, "request_input",
+                                   return_value="http://127.0.0.1:9999/search") as ask:
+                result = module.web_search_command(["endpoint"], {})
+            ask.assert_called_once_with("SearXNG JSON search endpoint:", secret=False)
+            self.assertIn("SearXNG selected with the new endpoint", result["text"])
+            saved = json.loads(config.read_text(encoding="utf-8"))["provider"]
+            self.assertEqual(saved, {"kind": "searxng", "endpoint": "http://127.0.0.1:9999/search",
+                                     "label": "Home SearXNG", "allow_private_endpoint": True})
+            with mock.patch.object(module.ext, "request_input", return_value=None):
+                unchanged = module.web_search_command(["endpoint"], {})
+            self.assertEqual(unchanged["text"], "SearXNG endpoint unchanged.")
 
     def test_rejected_brave_key_is_removed_without_becoming_result_data(self):
         module = load_extension()

@@ -248,7 +248,7 @@ pub(super) fn sampling(model: &Model, req: &Request, body: &mut Value) -> Result
     if qualified
         && matches!(
             model.spec.api_name.as_str(),
-            "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+            "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
         )
     {
         let effective = match req

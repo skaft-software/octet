@@ -86,23 +86,66 @@ impl Delivery {
     /// Cancellation of a partial frame must close the protocol stream: it can
     /// never be completed later in a replacement session or replayed. Already
     /// written bytes cannot be rolled back, just like other protocol writes.
+    ///
+    /// A delivery invalidated before its first byte is written leaves the
+    /// stream clean, so it is only dropped ([`BusWrite::Dropped`]): the same
+    /// outcome as the writer's earlier skip of a stale queued frame. Otherwise
+    /// a session switch that fences a delivery in flight would tear down a
+    /// surviving peer. The one pre-write failure that stays fatal is an expired
+    /// *control* notice: the peer would be left with a stale lifecycle view.
     pub(super) async fn guard_write(
         &self,
         write: impl std::future::Future<Output = Result<(), String>>,
-    ) -> Result<(), String> {
+    ) -> Result<BusWrite, String> {
         if !self.is_current() {
-            return Err("bus delivery invalidated before write".into());
+            return if self.control_expired() {
+                Err("bus delivery invalidated before write".into())
+            } else {
+                Ok(BusWrite::Dropped)
+            };
         }
+        let started = AtomicBool::new(false);
+        let write = async {
+            started.store(true, Ordering::Release);
+            write.await
+        };
         let remaining = Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64)
             .saturating_sub(self.queued.elapsed());
         tokio::select! {
             biased;
-            _ = self.topic_cancelled.cancelled() => Err("bus publisher/session invalidated during write".into()),
-            _ = self.subscription_cancelled.cancelled() => Err("bus subscription invalidated during write".into()),
-            _ = tokio::time::sleep(remaining) => Err("bus delivery expired during write".into()),
-            result = write => result,
+            _ = self.topic_cancelled.cancelled() => {
+                if started.load(Ordering::Acquire) {
+                    Err("bus publisher/session invalidated during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            _ = self.subscription_cancelled.cancelled() => {
+                if started.load(Ordering::Acquire) {
+                    Err("bus subscription invalidated during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                if started.load(Ordering::Acquire) || self.control {
+                    Err("bus delivery expired during write".into())
+                } else {
+                    Ok(BusWrite::Dropped)
+                }
+            }
+            result = write => result.map(|()| BusWrite::Written),
         }
     }
+}
+
+/// Outcome of a guarded bus write that did not fail the stream.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BusWrite {
+    /// The whole frame was written and flushed.
+    Written,
+    /// The delivery went stale before any byte was written; nothing was sent.
+    Dropped,
 }
 impl Drop for Delivery {
     fn drop(&mut self) {
@@ -743,6 +786,10 @@ impl ExtensionEventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_process::tests::{
+        insert_test_parent, protocol_read_state_for_test, test_resource_owner, wave1_error,
+        wave1_line,
+    };
     use serde_json::json;
 
     fn peer(name: &str, capacity: usize) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
@@ -931,6 +978,96 @@ mod tests {
         assert_eq!(event["method"], "bus/event");
         assert_eq!(event["params"]["sequence"], 1);
         assert!(lock_std_mutex(&beta.reader.child_requests).is_empty());
+    }
+
+    fn test_delivery(control: bool, age: Duration) -> Delivery {
+        let budget = Arc::new(Budget::default());
+        budget.messages.fetch_add(1, Ordering::AcqRel);
+        Delivery {
+            budget,
+            bytes: 0,
+            topic_cancelled: CancellationToken::default(),
+            subscription_cancelled: CancellationToken::default(),
+            closed: Arc::new(AtomicBool::new(false)),
+            draining: Arc::new(AtomicBool::new(false)),
+            queued: Instant::now().checked_sub(age).expect("monotonic clock"),
+            control,
+        }
+    }
+
+    async fn never_polled() -> Result<(), String> {
+        panic!("a delivery invalidated before its write must not start writing")
+    }
+
+    #[tokio::test]
+    async fn a_delivery_invalidated_before_any_byte_is_dropped_not_fatal() {
+        // The fence in a session switch cancels deliveries already queued. If
+        // that lands between the writer's skip check and the write, nothing has
+        // been written, so the peer's stream must stay open.
+        for (control, invalidate) in [(false, 0), (false, 1), (false, 2), (true, 0), (true, 1)] {
+            let delivery = test_delivery(control, Duration::ZERO);
+            match invalidate {
+                0 => delivery.subscription_cancelled.cancel(),
+                1 => delivery.topic_cancelled.cancel(),
+                _ => delivery.draining.store(true, Ordering::Release),
+            }
+            assert_eq!(
+                delivery.guard_write(never_polled()).await,
+                Ok(BusWrite::Dropped),
+                "control={control} invalidate={invalidate}"
+            );
+        }
+        let expired = test_delivery(
+            false,
+            Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64 + 1),
+        );
+        assert_eq!(
+            expired.guard_write(never_polled()).await,
+            Ok(BusWrite::Dropped)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_control_notice_still_fails_the_stream_closed() {
+        let delivery = test_delivery(
+            true,
+            Duration::from_millis(api_v03::MAX_BUS_MESSAGE_AGE_MS as u64 + 1),
+        );
+        assert_eq!(
+            delivery.guard_write(never_polled()).await,
+            Err("bus delivery invalidated before write".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_after_the_write_began_fails_the_stream_closed() {
+        // Bytes may already be in the pipe: the frame can never be completed.
+        let delivery = test_delivery(false, Duration::ZERO);
+        let token = delivery.subscription_cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            token.cancel();
+        });
+        let result = delivery
+            .guard_write(async { std::future::pending::<Result<(), String>>().await })
+            .await;
+        assert_eq!(
+            result,
+            Err("bus subscription invalidated during write".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_current_delivery_writes_normally() {
+        let delivery = test_delivery(false, Duration::ZERO);
+        assert_eq!(
+            delivery.guard_write(async { Ok(()) }).await,
+            Ok(BusWrite::Written)
+        );
+        let failed = test_delivery(false, Duration::ZERO)
+            .guard_write(async { Err("broken pipe".to_owned()) })
+            .await;
+        assert_eq!(failed, Err("broken pipe".to_owned()));
     }
 
     #[test]
@@ -1233,6 +1370,285 @@ mod tests {
                 "no complete stale frame: {action}"
             );
         }
+    }
+
+    fn remote_ui_test_state(
+        events: broadcast::Sender<ExtensionEvent>,
+    ) -> (ProtocolReadState, mpsc::Receiver<WriterFrame>) {
+        let (mut state, frames) =
+            protocol_read_state_for_test(ManifestContributions::default(), events);
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::new(Notify::new()))));
+        let mut protocol = write_std_lock(&state.protocol);
+        protocol.version = EXTENSION_API_VERSION_0_4.into();
+        protocol.features.insert(EXTENSION_FEATURE_REMOTE_UI.into());
+        drop(protocol);
+        insert_test_parent(&state, 7, Some(test_resource_owner("session")));
+        (state, frames)
+    }
+
+    fn commit_remote_ui_test_response(
+        state: &ProtocolReadState,
+        id: u64,
+        result: serde_json::Value,
+    ) {
+        let id = ExtensionRequestId::Number(id);
+        let prepared = lock_std_mutex(&state.child_requests)
+            .get(&id)
+            .unwrap()
+            .remote_ui
+            .as_ref()
+            .unwrap()
+            .prepare_response(Some(&result))
+            .unwrap()
+            .unwrap();
+        prepared.commit().unwrap();
+        settle_child_request(&state.child_requests, &id);
+    }
+
+    fn remote_ui_frame_line(revision: u64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","method":"ui/frame","params":{
+            "resource_owner":test_resource_owner("session"),"surface_id":"demo","revision":revision,
+            "columns":80,"rows":24,"lines":["\u{1b}[38;2;255;128;0m🦀\u{1b}[0m"]
+        }})).unwrap()
+    }
+
+    #[test]
+    fn remote_ui_requires_api_v04_frontend_and_explicit_negotiation() {
+        for (version, bound, selected) in [
+            ("0.1", true, true),
+            ("0.2", true, true),
+            ("0.4", false, true),
+            ("0.4", true, false),
+        ] {
+            let (events, mut received) = broadcast::channel(8);
+            let (mut state, mut frames) = remote_ui_test_state(events);
+            write_std_lock(&state.protocol).version = version.into();
+            if !selected {
+                write_std_lock(&state.protocol).features.clear();
+            }
+            if !bound {
+                state.remote_ui = Arc::new(RemoteUiMailbox::new(None));
+            }
+            handle_protocol_line(
+                &wave1_line(
+                    100,
+                    methods::UI_OPEN,
+                    serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"}),
+                ),
+                &state,
+            )
+            .unwrap();
+            assert_eq!(
+                wave1_error(&frames.try_recv().unwrap()),
+                (-32601, "unsupported_feature".into())
+            );
+            assert!(received.try_recv().is_err());
+        }
+        let base = r#"name = "remote-ui-negotiation"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "unused"
+"#;
+        for (version, offered, accepted) in [
+            ("0.2", true, false),
+            ("0.4", false, false),
+            ("0.4", true, true),
+        ] {
+            let manifest = ExtensionManifest::parse(&base.replace("0.4", version)).unwrap();
+            let response = InitializeResponse {
+                api_version: version.into(),
+                tools: vec![],
+                commands: vec![],
+                shortcuts: vec![],
+                tool_renderers: vec![],
+                protocol: Some(ExtensionProtocolResponse {
+                    session_snapshot_transport_v1: None,
+                    version: version.into(),
+                    features: API_0_2_REQUIRED_FEATURES
+                        .iter()
+                        .copied()
+                        .chain([EXTENSION_FEATURE_REMOTE_UI])
+                        .map(str::to_owned)
+                        .collect(),
+                    limits: ExtensionProtocolLimits {
+                        max_message_bytes: None,
+                        resource_refs_v1: None,
+                        max_concurrent_requests: 1,
+                    },
+                    lifecycle_events: vec![],
+                }),
+            };
+            assert_eq!(
+                negotiate_contributions_with_host_services(
+                    &manifest,
+                    response,
+                    1,
+                    OfferedHostServices {
+                        remote_ui: offered,
+                        ..OfferedHostServices::default()
+                    }
+                )
+                .is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn remote_ui_requests_are_typed_owner_fenced_and_cancel_pending_opens() {
+        let (events, mut received) = broadcast::channel(32);
+        let (state, mut frames) = remote_ui_test_state(events);
+        for (id, params, expected) in [
+            (
+                100,
+                serde_json::json!({"surface_id":"demo","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                101,
+                serde_json::json!({"parent_request_id":"7","surface_id":"demo","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                102,
+                serde_json::json!({"parent_request_id":7,"surface_id":"bad id","title":"Demo"}),
+                "invalid_request",
+            ),
+            (
+                103,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"\u{1b}[2J"}),
+                "invalid_request",
+            ),
+            (
+                104,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"x".repeat(129)}),
+                "bounds_exceeded",
+            ),
+            (
+                105,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"overlay"}),
+                "invalid_request",
+            ),
+            (
+                106,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo","placement":"footer","mouse_capture":true}),
+                "invalid_request",
+            ),
+        ] {
+            handle_protocol_line(&wave1_line(id, methods::UI_OPEN, params), &state).unwrap();
+            assert_eq!(
+                wave1_error(&frames.try_recv().unwrap()),
+                (-32602, expected.into())
+            );
+        }
+        handle_protocol_line(&wave1_line(110, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo","title":"Demo"
+        })), &state).unwrap();
+        assert!(
+            matches!(received.try_recv(), Ok(ExtensionEvent::RemoteUiRequested { owner, operation:
+            ExtensionRemoteUiOperation::Open { placement: crate::ExtensionRemoteUiPlacement::Fullscreen, .. }, .. })
+            if owner == test_resource_owner("session"))
+        );
+        handle_protocol_line(
+            br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":110}}"#,
+            &state,
+        )
+        .unwrap();
+        assert!(!state
+            .remote_ui
+            .contains(&test_resource_owner("session"), "demo"));
+        handle_protocol_line(br#"{"jsonrpc":"2.0","id":7,"result":{}}"#, &state).unwrap();
+        handle_protocol_line(&wave1_line(111, methods::UI_OPEN, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo","title":"Demo","placement":"footer"
+        })), &state).unwrap();
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::RemoteUiRequested { .. })
+        ));
+        commit_remote_ui_test_response(&state, 111, serde_json::json!({"columns":80,"rows":24}));
+        handle_protocol_line(&wave1_line(112, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("foreign"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert_eq!(
+            wave1_error(&frames.try_recv().unwrap()),
+            (-32002, "not_foreground_owner".into())
+        );
+        handle_protocol_line(&wave1_line(113, methods::UI_CLOSE, serde_json::json!({
+            "parent_request_id":7,"resource_owner":test_resource_owner("session"),"surface_id":"demo"
+        })), &state).unwrap();
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::RemoteUiRequested {
+                operation: ExtensionRemoteUiOperation::Close { .. },
+                ..
+            })
+        ));
+        commit_remote_ui_test_response(&state, 113, serde_json::json!({}));
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(!state
+            .remote_ui
+            .contains(&test_resource_owner("session"), "demo"));
+    }
+
+    #[tokio::test]
+    async fn remote_ui_frames_wake_latest_mailboxes_not_broadcast_and_enforce_full_boundary() {
+        let (events, mut received) = broadcast::channel(32);
+        let (mut state, _frames) = remote_ui_test_state(events);
+        let wake = Arc::new(Notify::new());
+        state.remote_ui = Arc::new(RemoteUiMailbox::new(Some(Arc::clone(&wake))));
+        handle_protocol_line(
+            &wave1_line(
+                100,
+                methods::UI_OPEN,
+                serde_json::json!({"parent_request_id":7,"surface_id":"demo","title":"Demo"}),
+            ),
+            &state,
+        )
+        .unwrap();
+        received.try_recv().unwrap();
+        commit_remote_ui_test_response(&state, 100, serde_json::json!({"columns":80,"rows":24}));
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .unwrap();
+        for revision in 0..1000 {
+            handle_protocol_line(&remote_ui_frame_line(revision), &state).unwrap();
+        }
+        tokio::time::timeout(Duration::from_millis(100), wake.notified())
+            .await
+            .unwrap();
+        assert!(
+            received.try_recv().is_err(),
+            "accepted frames never enter the event broadcast"
+        );
+        let latest = state.remote_ui.take_frames();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].revision, 999);
+        let mut exact = remote_ui_frame_line(1000);
+        exact.resize(DEFAULT_EXTENSION_MESSAGE_BYTES - 1, b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert_eq!(state.remote_ui.take_frames()[0].revision, 1000);
+        exact.push(b' ');
+        handle_protocol_line(&exact, &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ExtensionEvent::Diagnostic { .. })
+        ));
+        let mut stale: serde_json::Value =
+            serde_json::from_slice(&remote_ui_frame_line(1001)).unwrap();
+        for (field, value) in [
+            ("columns", serde_json::json!(81)),
+            ("revision", serde_json::json!(999)),
+        ] {
+            stale["params"][field] = value;
+            handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+            assert!(state.remote_ui.take_frames().is_empty());
+            received.try_recv().unwrap();
+        }
+        stale["params"]["resource_owner"]["process_generation"] = 0.into();
+        handle_protocol_line(&serde_json::to_vec(&stale).unwrap(), &state).unwrap();
+        assert!(state.remote_ui.take_frames().is_empty());
     }
 
     #[test]

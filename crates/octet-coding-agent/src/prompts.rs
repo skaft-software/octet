@@ -55,6 +55,7 @@ struct PromptTemplate {
 #[derive(Clone, Debug, Default)]
 pub struct PromptRegistry {
     templates: Arc<[PromptTemplate]>,
+    resource_lease: Option<crate::extensions::resource_paths::ResourceLease>,
     descriptors: Arc<[PromptTemplateDescriptor]>,
     diagnostics: Arc<[PromptDiagnostic]>,
 }
@@ -315,6 +316,19 @@ fn source_files(source: &PromptSource) -> Result<Vec<PathBuf>, PromptError> {
 }
 
 impl PromptRegistry {
+    pub(crate) fn with_resource_lease(
+        mut self,
+        lease: crate::extensions::resource_paths::ResourceLease,
+    ) -> Self {
+        self.resource_lease = Some(lease);
+        self
+    }
+    fn resource_current(&self) -> bool {
+        self.resource_lease
+            .as_ref()
+            .is_none_or(|lease| lease.is_current())
+    }
+
     #[cfg(test)]
     /// Build a registry from low-to-high precedence sources. Later sources
     /// replace earlier templates with the same name.
@@ -351,6 +365,7 @@ impl PromptRegistry {
             .collect::<Vec<_>>();
         Self {
             templates: Arc::from(templates),
+            resource_lease: None,
             descriptors: Arc::from(descriptors),
             diagnostics: Arc::from(diagnostics),
         }
@@ -405,6 +420,7 @@ impl PromptRegistry {
             .collect::<Vec<_>>();
         Self {
             templates: Arc::from(templates),
+            resource_lease: None,
             descriptors: Arc::from(descriptors),
             diagnostics: Arc::from(diagnostics),
         }
@@ -418,7 +434,11 @@ impl PromptRegistry {
     }
 
     pub fn descriptors(&self) -> Arc<[PromptTemplateDescriptor]> {
-        self.descriptors.clone()
+        if self.resource_current() {
+            self.descriptors.clone()
+        } else {
+            Arc::from([])
+        }
     }
 
     pub fn diagnostics(&self) -> Arc<[PromptDiagnostic]> {
@@ -426,6 +446,9 @@ impl PromptRegistry {
     }
 
     pub fn contains(&self, name: &str) -> bool {
+        if !self.resource_current() {
+            return false;
+        }
         self.templates
             .binary_search_by(|template| template.descriptor.name.as_str().cmp(name))
             .is_ok()
@@ -437,6 +460,9 @@ impl PromptRegistry {
         arguments: &str,
         context: &PromptRenderContext<'_>,
     ) -> Result<RenderedPrompt, PromptError> {
+        if !self.resource_current() {
+            return Err(PromptError::Expansion("resource source retired".into()));
+        }
         let template = self
             .templates
             .binary_search_by(|template| template.descriptor.name.as_str().cmp(name))
@@ -448,6 +474,9 @@ impl PromptRegistry {
         let text = expand_octet_variables(&pi_expanded, arguments.trim(), context)?;
         if text.len() > MAX_EXPANDED_PROMPT_BYTES {
             return Err(PromptError::ExpandedTooLarge);
+        }
+        if !self.resource_current() {
+            return Err(PromptError::Expansion("resource source retired".into()));
         }
         Ok(RenderedPrompt {
             name: template.descriptor.name.clone(),

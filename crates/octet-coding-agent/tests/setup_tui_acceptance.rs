@@ -1,11 +1,11 @@
-#![cfg(unix)]
-
 //! Real-binary VT100 coverage for the first-run provider setup journey.
 //!
 //! Every process owns a disposable HOME, workspace, and session directory. The
 //! only endpoint used by the online cases is a fresh loopback listener. The
 //! tests never submit an inference request, use live credentials, or retain a
 //! secret in a fixture.
+
+#![cfg(unix)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -294,7 +294,8 @@ impl PtyOctet {
                         "auto_discover": false,
                         "models": [{
                             "api_name": "existing-model",
-                            "display_name": "Existing Model"
+                            "display_name": "Existing Model",
+                            "context_window": 32768
                         }]
                     }
                 }
@@ -768,6 +769,24 @@ fn choose_manual_model(
     let mut input = model.as_bytes().to_vec();
     input.push(b'\r');
     octet.terminal.write_input(&input);
+    answer_context_window(octet, parser, consumed, columns);
+}
+
+fn answer_context_window(
+    octet: &mut PtyOctet,
+    parser: &mut vt100::Parser,
+    consumed: &mut usize,
+    columns: u16,
+) {
+    // Models without a known effective context require an explicit positive
+    // limit before the reviewed transaction can be saved. In the tiny fixed
+    // fullscreen viewport the wrapped prompt label is clipped above the input
+    // row, so there the new (non-"Model ID:") input surface is the signal.
+    octet.wait_for_screen(parser, consumed, columns, WAIT, |screen| {
+        screen.contains("Effective context window in tokens")
+            || (screen.contains("more lines above") && !screen.contains("Model ID:"))
+    });
+    octet.terminal.write_input(b"32768\r");
 }
 
 fn assert_first_run_choices(screen: &str) {
@@ -1257,6 +1276,7 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
     );
 
     octet.terminal.write_input(b"\r");
+    answer_context_window(&mut octet, &mut parser, &mut consumed, columns);
     let review = octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
         screen.contains("Review provider setup") && screen.contains("Confirm and save")
     });
@@ -1302,11 +1322,15 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
         frame_count(&capture.output, FRAME_BEGIN),
         frame_count(&capture.output, FRAME_END)
     );
-    let alternate_screen = b"\x1b[?1049h";
-    assert!(!capture
-        .output
-        .windows(alternate_screen.len())
-        .any(|window| window == alternate_screen));
+    // The interactive renderer is fullscreen by default; the alternate screen
+    // must be left as often as it is entered so the terminal is restored.
+    let entered = frame_count(&capture.output, b"\x1b[?1049h");
+    let left = frame_count(&capture.output, b"\x1b[?1049l");
+    assert!(
+        entered > 0,
+        "fullscreen setup never entered the alternate screen"
+    );
+    assert_eq!(entered, left, "alternate screen was not left on exit");
 
     let registry = fs::read_to_string(octet.credentials_path()).expect("saved custom registry");
     assert!(registry.contains("fixture-model"));

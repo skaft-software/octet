@@ -132,7 +132,8 @@ mod tests {
     }
 
     fn ready_shell() -> InteractiveShell {
-        let shell = InteractiveShell::test_shell();
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_identity("custom", "custom/probe", "off");
         shell.state.borrow_mut().startup_card_started_at =
             Some(Instant::now() - Duration::from_secs(10));
         shell
@@ -141,6 +142,7 @@ mod tests {
     #[test]
     fn update_before_readiness_is_retained_for_the_first_splash() {
         let mut shell = InteractiveShell::test_shell();
+        shell.set_identity("custom", "custom/probe", "off");
         shell.state.borrow_mut().startup_pending = true;
         shell.startup_update_notifier()(release());
         assert!(shell.state.borrow().transcript.is_empty());
@@ -149,7 +151,7 @@ mod tests {
         let rows = welcome_card::render_welcome_card(&state, 100, 10, Instant::now());
         let text = strip_terminal_sequences(&rows.join("\n"));
         assert!(text.contains("↑ v9.8.7 available · run octet update"));
-        assert!(text.contains("/changelog · what's new"));
+        assert!(!text.contains("/changelog"));
     }
 
     #[test]
@@ -165,6 +167,7 @@ mod tests {
         let after = state.rendered_transcript(100).to_vec();
         assert!(!strip_terminal_sequences(&before.join("\n")).contains("octet update"));
         assert!(strip_terminal_sequences(&after.join("\n")).contains("octet update"));
+        assert_eq!(before.len(), after.len(), "update moved composer geometry");
         assert!(state.transcript.is_empty());
     }
 
@@ -301,10 +304,11 @@ splash_box = "#d97757"
                 .into_iter()
                 .map(move |unicode| (color, unicode))
         }) {
-            let shell =
+            let mut shell =
                 InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(
                     TerminalCapabilities::test(true, unicode, color),
                 ));
+            shell.set_identity("custom", "custom/probe", "off");
             {
                 let mut state = shell.state.borrow_mut();
                 state.startup_card_started_at = Some(Instant::now());
@@ -348,10 +352,12 @@ splash_box = "#d97757"
             } else {
                 crate::tui::theme::test_theme()
             };
-            let shell = InteractiveShell::test_shell_with_theme(theme);
+            let mut shell = InteractiveShell::test_shell_with_theme(theme);
+            shell.set_identity("custom", "custom/probe", "off");
             shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
             for width in [46, 80, 120] {
                 let mut occupied_before = None;
+                let mut initial_rows = None;
                 for update in [false, true] {
                     shell.state.borrow_mut().available_update = update.then(release);
                     let rows = welcome_card::render_welcome_card(
@@ -375,14 +381,6 @@ splash_box = "#d97757"
                             .unwrap()
                     };
                     let title = locate(&format!("octet v{}", env!("CARGO_PKG_VERSION")));
-                    assert_eq!(locate("/changelog"), (title.0 + 1, title.1));
-                    assert_eq!(
-                        plain
-                            .iter()
-                            .filter(|line| line.contains("/changelog"))
-                            .count(),
-                        1
-                    );
                     if update {
                         let (row, _) = locate(UPDATE_COMMAND);
                         let prefix = if plain[row].contains('↑') {
@@ -390,9 +388,13 @@ splash_box = "#d97757"
                         } else {
                             "Update:"
                         };
-                        assert_eq!(locate(prefix), (title.0 + 2, title.1));
+                        assert_eq!(locate(prefix), (title.0 + 1, title.1));
+                        assert!(!plain.join("\n").contains("/changelog"));
+                        assert_eq!(Some(rows.len()), initial_rows, "update added a row");
                     } else {
+                        assert_eq!(locate("/changelog"), (title.0 + 1, title.1));
                         assert!(!plain.join("\n").contains(UPDATE_COMMAND));
+                        initial_rows = Some(rows.len());
                     }
                     if framed {
                         assert!(plain.last().unwrap().starts_with('╰'));
@@ -522,7 +524,7 @@ splash_box = "#d97757"
     }
 
     #[test]
-    fn pi_startup_groups_both_release_hints_under_its_version() {
+    fn pi_startup_replaces_the_release_hint_without_adding_a_row() {
         let mut theme = crate::tui::theme::test_theme();
         theme.override_token("startup", "pi");
         let shell = InteractiveShell::test_shell_with_theme(theme);
@@ -541,8 +543,9 @@ splash_box = "#d97757"
                 .collect::<Vec<_>>();
             assert!(rows.len() <= height);
             assert!(plain[0].starts_with("octet v"));
-            assert!(plain[1].starts_with("/changelog"));
-            assert!(plain[2].contains(UPDATE_COMMAND));
+            assert!(plain[1].contains(UPDATE_COMMAND));
+            assert!(!plain.join("\n").contains("/changelog"));
+            assert_eq!(rows.len(), 6);
             assert!(!plain.join("\n").contains('`'));
         }
     }

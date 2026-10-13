@@ -20,7 +20,7 @@ Included:
 - Configurable generated output modalities. Completed clips arrive as
   `AgentEvent::OutputMedia`; `Agent::complete` retains committed clips in
   `RunOutput::media` and removes output from retried or rejected attempts.
-- Five built-in tools — `read`, `search`, `edit`, `write`, `bash` — registered through
+- Four built-in tools — `read`, `edit`, `write`, `bash` — registered through
   the same `Extension` boundary available to third-party tools.
 - A concrete `SandboxConfig`: relative paths use the workspace and hosts may
   enable trusted-local absolute/`~/`/external paths, or opt into a workspace-only

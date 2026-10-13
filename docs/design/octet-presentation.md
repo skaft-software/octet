@@ -74,7 +74,7 @@ or yellow for mixed outcomes. Raw calls, arguments, worker prompts and costs
 remain hidden. On session hydration, durable call/results without worker
 telemetry yield a neutral “activity recorded” row, not a claim
 that a spawned child has completed; only proven orchestration failures colour
-that restored row as failed. `/subagents` retains the detailed roster,
+that restored row as failed. The worker list retains the detailed roster,
 reasons, usage, and read-only child transcripts after settlement. No duplicate
 pinned strip or automatic per-worker notices are created. This does not
 suppress ordinary tool/run failures or approval prompts, or alter model-visible
@@ -159,11 +159,12 @@ it exists.
 
 ## Interaction tone
 
-The default should be calm, dense under pressure, and precise about state. Any
-startup byte shimmer is subtle, non-blocking, finite, and safe to disable on
-limited or reduced-motion terminals. The complete byte remains identifiable
-without animation, and input never waits for it. Progressive
-disclosure keeps raw detail one action away without imposing a dashboard.
+The default should be calm, dense under pressure, and precise about state. The
+startup byte is static: its palette remains model/theme aware without decorative
+frame ticks. It stays identifiable in limited or reduced-motion terminals, and
+input never waits for it. Active-run Working/Thinking retain their liveness
+animations. Progressive disclosure keeps raw detail one action away without
+imposing a dashboard.
 
 A useful internal rule is: **calm by default, detail on demand, raw truth one
 keystroke away**. Themes and extensions must preserve the default

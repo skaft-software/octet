@@ -2,7 +2,7 @@
 
 This document defines how octet assigns capability ownership across host, extension, and delegated execution.
 
-> Scope: non-`octet-serve` extension-capability ownership. This reference does **not** revise protocol contracts.
+> Scope: extension-capability ownership. This reference does **not** revise protocol contracts.
 
 ## Capability classes and ownership
 
@@ -70,7 +70,7 @@ This document defines how octet assigns capability ownership across host, extens
 
 ## Trust and policy inheritance for extensions and children
 
-For non-`octet-serve` extension workflows, octet keeps ownership of policy and lifecycle while the extension owns domain behavior:
+For extension workflows, octet keeps ownership of policy and lifecycle while the extension owns domain behavior:
 
 - **Extensions are not trusted for policy authority.** They receive capability declarations, session context, and bounded broker services, but do not lower `EffectPolicy`.
 - **Enablement is explicit; trust follows host policy.** The coding product

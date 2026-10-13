@@ -1,5 +1,13 @@
 """Public exports for the octet Python extension SDK."""
 
+from .cache_warming import (
+    CacheWarmingAction,
+    CacheWarmingDecision,
+    CacheWarmingDecisionHandler,
+    CacheWarmingDecisionPayload,
+    CacheWarmingDecisionResult,
+    cache_warming_decision,
+)
 from .extension import (
     API_V02_FEATURES,
     LIFECYCLE_METHODS,
@@ -28,6 +36,12 @@ from .protocol import (
 
 __all__ = [
     "API_V02_FEATURES",
+    "CacheWarmingAction",
+    "CacheWarmingDecision",
+    "CacheWarmingDecisionHandler",
+    "CacheWarmingDecisionPayload",
+    "CacheWarmingDecisionResult",
+    "cache_warming_decision",
     "LIFECYCLE_METHODS",
     "MAX_INPUT_PROMPT_BYTES",
     "MAX_INPUT_VALUE_BYTES",

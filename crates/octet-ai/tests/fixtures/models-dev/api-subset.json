@@ -1,0 +1,598 @@
+{
+  "alibaba-token-plan": {
+    "models": {
+      "qwen3.7-max": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "qwen3.8-max-preview": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "text-completion-only": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": false
+      }
+    }
+  },
+  "alibaba-token-plan-cn": {
+    "models": {
+      "qwen3.7-max": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      }
+    }
+  },
+  "anthropic": {
+    "models": {
+      "claude-next": {
+        "cost": {
+          "cache_read": 0.3,
+          "cache_write": 3.75,
+          "input": 3,
+          "output": 15
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Claude Next",
+        "reasoning": true,
+        "tool_call": true
+      }
+    }
+  },
+  "baseten": {
+    "models": {
+      "retired/model": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "status": "deprecated",
+        "tool_call": true
+      },
+      "zai-org/GLM-5.2": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "zai-org/GLM-5.2-Fast": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      }
+    }
+  },
+  "custom": {
+    "models": {
+      "example": {
+        "cost": {
+          "cache_read": 0.003,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "id": "example",
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Example Flash",
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "default": "high",
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "status": "active",
+        "structured_output": true,
+        "tool_call": false
+      }
+    }
+  },
+  "deepseek": {
+    "models": {
+      "example": {
+        "cost": {
+          "cache_read": 0.003,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "id": "example",
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Example Flash",
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "default": "high",
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "status": "active",
+        "structured_output": true,
+        "tool_call": false
+      }
+    }
+  },
+  "openai": {
+    "models": {
+      "Mixed-Case": {
+        "cost": {
+          "input": 5e-07,
+          "output": 1e-07
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Mixed Case",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "example": {
+        "cost": {
+          "cache_read": 0.003,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "id": "example",
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Example Flash",
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "default": "high",
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "status": "active",
+        "structured_output": true,
+        "tool_call": false
+      },
+      "gpt-5.6": {
+        "cost": {
+          "cache_read": 0.003,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "id": "example",
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Example Flash",
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "default": "high",
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "status": "active",
+        "structured_output": true,
+        "tool_call": false
+      },
+      "gpt-9-preview": {
+        "cost": {
+          "cache_read": 0.125,
+          "cache_write": 1.5625,
+          "input": 1.25,
+          "output": 10,
+          "reasoning": 12.5
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "  GPT-9 Preview  ",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "unnamed": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "   ",
+        "reasoning": true,
+        "tool_call": true
+      }
+    }
+  },
+  "openrouter": {
+    "models": {
+      "vendor/model:free": {
+        "cost": {
+          "input": 0,
+          "output": 0
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Free Model",
+        "reasoning": true,
+        "tool_call": true
+      }
+    }
+  },
+  "togetherai": {
+    "models": {
+      "example": {
+        "cost": {
+          "cache_read": 0.003,
+          "input": 0.15,
+          "output": 0.6
+        },
+        "id": "example",
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Example Flash",
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "default": "high",
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "status": "active",
+        "structured_output": true,
+        "tool_call": false
+      }
+    }
+  },
+  "zai": {
+    "models": {
+      "glm-5.2": {
+        "cost": {
+          "input": 0.5,
+          "output": 3.0
+        },
+        "name": "GLM-5.2"
+      }
+    }
+  },
+  "zhipuai-coding-plan": {
+    "models": {
+      "glm-5.2": {
+        "cost": null,
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "glm-6": {
+        "cost": null,
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": true
+      },
+      "text-completion-only": {
+        "cost": {
+          "input": 0.2,
+          "output": 1.2
+        },
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "name": "Tool Model",
+        "reasoning": true,
+        "tool_call": false
+      }
+    }
+  }
+}

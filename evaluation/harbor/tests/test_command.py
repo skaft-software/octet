@@ -46,6 +46,30 @@ class CommandTests(unittest.TestCase):
             "600",
         )
 
+    def test_default_reasoning_defers_to_the_endpoint_declared_level(self) -> None:
+        # The harness must not force an effort level: octet resolves the
+        # endpoint's declared default when no preference is given, and an
+        # explicit caller choice keeps winning.
+        self.assertIsNone(DEFAULT_REASONING)
+        default_argv = build_ygg_argv(
+            "/tmp/ygg",
+            "do the task",
+            model="gpt-5.6-sol",
+            reasoning=DEFAULT_REASONING,
+            session_dir="/logs/agent/sessions",
+        )
+        self.assertNotIn("--reasoning", default_argv)
+
+        explicit_argv = build_ygg_argv(
+            "/tmp/ygg",
+            "do the task",
+            model="gpt-5.6-sol",
+            reasoning="max",
+            session_dir="/logs/agent/sessions",
+        )
+        self.assertIn("--reasoning", explicit_argv)
+        self.assertEqual(explicit_argv[explicit_argv.index("--reasoning") + 1], "max")
+
     def test_command_accepts_instruction_starting_with_dash(self) -> None:
         instruction = "- "
         command = build_ygg_command(

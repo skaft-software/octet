@@ -173,6 +173,33 @@ fn tall_png() -> TerminalImage {
 }
 
 #[test]
+fn rendered_viewport_top_tracks_the_physical_seam_across_shrink_and_replay() {
+    let mut harness = Harness::new(40, 8, numbered("row", 20));
+    harness.tui.set_clear_on_shrink(false);
+    assert_eq!(harness.tui.rendered_viewport_top(), None);
+    harness.start();
+    assert_eq!(harness.tui.rendered_viewport_top(), Some(12));
+
+    harness.clear_writes();
+    harness.lines.borrow_mut().truncate(18);
+    harness.render();
+    assert!(!harness.take_writes().contains(PI_CLEAR_AND_REPLAY));
+    assert_eq!(harness.tui.rendered_viewport_top(), Some(12));
+    assert_eq!(harness.viewport()[0], "row 12");
+
+    harness.lines.borrow_mut()[0] = "changed history".into();
+    harness.render();
+    assert!(harness.take_writes().contains(PI_CLEAR_AND_REPLAY));
+    assert_eq!(harness.tui.rendered_viewport_top(), Some(10));
+    assert_eq!(harness.viewport()[0], "row 10");
+
+    harness.lines.borrow_mut().extend(numbered("new", 3));
+    harness.render();
+    assert_eq!(harness.tui.rendered_viewport_top(), Some(13));
+    assert_eq!(harness.viewport()[0], "row 13");
+}
+
+#[test]
 fn image_plans_keep_protocol_bytes_out_of_native_scrollback_frames() {
     let image = tall_png();
     let cell = CellPixelSize::new(8, 16).unwrap();
@@ -618,14 +645,21 @@ fn pi_full_replay_deletes_previous_kitty_placement() {
 }
 
 #[test]
-fn pi_cursor_marker_positions_ime_after_the_synchronized_frame() {
+fn pi_cursor_marker_positions_ime_inside_the_synchronized_frame() {
     let mut harness = Harness::new(20, 5, vec![format!("界{CURSOR_MARKER}x")]);
     harness.start();
     let output = harness.take_writes();
     assert!(!output.contains(CURSOR_MARKER));
-    let end = output.find(PI_SYNC_END).unwrap();
+    let begin = output.find(PI_SYNC_BEGIN).unwrap();
     let cursor = output.find("\x1b[3G").unwrap();
-    assert!(end < cursor, "{output:?}");
+    let visibility = output.rfind("\x1b[?25l").unwrap();
+    let end = output.find(PI_SYNC_END).unwrap();
+    assert!(
+        begin < cursor && cursor < visibility && visibility < end,
+        "{output:?}"
+    );
+    assert!(output.ends_with(PI_SYNC_END), "{output:?}");
+    assert_eq!(harness.parser.borrow().screen().cursor_position(), (0, 2));
 }
 
 #[test]

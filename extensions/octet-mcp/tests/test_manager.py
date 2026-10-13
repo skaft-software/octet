@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import random
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -55,6 +57,273 @@ class ManagerTests(unittest.TestCase):
         manager.start()
         return extension, manager
 
+    def test_queued_restart_targets_retired_state_and_new_restart_still_starts_disabled(self):
+        server = server_config("stable")
+        extension = FakeExtension(self.scratch)
+        clients = []
+
+        def factory(*_args):
+            client = mock.Mock(alive=False)
+            client.start.side_effect = McpTransportError(
+                "fixture_stop", "controlled test", permanent=True
+            )
+            clients.append(client)
+            return client
+
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=factory,
+        )
+        self.managers.append(manager)
+        queued = []
+        with mock.patch.object(manager, "_submit", side_effect=lambda fn, *args: queued.append((fn, args))):
+            manager.request_action("restart", "fixture")
+            manager.apply_config(BridgeConfig(servers=(replace(server, enabled=False),), limits=limits()))
+            self.assertEqual(len(queued), 1)
+            stale_callback, stale_args = queued.pop()
+            self.assertFalse(stale_callback(*stale_args))
+            self.assertEqual(clients, [], "queued old restart must not start replacement config")
+
+            manager.request_action("restart", "fixture")
+            new_callback, new_args = queued.pop()
+            self.assertFalse(new_callback(*new_args))
+            self.assertEqual(len(clients), 1, "a newly admitted explicit restart may start disabled server")
+            clients[0].start.assert_called_once_with()
+
+    def test_retirement_at_start_effect_boundary_prevents_client_start(self):
+        entered = threading.Event()
+        release = threading.Event()
+        extension = FakeExtension(self.scratch)
+        client = mock.Mock(alive=True)
+        server = server_config("stable")
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=lambda *_args: client,
+        )
+        self.managers.append(manager)
+        begin_effect = manager._begin_lifecycle_effect
+
+        def paused_effect(state):
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release pre-start boundary")
+            return begin_effect(state)
+
+        starting = threading.Thread(target=manager._start_server, args=("fixture", False))
+        with mock.patch.object(manager, "_begin_lifecycle_effect", side_effect=paused_effect):
+            starting.start()
+            self.assertTrue(entered.wait(1), "startup did not reach its effect boundary")
+            applied = threading.Event()
+            reconfigured = threading.Thread(
+                target=lambda: (manager.apply_config(BridgeConfig(servers=(), limits=limits())), applied.set())
+            )
+            reconfigured.start()
+            wait_for(lambda: manager._servers["fixture"].retirement_pending, message="retirement effect fence")
+            release.set()
+            starting.join(2)
+            reconfigured.join(2)
+        self.assertFalse(starting.is_alive())
+        self.assertTrue(applied.is_set())
+        client.start.assert_not_called()
+        client.close.assert_called_once_with()
+
+    def test_retirement_wins_before_catalog_registration_admission(self):
+        entered = threading.Event()
+        release = threading.Event()
+        extension = FakeExtension(self.scratch)
+        register = mock.Mock(wraps=extension.register_tools)
+        extension.register_tools = register
+        client = mock.Mock(alive=True)
+        client.start.return_value = None
+
+        def list_tools():
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release catalog probe")
+            return [{"name": "probe", "inputSchema": {"type": "object", "properties": {}}}]
+
+        client.list_tools.side_effect = list_tools
+        server = server_config("stable")
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=lambda *_args: client,
+        )
+        self.managers.append(manager)
+        starting = threading.Thread(target=manager._start_server, args=("fixture", False))
+        starting.start()
+        self.assertTrue(entered.wait(1), "catalog probe did not start")
+        applied = threading.Event()
+        reconfigured = threading.Thread(
+            target=lambda: (manager.apply_config(BridgeConfig(servers=(), limits=limits())), applied.set())
+        )
+        reconfigured.start()
+        wait_for(lambda: manager._servers["fixture"].retirement_pending, message="retirement admission fence")
+        release.set()
+        starting.join(2)
+        reconfigured.join(2)
+        self.assertFalse(starting.is_alive())
+        self.assertTrue(applied.is_set())
+        register.assert_not_called()
+        self.assertEqual(extension._tools, {})
+        client.close.assert_called_once_with()
+
+    def test_retirement_waits_for_host_registration_then_unpublishes_catalog(self):
+        entered = threading.Event()
+        release = threading.Event()
+        extension = FakeExtension(self.scratch)
+        original_register = extension.register_tools
+
+        def blocking_register(definitions):
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release host registration")
+            return original_register(definitions)
+
+        extension.register_tools = blocking_register
+        client = mock.Mock(alive=True)
+        client.start.return_value = None
+        client.list_tools.return_value = [
+            {"name": "probe", "inputSchema": {"type": "object", "properties": {}}}
+        ]
+        server = server_config("stable")
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=lambda *_args: client,
+        )
+        self.managers.append(manager)
+        starting = threading.Thread(target=manager._start_server, args=("fixture", False))
+        starting.start()
+        self.assertTrue(entered.wait(1), "catalog registration did not start")
+        applied = threading.Event()
+        reconfigured = threading.Thread(
+            target=lambda: (manager.apply_config(BridgeConfig(servers=(), limits=limits())), applied.set())
+        )
+        reconfigured.start()
+        wait_for(lambda: manager._servers["fixture"].retirement_pending, message="retirement admission fence")
+        self.assertFalse(manager._servers["fixture"].retired, "retirement linearizes after admitted registration")
+        self.assertFalse(applied.is_set(), "retirement must wait for admitted host callback")
+        release.set()
+        starting.join(2)
+        reconfigured.join(2)
+        self.assertFalse(starting.is_alive())
+        self.assertTrue(applied.is_set())
+        self.assertEqual(extension._tools, {})
+        client.start.assert_called_once_with()
+        client.close.assert_called_once_with()
+
+    def two_server_manager(self):
+        extension = FakeExtension(self.scratch)
+        server_a = server_config("stable", server_id="a")
+        server_b = server_config("stable", server_id="b")
+        clients = {}
+
+        def factory(config, *_args):
+            client = mock.Mock(alive=True)
+            client.start.return_value = None
+            client.list_tools.return_value = [
+                {"name": "probe", "inputSchema": {"type": "object", "properties": {}}}
+            ]
+            clients[config.id] = client
+            return client
+
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server_a, server_b), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=factory,
+        )
+        self.managers.append(manager)
+        return extension, manager, server_a, server_b, clients
+
+    def test_register_callback_cannot_reentrantly_remove_other_server(self):
+        extension, manager, server_a, server_b, clients = self.two_server_manager()
+        self.assertTrue(manager._start_server("b", False))
+        original_register = extension.register_tools
+        rejection = []
+        attempted = False
+
+        def reentrant_register(definitions):
+            nonlocal attempted
+            if not attempted and any(item["name"].startswith("mcp_a_") for item in definitions):
+                attempted = True
+                try:
+                    manager.apply_config(BridgeConfig(servers=(server_a,), limits=limits()))
+                except RuntimeError as error:
+                    rejection.append(str(error))
+            return original_register(definitions)
+
+        extension.register_tools = reentrant_register
+        self.assertTrue(manager._start_server("a", False))
+        self.assertEqual(len(rejection), 1)
+        self.assertEqual(set(manager._servers), {"a", "b"})
+        self.assertFalse(manager._servers["b"].retired)
+        self.assertEqual(len(extension._tools), 2)
+        clients["b"].close.assert_not_called()
+        manager.apply_config(BridgeConfig(servers=(server_a,), limits=limits()))
+        self.assertNotIn("b", manager._servers)
+        clients["b"].close.assert_called_once_with()
+
+    def test_register_callback_shutdown_rejection_does_not_latch_and_later_shutdown_works(self):
+        extension, manager, _server_a, _server_b, clients = self.two_server_manager()
+        self.assertTrue(manager._start_server("b", False))
+        original_register = extension.register_tools
+        rejection = []
+        attempted = False
+
+        def reentrant_register(definitions):
+            nonlocal attempted
+            if not attempted and any(item["name"].startswith("mcp_a_") for item in definitions):
+                attempted = True
+                try:
+                    manager.shutdown()
+                except RuntimeError as error:
+                    rejection.append(str(error))
+            return original_register(definitions)
+
+        extension.register_tools = reentrant_register
+        self.assertTrue(manager._start_server("a", False))
+        self.assertEqual(len(rejection), 1)
+        self.assertFalse(manager._shutting_down)
+        self.assertFalse(manager._servers["a"].retired)
+        self.assertFalse(manager._servers["b"].retired)
+        clients["b"].close.assert_not_called()
+        manager.shutdown()
+        clients["b"].close.assert_called_once_with()
+
+    def test_register_callback_remove_all_rejection_preflights_before_sorted_retirement(self):
+        extension, manager, _server_a, _server_b, clients = self.two_server_manager()
+        self.assertTrue(manager._start_server("a", False))
+        original_register = extension.register_tools
+        rejection = []
+        attempted = False
+
+        def reentrant_register(definitions):
+            nonlocal attempted
+            if not attempted and any(item["name"].startswith("mcp_b_") for item in definitions):
+                attempted = True
+                try:
+                    manager.apply_config(BridgeConfig(servers=(), limits=limits()))
+                except RuntimeError as error:
+                    rejection.append(str(error))
+            return original_register(definitions)
+
+        extension.register_tools = reentrant_register
+        self.assertTrue(manager._start_server("b", False))
+        self.assertEqual(len(rejection), 1)
+        self.assertEqual(set(manager._servers), {"a", "b"})
+        self.assertFalse(manager._servers["a"].retired)
+        self.assertFalse(manager._servers["b"].retired)
+        clients["a"].close.assert_not_called()
+        manager.apply_config(BridgeConfig(servers=(), limits=limits()))
+        self.assertEqual(manager._servers, {})
+        clients["a"].close.assert_called_once_with()
+        clients["b"].close.assert_called_once_with()
+
     def test_real_fixture_end_to_end_preserves_structured_and_media_results(self):
         extension, manager = self.manager(real_server_config())
         wait_for(
@@ -81,6 +350,47 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(denied["is_error"])
         self.assertIn("denied", denied["content"][0]["text"].lower())
         self.assertTrue(extension.presentations)
+
+    def test_removed_server_fences_a_client_constructed_by_queued_start(self):
+        entered = threading.Event()
+        release = threading.Event()
+        client = mock.Mock(alive=True)
+
+        def factory(*_args):
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release client factory")
+            return client
+
+        server = server_config("stable")
+        extension = FakeExtension(self.scratch)
+        manager = BridgeManager(
+            extension,
+            BridgeConfig(servers=(server,), limits=limits()),
+            scratch_directory=self.scratch,
+            client_factory=factory,
+        )
+        self.managers.append(manager)
+        starting = threading.Thread(target=manager._start_server, args=("fixture", False))
+        starting.start()
+        self.assertTrue(entered.wait(1), "client construction did not start")
+
+        applied = threading.Event()
+        reconfigured = threading.Thread(
+            target=lambda: (manager.apply_config(BridgeConfig(servers=(), limits=limits())), applied.set())
+        )
+        reconfigured.start()
+        # apply_config marks the old state retired before it waits for its
+        # per-server operation lock. Release construction only after that fence.
+        wait_for(lambda: manager._servers["fixture"].retired, message="retirement fence")
+        release.set()
+        starting.join(2)
+        reconfigured.join(2)
+        self.assertFalse(starting.is_alive())
+        self.assertTrue(applied.is_set())
+        client.start.assert_not_called()
+        client.close.assert_called_once_with()
+        self.assertEqual(extension._tools, {})
+        self.assertNotIn("fixture", manager._servers)
 
     def test_catalog_add_replace_remove_and_epoch_pinned_schema_handlers(self):
         extension, manager = self.manager(server_config("catalog"))

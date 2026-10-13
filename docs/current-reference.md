@@ -10,8 +10,7 @@ not a second user manual.
 | Topic / old anchor | Canonical content |
 | --- | --- |
 | <a id="optional-packages"></a>Optional packages | [Package choices and availability](installation.md#optional-packages) |
-| <a id="executable-extension-bundles"></a>Executable extension bundles | [Package CLI](cli.md#packages-and-serve), [activation menu](commands.md#extension-activation-menu), [extension contract](extensions.md) |
-| <a id="graphical-serve-extension"></a>Graphical Serve extension | [Serve package commands](cli.md#packages-and-serve) and [graphical guide](experimental/octet-serve/README.md) |
+| <a id="executable-extension-bundles"></a>Executable extension bundles | [Package CLI](cli.md#packages), [activation menu](commands.md#extension-menu), [extension contract](extensions.md) |
 | <a id="container"></a>Container | [Source container build](installation.md#container) |
 | <a id="quick-start"></a>Quick start | [Provider setup](providers.md) |
 | <a id="use-a-cloud-model"></a>Use a cloud model | [Cloud credentials and models](providers.md#cloud-setup), [Codex login](providers.md#codex-subscription-login) |
@@ -21,7 +20,7 @@ not a second user manual.
 | <a id="what-ships-in-the-binary"></a>What ships in the binary | [Frontends](terminal.md#choose-a-frontend) and [built-in tools](tools.md#built-in-tools) |
 | <a id="three-frontends"></a>Three frontends | [TUI, plain, print](terminal.md#choose-a-frontend) |
 | <a id="built-in-tools"></a>Built-in tools | [Tools and permissions](tools.md#built-in-tools) |
-| <a id="provider-and-protocol-support"></a>Provider and protocol support | [Protocols, transport, and replay](providers.md#protocols-and-transport), [Astra limits](providers.md#astra-source-limits) |
+| <a id="provider-and-protocol-support"></a>Provider and protocol support | [Protocols, transport, and replay](providers.md#protocols-and-transport), [GPT-6 contracts and execution](providers.md#gpt-6-contracts-and-execution) |
 | <a id="reasoning-without-transcript-noise"></a>Reasoning | [Model-supported choices](providers.md#reasoning), [display](terminal.md#reasoning-and-progress), [workers](../extensions/octet-subagents/README.md) |
 | <a id="multimodal-prompts"></a>Multimodal prompts | [Images and audio](media.md#formats-and-limits) |
 | <a id="durable-branchable-sessions"></a>Durable branchable sessions | [Resume and branch](sessions.md#resume-and-branch) |

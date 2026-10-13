@@ -16,9 +16,21 @@ from .config import (
     STATIC_CREDENTIAL_AUTH_TYPE,
     BridgeConfig,
     ConfigError,
+    default_config_path,
     load_config,
 )
+from .editor import (
+    ConfigEditor,
+    EditCancelled,
+    ask_http,
+    ask_label,
+    ask_server_id,
+    ask_stdio,
+    describe,
+)
 from .manager import BridgeManager
+from .pi_registration import PiMcpRegistrations
+from .menu import GATE_NOTE, build_menu
 from .streamable_http import StaticEnvironmentCredentialProvider
 
 
@@ -32,6 +44,13 @@ SUPPORTED_FEATURES = (
     "approvals",
 )
 EXPERIMENTAL_STREAMABLE_HTTP_MCP_ARGUMENT = "--experimental-streamable-http-mcp"
+# Actions that change the user configuration; the rest are lifecycle actions.
+EDIT_ACTIONS = frozenset({"add", "edit", "enable", "disable", "remove"})
+USAGE = (
+    "/mcp [status|list|snapshot|show <server>|refresh [server]|restart <server>|"
+    "stop <server>|add stdio|add http|edit <server>|enable <server>|"
+    "disable <server>|remove <server>]"
+)
 
 
 class ProtocolReadyExtension(Extension):
@@ -124,16 +143,111 @@ def build_runtime(
         experimental_streamable_http_mcp=experimental_streamable_http_mcp,
     )
 
+    editor = ConfigEditor(
+        Path(config_path) if config_path is not None else default_config_path(),
+        workspace=workspace,
+        experimental_streamable_http_mcp=experimental_streamable_http_mcp,
+    )
+
+    pi_registrations = PiMcpRegistrations(manager)
+
+    def apply(config: BridgeConfig, context: Mapping[str, Any]) -> None:
+        if any(server.transport == "streamable-http" for server in config.servers):
+            # Owner binding is an admission check, not a best-effort hint. Never
+            # persist an edit that this host owner cannot apply.
+            if not manager.bind_owner(context):
+                raise ValueError("Remote MCP owner mismatch; configuration was not changed.")
+        pi_registrations.apply_config(config, credential_provider=static_credential_provider(config))
+
+    def edit(arguments: list[str], context: Mapping[str, Any]) -> str:
+        manager.assert_lifecycle_mutation_allowed()
+        action = arguments[0]
+        if manager.config_error is not None:
+            return (
+                "Your MCP configuration did not load, so it was not changed. Fix "
+                f"{editor.path}, then reload extensions."
+            )
+        ask = extension.request_input
+        has_remote = any(
+            server.transport == "streamable-http" for server in manager.config.servers
+        )
+        adding_remote = action == "add" and arguments[1:] == ["http"]
+        if (has_remote or adding_remote) and not manager.bind_owner(context):
+            return "Remote MCP owner mismatch; no prompt or configuration change was made."
+        if action == "add" and arguments[1:] in (["stdio"], ["http"]):
+            remote = arguments[1] == "http"
+            if remote and not experimental_streamable_http_mcp:
+                return GATE_NOTE
+            taken = {server.id for server in manager.config.servers}
+            server_id = ask_server_id(ask, taken)
+            descriptor = ask_http(ask) if remote else ask_stdio(ask)
+            label = ask_label(ask, server_id)
+            if label != server_id:
+                descriptor["label"] = label
+            if not extension.confirm(
+                f"Add {label} and start it?",
+                detail=describe(descriptor),
+                default=True,
+            ):
+                return "Nothing was added."
+            apply(editor.add(server_id, descriptor, taken), context)
+            return f"Added {server_id}: {describe(descriptor)}. It is starting now."
+        if len(arguments) != 2:
+            return "Usage: " + USAGE
+        server_id = arguments[1]
+        if action in {"enable", "disable"}:
+            apply(editor.set_enabled(server_id, action == "enable"), context)
+            return f"{server_id} {action}d."
+        if action == "remove":
+            apply(editor.remove(server_id), context)
+            return f"Removed {server_id} from your MCP configuration."
+        current = editor.user_servers().get(server_id)
+        if not isinstance(current, Mapping):
+            return (
+                f"{server_id} is not in your MCP configuration; a trusted project file "
+                "defines it, so edit it there."
+            )
+        remote = current.get("transport") == "streamable-http"
+        if remote and not experimental_streamable_http_mcp:
+            return GATE_NOTE
+        descriptor = ask_http(ask, current) if remote else ask_stdio(ask, current)
+        label = ask_label(ask, server_id, current.get("label"))
+        if label != server_id or "label" in current:
+            descriptor["label"] = label
+        apply(editor.replace(server_id, descriptor), context)
+        return f"Updated {server_id}: {describe(descriptor)}. It restarts with the new settings."
+
     @extension.command(
         name="mcp",
-        description="Inspect MCP server state or request a safe lifecycle action",
-        usage=(
-            "/mcp [status|list|snapshot|show <server>|refresh [server]|"
-            "restart <server>|stop <server>]"
-        ),
+        description="Manage MCP servers: add, edit, enable, disable, remove, and restart them",
+        usage=USAGE,
     )
     def mcp_command(arguments: list[str], context: Mapping[str, Any]) -> dict[str, Any]:
+        if arguments and arguments[0] in {"__pi_replace", "__pi_release"}:
+            return pi_registrations.command(arguments, context)
+        if arguments and arguments[0] in EDIT_ACTIONS:
+            try:
+                text = edit(arguments, context)
+            except EditCancelled:
+                text = "Nothing was changed."
+            except ConfigError as error:
+                text = f"MCP configuration unchanged: {error}"
+            return {"text": text, "notifications": [], "context": []}
         return manager.execute_command(arguments, context)
+
+    @extension.menu
+    def mcp_menu(_request: Mapping[str, Any], _context: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            user_servers = editor.user_servers() if manager.config_error is None else {}
+        except ConfigError:
+            user_servers = {}
+        return build_menu(
+            manager.domain_snapshot(),
+            user_servers=user_servers,
+            experimental_streamable_http_mcp=experimental_streamable_http_mcp,
+            config_path=editor.path,
+            config_error=manager.config_error,
+        )
 
     @extension.status("status")
     def mcp_status(params: Mapping[str, Any]) -> dict[str, Any]:

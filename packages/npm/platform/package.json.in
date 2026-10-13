@@ -4,6 +4,7 @@
   "description": "Native octet runtime for __TARGET__",
   "license": "MIT",
   "repository": "https://github.com/skaft-software/octet",
+  "homepage": "https://octet.skaft.org",
   "os": ["__OS__"],
   "cpu": ["__CPU__"],
   "files": [

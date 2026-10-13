@@ -1,0 +1,4 @@
+# Preserve published bytes, including upstream whitespace; see PROVENANCE.json.
+pi-codemode/** linguist-vendored -whitespace
+quickjs-wasi/** linguist-vendored -whitespace
+sources/** linguist-vendored -whitespace

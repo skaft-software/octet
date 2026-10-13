@@ -24,6 +24,9 @@ use octet_ai::{
     RequestOverrides, ResponseHook, ResponseStream, Secret, ToolChoice, UserMessage, UserPart,
 };
 
+#[path = "runtime_hooks/pipeline.rs"]
+mod pipeline;
+
 const SSE_BODY: &str = "data: {\"id\": \"chatcmpl-hooks\", \"choices\": [{\"delta\": {\"content\": \"hooked\"}}]}\n\n\
                         data: {\"id\": \"chatcmpl-hooks\", \"choices\": [{\"delta\": {}, \"finish_reason\": \"stop\"}]}\n\n\
                         data: [DONE]\n\n";

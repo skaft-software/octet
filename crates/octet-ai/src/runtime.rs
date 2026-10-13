@@ -22,8 +22,10 @@
 //! * [`HostRequestOptions::fetch`] substitutes a host transport for this one
 //!   request, exactly like a registered endpoint transport.
 //!
-//! Hooks are bounded and synchronous. There are no hidden retries: a hook error
-//! fails the attempt. None of these values appear in `Debug`.
+//! The original hooks are synchronous. [`ProviderRequestHook`] adds optional,
+//! cancellable async mediation at the real encoded HTTP boundaries. Neither lane
+//! retries: a hook error fails the attempt. Private wire values never appear in
+//! hook diagnostics or `Debug`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,7 +43,7 @@ pub const MAX_RUNTIME_METADATA_BYTES: usize = 8 * 1024;
 ///
 /// It is available for both catalog chat models and image-generation models, so
 /// a hook can never depend on credentials, headers, or a base URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct HookModelContext {
     /// Canonical selected model identifier.
     pub id: String,
@@ -121,6 +123,62 @@ pub trait ResponseHook: Send + Sync {
     );
 }
 
+/// Secret-free identity shared by the three callbacks of one HTTP attempt.
+///
+/// The operation ID changes on every call, including a host-authorized retry.
+/// It is correlation, not authority to replay or change routes/credentials.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderRequestContext {
+    /// Host-generated, process-local attempt identity.
+    pub operation_id: String,
+    /// Selected model without endpoint URLs, headers or credentials.
+    pub model: HookModelContext,
+}
+
+/// Optional async mediation at actual HTTP request and response boundaries.
+///
+/// Callbacks are awaited in registration order, outside executor-blocking or
+/// paint code. Dropping an opening future cancels its in-flight callback. Each
+/// callback phase has a bounded deadline. Payloads and headers are private: an
+/// implementation must not put them in ordinary logs, session records or UI.
+/// HTTP is selected instead of preferred WebSockets when this lane is active;
+/// opaque host transports and native steering refuse it rather than inventing
+/// an encoded payload or HTTP response. There is no automatic retry.
+#[async_trait::async_trait]
+pub trait ProviderRequestHook: Send + Sync {
+    /// Inspect or replace the actual codec-produced JSON body, before signing.
+    /// `None` leaves it unchanged; replacements must be bounded objects/arrays.
+    async fn before_request(
+        &self,
+        _context: &ProviderRequestContext,
+        _payload: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AiError> {
+        Ok(None)
+    }
+
+    /// Mutate final endpoint/model/codec headers before authoritative auth.
+    /// Insertions, replacements and deletions are applied. Reserved auth,
+    /// routing, framing and signing names cannot be changed or removed.
+    async fn before_headers(
+        &self,
+        _context: &ProviderRequestContext,
+        _headers: &mut http::HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+
+    /// Observe actual HTTP status/headers, success or error, before body reads.
+    /// This cannot replace the response or authorize a retry.
+    async fn after_response(
+        &self,
+        _context: &ProviderRequestContext,
+        _status: http::StatusCode,
+        _headers: &http::HeaderMap,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
+}
+
 /// Host-owned runtime hooks for exactly one request attempt.
 ///
 /// The default value is inert and preserves the ordinary client behavior.
@@ -145,6 +203,8 @@ pub struct HostRequestOptions {
     pub on_payload: Option<Arc<dyn PayloadHook>>,
     /// Response hook.
     pub on_response: Option<Arc<dyn ResponseHook>>,
+    /// Async HTTP boundary hooks, after client-bound hooks in each phase.
+    pub provider_hooks: Vec<Arc<dyn ProviderRequestHook>>,
     /// Per-request transport override, used instead of the endpoint's
     /// registered host transport for this attempt only.
     pub fetch: Option<Arc<dyn HostStreamTransport>>,
@@ -159,6 +219,7 @@ impl std::fmt::Debug for HostRequestOptions {
             .field("transform_headers", &self.transform_headers.is_some())
             .field("on_payload", &self.on_payload.is_some())
             .field("on_response", &self.on_response.is_some())
+            .field("provider_hook_count", &self.provider_hooks.len())
             .field("fetch", &self.fetch.is_some())
             .finish()
     }
@@ -172,6 +233,7 @@ impl HostRequestOptions {
             && self.transform_headers.is_none()
             && self.on_payload.is_none()
             && self.on_response.is_none()
+            && self.provider_hooks.is_empty()
             && self.fetch.is_none()
     }
 
@@ -185,6 +247,7 @@ impl HostRequestOptions {
             || self.transform_headers.is_some()
             || self.on_payload.is_some()
             || self.on_response.is_some()
+            || !self.provider_hooks.is_empty()
     }
 
     /// Rejects an unbounded, empty, or unserializable runtime.

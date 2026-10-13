@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "octet-native-hello"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "hello-rust"
+path = "main.rs"
+
+[dependencies]
+octet-extension = { path = "../../../../sdk/rust" }
+serde = { version = "=1.0.228", features = ["derive"] }
+schemars = "=0.8.22"

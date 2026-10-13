@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import platform
 import queue
 import subprocess
 import threading
@@ -52,12 +53,49 @@ SESSION_ENVIRONMENT: Sequence[str] = (
     "XDG_CONFIG_HOME",
     "DBUS_SESSION_BUS_ADDRESS",
     "XAUTHORITY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_DESKTOP",
+    "DESKTOP_SESSION",
+    "XDG_STATE_HOME",
+    "KDE_FULL_SESSION",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "SWAYSOCK",
     "APPDATA",
     "LOCALAPPDATA",
     "USERPROFILE",
     "SYSTEMROOT",
     "WINDIR",
 )
+
+# On Linux the driver launches applications itself, through the system shell,
+# and resolves helpers such as ``grim`` from ``PATH``. The launched app inherits
+# the driver's environment, so without these it would start with no home, no
+# locale, and no user ``PATH`` (Omarchy's web-app launchers live on it). They are
+# the same host-sanitized values octet already hands its own tool subprocesses;
+# none is a credential, and nothing beyond them is inherited. macOS and Windows
+# launch through LaunchServices and the shell, which own their own environment.
+LINUX_LAUNCH_ENVIRONMENT: Sequence[str] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+)
+
+# Cua Driver's native Wayland backend is opt-in. Without it a pure Wayland
+# session such as Hyprland (Omarchy) only exposes XWayland windows, and most
+# native apps there are invisible, so a live Wayland session always opts in.
+WAYLAND_BACKEND_VARIABLE = "CUA_DRIVER_RS_ENABLE_WAYLAND"
+
+
+def _frame(message: Mapping[str, Any]) -> bytes:
+    """One MCP stdio message: UTF-8 JSON terminated by exactly one LF."""
+
+    return (json.dumps(message) + "\n").encode("utf-8")
 
 
 class McpError(RuntimeError):
@@ -81,12 +119,32 @@ class ToolInfo:
         }
 
 
+def _is_linux() -> bool:
+    return platform.system().lower() == "linux"
+
+
+def wayland_backend_requested(environment: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether the driver's native Wayland backend should be enabled.
+
+    Enabled exactly when this is a live Linux Wayland session. The driver still
+    reaches XWayland windows through ``DISPLAY`` when both are present.
+    """
+
+    source = os.environ if environment is None else environment
+    return _is_linux() and bool(source.get("WAYLAND_DISPLAY"))
+
+
 def _child_environment(extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     environment: Dict[str, str] = {}
-    for name in SESSION_ENVIRONMENT:
+    names = tuple(SESSION_ENVIRONMENT)
+    if _is_linux():
+        names += tuple(LINUX_LAUNCH_ENVIRONMENT)
+    for name in names:
         value = os.environ.get(name)
         if value:
             environment[name] = value
+    if wayland_backend_requested():
+        environment[WAYLAND_BACKEND_VARIABLE] = "1"
     if extra:
         for name, value in extra.items():
             if isinstance(value, str):
@@ -147,6 +205,10 @@ class DriverClient:
         else:
             arguments = ["mcp", "--direct"]
         try:
+            # Binary pipes with explicit UTF-8 framing: text mode would use the
+            # ANSI code page on Windows, where a window title with an em dash
+            # or curly quote fails to decode and reads as a closed stream, and
+            # would write CRLF line endings.
             self._process = subprocess.Popen(
                 [self._binary, *arguments],
                 cwd=self._cwd,
@@ -154,8 +216,6 @@ class DriverClient:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
             )
         except OSError as error:
             raise McpError(f"failed to start the driver: {error}") from error
@@ -221,7 +281,9 @@ class DriverClient:
                 if not line:
                     sink.put(None)
                     return
-                sink.put(line)
+                # MCP stdio is UTF-8. A malformed line becomes non-JSON and is
+                # skipped by the caller instead of ending the stream.
+                sink.put(line.decode("utf-8", "replace"))
         except (ValueError, OSError):
             sink.put(None)
 
@@ -309,7 +371,7 @@ class DriverClient:
             raise McpError("driver is not running")
         message = {"jsonrpc": "2.0", "method": method, "params": dict(params or {})}
         try:
-            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.write(_frame(message))
             process.stdin.flush()
         except (BrokenPipeError, ValueError) as error:
             raise McpError("driver stdin closed") from error
@@ -330,7 +392,7 @@ class DriverClient:
                 "params": dict(params),
             }
             try:
-                process.stdin.write(json.dumps(message) + "\n")
+                process.stdin.write(_frame(message))
                 process.stdin.flush()
             except (BrokenPipeError, ValueError) as error:
                 raise McpError("driver stdin closed") from error

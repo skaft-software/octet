@@ -6,6 +6,7 @@
 //! completed speculatively.
 
 use crate::error::DecodeError;
+use crate::types::ToolCallArgumentError;
 use std::collections::HashSet;
 
 const VALID_ESCAPES: &[u8] = b"\"\\/bfnrtu";
@@ -36,6 +37,42 @@ pub(crate) fn normalize_json_object_value(input: &str) -> Result<serde_json::Val
 pub(crate) fn normalize_json_object(input: &str) -> Result<String, DecodeError> {
     let value = normalize_json_object_value(input)?;
     serde_json::to_string(&value).map_err(|error| DecodeError::Json(error.to_string()))
+}
+
+/// Arguments retained for a call whose provider text could not be repaired into
+/// a JSON object. Never a guess at the provider's intent: an unexecutable call
+/// stays visibly empty instead of being completed speculatively.
+pub(crate) const UNREPAIRABLE_TOOL_ARGUMENTS: &str = "{}";
+
+/// Normalize completed provider tool arguments without inventing values.
+///
+/// The returned marker tells a consumer to pair a bounded error result with the
+/// call and never execute it. Conservative repair that cannot recover a JSON
+/// object yields [`UNREPAIRABLE_TOOL_ARGUMENTS`] plus
+/// [`ToolCallArgumentError::Malformed`], so the call keeps its identity and the
+/// model can correct itself. Pi parses such arguments leniently and lets the
+/// call fail its own validation for exactly this reason: one malformed call
+/// must not end the run.
+pub(crate) fn normalize_completed_tool_arguments(
+    raw_arguments: &str,
+) -> (String, Option<ToolCallArgumentError>) {
+    match normalize_json_object(raw_arguments) {
+        Ok(arguments_json) => (arguments_json, None),
+        Err(_) => (
+            UNREPAIRABLE_TOOL_ARGUMENTS.to_owned(),
+            Some(ToolCallArgumentError::Malformed),
+        ),
+    }
+}
+
+/// Diagnostic attached to a response that kept a call whose provider arguments
+/// could not be repaired. Shared by every transport so the streamed and
+/// completed shapes stay observably identical.
+pub(crate) fn malformed_tool_arguments_diagnostic() -> crate::Diagnostic {
+    crate::Diagnostic {
+        code: "malformed_tool_arguments".to_owned(),
+        message: "Tool arguments that were not valid JSON and could not be repaired were replaced with an empty object and must not be executed".to_owned(),
+    }
 }
 
 // Tool schemas arrive as untrusted request data and provider arguments are
@@ -75,7 +112,172 @@ const SUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
     "uniqueItems",
     "minProperties",
     "maxProperties",
+    "pattern",
+    "deprecated",
 ];
+
+// A deliberately portable ECMAScript subset, also admitted by the Pi adapter:
+// anchored sequences of printable ASCII literals / positive character classes,
+// optionally followed by finite {m} or {m,n}. No escapes, wildcard, negation,
+// groups, alternation or unbounded repeats. Unsupported syntax fails admission;
+// the original schema is never rewritten. This avoids regex dialect differences
+// and backtracking while covering bounded identifiers used by Pi extensions.
+const MAX_SCHEMA_PATTERN: usize = 1_024;
+const UNSUPPORTED_PATTERN: &str = "unsupported JSON Schema pattern: require bounded ^...$ ASCII literals/classes with finite repetitions (1024 bytes/maximum characters)";
+
+struct PatternAtom {
+    characters: u128,
+    minimum: usize,
+    maximum: usize,
+}
+
+struct SchemaPattern {
+    atoms: Vec<PatternAtom>,
+    maximum: usize,
+}
+
+impl SchemaPattern {
+    fn parse(pattern: &str) -> Result<Self, &'static str> {
+        fn class_byte(byte: u8) -> bool {
+            (b' '..=b'~').contains(&byte) && !matches!(byte, b'[' | b']' | b'\\' | b'^' | b'-')
+        }
+        fn count(bytes: &[u8], index: &mut usize) -> Result<usize, &'static str> {
+            let start = *index;
+            let mut value = 0;
+            while let Some(byte) = bytes.get(*index).filter(|byte| byte.is_ascii_digit()) {
+                value = value * 10 + usize::from(*byte - b'0');
+                if value > MAX_SCHEMA_PATTERN {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                *index += 1;
+            }
+            if *index == start || (*index > start + 1 && bytes[start] == b'0') {
+                return Err(UNSUPPORTED_PATTERN);
+            }
+            Ok(value)
+        }
+        let bytes = pattern.as_bytes();
+        if bytes.len() > MAX_SCHEMA_PATTERN
+            || bytes.first() != Some(&b'^')
+            || bytes.last() != Some(&b'$')
+        {
+            return Err(UNSUPPORTED_PATTERN);
+        }
+        let mut atoms = Vec::new();
+        let mut maximum = 0;
+        let mut index = 1;
+        while index < bytes.len() - 1 {
+            let mut characters = 0_u128;
+            if bytes[index] == b'[' {
+                index += 1;
+                let start = index;
+                loop {
+                    let byte = *bytes.get(index).ok_or(UNSUPPORTED_PATTERN)?;
+                    if byte == b']' {
+                        break;
+                    }
+                    if byte == b'-' && (index == start || bytes.get(index + 1) == Some(&b']')) {
+                        characters |= 1_u128 << byte;
+                        index += 1;
+                        continue;
+                    }
+                    if !class_byte(byte) {
+                        return Err(UNSUPPORTED_PATTERN);
+                    }
+                    if bytes.get(index + 1) == Some(&b'-') && bytes.get(index + 2) != Some(&b']') {
+                        let end = *bytes.get(index + 2).ok_or(UNSUPPORTED_PATTERN)?;
+                        if !class_byte(end) || end < byte {
+                            return Err(UNSUPPORTED_PATTERN);
+                        }
+                        for member in byte..=end {
+                            characters |= 1_u128 << member;
+                        }
+                        index += 3;
+                    } else {
+                        characters |= 1_u128 << byte;
+                        index += 1;
+                    }
+                }
+                if index == start {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                index += 1;
+            } else {
+                let byte = bytes[index];
+                if !(b' '..=b'~').contains(&byte) || b".+*?^$(){}[]\\|".contains(&byte) {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                characters |= 1_u128 << byte;
+                index += 1;
+            }
+            let (mut minimum, mut upper) = (1, 1);
+            if bytes.get(index) == Some(&b'{') {
+                index += 1;
+                minimum = count(bytes, &mut index)?;
+                upper = minimum;
+                if bytes.get(index) == Some(&b',') {
+                    index += 1;
+                    upper = count(bytes, &mut index)?;
+                }
+                if bytes.get(index) != Some(&b'}') || minimum > upper {
+                    return Err(UNSUPPORTED_PATTERN);
+                }
+                index += 1;
+            }
+            maximum += upper;
+            if maximum > MAX_SCHEMA_PATTERN {
+                return Err(UNSUPPORTED_PATTERN);
+            }
+            atoms.push(PatternAtom {
+                characters,
+                minimum,
+                maximum: upper,
+            });
+        }
+        if index != bytes.len() - 1 {
+            return Err(UNSUPPORTED_PATTERN);
+        }
+        Ok(Self { atoms, maximum })
+    }
+
+    fn matches(
+        &self,
+        value: &str,
+        budget: &mut ValueValidationBudget,
+    ) -> Result<bool, ValueValidationFailure> {
+        if value.len() > self.maximum || !value.is_ascii() {
+            return Ok(false);
+        }
+        let bytes = value.as_bytes();
+        let mut reachable = vec![false; bytes.len() + 1];
+        reachable[0] = true;
+        for atom in &self.atoms {
+            // Prefix counts answer whether any preceding match can reach this
+            // position within the repetition interval. Unlike a greedy matcher,
+            // this handles overlapping classes and adjacent variable repeats.
+            let mut prefix = vec![0_usize; reachable.len() + 1];
+            for (index, reached) in reachable.iter().enumerate() {
+                prefix[index + 1] = prefix[index] + usize::from(*reached);
+            }
+            let mut next = vec![false; reachable.len()];
+            let mut after_mismatch = 0;
+            for end in 0..=bytes.len() {
+                budget.consume()?;
+                if end > 0 && atom.characters & (1_u128 << bytes[end - 1]) == 0 {
+                    after_mismatch = end;
+                }
+                if let Some(last_start) = end.checked_sub(atom.minimum) {
+                    let first_start = end.saturating_sub(atom.maximum).max(after_mismatch);
+                    if first_start <= last_start {
+                        next[end] = prefix[last_start + 1] > prefix[first_start];
+                    }
+                }
+            }
+            reachable = next;
+        }
+        Ok(reachable[bytes.len()])
+    }
+}
 
 fn supported_json_type(name: &str) -> bool {
     matches!(
@@ -299,6 +501,17 @@ fn validate_schema(
             ));
         }
         match keyword.as_str() {
+            "pattern" => {
+                let pattern = value
+                    .as_str()
+                    .ok_or_else(|| "pattern must be a string".to_owned())?;
+                SchemaPattern::parse(pattern).map_err(str::to_owned)?;
+            }
+            "deprecated" => {
+                if !value.is_boolean() {
+                    return Err("deprecated must be boolean".to_owned());
+                }
+            }
             "$schema" | "title" | "description" => {
                 if !value.is_string() {
                     return Err(format!("{keyword} must be a string"));
@@ -638,6 +851,12 @@ fn validate_value(
         }
     }
     if let Some(string) = value.as_str() {
+        if let Some(pattern) = object.get("pattern").and_then(serde_json::Value::as_str) {
+            let pattern = SchemaPattern::parse(pattern).map_err(ValueValidationFailure::Unsafe)?;
+            if !pattern.matches(string, budget)? {
+                return Err(ValueValidationFailure::Mismatch);
+            }
+        }
         let count = string.chars().count() as u64;
         if object
             .get("minLength")
@@ -991,168 +1210,6 @@ fn remove_trailing_commas(input: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn valid_json_is_canonicalized_without_semantic_changes() {
-        assert_eq!(
-            normalize_json_object(r#"{ "path": "src/main.rs", "n": 2 }"#).unwrap(),
-            r#"{"n":2,"path":"src/main.rs"}"#
-        );
-    }
-
-    #[test]
-    fn repairs_controls_invalid_escapes_trailing_commas_and_python_literals() {
-        let raw = "{path:'C:\\Users\\example', lines:['a\nb',], ok:True, none:None,}";
-        let value = parse_json_value(raw).unwrap();
-        assert_eq!(value["path"], r"C:\Users\example");
-        assert_eq!(value["lines"][0], "a\nb");
-        assert_eq!(value["ok"], true);
-        assert!(value["none"].is_null());
-    }
-
-    #[test]
-    fn accepts_json_code_fences() {
-        assert_eq!(
-            normalize_json_object("```json\n{\"path\":\"README.md\"}\n```").unwrap(),
-            r#"{"path":"README.md"}"#
-        );
-        assert_eq!(
-            normalize_json_object("{'message':'你好 🌲'}").unwrap(),
-            r#"{"message":"你好 🌲"}"#
-        );
-    }
-
-    #[test]
-    fn never_completes_truncated_json() {
-        for raw in [r#"{"command":"rm -r"#, r#"{"path":"src"#, "{'path':'src"] {
-            assert!(normalize_json_object(raw).is_err(), "accepted {raw:?}");
-        }
-    }
-
-    #[test]
-    fn validates_repaired_arguments_against_tool_schema() {
-        let tools = vec![crate::types::ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "read".to_owned(),
-            description: "Read a file".to_owned(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 1}
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-        }];
-        validate_tool_definitions(&tools).unwrap();
-        let arguments = normalize_json_object_value("{path:'README.md', offset:1}").unwrap();
-        validate_tool_arguments("read", &arguments, &tools).unwrap();
-
-        for invalid in [
-            serde_json::json!({"offset": 1}),
-            serde_json::json!({"path": "README.md", "offset": 0}),
-            serde_json::json!({"path": "README.md", "unexpected": true}),
-            serde_json::json!({"path": 7}),
-            serde_json::json!({}),
-        ] {
-            assert_eq!(
-                validate_tool_arguments("read", &invalid, &tools).unwrap(),
-                crate::types::ToolArgumentValidation::SchemaMismatch,
-            );
-        }
-        // Unknown names are preserved for the agent dispatcher to report as a
-        // tool result so the model can recover on its next turn.
-        assert_eq!(
-            validate_tool_arguments("no_such_tool", &arguments, &tools).unwrap(),
-            crate::types::ToolArgumentValidation::UnknownTool,
-        );
-    }
-
-    #[test]
-    fn rejects_ambiguous_or_unbounded_tool_schemas() {
-        let duplicate = vec![
-            crate::types::ToolDef {
-                async_execution: false,
-                constrained_sampling: None,
-                name: "same".to_owned(),
-                description: String::new(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-            crate::types::ToolDef {
-                async_execution: false,
-                constrained_sampling: None,
-                name: "same".to_owned(),
-                description: String::new(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
-        assert!(validate_tool_definitions(&duplicate).is_err());
-        assert!(validate_tool_definitions(&[crate::types::ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "unsupported".to_owned(),
-            description: String::new(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"value": {"type": "string", "pattern": "secret"}}
-            }),
-        }])
-        .is_err());
-    }
-
-    #[test]
-    fn value_validation_work_exhaustion_is_fatal_and_secret_free() {
-        let tools = [crate::types::ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "bounded".to_owned(),
-            description: String::new(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            }),
-        }];
-        validate_tool_definitions(&tools).unwrap();
-        // Each property consumes work in the object and child-schema passes,
-        // so this remains a fatal resource-bound failure rather than a normal
-        // schema mismatch.
-        let arguments = serde_json::Value::Object(
-            (0..MAX_SCHEMA_NODES)
-                .map(|index| {
-                    (
-                        format!("field_{index}"),
-                        serde_json::Value::String("provider-secret-value".to_owned()),
-                    )
-                })
-                .collect(),
-        );
-        let error = validate_tool_arguments("bounded", &arguments, &tools).unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("validation work limit exceeded"));
-        assert!(!message.contains("provider-secret-value"));
-        assert!(message.len() <= MAX_SCHEMA_ERROR_BYTES);
-    }
-
-    #[test]
-    fn bounds_schema_validation_work_and_error_text() {
-        let mut schema = serde_json::json!({"type": "object"});
-        for _ in 0..=MAX_SCHEMA_DEPTH {
-            schema = serde_json::json!({"type": "object", "properties": {"next": schema}});
-        }
-        let error = validate_tool_definitions(&[crate::types::ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "deep".to_owned(),
-            description: String::new(),
-            parameters: schema,
-        }])
-        .unwrap_err();
-        let message = error.to_string();
-        assert!(message.len() <= MAX_SCHEMA_ERROR_BYTES);
-        assert!(message.contains("nesting") || message.contains("work limit"));
-    }
-}
+mod schema_profile_tests;
+#[cfg(test)]
+mod tests;

@@ -10,8 +10,8 @@ tags:
 # Cua Driver desktop control
 
 Use this skill only after the separately installed **Cua Driver** is running, its
-OS permissions are granted, and `/mcp show cua-driver` reports an active
-`cua-driver` server. This bundle never installs or starts the driver itself.
+OS permissions are granted, and the octet-mcp status (in `/extensions`, under
+**cua-driver** → **Show details**) reports an active `cua-driver` server. This bundle never installs or starts the driver itself.
 
 Cua Driver is third-party MIT software from
 [trycua/cua](https://github.com/trycua/cua). It is not OpenAI's CUA and it is not
@@ -22,8 +22,9 @@ and update steps.
 This skill deliberately declares no `required-tools`. The bridge mints each
 published tool name from the server id plus a hash of the tool name, so the exact
 `mcp_cua_driver_*` names depend on the running driver's own tool list. Read
-`/mcp show cua-driver` for the names that were actually published in this
-session instead of assuming a fixed suffix.
+**cua-driver** → **Show details** in the octet-mcp options menu (or
+`/mcp show cua-driver` in the web UI) for the names that were actually published
+in this session instead of assuming a fixed suffix.
 
 ## Choose a target and observe it
 

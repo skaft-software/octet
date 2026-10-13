@@ -1,0 +1,37 @@
+{
+  "base_commit": "a23543de6a1e99681623254072cbb1a3e975a498",
+  "candidate_source": "This PR implementation on the base commit; source hashes below.",
+  "binary_sha256": {
+    "before": "4304150971c34a6bfc9502170e78aa2eb8f9e194e38077f32bc6f63c422aacc6",
+    "after": "9d3b119c051c3dd9a503d848c7072f334072a23c6a3c328005222c403511e01a"
+  },
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "build_command": "cargo build --release --locked --offline -p octet-coding-agent --bin octet -j 2",
+  "hardware": {
+    "cpu": "Apple M3",
+    "ram_gib": 16
+  },
+  "build_targets": "Native Cargo release builds with default crate features; existing dependency caches reused. Sanitized compilation logs retained.",
+  "source_sha256": {
+    "crates/octet-coding-agent/src/app/bootstrap.rs": "ea877811d27bfd5507b82595d5033715de789adc5d57297467b3abe1fb1eed79",
+    "crates/octet-coding-agent/src/app/bootstrap/tests/custom_model_inventory_indexing.rs": "e995f4c61676de08d169350ee745159ce2126687c15fee058e9e84d312282b3e",
+    "crates/octet-coding-agent/src/cli/parity.rs": "15daffe1f338000f2d3d34e21cda95048d62deff01269057d26ad29ef65ae185",
+    "crates/octet-coding-agent/src/modes/interactive.rs": "4947e6af402ec948c77a9bcdfc982f9f72da8d68d9a35e052d3630a46918bb3c",
+    "crates/octet-coding-agent/src/tui/terminal/backend.rs": "84ed7314da2adddc00b36dd694f69b07e116c74224598475a0b2dc11a14714f1",
+    "crates/octet-coding-agent/src/tui/terminal/backend_tests.rs": "c1e9cad18e2dacc7eea8156ad5b0117a68719d43583badc411992337b714e790",
+    "crates/octet-coding-agent/src/tui/view.rs": "d6e2cea4c86504dd71215cd4c4cebd365827ca56983524e590a0d5d4d824b4d8",
+    "crates/octet-coding-agent/src/tui/view/assistant_block.rs": "46f56c17fe0d39cb0f02a97ad4e7529cde7cab2f3973d9d5accad8c7ae8386bc",
+    "crates/octet-coding-agent/src/tui/view/renderer_model.rs": "a12310d226e647180b42dce613a2cb041f9c2e48ef6da7066360a4519bd9f5f4",
+    "crates/octet-coding-agent/src/tui/view/renderer_model/resume_tests.rs": "a2393129a201b145a9958d76899da01db759dad9dc082c26b348a97ca7b03b7a",
+    "crates/octet-coding-agent/src/tui/view/resume_bookkeeping_tests.rs": "1bdc2046c269b0f4dee3bda6e68a364845ff7d2269a901215d5bbee41205e698",
+    "crates/octet-coding-agent/src/tui/view/transcript_hydration.rs": "dce76bd69e6a4a886b7028d10c05ff4047cc86644b1c657465fedfc9553f2fcd",
+    "crates/octet-coding-agent/src/tui/view/transcript_hydration/resume_tests.rs": "92fbf536946db356ed0b9d5c5ec42a13f67c748e7d4472d38ea31a93fc419f9e",
+    "crates/octet-coding-agent/tests/startup_frame_pty.rs": "0d13124c6c038a5ac3e2771149a76aa1154c3e6c385a7a1464b7484292b7a585",
+    "crates/sexy-tui-rs/src/rich_text/stream.rs": "6bc22440a34fbafa9d8e11344a6f223a14f26bec7a60fab715c106c68056c3c9",
+    "crates/sexy-tui-rs/src/rich_text/stream/tests.rs": "2d2f52ed117a7b0904716eaf8f3324473cad27a073fe6d827b977cb3f8dd5330",
+    "scripts/bench-startup-resume.py": "0db4c48010045d792a8211853587e9fad2a80551ea18afbcedcfc412f0ef6e78",
+    "scripts/tests/test_bench_startup_resume.py": "22b332b86885a2e9afb9cad25fb92e72b304b819d66679cd53bc7783d7a7966c",
+    "Cargo.lock": "459cb19ec3fffd8639f97c8e4500e220a03bc7c32d51f0a06541125b17237b9e"
+  }
+}

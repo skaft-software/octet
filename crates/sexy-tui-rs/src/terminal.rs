@@ -262,6 +262,23 @@ pub trait Terminal {
         self.write(&format!("\x1b]2;{title}\x07"));
     }
 
+    /// Emit one bounded semantic desktop notification through the owning terminal.
+    /// A successful write does not establish that the operating system displayed it.
+    fn desktop_notification(&mut self, title: &str, body: &str) -> bool {
+        let capabilities = self.capabilities();
+        if capabilities.plain
+            || !capabilities.interactive
+            || title.len() > 1024
+            || body.len() > 4096
+            || title.contains(';')
+            || title.chars().chain(body.chars()).any(char::is_control)
+        {
+            return false;
+        }
+        self.write(&format!("\x1b]777;notify;{title};{body}\x07"));
+        true
+    }
+
     fn set_progress(&mut self, active: bool) {
         self.write(if active {
             "\x1b]9;4;1;0\x1b\\"
@@ -613,86 +630,4 @@ pub(crate) fn key_to_string(event: &event::KeyEvent) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pi_keyboard_negotiation_and_apple_return_normalization() {
-        assert_eq!(
-            parse_keyboard_protocol_negotiation_sequence("\x1b[?7u"),
-            Some(KeyboardProtocolNegotiationSequence::KittyFlags(7))
-        );
-        assert_eq!(
-            parse_keyboard_protocol_negotiation_sequence("\x1b[?62;4;52c"),
-            Some(KeyboardProtocolNegotiationSequence::DeviceAttributes)
-        );
-        assert_eq!(
-            normalize_apple_terminal_input("\r", true, true),
-            "\x1b[13;2u"
-        );
-        assert_eq!(normalize_apple_terminal_input("\r", true, false), "\r");
-        assert_eq!(normalize_apple_terminal_input("a", true, true), "a");
-    }
-
-    #[test]
-    fn process_terminal_emits_text_and_paste_semantically() {
-        assert_eq!(
-            input_from_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE)),
-            TerminalInput::Text("A".into())
-        );
-        assert_eq!(
-            input_from_key(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::ALT)),
-            TerminalInput::Text("é".into())
-        );
-        assert_eq!(
-            input_from_key(KeyEvent::new(
-                KeyCode::Char('€'),
-                KeyModifiers::CONTROL | KeyModifiers::ALT,
-            )),
-            TerminalInput::Text("€".into())
-        );
-        assert_eq!(
-            input_from_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            TerminalInput::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        );
-        assert_eq!(
-            TerminalInput::Paste("one\r\ntwo".into()).legacy_data(),
-            Some("one\r\ntwo".into())
-        );
-    }
-
-    #[test]
-    fn process_terminal_repeats_only_editing_and_navigation_keys() {
-        let key = |code, modifiers, kind| KeyEvent::new_with_kind(code, modifiers, kind);
-        assert!(forwards_key_event(&key(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-            KeyEventKind::Press,
-        )));
-        assert!(forwards_key_event(&key(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-            KeyEventKind::Repeat,
-        )));
-        assert!(forwards_key_event(&key(
-            KeyCode::Left,
-            KeyModifiers::NONE,
-            KeyEventKind::Repeat,
-        )));
-        assert!(!forwards_key_event(&key(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-            KeyEventKind::Repeat,
-        )));
-        assert!(!forwards_key_event(&key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL,
-            KeyEventKind::Repeat,
-        )));
-        assert!(!forwards_key_event(&key(
-            KeyCode::Backspace,
-            KeyModifiers::NONE,
-            KeyEventKind::Release,
-        )));
-    }
-}
+mod tests;

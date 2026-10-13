@@ -218,25 +218,30 @@ fn classify_existing_path(path: PathBuf) -> PasteKind {
 }
 
 /// Return whether editor text should be treated as an absolute filesystem path
-/// instead of a slash command.
+/// instead of a slash command. A path-led prompt may continue with prose on
+/// later lines, so only its first line participates in this classification.
 pub fn looks_like_absolute_path(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('\n') {
-        return false;
-    }
-    if parse_dropped_path(trimmed).is_some() {
+    let path_line = match trimmed.lines().next() {
+        Some(line) if !line.trim().is_empty() => line.trim(),
+        _ => return false,
+    };
+    if parse_dropped_path(path_line).is_some() {
         return true;
     }
 
-    let unquoted = if let Some(value) = trimmed
+    let unquoted = if let Some(value) = path_line
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
     {
         value
-    } else if let Some(value) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+    } else if let Some(value) = path_line
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+    {
         value
     } else {
-        trimmed
+        path_line
     };
     // macOS terminals commonly paste drag/drop paths shell-escaped as
     // `/Users/me/Screenshot\\ 2026.png`. Normalize escaped spaces before the
@@ -257,12 +262,21 @@ pub fn looks_like_absolute_path(text: &str) -> bool {
         })
         .unwrap_or(unquoted.len());
     let normalized = unquoted[..prefix_end].replace("\\ ", " ");
-    if !normalized.starts_with('/') {
-        return false;
+    if normalized.starts_with('/')
+        // A second separator distinguishes ordinary absolute paths from slash
+        // command names. Existing files/directories are paths even with one level.
+        && (normalized[1..].contains('/') || Path::new(&normalized).exists())
+    {
+        return true;
     }
-    // A second separator distinguishes ordinary absolute paths from slash
-    // command names. Existing files/directories are paths even with one level.
-    normalized[1..].contains('/') || Path::new(&normalized).exists()
+
+    // A quoted or escaped root-level destination is unambiguous even when it
+    // does not exist yet. Keep ordinary one-segment slash names on the command
+    // path unless they use explicit path-token syntax.
+    shell_token_ranges(path_line)
+        .and_then(|ranges| ranges.first().map(|range| &path_line[range.clone()]))
+        .and_then(|raw| decode_shell_path_token(raw).map(|decoded| (raw, decoded)))
+        .is_some_and(|(raw, decoded)| decoded.starts_with('/') && raw != decoded.as_str())
 }
 
 /// How a paste payload should enter the composer.

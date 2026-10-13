@@ -60,16 +60,15 @@ fn openai_pricing(model_id: &str) -> Option<Pricing> {
             (5_000_000, 30_000_000, 500_000, 0),
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 uses OpenAI's published standard costs (Pi 0.84.4
-        // correction); the checked-in models.dev snapshot already agrees
-        // with these rates.
+        // GPT-5.6 rates follow the checked-in models.dev snapshot and Pi
+        // 1.0.2; above 272K input tokens Pi 1.0.2's long-context tier applies.
         "gpt-5.6-luna" => (
             (200_000, 1_200_000, 20_000, 250_000),
             Some((400_000, 1_800_000, 40_000, 500_000)),
         ),
         "gpt-5.6-sol" => (
-            (5_000_000, 30_000_000, 500_000, 6_250_000),
-            Some((10_000_000, 45_000_000, 1_000_000, 12_500_000)),
+            (4_000_000, 20_000_000, 400_000, 5_000_000),
+            Some((8_000_000, 30_000_000, 800_000, 10_000_000)),
         ),
         "gpt-5.6-terra" => (
             (2_000_000, 12_000_000, 200_000, 2_500_000),
@@ -82,6 +81,10 @@ fn openai_pricing(model_id: &str) -> Option<Pricing> {
         "gpt-6-sol" => (
             (2_000_000, 10_000_000, 200_000, 2_500_000),
             Some((4_000_000, 15_000_000, 400_000, 5_000_000)),
+        ),
+        "gpt-6.1-sol" => (
+            (2_000_000, 10_000_000, 100_000, 2_500_000),
+            Some((4_000_000, 15_000_000, 200_000, 5_000_000)),
         ),
         "gpt-6-luna" => (
             (100_000, 500_000, 10_000, 125_000),
@@ -105,7 +108,7 @@ fn opencode_openai_pricing(model_id: &str) -> Option<Pricing> {
         "gpt-5.4-pro" | "gpt-5.5-pro" => (30_000_000, 180_000_000, 30_000_000, 0),
         "gpt-5.5" => (5_000_000, 30_000_000, 500_000, 0),
         "gpt-5.6-luna" => (200_000, 1_200_000, 20_000, 250_000),
-        "gpt-5.6-sol" => (5_000_000, 30_000_000, 500_000, 6_250_000),
+        "gpt-5.6-sol" => (4_000_000, 20_000_000, 400_000, 5_000_000),
         "gpt-5.6-terra" => (2_000_000, 12_000_000, 200_000, 2_500_000),
         _ => return None,
     };
@@ -165,6 +168,11 @@ fn mistral_pricing(model_id: &str) -> Option<Pricing> {
         "codestral-latest" => (300_000, 900_000, 0, 0),
         "devstral-latest" => (400_000, 2_000_000, 0, 0),
         "magistral-medium-latest" => (2_000_000, 5_000_000, 0, 0),
+        // Mistral's own model card publishes $0.68 input / $2.09 output with
+        // $0.07 cached input per million tokens for `mistral-large-4` in public
+        // preview; docs.mistral.ai/models/mistral-large-4-0, reviewed
+        // 2026-10-07. Mistral publishes no cache-write tariff.
+        "mistral-large-4" => (680_000, 2_090_000, 70_000, 0),
         "mistral-large-latest" => (500_000, 1_500_000, 0, 0),
         "mistral-small-latest" => (150_000, 600_000, 0, 0),
         "pixtral-large-latest" => (2_000_000, 6_000_000, 0, 0),
@@ -282,8 +290,7 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
             0,
             Some((10_000_000, 45_000_000, 1_000_000, 0)),
         ),
-        // GPT-5.6 uses OpenAI's published standard costs, which are well below
-        // the older catalog estimates (Pi 0.84.4 pinned these as authoritative).
+        // GPT-5.6 rates follow the checked-in models.dev snapshot and Pi 1.0.2.
         "gpt-5.6-luna" => (
             200_000,
             1_200_000,
@@ -292,11 +299,11 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
             Some((400_000, 1_800_000, 40_000, 500_000)),
         ),
         "gpt-5.6-sol" => (
+            4_000_000,
+            20_000_000,
+            400_000,
             5_000_000,
-            30_000_000,
-            500_000,
-            6_250_000,
-            Some((10_000_000, 45_000_000, 1_000_000, 12_500_000)),
+            Some((8_000_000, 30_000_000, 800_000, 10_000_000)),
         ),
         "gpt-5.6-terra" => (
             2_000_000,

@@ -17,48 +17,58 @@ const MAX_OUTCOME_DETAIL_BYTES: usize = 4 * 1024;
 /// is a render-time fact: the same settled outcome block stops showing the line
 /// the moment the roster settles.
 pub(super) const SUBAGENTS_RUNNING_DETAIL: &str =
-    "subagents are running; inspect them in the /subagents menu.";
+    "subagents are running; inspect or stop them from /subagents.";
 
 pub(super) fn completion_text(
     elapsed: Duration,
     separator: &str,
-    tokens_per_second: Option<f64>,
+    generation: Option<&super::RunGenerationRate>,
 ) -> String {
-    completion_status_text("completed", elapsed, separator, tokens_per_second)
+    completion_status_text("completed", elapsed, separator, generation)
 }
 
 fn completion_status_text(
     status: &str,
     elapsed: Duration,
     separator: &str,
-    tokens_per_second: Option<f64>,
+    generation: Option<&super::RunGenerationRate>,
 ) -> String {
     let mut text = format!("{status}{separator}{}", format_duration(elapsed));
-    if let Some(rate) = tokens_per_second.filter(|rate| rate.is_finite() && *rate > 0.0) {
-        text.push_str(&format!("{separator}{rate:.0} tok/s"));
+    if let Some(generation) = generation {
+        text.push_str(separator);
+        text.push_str(&completion_rate_detail(generation));
     }
     text
 }
 
+pub(super) fn completion_rate_detail(generation: &super::RunGenerationRate) -> String {
+    let approx = if generation.is_estimate { "~" } else { "" };
+    let estimated = if generation.is_estimate {
+        " (estimated tokens)"
+    } else {
+        ""
+    };
+    format!(
+        "{approx}{:.1} tok/s{estimated}",
+        generation.tokens_per_second
+    )
+}
+
 fn outcome_line(
     outcome: &RunOutcome,
-    tokens_per_second: Option<f64>,
+    generation: Option<&super::RunGenerationRate>,
     theme: &OctetTheme,
 ) -> String {
     let separator = semantic_separator(theme);
     match outcome {
         // `CompletedWithWarnings` deliberately renders exactly like
-        // `Completed`: the same success glyph, the same `completed · duration ·
-        // rate tok/s` text, the same success-led intro. Per-call tool failures
-        // are already rendered by their own tool blocks above this line, and the
-        // warning count stays in the model for exit status and telemetry. It is
-        // never transcript wording, so the two variants cannot drift apart.
+        // `Completed`: the same success glyph, `completed · duration · whole-run
+        // rate` text, and success-led intro. Per-call tool failures are already
+        // rendered by their own blocks; warning count stays in the model for exit
+        // status and telemetry, never transcript wording.
         RunOutcome::Completed { elapsed, .. }
         | RunOutcome::CompletedWithWarnings { elapsed, .. } => {
-            let text = subdued_text(
-                theme,
-                &completion_text(*elapsed, separator, tokens_per_second),
-            );
+            let text = subdued_text(theme, &completion_text(*elapsed, separator, generation));
             format!("{} {text}", theme.fg("success", theme.glyph("success")))
         }
         RunOutcome::Failed { elapsed, .. } => format!(
@@ -107,7 +117,7 @@ pub(super) fn render_outcome(
     subagents_running: bool,
 ) -> Vec<String> {
     let mut lines = vec![fit_line(
-        &outcome_line(&outcome.outcome, outcome.tokens_per_second, theme),
+        &outcome_line(&outcome.outcome, outcome.generation.as_ref(), theme),
         width,
     )];
     let detail = match &outcome.outcome {
@@ -184,20 +194,24 @@ mod tests {
             },
         };
 
-        for rate in [None, Some(216.0)] {
+        let generation = super::super::RunGenerationRate {
+            tokens_per_second: 100.0,
+            is_estimate: false,
+        };
+        for rate in [None, Some(&generation)] {
             assert_eq!(
                 outcome_line(&completed, rate, &theme),
                 outcome_line(&with_warnings, rate, &theme),
                 "the two completed variants must render byte-identically"
             );
         }
-        let line = strip_terminal_sequences(&outcome_line(&with_warnings, Some(216.0), &theme));
-        assert_eq!(line, "✓ completed · 1m23s · 216 tok/s");
+        let line = strip_terminal_sequences(&outcome_line(&with_warnings, None, &theme));
+        assert_eq!(line, "✓ completed · 1m23s");
         assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
 
         // The success glyph and role are the ones the completed line uses; the
         // warning glyph and role never reach it.
-        let styled = outcome_line(&with_warnings, Some(216.0), &theme);
+        let styled = outcome_line(&with_warnings, None, &theme);
         assert!(
             styled.contains(&theme.fg("success", theme.glyph("success"))),
             "{styled:?}"
@@ -208,7 +222,7 @@ mod tests {
         );
 
         // The whole block is identical too, and no line carries warning wording.
-        let block = |outcome: RunOutcome| OutcomeBlock::new(outcome, Some(216.0));
+        let block = |outcome: RunOutcome| OutcomeBlock::new(outcome, None);
         let rendered = |outcome: RunOutcome| {
             render_outcome(&block(outcome), &theme, 80, false)
                 .into_iter()
@@ -218,7 +232,7 @@ mod tests {
         };
         let plain = rendered(with_warnings);
         assert_eq!(plain, rendered(completed), "{plain:?}");
-        assert_eq!(plain, "✓ completed · 1m23s · 216 tok/s", "{plain:?}");
+        assert_eq!(plain, "✓ completed · 1m23s", "{plain:?}");
         assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
     }
 
@@ -263,7 +277,7 @@ mod tests {
                 live,
                 vec![
                     "✓ completed · 1.0s",
-                    "  subagents are running; inspect them in the /subagents menu.",
+                    "  subagents are running; inspect or stop them from /subagents.",
                 ],
                 "{live:?}"
             );
@@ -341,5 +355,127 @@ mod tests {
         let copied = block_copy_text(&TranscriptBlock::Outcome(OutcomeBlock::new(outcome, None)));
         assert!(copied.starts_with("failed · 9.4s\nProvider unavailable␇\n"));
         assert!(copied.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+
+    fn client(tokens: u64, elapsed_ms: u64) -> octet_ai::ClientInferenceMetrics {
+        octet_ai::ClientInferenceMetrics {
+            scope: Some(octet_ai::ClientTimingScope::Request),
+            elapsed_ns: elapsed_ms * 1_000_000,
+            first_output_ns: Some(800_000_000),
+            last_output_ns: Some(elapsed_ms * 1_000_000),
+            reported_output_tokens: tokens,
+            text_bytes: 404,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn completion_shows_reported_output_over_dispatch_to_stream_end() {
+        let theme = crate::tui::theme::test_theme();
+        // Server-native counters and a decode fit would both claim much faster
+        // speeds; the displayed rate is 100 reported tokens over the 2 s from
+        // dispatch to stream end.
+        let metrics = octet_ai::InferenceMetrics {
+            client: Some(client(100, 2_000)),
+            decode_estimate: Some(octet_ai::DecodeEstimate {
+                tokens_per_second: 400.0,
+                reported_visible_tokens: 100,
+                observed_ns: 250_000_000,
+                samples: 20,
+                relative_dispersion: 0.01,
+                reasoning_tokens_excluded: 0,
+            }),
+            server: Some(octet_ai::ServerGenerationMetrics {
+                source: octet_ai::ServerTimingSource::TimingsPredicted,
+                tokens: 100,
+                generation_ns: 500_000_000,
+                reported_unit: octet_ai::ReportedTimingUnit::Milliseconds,
+                prompt_ns: None,
+                queue_ns: None,
+                total_ns: None,
+            }),
+            ..Default::default()
+        };
+        let block = OutcomeBlock::new(
+            RunOutcome::Completed {
+                elapsed: Duration::from_secs(9),
+                summary: crate::presentation::RunSummary {
+                    files_changed: 0,
+                    tool_calls: 0,
+                    warnings: 0,
+                },
+            },
+            Some(metrics),
+        );
+        let text = render_outcome(&block, &theme, 120, false)
+            .iter()
+            .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text, "✓ completed · 9.0s · 50.0 tok/s");
+    }
+}
+
+#[cfg(test)]
+mod decode_estimate_tests {
+    use super::*;
+    #[test]
+    fn completion_and_copy_show_only_available_speed_and_mark_estimates() {
+        let block = |inference| {
+            OutcomeBlock::new(
+                RunOutcome::Completed {
+                    elapsed: Duration::from_secs(60),
+                    summary: crate::presentation::RunSummary {
+                        files_changed: 0,
+                        tool_calls: 0,
+                        warnings: 0,
+                    },
+                },
+                inference,
+            )
+        };
+        let metrics = octet_ai::InferenceMetrics::default();
+        let missing_block = block(Some(metrics.clone()));
+        let missing = completion_text(
+            Duration::from_secs(60),
+            " · ",
+            missing_block.generation.as_ref(),
+        );
+        assert_eq!(missing, "completed · 1m00s");
+        for inference in [None, Some(metrics)] {
+            assert_eq!(
+                super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block(
+                    inference
+                ))),
+                missing
+            );
+        }
+        // No provider output usage: 400 streamed bytes are ~100 tokens over 2 s.
+        let metrics = octet_ai::InferenceMetrics {
+            client: Some(octet_ai::ClientInferenceMetrics {
+                scope: Some(octet_ai::ClientTimingScope::Request),
+                elapsed_ns: 2_000_000_000,
+                text_bytes: 400,
+                reported_output_tokens: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let estimated_block = block(Some(metrics));
+        let text = completion_text(
+            Duration::from_secs(60),
+            " · ",
+            estimated_block.generation.as_ref(),
+        );
+        assert_eq!(text, "completed · 1m00s · ~50.0 tok/s (estimated tokens)");
+        assert_eq!(
+            super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(estimated_block)),
+            text
+        );
     }
 }

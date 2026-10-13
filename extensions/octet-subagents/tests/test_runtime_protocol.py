@@ -33,7 +33,7 @@ class PresentationPublisherTests(unittest.TestCase):
                 agent_id = orchestrator.spawn(
                     client, owner, {"name": "audit", "task": "Inspect ordering."}
                 )["worker"]["id"]
-                host.start(agent_id, tool_name="search")
+                host.start(agent_id, tool_name="read")
                 orchestrator.status(client, owner, {})
                 running = captured[-1]
                 if terminal_state == "done":
@@ -234,7 +234,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(
             calls[0]["params"]["policy"],
             {
-                "tools": ["read", "search", "edit", "write", "bash"],
+                "tools": ["read", "edit", "write", "bash"],
                 "max_depth": 1,
                 "max_concurrent_children": 8,
                 "max_turns": None,
@@ -245,7 +245,7 @@ class RuntimeProtocolTests(unittest.TestCase):
             },
         )
         self.assertIn(
-            "Use only these exact requested tools: read, search, edit, write, bash",
+            "Use only these exact requested tools: read, edit, write, bash",
             calls[0]["params"]["message"],
         )
         self.assertIn(
@@ -390,7 +390,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertTrue(resumed["result"]["metadata"]["accepted"])
         self.assertEqual(self.responder.follow_ups, [("agent-1", "Follow up: also inspect the config.")])
         self.assertEqual(self.responder.steers, [("agent-1", "Adjust scope: also check docs/.")])
-        self.responder.host.start("agent-1", tool_name="search")
+        self.responder.host.start("agent-1", tool_name="read")
         self.running.reader.feed(
             rpc_request(
                 33,
@@ -408,7 +408,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         latest = presentations[-1]["params"]["snapshot"]
         self.assertEqual(latest["activities"][0]["summary"], "audit · running")
         self.assertNotIn("completed_at_ms", latest["activities"][0])
-        self.assertIn("Current phase/tool: search", latest["collection"]["detail"]["body"])
+        self.assertIn("Current phase/tool: read", latest["collection"]["detail"]["body"])
 
     def test_continue_rejects_orphaned_worker_with_stable_error(self):
         self.running.start()

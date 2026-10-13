@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from octet_computer_use import entrypoint, service
@@ -14,8 +16,10 @@ from octet_computer_use.entrypoint import ComputerUse, _DRIVER_TOOLS, _render_st
 from octet_computer_use.service import ArgumentError, sanitize, summarize_result
 
 try:  # the prototype suite discovers tests flat; the bundle suite uses packages
+    from . import live_smoke
     from .helpers import FakeClient, RecordingExtension
 except ImportError:  # pragma: no cover - exercised by the flat discovery mode
+    import live_smoke
     from helpers import FakeClient, RecordingExtension
 
 
@@ -41,6 +45,20 @@ class SanitizeTests(unittest.TestCase):
             sanitize("get_window_state", {"include_screenshot": False})["include_screenshot"],
             False,
         )
+
+    def test_window_visibility_filter_requires_a_boolean(self):
+        for visible in (True, False):
+            with self.subTest(on_screen_only=visible):
+                self.assertEqual(
+                    sanitize("list_windows", {"pid": 42, "on_screen_only": visible}),
+                    {"pid": 42, "on_screen_only": visible},
+                )
+        self.assertEqual(sanitize("list_windows", {}), {})
+        self.assertEqual(sanitize("list_windows", {"on_screen_only": None}), {})
+        for invalid in ("true", "false", "yes", 1, 0, [], {}):
+            with self.subTest(on_screen_only=invalid):
+                with self.assertRaisesRegex(ArgumentError, "on_screen_only must be a boolean"):
+                    sanitize("list_windows", {"on_screen_only": invalid})
 
     def test_unreviewed_tool_is_refused_outright(self):
         with self.assertRaises(ArgumentError):
@@ -226,6 +244,20 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(extension.confirmations, [])
         self.assertEqual(client.calls[0][0], "get_window_state")
 
+    def test_window_visibility_filter_reaches_driver_unchanged(self):
+        client = FakeClient(read_only=["list_windows"])
+        computer_use, extension = self.use(client)
+        for arguments in ({}, {"on_screen_only": True}, {"pid": 42, "on_screen_only": False}):
+            with self.subTest(arguments=arguments):
+                computer_use.call("list_windows", arguments)
+                self.assertEqual(client.calls[-1], ("list_windows", arguments))
+        for invalid in ("true", "false", 1, 0):
+            with self.subTest(on_screen_only=invalid):
+                with self.assertRaises(ArgumentError):
+                    computer_use.call("list_windows", {"on_screen_only": invalid})
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(extension.confirmations, [])
+
     def test_effectful_tool_prompts_once_and_dispatches_when_approved(self):
         client = FakeClient(effectful=["click"])
         computer_use, extension = self.use(client, confirm=True)
@@ -285,6 +317,11 @@ class RegistrationTests(unittest.TestCase):
             self.assertTrue(description.strip())
             self.assertIn(driver_tool, service._ARGUMENTS, f"{name} has no argument allowlist")
 
+    def test_window_visibility_filter_is_an_optional_boolean(self):
+        schema = entrypoint._schema_for("list_windows")
+        self.assertEqual(schema["properties"]["on_screen_only"], {"type": "boolean"})
+        self.assertNotIn("on_screen_only", schema.get("required", []))
+
     def test_manifest_environment_matches_the_runtime_allowlist(self):
         import tomllib
 
@@ -333,18 +370,69 @@ class ClientClassificationTests(unittest.TestCase):
         import os
         from unittest import mock
 
+        from octet_computer_use import driver_client
         from octet_computer_use.driver_client import SESSION_ENVIRONMENT, _child_environment
 
-        with mock.patch.dict(
-            os.environ,
-            {"DISPLAY": ":0", "OPENAI_API_KEY": "secret", "AWS_SECRET_ACCESS_KEY": "secret"},
-        ):
+        ambient = {"DISPLAY": ":0", "PATH": "/usr/bin", "HOME": "/home/u",
+                   "OPENAI_API_KEY": "secret", "AWS_SECRET_ACCESS_KEY": "secret"}
+        for system in ("Darwin", "Windows"):
+            with self.subTest(system=system), mock.patch.dict(os.environ, ambient), \
+                    mock.patch.object(driver_client.platform, "system", return_value=system):
+                environment = _child_environment()
+            self.assertEqual(environment.get("DISPLAY"), ":0")
+            self.assertNotIn("OPENAI_API_KEY", environment)
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+            for name in environment:
+                self.assertIn(name, SESSION_ENVIRONMENT)
+
+    def test_linux_child_gets_the_launch_baseline_and_nothing_secret(self):
+        # Linux launch_app spawns through the driver's own environment, so the
+        # launched app needs the same PATH/HOME/locale octet's tools get.
+        import os
+        from unittest import mock
+
+        from octet_computer_use import driver_client
+        from octet_computer_use.driver_client import (
+            LINUX_LAUNCH_ENVIRONMENT, SESSION_ENVIRONMENT, _child_environment)
+
+        ambient = {"DISPLAY": ":0", "PATH": "/usr/bin:/home/u/.local/share/omarchy/bin",
+                   "HOME": "/home/u", "LANG": "en_US.UTF-8",
+                   "HYPRLAND_INSTANCE_SIGNATURE": "abc_123", "XDG_CURRENT_DESKTOP": "Hyprland",
+                   "OPENAI_API_KEY": "secret", "LD_PRELOAD": "/tmp/evil.so"}
+        with mock.patch.dict(os.environ, ambient, clear=True), \
+                mock.patch.object(driver_client.platform, "system", return_value="Linux"):
             environment = _child_environment()
-        self.assertEqual(environment.get("DISPLAY"), ":0")
+        self.assertEqual(environment["PATH"], ambient["PATH"])
+        self.assertEqual(environment["HOME"], "/home/u")
+        self.assertEqual(environment["LANG"], "en_US.UTF-8")
+        self.assertEqual(environment["HYPRLAND_INSTANCE_SIGNATURE"], "abc_123")
+        self.assertEqual(environment["XDG_CURRENT_DESKTOP"], "Hyprland")
         self.assertNotIn("OPENAI_API_KEY", environment)
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+        self.assertNotIn("LD_PRELOAD", environment)
+        # No Wayland socket, so the native Wayland backend stays off.
+        self.assertNotIn(driver_client.WAYLAND_BACKEND_VARIABLE, environment)
+        allowed = set(SESSION_ENVIRONMENT) | set(LINUX_LAUNCH_ENVIRONMENT)
         for name in environment:
-            self.assertIn(name, SESSION_ENVIRONMENT)
+            self.assertIn(name, allowed)
+
+    def test_wayland_sessions_enable_the_native_backend_only_on_linux(self):
+        # Hyprland (Omarchy) is pure Wayland: without the native backend only
+        # XWayland windows would be visible to the driver.
+        import os
+        from unittest import mock
+
+        from octet_computer_use import driver_client
+        from octet_computer_use.driver_client import WAYLAND_BACKEND_VARIABLE, _child_environment
+
+        wayland = {"WAYLAND_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": "/run/user/1000"}
+        with mock.patch.dict(os.environ, wayland, clear=True):
+            with mock.patch.object(driver_client.platform, "system", return_value="Linux"):
+                self.assertEqual(_child_environment()[WAYLAND_BACKEND_VARIABLE], "1")
+            with mock.patch.object(driver_client.platform, "system", return_value="Darwin"):
+                self.assertNotIn(WAYLAND_BACKEND_VARIABLE, _child_environment())
+        with mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True), \
+                mock.patch.object(driver_client.platform, "system", return_value="Linux"):
+            self.assertNotIn(WAYLAND_BACKEND_VARIABLE, _child_environment())
 
     def test_explicit_overrides_win_over_inherited_names(self):
         from octet_computer_use.driver_client import _child_environment
@@ -353,12 +441,84 @@ class ClientClassificationTests(unittest.TestCase):
         self.assertEqual(environment["DISPLAY"], ":9")
 
 
+class DriverTransportEncodingTests(unittest.TestCase):
+    """The MCP stdio transport is UTF-8 with LF framing on every host.
+
+    On Windows the default text encoding is cp1252, so any byte undefined
+    there (window titles, pip banners, lone 0x90) used to kill the reader
+    and report the driver as closed. These tests pin the binary-pipe
+    contract without needing a live driver.
+    """
+
+    def test_frame_is_utf8_with_a_single_lf(self):
+        from octet_computer_use.driver_client import _frame
+
+        raw = _frame({"text": "— curly “quotes” —"})
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertFalse(raw.endswith(b"\r\n"))
+        self.assertTrue(raw.decode("utf-8").endswith('"}\n'))
+
+    def test_reader_decodes_utf8_and_survives_undefined_cp1252_bytes(self):
+        import io
+        import queue
+
+        from octet_computer_use.driver_client import DriverClient
+
+        stream = io.BytesIO(
+            '{"jsonrpc":"2.0","id":1,"result":{}}\n'.encode("utf-8")
+            + "—\n".encode("utf-8")
+            + b"\x90\n"
+            + '{"jsonrpc":"2.0","id":2,"result":{}}\n'.encode("utf-8")
+        )
+        sink: queue.Queue = queue.Queue()
+        DriverClient._read_lines(stream, sink)
+        got = [sink.get(timeout=5) for _ in range(5)]
+        self.assertTrue(got[0].startswith('{"jsonrpc"'))
+        self.assertIn("—", got[1])
+        # errors="replace": the lone 0x90 becomes U+FFFD and the stream
+        # continues instead of reporting EOF.
+        self.assertIn("�", got[2])
+        self.assertTrue(got[3].startswith('{"jsonrpc"'))
+        self.assertIsNone(got[4])
+
+    def test_run_decodes_subprocess_output_as_utf8(self):
+        from unittest import mock
+
+        from octet_computer_use import driver as driver_module
+
+        with mock.patch("subprocess.run") as run:
+            driver_module._run(["octet", "--version"])
+        _, kwargs = run.call_args
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
+        self.assertEqual(kwargs.get("errors"), "replace")
+
+    def test_cursor_theme_probes_decode_as_utf8(self):
+        from unittest import mock
+
+        from octet_computer_use import cursor_theme
+
+        # Only a driver shipped with Cua's cursor-theme compiler is probed
+        # through a subprocess; a wheel driver's store is read directly.
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cursor_theme.subprocess, "run") as run:
+            binary = Path(directory) / "cua-driver"
+            binary.write_text("")
+            for sidecar in ("cua-cursor-theme", "cua-cursor-theme.exe"):
+                (Path(directory) / sidecar).write_text("")
+            run.return_value = mock.Mock(stdout="[]", stderr="", returncode=0)
+            cursor_theme.installed_theme_ids(binary)
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs.get("encoding"), "utf-8")
+            self.assertEqual(call.kwargs.get("errors"), "replace")
+
+
 class VersionSpecTests(unittest.TestCase):
     def test_pip_spec_is_validated(self):
         from octet_computer_use.driver import _pip_spec, ProvisionError
 
-        self.assertEqual(_pip_spec(""), "cua-driver")
-        self.assertEqual(_pip_spec("0.29.1"), "cua-driver==0.29.1")
+        self.assertEqual(_pip_spec(""), "cua-driver>=0.30.2")
+        self.assertEqual(_pip_spec("0.31.1"), "cua-driver==0.31.1")
         for bad in ("--index-url=http://evil", "1.0; rm -rf /", "a b", "1.0 2.0"):
             with self.subTest(bad=bad):
                 with self.assertRaises(ProvisionError):
@@ -371,6 +531,14 @@ class PermissionProbeTests(unittest.TestCase):
     The CLI can report unknown for a direct runtime or an alternate app host;
     check_permissions reports the actual selected runtime's grant state.
     """
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Darwin")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _state(self, accessibility, screen_recording, raises=None):
         from octet_computer_use.driver import permission_state
@@ -415,6 +583,188 @@ class PermissionProbeTests(unittest.TestCase):
         self.assertIn("did not answer", state["detail"])
 
 
+class WindowsSessionProbeTests(unittest.TestCase):
+    """Windows reports automation interfaces, not macOS TCC grants."""
+
+    AVAILABLE = {"uia": True, "post_message": True, "elevated": False,
+                 "integrity_level": "Unavailable", "integrity_level_rid": None}
+
+    def setUp(self):
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _state(self, structured, *, prompt=False, raises=None, is_error=False):
+        from octet_computer_use.driver import permission_state
+
+        client = FakeClient(result={"structuredContent": structured, "isError": is_error},
+                            raises=raises)
+        return permission_state(client, prompt=prompt), client
+
+    def test_available_interfaces_are_ready_without_a_mac_permission_prompt(self):
+        for prompt in (False, True):
+            with self.subTest(prompt=prompt):
+                state, client = self._state(self.AVAILABLE, prompt=prompt)
+                self.assertEqual(state["permissions"], "granted")
+                # Windows check_permissions rejects the macOS-only prompt and
+                # probe_direct_capture arguments in supported driver releases.
+                self.assertEqual(client.calls, [("check_permissions", {})])
+                self.assertNotIn("accessibility", state)
+                self.assertNotIn("screen_recording", state)
+                self.assertIn("no separate", state["detail"])
+
+    def test_elevation_and_an_unreadable_integrity_token_are_not_os_grants(self):
+        state, _ = self._state({**self.AVAILABLE, "elevated": True})
+        self.assertEqual(state["permissions"], "granted")
+
+    def test_unavailable_interfaces_are_named(self):
+        for field, label in (("uia", "UI Automation"), ("post_message", "window-message")):
+            with self.subTest(field=field):
+                state, _ = self._state({**self.AVAILABLE, field: False})
+                self.assertEqual(state["permissions"], "denied")
+                self.assertIn(label, state["detail"])
+                self.assertNotIn("Screen Recording", state["detail"])
+
+    def test_incomplete_malformed_or_refused_probes_stay_unknown(self):
+        for payload in ({}, {"uia": True}, {"uia": "true", "post_message": "true"},
+                        {"uia": 1, "post_message": 1}, None, "not an object", ["invalid"]):
+            with self.subTest(payload=payload):
+                self.assertEqual(self._state(payload)[0]["permissions"], "unknown")
+        self.assertEqual(self._state(self.AVAILABLE, is_error=True)[0]["permissions"], "unknown")
+        state, _ = self._state(self.AVAILABLE, raises=McpError("driver gone"))
+        self.assertEqual(state["permissions"], "unknown")
+        self.assertIn("did not answer", state["detail"])
+
+
+class LinuxSessionProbeTests(unittest.TestCase):
+    """Linux readiness is a reachable display session; nothing is granted."""
+
+    # The exact structured payload cua-driver 0.30 returns on Linux.
+    HYPRLAND = {"atspi": True, "dbus_session_bus_address": "unix:path=/run/user/1000/bus",
+                "wayland": True, "wayland_enabled": True, "x11": True, "xsend_event": True}
+    HEADLESS = {"atspi": False, "dbus_session_bus_address": None, "wayland": False,
+                "wayland_enabled": False, "x11": False, "xsend_event": False}
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        patcher = mock.patch.object(driver.platform, "system", return_value="Linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _state(self, structured, raises=None, prompt=False):
+        from octet_computer_use.driver import permission_state
+
+        client = FakeClient(result={"structuredContent": structured}, raises=raises)
+        return permission_state(client, prompt=prompt), client
+
+    def test_hyprland_with_xwayland_is_ready(self):
+        state, client = self._state(self.HYPRLAND, prompt=True)
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "wayland+x11")
+        self.assertTrue(state["atspi"])
+        # Linux never prompts, even from setup.
+        self.assertEqual(client.calls, [("check_permissions", {"prompt": False})])
+        self.assertNotIn("accessibility", state)
+        self.assertNotIn("screen_recording", state)
+
+    def test_pure_wayland_without_atspi_is_ready_but_says_so(self):
+        state, _ = self._state({**self.HYPRLAND, "x11": False, "atspi": False})
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "wayland")
+        self.assertIn("AT-SPI unavailable", state["detail"])
+
+    def test_wayland_with_the_backend_off_and_no_xwayland_is_denied(self):
+        state, _ = self._state({**self.HYPRLAND, "x11": False, "wayland_enabled": False})
+        self.assertEqual(state["permissions"], "denied")
+        self.assertIn("native Wayland backend is off", state["detail"])
+
+    def test_x11_session_is_ready(self):
+        state, _ = self._state({**self.HEADLESS, "x11": True, "xsend_event": True})
+        self.assertEqual(state["permissions"], "granted")
+        self.assertEqual(state["display_server"], "x11")
+
+    def test_no_display_is_denied_and_holds_actions(self):
+        state, _ = self._state(self.HEADLESS)
+        self.assertEqual(state["permissions"], "denied")
+        self.assertIsNone(state["display_server"])
+        self.assertIn("inside your graphical session", state["detail"])
+
+    def test_unreadable_or_failed_probe_is_unknown(self):
+        self.assertEqual(self._state({})[0]["permissions"], "unknown")
+        state, _ = self._state(self.HYPRLAND, raises=McpError("driver gone"))
+        self.assertEqual(state["permissions"], "unknown")
+
+    def test_cli_permission_status_is_macos_only(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with mock.patch.object(driver, "_run") as run:
+            self.assertEqual(driver._permission_status(Path("/opt/cua-driver")), "unknown")
+            run.assert_not_called()
+
+    def test_status_reports_the_session_without_null_grants(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        computer = ComputerUse(RecordingExtension())
+        computer._client = FakeClient(result={"structuredContent": self.HYPRLAND})
+        computer._client.started = True
+        health = driver.Health(installed=True, version="0.30.2", permissions="unknown",
+                               doctor_ok=True, detail="cua-driver 0.30.2")
+        with mock.patch.object(driver, "health", return_value=health):
+            report = computer.status()
+        self.assertEqual(report["platform"], "linux")
+        self.assertEqual(report["permissions"], "granted")
+        self.assertEqual(report["display_server"], "wayland+x11")
+        self.assertNotIn("accessibility", report)
+        self.assertNotIn("screen_recording", report)
+        text = _render_status(report)
+        self.assertIn("Linux desktop session: Wayland (native) and XWayland reachable", text)
+        self.assertNotIn("macOS", text)
+
+    def test_rendered_linux_status_names_the_fix(self):
+        denied = _render_status({"installed": True, "version": "0.30.2", "doctor_ok": True,
+                                 "runtime": "direct", "platform": "linux",
+                                 "permissions": "denied",
+                                 "permission_detail": "no display session is reachable"})
+        self.assertIn("no display session is reachable", denied)
+        self.assertIn("WAYLAND_DISPLAY", denied)
+        self.assertNotIn("macOS", denied)
+        self.assertNotIn("Screen Recording", denied)
+        no_atspi = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                                   "permissions": "granted", "atspi": False,
+                                   "permission_detail": "Wayland (native) reachable"})
+        self.assertIn("at-spi2-core", no_atspi)
+
+    def test_status_row_names_the_linux_blocker(self):
+        extension = StatusRowTests._RecordingStatus()
+        computer = ComputerUse(extension)
+        computer.status = lambda **_: {"installed": True, "runtime": "direct",
+                                       "platform": "linux", "permissions": "denied"}
+        computer.publish_status()
+        self.assertEqual(extension.statuses[-1]["label"], "computer use · needs a desktop session")
+        computer.status = lambda **_: {"installed": True, "runtime": "direct",
+                                       "platform": "linux", "permissions": "granted", "doctor_ok": True}
+        computer.publish_status()
+        self.assertEqual(extension.statuses[-1]["label"], "computer use · ready")
+
+    def test_missing_display_blocks_effectful_actions_with_a_linux_message(self):
+        from unittest import mock
+
+        computer = ComputerUse(RecordingExtension())
+        client = FakeClient(effectful=["click"], result={"structuredContent": self.HEADLESS})
+        computer._client = client
+        with mock.patch.object(entrypoint, "confirmations_enabled", return_value=True):
+            result = computer.call("click", {"pid": 1, "window_id": 2, "x": 3, "y": 4})
+        self.assertTrue(result["is_error"])
+        self.assertIn("Linux display session", result["content"][0]["text"])
+        self.assertNotIn(("click", mock.ANY), client.calls)
+
+
 class StatusRowTests(unittest.TestCase):
     """An installed bundle reports its own readiness, like web-search does."""
 
@@ -434,18 +784,34 @@ class StatusRowTests(unittest.TestCase):
         return extension.statuses
 
     def test_ready_state_reports_active(self):
-        statuses = self._publish({"installed": True, "permissions": "granted"})
+        statuses = self._publish({"installed": True, "permissions": "granted", "doctor_ok": True})
         self.assertEqual(
             statuses,
             [{"state": "active", "label": "computer use · ready"}],
         )
 
     def test_missing_screen_recording_is_visible_before_any_action(self):
-        statuses = self._publish(
-            {"installed": True, "permissions": "denied", "screen_recording": False}
-        )
+        from unittest import mock
+
+        # macOS wording is pinned: the label names the missing grant.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            statuses = self._publish(
+                {"installed": True, "permissions": "denied", "screen_recording": False}
+            )
         self.assertEqual(statuses[0]["state"], "pending")
         self.assertIn("Screen Recording", statuses[0]["label"])
+
+    def test_pending_label_names_windows_limits_on_windows(self):
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"):
+            statuses = self._publish(
+                {"installed": True, "permissions": "denied", "screen_recording": False}
+            )
+        self.assertEqual(statuses[0]["state"], "pending")
+        self.assertIn("non-elevated target", statuses[0]["label"])
+        self.assertNotIn("Screen Recording", statuses[0]["label"])
+        self.assertNotIn("macOS", statuses[0]["label"])
 
     def test_unprovisioned_bundle_says_so(self):
         statuses = self._publish({"installed": False})
@@ -477,53 +843,93 @@ class StatusRowTests(unittest.TestCase):
         self.assertEqual(computer_use.publish_status()["permissions"], "granted")
 
     def test_rendered_status_names_the_missing_grant_and_the_fix(self):
-        text = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "denied",
-                "screen_recording": False,
-                "permission_detail": "still needs: Screen Recording",
-            }
-        )
+        from unittest import mock
+
+        # macOS wording is pinned so the contract holds on every host.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            text = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "denied",
+                    "screen_recording": False,
+                    "permission_detail": "still needs: Screen Recording",
+                }
+            )
         self.assertIn("still needs: Screen Recording", text)
         # The fix must name the app the user actually grants: the one running
         # octet. Pointing at a helper app would send them to grant the wrong
         # identity and never succeed.
         self.assertIn("app you run octet from", text)
 
+    def test_rendered_status_names_windows_limits_on_windows(self):
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"):
+            denied = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "denied",
+                    "screen_recording": False,
+                    "permission_detail": "still needs: Screen Recording",
+                }
+            )
+            granted = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "direct",
+                }
+            )
+            unavailable = _render_status({"installed": True, "runtime": "unavailable"})
+        self.assertIn("Windows limits", denied)
+        self.assertIn("secure desktop", denied)
+        self.assertNotIn("Accessibility", denied)
+        self.assertIn("no separate grant", granted)
+        self.assertNotIn("Accessibility", granted)
+        self.assertIn("non-elevated target", unavailable)
+        self.assertNotIn("Grant Accessibility", unavailable)
+
     def test_status_reports_the_live_runtime(self):
         # The permission fix differs per runtime, so a user must be able to see
-        # which one is live instead of guessing.
-        direct = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-                "runtime": "direct",
-            }
-        )
-        self.assertIn("runtime: direct", direct)
-        host = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-                "runtime": "desktop-host",
-            }
-        )
-        self.assertIn("runtime: desktop host", host)
-        self.assertIn("cursor", host)
-        unavailable = _render_status({"installed": True, "runtime": "unavailable"})
-        self.assertIn("that host", unavailable)
-        self.assertNotIn("app you run octet from", unavailable)
-        denied_host = _render_status({"installed": True, "runtime": "desktop-host",
-                                      "permissions": "denied"})
-        self.assertIn("selected Cua Driver desktop host", denied_host)
-        self.assertNotIn("app you run octet from", denied_host)
+        # which one is live instead of guessing. macOS wording is pinned so
+        # the contract holds on every host.
+        from unittest import mock
+
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            direct = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "direct",
+                }
+            )
+            self.assertIn("runtime: direct", direct)
+            host = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                    "runtime": "desktop-host",
+                }
+            )
+            self.assertIn("runtime: desktop host", host)
+            self.assertIn("cursor", host)
+            unavailable = _render_status({"installed": True, "runtime": "unavailable"})
+            self.assertIn("that host", unavailable)
+            self.assertNotIn("app you run octet from", unavailable)
+            denied_host = _render_status({"installed": True, "runtime": "desktop-host",
+                                          "permissions": "denied"})
+            self.assertIn("selected Cua Driver desktop host", denied_host)
+            self.assertNotIn("app you run octet from", denied_host)
 
     def test_runtime_selection_fails_closed_by_default_on_macos(self):
         # The permission fix differs per runtime, so a user must be able to see
@@ -550,24 +956,244 @@ class StatusRowTests(unittest.TestCase):
                 os.environ["OCTET_CUA_DESKTOP_HOST"] = original_env
 
     def test_granted_status_stops_short(self):
-        text = _render_status(
-            {
-                "installed": True,
-                "version": "0.29.1",
-                "doctor_ok": True,
-                "permissions": "granted",
-            }
-        )
+        from unittest import mock
+
+        # macOS wording is pinned so the contract holds on every host.
+        with mock.patch.object(entrypoint.platform, "system", return_value="Darwin"):
+            text = _render_status(
+                {
+                    "installed": True,
+                    "version": "0.29.1",
+                    "doctor_ok": True,
+                    "permissions": "granted",
+                }
+            )
         self.assertIn("Accessibility and Screen Recording allowed", text)
         self.assertNotIn("cannot grant a system permission", text)
 
     def test_not_installed_points_at_setup(self):
-        self.assertIn("/computer-use setup", _render_status({"installed": False}))
+        text = _render_status({"installed": False})
+        self.assertIn("/extensions", text)
+        self.assertIn("Set up computer use", text)
+        self.assertNotIn("/computer-use", text)
 
 
+def _menu_items(items, depth=1):
+    """Walk a menu and check the invariants the host enforces."""
+    ids = set()
+    recommended = 0
+    for item in items:
+        assert item["id"] not in ids, item
+        ids.add(item["id"])
+        recommended += bool(item.get("recommended"))
+        assert ("command" in item) != ("items" in item), item
+        if "command" in item:
+            assert item["command"] == "computer-use", item
+            yield depth, item
+        else:
+            assert not item.get("destructive") and not item.get("arguments"), item
+            yield from _menu_items(item["items"], depth + 1)
+    assert recommended <= 1, items
+    assert depth <= 4
+
+
+class OptionsMenuTests(unittest.TestCase):
+    OWNER = {"resource_owner": {"session_id": "session", "extension_instance_id": "instance",
+                                "process_generation": 1}}
+
+    def menu(self, computer, extension):
+        from unittest import mock
+        with mock.patch.object(entrypoint, "jev_status", return_value={
+                "sdk_installed": False, "api_key_configured": False,
+                "api_key_source": None, "usable": False}):
+            return extension._menu_handler({}, self.OWNER)
+
+    def test_a_fresh_install_recommends_setup_and_routes_every_action(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(driver, "installed_binary", return_value=None), \
+             mock.patch.object(driver, "desktop_app", return_value=None):
+            menu = self.menu(computer, extension)
+        self.assertEqual(menu["status"]["label"], "Not set up")
+        self.assertEqual(menu["items"][0]["arguments"], ["setup"])
+        self.assertTrue(menu["items"][0]["recommended"])
+        actions = {tuple(item["arguments"]): item for _, item in _menu_items(menu["items"])}
+        for arguments in (("setup",), ("status",), ("jev",), ("jev-use", "status"),
+                          ("jev-use", "setup"), ("jev-use", "run"), ("jev-use", "run", "--live")):
+            self.assertIn(arguments, actions)
+        self.assertTrue(actions[("jev-use", "run", "--live")]["destructive"])
+
+    def test_the_menu_reports_the_last_probe_without_starting_the_driver(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "status", return_value={
+                "installed": True, "version": "0.31.0", "doctor_ok": True,
+                "permissions": "granted", "runtime": "direct", "platform": "darwin"}):
+            computer.publish_status()
+        with mock.patch.object(entrypoint.DriverClient, "start",
+                               side_effect=AssertionError("the menu must not start the driver")):
+            menu = self.menu(computer, extension)
+        self.assertEqual(menu["status"], {"state": "active", "label": "Ready"})
+        self.assertIn("0.31.0", menu["detail"])
+        self.assertEqual(menu["items"][0]["label"], "Set up again")
+        self.assertFalse(any(item.get("recommended") for item in menu["items"]))
+
+    def test_windows_live_probe_makes_the_completed_setup_ready(self):
+        extension, computer = entrypoint.create_extension()
+        client = FakeClient(result={"structuredContent": WindowsSessionProbeTests.AVAILABLE})
+        computer._client = client
+        health = mock.Mock()
+        health.as_dict.return_value = {
+            "installed": True, "version": "0.33.0", "doctor_ok": True,
+            "permissions": "unknown", "runtime": "direct", "platform": "windows",
+        }
+        with mock.patch.object(entrypoint.platform, "system", return_value="Windows"), \
+             mock.patch.object(entrypoint.driver_module, "health", return_value=health):
+            report = computer.publish_status(prompt=True)
+            menu = self.menu(computer, extension)
+        self.assertEqual(report["permissions"], "granted")
+        self.assertEqual(menu["status"], {"state": "active", "label": "Ready"})
+        self.assertFalse(menu["items"][0].get("recommended", False))
+        self.assertIn("no separate grant", menu["detail"])
+        self.assertEqual(client.calls, [("check_permissions", {})])
+
+    def test_owned_jev_use_jobs_can_be_checked_and_cancelled(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(driver, "installed_binary", return_value=None), \
+             mock.patch.object(driver, "desktop_app", return_value=None), \
+             mock.patch.object(entrypoint.jev_use_jobs.Jobs, "owned", return_value=[
+                 ("a" * 32, "run", "running"), ("b" * 32, "setup", "finished")]):
+            menu = self.menu(computer, extension)
+        jev_use = next(item for item in menu["items"] if item["id"] == "jev-use")
+        running, finished = [item for item in jev_use["items"] if item["id"].startswith("job:")]
+        self.assertEqual([tuple(action["arguments"]) for action in running["items"]],
+                         [("jev-use", "status", "a" * 32), ("jev-use", "cancel", "a" * 32)])
+        self.assertTrue(running["items"][1]["destructive"])
+        self.assertEqual([tuple(action["arguments"]) for action in finished["items"]],
+                         [("jev-use", "status", "b" * 32)])
+
+    def test_setup_reports_each_step_as_live_progress(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme, gnome_helper
+
+        extension, computer = entrypoint.create_extension()
+        steps = []
+
+        def provision(version="", *, progress=None):
+            progress("Downloading and installing cua-driver>=0.30.2 (this can take a minute)…")
+            return {"provisioned": True, "binary": "/tmp/cua-driver", "version": "0.31.0"}
+
+        with mock.patch.object(extension, "progress",
+                               side_effect=lambda message=None, **_: steps.append(message)), \
+             mock.patch.object(computer, "provision", side_effect=provision), \
+             mock.patch.object(computer, "publish_status", return_value={
+                "installed": True, "permissions": "granted", "runtime": "direct",
+                "platform": "linux"}), \
+             mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "declined"}), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24), \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
+             mock.patch.object(gnome_helper, "install", return_value={"gnome_helper": "active"}):
+            result = extension._commands["computer-use"].handler(["setup"], {})
+        self.assertNotIn("content", result)
+        self.assertEqual(steps[0], "Downloading and installing cua-driver>=0.30.2 (this can take a minute)…")
+        self.assertIn("Installing the model-colored cursor themes…", steps)
+        self.assertIn("Installing the GNOME Shell helper…", steps)
+        self.assertIn("Jev setup declined", result["text"])
+
+    def test_progress_is_optional(self):
+        extension, _ = entrypoint.create_extension()
+        # Outside a request with negotiated progress the step is dropped.
+        entrypoint._progress(extension, "Checking…")
+
+    def test_jev_keys_are_entered_as_secrets_replaced_and_forgotten(self):
+        from unittest import mock
+        from octet_computer_use import jev
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, {"OCTET_STATE_DIR": directory}), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            extension, _ = entrypoint.create_extension()
+            command = extension._commands["computer-use"].handler
+            with mock.patch.object(extension, "request_input", return_value="sk-test") as ask:
+                stored = command(["jev", "key"], {})
+            ask.assert_called_once()
+            self.assertTrue(ask.call_args.kwargs["secret"])
+            self.assertIn("configured", stored["text"])
+            self.assertNotIn("sk-test", str(stored))
+            self.assertEqual(jev.key_path().read_text(encoding="utf-8"), "sk-test")
+            forgotten = command(["jev", "forget"], {})
+            self.assertIn("Forgot the stored Jev API key", forgotten["text"])
+            self.assertFalse(jev.key_path().exists())
+            self.assertIn("Unknown Jev action", command(["jev", "unknown"], {})["text"])
+
+    def test_unknown_actions_point_at_the_menu(self):
+        extension, _ = entrypoint.create_extension()
+        result = extension._commands["computer-use"].handler(["bogus"], {})
+        self.assertIn("/extensions", result["text"])
+
+
+class StatusCommandTests(unittest.TestCase):
+    """The status command reports every outcome; it never fails opaquely."""
+
+    REPORT = {"installed": True, "version": "0.30.3", "doctor_ok": True,
+              "permissions": "granted", "runtime": "direct", "platform": "windows"}
+
+    def test_a_bare_command_checks_status(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status", return_value=dict(self.REPORT)):
+            result = extension._commands["computer-use"].handler([], {})
+        self.assertNotIn("content", result)
+        self.assertIn("Cua Driver 0.30.3 is installed.", result["text"])
+
+    def test_a_failing_command_names_its_error(self):
+        from unittest import mock
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status",
+                               side_effect=RuntimeError("the driver session wedged")):
+            result = extension._commands["computer-use"].handler(["status"], {})
+        self.assertNotIn("content", result)
+        self.assertEqual(result["text"],
+                         "computer-use status failed: the driver session wedged")
+
+    def test_cancellation_is_not_reported_as_a_failure(self):
+        from unittest import mock
+        from octet_extension import CancelledError
+
+        extension, computer = entrypoint.create_extension()
+        with mock.patch.object(computer, "publish_status", side_effect=CancelledError("user")):
+            with self.assertRaises(CancelledError):
+                extension._commands["computer-use"].handler(["status"], {})
+
+    def test_a_failing_self_check_says_why(self):
+        report = dict(self.REPORT, doctor_ok=False, version=None,
+                      detail="the driver check could not run: command timed out after 60s")
+        text = _render_status(report)
+        self.assertIn("driver self-check: needs attention (the driver check could not run: "
+                      "command timed out after 60s)", text)
+        self.assertNotIn("(", _render_status(self.REPORT).splitlines()[1])
 
 
 class CursorThemeTests(unittest.TestCase):
+    def setUp(self):
+        # These menu/tool tests mock ComputerUse.provision, not the installer.
+        # Fail before any download if a call accidentally escapes that mock.
+        provision = mock.patch.object(
+            entrypoint.driver_module, "provision",
+            side_effect=AssertionError("cursor theme tests must not provision a real driver"),
+        )
+        provision.start()
+        self.addCleanup(provision.stop)
+
     def test_palette_matches_model_families_and_bundles_every_artifact(self):
         from octet_computer_use import cursor_theme
 
@@ -588,42 +1214,527 @@ class CursorThemeTests(unittest.TestCase):
 
         extension, computer = entrypoint.create_extension()
         context = {"host": {"model": "claude-sonnet-4"}}
+        report = {"installed": True, "version": "0.29.1", "permissions": "granted",
+                  "runtime": "desktop-host", "cursor_enabled": True,
+                  "cursor_theme": "com.octet.computeruse.anthropic", "cursor_personalized": True}
         with mock.patch.object(computer, "provision", return_value={
                 "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.29.1"}), \
-             mock.patch.object(computer, "publish_status", return_value={
-                "installed": True, "permissions": "granted", "runtime": "desktop-host",
-                "cursor_enabled": True, "cursor_theme": "com.octet.computeruse.anthropic",
-                "cursor_personalized": True}), \
+             mock.patch.object(computer, "publish_status", return_value=report), \
+             mock.patch.object(computer, "status", return_value=report) as status, \
              mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
              mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install:
             command = extension._commands["computer-use"].handler
             result = command(["setup"], context)
-            self.assertEqual(result["structured_content"]["cursor_themes_installed"], 24)
+            # The command channel renders text only; details stay in the log.
+            self.assertNotIn("content", result)
+            self.assertIn("Cua Driver 0.29.1 is installed.", result["text"])
             install.assert_called_once_with(Path("/tmp/cua-driver"))
             install.reset_mock()
-            extension._tools["computer_use_setup"].handler({}, context)
+            tool = extension._tools["computer_use_setup"].handler({}, context)
+            status.assert_called_once_with()
+            self.assertIn("Cua Driver 0.29.1 is installed.", tool["content"][0]["text"])
             install.assert_not_called()
             install.side_effect = RuntimeError("invalid artifact")
             failed = command(["setup"], context)
-            self.assertTrue(failed["is_error"])
-            self.assertIn("cursor theme setup failed", failed["content"][0]["text"])
+            self.assertNotIn("content", failed)
+            self.assertIn("cursor theme setup failed", failed["text"])
+            self.assertIn("invalid artifact", failed["text"])
 
+    def test_setup_reports_provisioning_failures_instead_of_raising(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        extension, computer = entrypoint.create_extension()
+        failure = driver.ProvisionError(
+            "cua-driver needs Python 3.10 or newer, but octet's computer-use "
+            "extension runs on Python 3.9 (/usr/bin/python3)")
+        with mock.patch.object(computer, "provision", side_effect=failure):
+            command = extension._commands["computer-use"].handler(["setup"], {})
+            tool = extension._tools["computer_use_setup"].handler({}, {})
+        self.assertTrue(tool["is_error"])
+        self.assertIn("Cua Driver setup failed", tool["content"][0]["text"])
+        self.assertIn("needs Python 3.10 or newer", tool["content"][0]["text"])
+        self.assertIn("Cua Driver setup failed", command["text"])
+        self.assertIn("needs Python 3.10 or newer", command["text"])
+
+    def test_linux_setup_installs_themes_and_the_gnome_helper(self):
+        # The Linux wheel has no cursor-theme compiler, so setup must install
+        # the bundled artifacts itself rather than fail.
+        from unittest import mock
+        from octet_computer_use import cursor_theme, gnome_helper
+
+        extension, computer = entrypoint.create_extension()
+        report = {"installed": True, "version": "0.30.2", "permissions": "granted",
+                  "runtime": "direct", "platform": "linux",
+                  "permission_detail": "Wayland (native) reachable"}
+        with mock.patch.object(computer, "provision", return_value={
+                "provisioned": True, "binary": "/tmp/cua-driver", "version": "0.30.2"}), \
+             mock.patch.object(computer, "publish_status", return_value=report), \
+             mock.patch.object(computer, "status", return_value=report) as status, \
+             mock.patch.object(entrypoint, "_setup_jev", return_value={"jev_setup": "skipped"}), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install, \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=True), \
+             mock.patch.object(gnome_helper, "install", return_value={
+                "gnome_helper": "restart-required",
+                "gnome_helper_detail": "log out and back in once"}) as helper:
+            result = extension._commands["computer-use"].handler(["setup"], {})
+            # Keep both entrypoints inside the offline provisioning/status mocks.
+            # The menu renders text; the agent tool keeps the structured report.
+            # The tool provisions only, so themes and the helper stay command-only.
+            tool = extension._tools["computer_use_setup"].handler({}, {})
+        install.assert_called_once_with(Path("/tmp/cua-driver"))
+        helper.assert_called_once_with()
+        status.assert_called_once_with()
+        self.assertTrue(tool["structured_content"]["provisioned"])
+        self.assertIn("Cua Driver 0.30.2 is installed.", tool["content"][0]["text"])
+        self.assertIn("Linux desktop session: Wayland (native) reachable", tool["content"][0]["text"])
+        self.assertNotIn("content", result)
+        self.assertIn("Cua Driver 0.30.2 is installed.", result["text"])
+        install.assert_called_once_with(Path("/tmp/cua-driver"))
+
+    # TEMPORARY for the 0.8.2 release: this asserts the driver-CLI install route,
+    # which is only taken when a Cua compiler sidecar is present. Windows has no
+    # such sidecar, so install_bundled_themes takes the store route there and
+    # shells out zero times. The test never forced the route it means to check, so
+    # it is skipped on Windows rather than weakened. Teaching it to pin the route
+    # (and to assert the store route on Windows) needs a real Windows host.
+    @unittest.skipIf(
+        os.name == "nt",
+        "driver-CLI install route: Windows has no Cua compiler sidecar")
     def test_installer_uses_only_bundled_artifacts_and_reports_failure(self):
         from unittest import mock
         from octet_computer_use import cursor_theme
 
-        with mock.patch.object(cursor_theme.subprocess, "run") as run:
-            run.return_value.returncode = 0
-            self.assertEqual(cursor_theme.install_bundled_themes(Path("/tmp/cua-driver")), 24)
-            self.assertEqual(run.call_count, 24)
-            for args, _ in run.call_args_list:
-                command = args[0]
-                self.assertEqual(command[:3], ["/tmp/cua-driver", "cursor-theme", "install"])
-                self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
-            run.return_value.returncode = 1
-            run.return_value.stderr = "rejected"
-            with self.assertRaisesRegex(RuntimeError, "rejected"):
-                cursor_theme.install_bundled_themes(Path("/tmp/cua-driver"))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cua-driver"
+            binary.write_text("")
+            (Path(directory) / "cua-cursor-theme").write_text("")
+            with mock.patch.object(cursor_theme.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                self.assertEqual(cursor_theme.install_bundled_themes(binary), 24)
+                self.assertEqual(run.call_count, 24)
+                for args, _ in run.call_args_list:
+                    command = args[0]
+                    self.assertEqual(command[:3], [str(binary), "cursor-theme", "install"])
+                    self.assertEqual(Path(command[3]).parent, cursor_theme.THEMES)
+                run.return_value.returncode = 1
+                run.return_value.stderr = "rejected"
+                with self.assertRaisesRegex(RuntimeError, "rejected"):
+                    cursor_theme.install_bundled_themes(binary)
+
+    def test_without_the_compiler_themes_go_straight_into_the_driver_store(self):
+        # Mirrors Cua's own install: <store>/<id>.cua-theme, atomically, with
+        # the driver re-validating on load. No subprocess is involved.
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "data" / "cua-driver" / "cursor-themes"
+            env = {"XDG_DATA_HOME": str(Path(directory) / "data"), "HOME": directory}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(cursor_theme.platform, "system", return_value="Linux"), \
+                 mock.patch.object(cursor_theme.subprocess, "run") as run:
+                binary = Path(directory) / "cua-driver"
+                self.assertEqual(cursor_theme.theme_store_root(), store)
+                self.assertEqual(cursor_theme.installed_theme_ids(binary), {"cua.default"})
+                self.assertEqual(cursor_theme.install_bundled_themes(binary), 24)
+                run.assert_not_called()
+                entry = cursor_theme.PALETTE["anthropic"]
+                target = store / (entry["id"] + ".cua-theme")
+                self.assertEqual(target.read_bytes(),
+                                 (cursor_theme.THEMES / "anthropic.cua-theme").read_bytes())
+                ids = cursor_theme.installed_theme_ids(binary)
+                self.assertEqual(ids, {"cua.default"} | {e["id"] for e in cursor_theme.PALETTE.values()})
+                # Idempotent, and an outdated copy is replaced.
+                target.write_bytes(b"stale")
+                cursor_theme.install_bundled_themes(binary)
+                self.assertEqual(target.read_bytes()[:8], b"CUATHEM3")
+                self.assertEqual([p.name for p in store.iterdir() if p.name.startswith(".")], [])
+
+    def test_store_falls_back_to_home_and_refuses_a_symlinked_store(self):
+        from unittest import mock
+        from octet_computer_use import cursor_theme
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"HOME": directory}, clear=True), \
+                 mock.patch.object(cursor_theme.platform, "system", return_value="Linux"):
+                root = cursor_theme.theme_store_root()
+                self.assertEqual(root, Path(directory) / ".local/share/cua-driver/cursor-themes")
+                root.parent.mkdir(parents=True)
+                elsewhere = Path(directory) / "elsewhere"
+                elsewhere.mkdir()
+                root.symlink_to(elsewhere)
+                with self.assertRaisesRegex(RuntimeError, "symlink"):
+                    cursor_theme.install_bundled_themes(Path(directory) / "cua-driver")
+                self.assertEqual(list(elsewhere.iterdir()), [])
+
+
+class LinuxCursorTests(unittest.TestCase):
+    """Linux's direct runtime draws the model-colored cursor, best-effort."""
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        for target, value in ((driver.platform, "Linux"),):
+            patcher = mock.patch.object(target, "system", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        confirm = mock.patch.dict(os.environ, {"OCTET_CUA_CONFIRM": "0"})
+        confirm.start()
+        self.addCleanup(confirm.stop)
+
+    def _start(self, client, *, theme_ids, installed=None, gnome=False):
+        """Run ComputerUse.client() for a Linux direct runtime with fakes."""
+
+        from unittest import mock
+        from octet_computer_use import cursor_theme, driver, gnome_helper
+
+        computer = ComputerUse(RecordingExtension())
+        computer.select_model({"host": {"model": "claude-sonnet-4"}})
+        inventories = [set(theme_ids), set(installed if installed is not None else theme_ids)]
+        with mock.patch.object(driver, "desktop_app_binary", return_value=None), \
+             mock.patch.object(driver, "installed_binary", return_value=Path("/opt/cua-driver")), \
+             mock.patch.object(entrypoint, "DriverClient", return_value=client), \
+             mock.patch.object(cursor_theme, "installed_theme_ids",
+                               side_effect=lambda binary: inventories.pop(0) if len(inventories) > 1
+                               else inventories[0]), \
+             mock.patch.object(cursor_theme, "install_bundled_themes", return_value=24) as install, \
+             mock.patch.object(gnome_helper, "is_gnome_wayland", return_value=gnome), \
+             mock.patch.object(gnome_helper, "set_theme_color", return_value=True) as color:
+            computer.client()
+        return computer, install, color
+
+    def _client(self, **kwargs):
+        client = CursorSessionTests._CursorClient(**kwargs)
+        client.start = lambda **_: None
+        return client
+
+    def test_direct_runtime_shows_the_model_colored_theme(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        computer, install, color = self._start(client, theme_ids=every)
+        install.assert_not_called()
+        self.assertFalse(computer._app_daemon)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        color.assert_not_called()
+
+    def test_missing_themes_are_installed_on_first_use(self):
+        # Provisioned through the agent tool, never through /computer-use setup.
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        computer, install, _ = self._start(client, theme_ids={"cua.default"}, installed=every)
+        install.assert_called_once_with(Path("/opt/cua-driver"))
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+
+    def test_gnome_pins_the_shell_helper_to_the_model_color(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        computer, _, color = self._start(self._client(), theme_ids=every, gnome=True)
+        color.assert_called_once_with(entrypoint.cursor_theme.PALETTE["anthropic"]["color"])
+
+    def test_a_rejected_theme_falls_back_to_the_default_cursor(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+        original = client.call
+
+        def call(tool, arguments=None, **kwargs):
+            if tool == "set_agent_cursor_theme" and arguments["theme_id"] != "cua.default":
+                client.calls.append((tool, dict(arguments)))
+                return {"isError": True, "content": [{"type": "text", "text": "artifact version"}]}
+            return original(tool, arguments, **kwargs)
+
+        client.call = call
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "cua.default")
+
+    def test_a_cursor_failure_never_blocks_actions(self):
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client(enabled=False)
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertFalse(computer._cursor_ready)
+        self.assertIn("refusing to report readiness", computer._cursor_failure)
+        attempts = sum(tool == "set_agent_cursor_enabled" for tool, _ in client.calls)
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertIn("click", [tool for tool, _ in client.calls])
+        # The failure is not retried on every action, only after a model switch.
+        self.assertEqual(sum(tool == "set_agent_cursor_enabled" for tool, _ in client.calls), attempts)
+        text = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                               "permissions": "granted", "cursor_available": True,
+                               "cursor_enabled": False, "cursor_detail": computer._cursor_failure})
+        self.assertIn("agent cursor: not shown", text)
+
+    def test_native_wayland_readiness_uses_the_setter_acknowledgements(self):
+        # Cua 0.30 reads cursor state back from its X11 overlay, so a pure
+        # Wayland session reports defaults although the layer-shell overlay
+        # draws the configured cursor (verified on headless Sway).
+        every = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        client = self._client()
+
+        def call(tool, arguments=None, **kwargs):
+            args = dict(arguments or {})
+            client.calls.append((tool, args))
+            if tool == "set_agent_cursor_motion":
+                return {"structuredContent": {"motion": {k: v for k, v in args.items() if k != "session"}}}
+            if tool == "set_agent_cursor_theme":
+                return {"structuredContent": {"theme": {"id": args["theme_id"]}}}
+            if tool == "set_agent_cursor_enabled":
+                return {"structuredContent": {"enabled": True}}
+            if tool == "get_agent_cursor_state":
+                return {"structuredContent": {"enabled": True, "motion": {"idle_hide_ms": 20000.0},
+                                              "theme": {"id": "cua.default"}}}
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+        client.call = call
+        computer, _, _ = self._start(client, theme_ids=every)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        # The macOS host never accepts acknowledgements in place of read-back.
+        host = ComputerUse(RecordingExtension())
+        host._app_daemon = True
+        host._theme_ids = every
+        with self.assertRaises(McpError):
+            host._configure_cursor(client, "s")
+
+    def test_status_renders_the_linux_cursor_and_gnome_helper(self):
+        text = _render_status({"installed": True, "runtime": "direct", "platform": "linux",
+                               "permissions": "granted", "cursor_available": True,
+                               "cursor_enabled": True,
+                               "cursor_theme": "com.octet.computeruse.anthropic",
+                               "gnome_helper": "restart-required"})
+        self.assertIn("agent cursor: on (theme com.octet.computeruse.anthropic)", text)
+        self.assertIn("log out and back in", text)
+
+
+class WindowsCursorTests(unittest.TestCase):
+    """Windows direct sessions verify the themed overlay by reading it back."""
+
+    def setUp(self):
+        patcher = mock.patch.object(entrypoint.driver_module.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        confirm = mock.patch.dict(os.environ, {"OCTET_CUA_CONFIRM": "0"})
+        confirm.start()
+        self.addCleanup(confirm.stop)
+
+    def _start(self, client):
+        computer = ComputerUse(RecordingExtension())
+        computer.select_model({"host": {"model": "claude-sonnet-4"}})
+        client.start = lambda **_: None
+        themes = {e["id"] for e in entrypoint.cursor_theme.PALETTE.values()} | {"cua.default"}
+        with mock.patch.object(entrypoint.driver_module, "desktop_app_binary", return_value=None), \
+                mock.patch.object(entrypoint.driver_module, "installed_binary", return_value=Path("cua-driver.exe")), \
+                mock.patch.object(entrypoint, "DriverClient", return_value=client), \
+                mock.patch.object(entrypoint.cursor_theme, "installed_theme_ids", return_value=themes):
+            computer.client()
+        return computer
+
+    def test_direct_runtime_verifies_the_colored_cursor_and_binds_actions(self):
+        client = CursorSessionTests._CursorClient()
+        computer = self._start(client)
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.anthropic")
+        session = computer._cursor_session
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertEqual(client.calls[-1][1]["session"], session)
+        computer.shutdown()
+        self.assertIn(("end_session", {"session": session}), client.calls)
+        self.assertFalse(client.started)
+
+    def test_setter_acknowledgements_do_not_replace_windows_readback(self):
+        client = CursorSessionTests._CursorClient()
+        original = client.call
+
+        def call(tool, arguments=None, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == "set_agent_cursor_motion":
+                return {"structuredContent": {"motion": entrypoint.CURSOR_MOTION}}
+            if tool == "set_agent_cursor_theme":
+                return {"structuredContent": {"theme": {"id": arguments["theme_id"]}}}
+            if tool == "set_agent_cursor_enabled":
+                return {"structuredContent": {"enabled": True}}
+            if tool == "get_agent_cursor_state":
+                return {"structuredContent": {"enabled": False, "motion": {}, "theme": {}}}
+            return result
+
+        client.call = call
+        computer = self._start(client)
+        self.assertFalse(computer._cursor_ready)
+        self.assertIsNotNone(computer._cursor_failure)
+        computer.call("click", {"pid": 17, "window_id": 5, "x": 10, "y": 20})
+        self.assertEqual(client.calls[-1][0], "click", "overlay failure must not disable desktop input")
+
+    def test_status_reports_windows_cursor_verification_and_failure(self):
+        status = {"installed": True, "runtime": "direct", "platform": "windows",
+                  "permissions": "granted", "cursor_available": True,
+                  "cursor_enabled": True, "cursor_theme": "com.octet.computeruse.openai"}
+        self.assertIn("agent cursor: on (theme com.octet.computeruse.openai)", _render_status(status))
+        status.update(cursor_enabled=False, cursor_detail="read-back did not match")
+        self.assertIn("agent cursor: not shown (read-back did not match)", _render_status(status))
+
+    def test_session_and_model_switch_reconfigure_the_same_windows_cursor(self):
+        client = CursorSessionTests._CursorClient()
+        computer = self._start(client)
+        previous = computer._cursor_session
+        computer.call("start_session", {"session": "windows-review"})
+        self.assertIn(("end_session", {"session": previous}), client.calls)
+        computer.select_model({"host": {"model": "gpt-5.6"}})
+        computer.call("press_key", {"pid": 17, "window_id": 5, "key": "ENTER"})
+        self.assertTrue(computer._cursor_ready)
+        self.assertEqual(computer._selected_theme, "com.octet.computeruse.openai")
+        self.assertEqual(client.calls[-1][1]["session"], "windows-review")
+
+
+class GnomeHelperTests(unittest.TestCase):
+    def test_gnome_wayland_detection_covers_derivatives(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper.platform, "system", return_value="Linux"):
+            for desktop, expected in (("ubuntu:GNOME", True), ("GNOME", True), ("pop:GNOME", True),
+                                      ("Hyprland", False), ("KDE", False)):
+                with self.subTest(desktop=desktop), mock.patch.dict(
+                        os.environ, {"WAYLAND_DISPLAY": "wayland-0",
+                                     "XDG_CURRENT_DESKTOP": desktop}, clear=True):
+                    self.assertEqual(gnome_helper.is_gnome_wayland(), expected)
+            with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "GNOME", "DISPLAY": ":0"},
+                                 clear=True):
+                self.assertFalse(gnome_helper.is_gnome_wayland(), "GNOME on Xorg needs no helper")
+
+    def test_bundled_helper_is_the_pinned_release_plus_the_theme_pin(self):
+        from octet_computer_use import gnome_helper
+
+        source = (gnome_helper.BUNDLE / "extension.js").read_text()
+        metadata = __import__("json").loads((gnome_helper.BUNDLE / "metadata.json").read_text())
+        self.assertEqual(metadata["uuid"], gnome_helper.UUID)
+        self.assertEqual(metadata["version"], 8)
+        self.assertIn('<method name="SetThemeColor">', source)
+        self.assertIn('<method name="GetThemeColor">', source)
+        self.assertIn("GetThemeColor() {", source)
+        self.assertIn("if (this._themeColor) return;", source)
+
+    def test_install_writes_the_bundle_and_enables_it(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            result = mock.Mock(returncode=0, stdout="")
+            if argv[:2] == ["gnome-extensions", "enable"]:
+                result.returncode = 2  # not yet known to the running Shell
+            elif argv[:3] == ["gsettings", "get", "org.gnome.shell"] and argv[3] == "enabled-extensions":
+                result.stdout = "['user-theme@gnome-shell-extensions.gcampax.github.com']\n"
+            elif argv[:3] == ["gsettings", "get", "org.gnome.shell"]:
+                result.stdout = "false\n"
+            elif argv[0] == "gdbus":
+                result.returncode = 1  # not loaded until the next login
+            return result
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {"HOME": directory}, clear=True), \
+                mock.patch.object(gnome_helper, "_run", side_effect=run):
+            outcome = gnome_helper.install()
+            target = Path(directory) / ".local/share/gnome-shell/extensions/winrects@cua"
+            for name in gnome_helper.FILES:
+                self.assertEqual((target / name).read_bytes(),
+                                 (gnome_helper.BUNDLE / name).read_bytes())
+        self.assertEqual(outcome["gnome_helper"], "restart-required")
+        self.assertIn("log out and back in", outcome["gnome_helper_detail"])
+        self.assertIn(["gsettings", "set", "org.gnome.shell", "enabled-extensions",
+                       "['user-theme@gnome-shell-extensions.gcampax.github.com', 'winrects@cua']"],
+                      calls)
+
+    def test_status_probes_theme_pin_without_mutating_it(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper, "extension_directory", return_value=Path("/fake")), \
+                mock.patch.object(gnome_helper, "active_version", return_value=8), \
+                mock.patch.object(gnome_helper, "_gdbus", return_value="('#a9634c',)") as call:
+            self.assertEqual(gnome_helper.status(), {"gnome_helper": "active"})
+        call.assert_called_once_with("GetThemeColor")
+
+    def test_theme_color_is_validated_before_reaching_dbus(self):
+        from unittest import mock
+        from octet_computer_use import gnome_helper
+
+        with mock.patch.object(gnome_helper, "_run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="()")
+            self.assertFalse(gnome_helper.set_theme_color("red; rm -rf ~"))
+            run.assert_not_called()
+            self.assertTrue(gnome_helper.set_theme_color("#a9634c"))
+            self.assertEqual(run.call_args[0][0][-2:], ["org.cua.WinRects.SetThemeColor", "#a9634c"])
+
+
+class PiplessProvisionTests(unittest.TestCase):
+    """Debian/Ubuntu Pythons without python3-venv still provision the driver."""
+
+    def test_wheel_selection_matches_arch_and_requires_a_digest(self):
+        from octet_computer_use import driver
+
+        files = [
+            {"filename": "cua_driver-0.30.2-py3-none-macosx_13_0_universal2.whl",
+             "url": "https://files.pythonhosted.org/a", "digests": {"sha256": "a" * 64}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_aarch64.whl",
+             "url": "https://files.pythonhosted.org/b", "digests": {"sha256": "b" * 64}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
+             "url": "http://files.pythonhosted.org/insecure", "digests": {"sha256": "c" * 64}},
+            {"filename": "cua_driver-0.30.2-py3-none-manylinux_2_31_x86_64.whl",
+             "url": "https://files.pythonhosted.org/d", "digests": {"sha256": "d" * 64}},
+        ]
+        self.assertEqual(driver._select_wheel(files, "x86_64")["url"], "https://files.pythonhosted.org/d")
+        self.assertEqual(driver._select_wheel(files, "aarch64")["url"], "https://files.pythonhosted.org/b")
+        with self.assertRaises(driver.ProvisionError):
+            driver._select_wheel(files[:1], "x86_64")
+
+    def test_only_the_driver_package_can_be_extracted(self):
+        from octet_computer_use import driver
+
+        for name in ("cua_driver/bin/cua-driver", "cua_driver-0.30.2.dist-info/RECORD"):
+            self.assertTrue(driver._safe_member(name), name)
+        for name in ("/etc/passwd", "../x", "cua_driver/../../x", "cua_driver/..",
+                     "other/module.py", "cua_driver\\..\\x", "cua_driver_evil/x"):
+            self.assertFalse(driver._safe_member(name), name)
+
+    def test_a_missing_ensurepip_falls_back_to_the_direct_wheel(self):
+        import subprocess
+        from unittest import mock
+        from octet_computer_use import driver
+
+        failed = subprocess.CompletedProcess([], 1, "", "ensurepip is not available")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(driver, "installed_binary", return_value=None), \
+                mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver, "_driver_interpreter",
+                                  return_value=(sys.executable, (3, 12))), \
+                mock.patch.object(driver.platform, "system", return_value="Linux"), \
+                mock.patch.object(driver.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(driver, "_provision_without_pip",
+                                  return_value=Path("/opt/cua-driver")) as fallback:
+            paths = driver.DriverPaths.for_home(Path(directory))
+            self.assertEqual(driver.provision(paths, version="0.30.2"), Path("/opt/cua-driver"))
+        fallback.assert_called_once()
+        self.assertEqual(fallback.call_args[0][1], "0.30.2")
+
+    def test_other_platforms_still_report_the_venv_failure(self):
+        import subprocess
+        from unittest import mock
+        from octet_computer_use import driver
+
+        failed = subprocess.CompletedProcess([], 1, "", "no venv")
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(driver, "installed_binary", return_value=None), \
+                mock.patch.object(driver, "_run", return_value=failed), \
+                mock.patch.object(driver, "_driver_interpreter",
+                                  return_value=(sys.executable, (3, 12))), \
+                mock.patch.object(driver.platform, "system", return_value="Darwin"), \
+                mock.patch.object(driver, "_provision_without_pip") as fallback:
+            with self.assertRaisesRegex(driver.ProvisionError, "no venv"):
+                driver.provision(driver.DriverPaths.for_home(Path(directory)))
+        fallback.assert_not_called()
 
 
 class CursorSessionTests(unittest.TestCase):
@@ -685,7 +1796,8 @@ class CursorSessionTests(unittest.TestCase):
             else:
                 os.environ["OCTET_CUA_CONFIRM"] = original
         session = computer._cursor_session
-        self.assertEqual(session, entrypoint.cursor_session())
+        self.assertEqual(session, next(args["session"] for tool, args in client.calls
+                                       if tool == "start_session"))
         self.assertTrue(computer._cursor_ready)
         for tool in ("start_session", "set_agent_cursor_motion", "set_agent_cursor_enabled",
                      "get_agent_cursor_state", "click"):
@@ -712,10 +1824,40 @@ class CursorSessionTests(unittest.TestCase):
                 os.environ["OCTET_CUA_CONFIRM"] = original
 
         dispatched = [(tool, args) for tool, args in client.calls if tool == "press_key"]
-        self.assertEqual([args["session"] for _tool, args in dispatched],
-                         [entrypoint.cursor_session(), "review-session", entrypoint.cursor_session()])
+        sessions = [args["session"] for tool, args in client.calls if tool == "start_session"]
+        self.assertEqual([args["session"] for _tool, args in dispatched], sessions)
+        self.assertEqual(sessions[1], "review-session")
+        self.assertNotEqual(sessions[0], sessions[2], "reconnect must not reuse a transport's session")
         self.assertTrue(any(tool == "end_session" and args.get("session") == "review-session"
                             for tool, args in client.calls))
+
+    def test_setup_again_uses_a_new_session_on_the_reopened_transport(self):
+        computer, client = self._computer()
+        owned = {}
+        def enforce_owner(transport):
+            call = transport.call
+            def invoke(tool, arguments=None, **kwargs):
+                if tool == "start_session":
+                    name = arguments["session"]
+                    if name in owned and owned[name] is not transport:
+                        return {"isError": True, "content": [{"type": "text", "text": "already owned"}]}
+                    owned[name] = transport
+                return call(tool, arguments, **kwargs)
+            transport.call = invoke
+        enforce_owner(client)
+        computer.client()
+        previous = computer._cursor_session
+        with mock.patch.object(entrypoint.driver_module, "provision", return_value=Path("/tmp/driver")), \
+                mock.patch.object(entrypoint.driver_module, "driver_version", return_value="0.31.0"), \
+                mock.patch.object(entrypoint.desktop_host, "provision", return_value=None):
+            computer.provision()
+        fresh = self._CursorClient()
+        enforce_owner(fresh)
+        computer._client, computer._app_daemon = fresh, True
+        computer.client()
+        self.assertTrue(computer._cursor_ready)
+        self.assertNotEqual(previous, computer._cursor_session)
+        self.assertEqual(len(owned), 2)
 
     def test_cursor_initialization_failure_fails_closed_before_action(self):
         computer, client = self._computer(enabled=False)
@@ -777,7 +1919,7 @@ class CursorSessionTests(unittest.TestCase):
                 os.environ["OCTET_CUA_CONFIRM"] = original
         _tool, arguments = next((tool, args) for tool, args in client.calls if tool == "move_cursor")
         self.assertEqual(arguments["target"], {"kind": "window", "pid": 17, "window_id": 5})
-        self.assertEqual(arguments["scope"], "window")
+        self.assertNotIn("scope", arguments, "exact target and legacy scope cannot coexist")
         self.assertNotIn("pid", arguments)
         self.assertNotIn("window_id", arguments)
         self.assertEqual(arguments["session"], computer._cursor_session)
@@ -807,13 +1949,67 @@ class ResultFidelityTests(unittest.TestCase):
         self.assertEqual(summary["images"][0]["data"], "QUJD")
 
     def test_failed_screenshot_publication_is_visible(self):
-        computer = ComputerUse(RecordingExtension())  # no artifact publisher
+        from octet_extension.protocol import RpcError
+
+        class RejectedPublisher:
+            negotiated_features = {"artifacts"}
+
+            def publish_artifact(self, **kwargs):
+                raise RpcError(-32002, "artifact publication requires a host-owned session context")
+
+        computer = ComputerUse(RejectedPublisher())
         result = computer._format_result("get_window_state", {
             "content": [{"type": "text", "text": "window captured"},
                         {"type": "image", "data": "QUJD", "mimeType": "image/png"}],
         })
-        self.assertTrue(any("could not be delivered" in part.get("text", "")
+        self.assertTrue(any("-32002: artifact publication requires" in part.get("text", "")
                             for part in result["content"]))
+        self.assertFalse(result["is_error"])  # The tree can still be used.
+
+    def test_small_and_large_screenshots_publish_by_inline_and_scratch(self):
+        try:
+            from .test_screenshots import RecordingPublisher, FRAME_A, _png
+        except ImportError:
+            from test_screenshots import RecordingPublisher, FRAME_A, _png
+
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = RecordingPublisher(Path(directory))
+            computer = ComputerUse(publisher)
+            old = os.environ.get("OCTET_EXTENSION_SCRATCH")
+            os.environ["OCTET_EXTENSION_SCRATCH"] = directory
+            try:
+                large = _png(marker=os.urandom(150000).hex().encode())
+                for raw, source in ((FRAME_A, "data"), (large, "path")):
+                    result = computer._format_result("get_window_state", {
+                        "content": [{"type": "image", "data": base64.b64encode(raw).decode(),
+                                     "mimeType": "image/png"}],
+                    })
+                    self.assertFalse(result["is_error"])
+                    self.assertTrue(any(part.get("type") == "image" for part in result["content"]))
+                    self.assertIn(source, publisher.calls[-1])
+                self.assertEqual(publisher.path_bytes, [large])
+                self.assertEqual(list((Path(directory) / "octet-computer-use-screenshots").iterdir()), [])
+            finally:
+                if old is None:
+                    os.environ.pop("OCTET_EXTENSION_SCRATCH", None)
+                else:
+                    os.environ["OCTET_EXTENSION_SCRATCH"] = old
+
+    def test_artifacts_are_negotiated(self):
+        from octet_computer_use.entrypoint import create_extension
+
+        extension, _ = create_extension()
+        try:
+            result = extension._initialize({
+                "api_version": "0.4",
+                "protocol": {"version": "0.4", "required_features": [],
+                             "optional_features": ["artifacts", "content_parts"],
+                             "limits": {"max_concurrent_requests": 1}},
+            })
+            self.assertIn("artifacts", result["protocol"]["features"])
+        finally:
+            if extension._executor is not None:
+                extension._executor.shutdown(wait=True)
 
     def test_structured_payload_survives_the_summary(self):
         from octet_computer_use.service import summarize_result
@@ -948,10 +2144,35 @@ class TargetingHintTests(unittest.TestCase):
         hint = _targeting_hint(structured)
         rows = [line for line in hint.splitlines() if line.startswith("  token=")]
         self.assertEqual(len(rows), _TARGETING_HINT_ROWS)
-        # A truncated sample must never read as the whole table: the model has to
-        # be told what it is not seeing and where the rest is.
-        self.assertIn(f"... 12 more addressable elements", hint)
-        self.assertIn("structured_content.elements", hint)
+        # Hidden structured details are not model-visible. Narrow or use the
+        # markdown tree's index with this snapshot rather than referring to them.
+        self.assertIn("... 12 more in this snapshot", hint)
+        self.assertIn("narrow with query", hint)
+        self.assertNotIn("structured_content.elements", hint)
+
+    def test_empty_query_is_not_reported_as_degraded(self):
+        from octet_computer_use.entrypoint import _targeting_hint
+
+        snapshot = {"element_count": 149, "returned_element_count": 0,
+                    "filtered_element_count": 0, "elements": []}
+        hint = _targeting_hint(snapshot, query="not-a-control")
+        self.assertIn("No matching", hint)
+        self.assertNotIn("degraded", hint)
+        self.assertIn("retry", _targeting_hint(snapshot))
+
+    def test_window_and_app_handles_are_model_visible(self):
+        computer = ComputerUse(RecordingExtension())
+        for tool, collection, record, handle in (
+            ("list_windows", "windows", {"pid": 42, "window_id": 7, "app_name": "Calculator"}, "window_id=7"),
+            ("list_apps", "apps", {"pid": 42, "name": "Calculator", "bundle_id": "com.apple.calculator"}, "com.apple.calculator"),
+        ):
+            with self.subTest(tool=tool):
+                result = computer._format_result(tool, {
+                    "content": [{"type": "text", "text": "Found 1 item(s)."}],
+                    "structuredContent": {collection: [record]},
+                })
+                self.assertTrue(any(handle in part.get("text", "") for part in result["content"]))
+
 
 
 class ObservationScreenshotTests(unittest.TestCase):
@@ -962,6 +2183,9 @@ class ObservationScreenshotTests(unittest.TestCase):
 
         client = FakeClient(read_only=[tool])
         use = ComputerUse.__new__(ComputerUse)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        use._paths = entrypoint.driver_module.DriverPaths.for_home(Path(home.name))
         use._client = client
         use._lock = __import__("threading").Lock()
         use._app_daemon = False
@@ -1003,7 +2227,26 @@ class DesktopHostTests(unittest.TestCase):
     through ``DESKTOP_APP_CANDIDATES[platform.system()]`` and reads
     ``CFBundleExecutable`` with ``plutil``, so off darwin the correct answer is
     ``None`` and only the darwin behaviour is meaningful to pin.
+
+    The other tests here are macOS host semantics too, so ``setUp`` pins the
+    platform to Darwin rather than depending on the machine the suite runs on.
     """
+
+    def setUp(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # A setup-owned app takes precedence over DESKTOP_APP_CANDIDATES. Keep
+        # bundle-layout fixtures independent of the caller's installed host.
+        for patcher in (
+            mock.patch.object(driver.platform, "system", return_value="Darwin"),
+            mock.patch.object(driver.DriverPaths, "for_home", return_value=
+                              driver.DriverPaths.for_home(Path(temporary.name))),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_desktop_app_is_found_only_when_installed(self):
         from octet_computer_use import driver
@@ -1260,7 +2503,7 @@ class DesktopHostTests(unittest.TestCase):
         name = cursor_session()
         self.assertTrue(name.startswith(CURSOR_SESSION_PREFIX + "-"))
         self.assertNotEqual(name, CURSOR_SESSION_PREFIX)
-        self.assertEqual(name, cursor_session())
+        self.assertNotEqual(name, cursor_session(), "each transport needs a fresh name, even in one PID")
         self.assertIn(str(os.getpid()), name)
 
     def test_cursor_motion_is_short_straight_and_fades_later(self):
@@ -1278,9 +2521,139 @@ class DesktopHostTests(unittest.TestCase):
 
         os.environ["OCTET_CUA_DAEMON_SOCKET"] = "/tmp/custom.sock"
         try:
-            self.assertEqual(str(daemon_socket()), "/tmp/custom.sock")
+            self.assertEqual(daemon_socket(), Path("/tmp/custom.sock"))
         finally:
             os.environ.pop("OCTET_CUA_DAEMON_SOCKET", None)
+
+
+
+class NoDriverFailClosedTests(unittest.TestCase):
+    """With no provisioned driver, status explains setup and nothing dispatches.
+
+    This is the state of a fresh Windows (or any) install and of every CI
+    runner. It never provisions, prompts, or starts a driver process.
+    """
+
+    def test_status_points_at_setup_and_every_driver_tool_fails_closed(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, {"OCTET_CUA_DESKTOP_HOST": "0"}), \
+             mock.patch.object(driver, "desktop_app_binary", return_value=None), \
+             mock.patch.object(entrypoint.DriverClient, "start",
+                               side_effect=AssertionError("no driver process may start")):
+            home = Path(directory)
+            extension, _ = entrypoint.create_extension(home=home)
+            context = {"host": {"model": "claude-sonnet-4"}}
+
+            status = extension._tools["computer_use_status"].handler({}, context)
+            self.assertFalse(status.get("is_error"))
+            self.assertFalse(status["structured_content"]["installed"])
+            self.assertIn("Set up computer use", status["content"][0]["text"])
+
+            window = {"pid": 4242, "window_id": 4242}
+            for tool, arguments in (
+                ("computer_use_windows", {}),
+                ("computer_use_window_state", dict(window)),
+                ("computer_use_click", {**window, "x": 10, "y": 10}),
+                ("computer_use_type_text", {**window, "text": "never typed"}),
+                ("computer_use_press_key", {**window, "key": "enter"}),
+                ("computer_use_launch_app", {"name": "notepad"}),
+            ):
+                result = extension._tools[tool].handler(arguments, context)
+                self.assertTrue(result.get("is_error"), tool)
+                self.assertIn("not installed", result["content"][0]["text"], tool)
+            # Status and refusals are read-only: nothing was provisioned.
+            self.assertEqual(list(home.iterdir()), [])
+
+
+
+class MenuCommandResultShapeTests(unittest.TestCase):
+    """Options-menu commands return {"text": ...}, never a tool-shaped dict.
+
+    The command/execute channel renders the ``text`` field; a tool-shaped
+    ``{"content": [...]}`` result has none, so the host showed only
+    "<label> finished" and the status/setup report was invisible.
+    """
+
+    def test_menu_result_extracts_the_first_text_part(self):
+        from octet_computer_use.entrypoint import _menu_result
+
+        shaped = _menu_result({"content": [{"type": "text", "text": "hello"}],
+                               "structured_content": {"a": 1}})
+        self.assertEqual(shaped, {"text": "hello"})
+        self.assertEqual(_menu_result({"text": "kept"}), {"text": "kept"})
+        self.assertEqual(_menu_result({"content": []}), {"text": ""})
+        self.assertEqual(_menu_result(None), {"text": ""})
+
+    def test_menu_status_and_unknown_actions_render_their_text(self):
+        # An installed global app is independent of this empty test home.
+        # Keep this read-only fixture offline on developer desktops too.
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(entrypoint.driver_module, "desktop_app", return_value=None), \
+                mock.patch.object(entrypoint.driver_module, "desktop_app_binary", return_value=None), \
+                mock.patch.dict(os.environ, {"OCTET_CUA_DESKTOP_HOST": "0"}):
+            home = Path(directory)
+            extension, _ = entrypoint.create_extension(home=home)
+            command = extension._commands["computer-use"].handler
+
+            status = command(["status"], {})
+            self.assertNotIn("content", status)
+            self.assertTrue(status["text"])
+            self.assertIn("not installed", status["text"])
+
+            unknown = command(["bogus"], {})
+            self.assertNotIn("content", unknown)
+            self.assertIn("Unknown computer-use action", unknown["text"])
+            # Read-only: the menu never provisions.
+            self.assertEqual(list(home.iterdir()), [])
+
+    def test_menu_setup_failure_names_its_reason(self):
+        from unittest import mock
+        from octet_computer_use import driver
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            extension, computer_use = entrypoint.create_extension(home=home)
+            command = extension._commands["computer-use"].handler
+            with mock.patch.object(
+                computer_use, "provision",
+                side_effect=driver.ProvisionError("no interpreter"),
+            ):
+                result = command(["setup"], {})
+            self.assertNotIn("content", result)
+            self.assertIn("setup failed", result["text"])
+            self.assertIn("no interpreter", result["text"])
+
+
+
+class LiveSmokeGuardTests(unittest.TestCase):
+    """The attended live smoke must never run unattended."""
+
+    def test_refuses_ci_unconfirmed_and_non_interactive_runs(self):
+        self.assertIn("CI", live_smoke.refusal_reason(True, {"CI": "true"}, True))
+        self.assertIn("CI", live_smoke.refusal_reason(True, {"GITHUB_ACTIONS": "true"}, True))
+        self.assertIn(live_smoke.CONFIRMATION_FLAG, live_smoke.refusal_reason(False, {}, True))
+        self.assertIn("interactive", live_smoke.refusal_reason(True, {}, False))
+        self.assertIsNone(live_smoke.refusal_reason(True, {}, True))
+
+    def test_main_refuses_before_touching_the_driver(self):
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"CI": "true"}), \
+             mock.patch.object(live_smoke, "Smoke", side_effect=AssertionError("must not start")):
+            self.assertEqual(live_smoke.main([live_smoke.CONFIRMATION_FLAG]), 2)
+
+    def test_window_lookup_uses_the_bounded_window_projection(self):
+        listing = {"windows": [
+            {"window_id": 11, "pid": 7, "app_name": "Explorer", "title": "Downloads"},
+            {"window_id": 12, "pid": 8, "app_name": "Notepad", "title": "Untitled - Notepad"},
+        ]}
+        self.assertEqual(live_smoke.find_window(listing, "notepad")[:2], (8, 12))
+        self.assertIsNone(live_smoke.find_window(listing, "calculator"))
+        self.assertIsNone(live_smoke.find_window({"windows": [{"pid": "8", "window_id": 12,
+                                                                 "title": "notepad"}]}, "notepad"))
 
 
 if __name__ == "__main__":

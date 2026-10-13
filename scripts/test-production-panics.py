@@ -24,7 +24,7 @@ sys.modules[_spec.name] = checker
 _spec.loader.exec_module(checker)
 
 SCOPE = {
-    "rust_msrv": "1.86",
+    "rust_msrv": "1.88",
     "diagnostic_format": "cargo-jsonl",
     "feature_selection": "all-features",
     "lint_level": "warning",
@@ -119,7 +119,7 @@ def baseline(
         "scope": copy.deepcopy(SCOPE), "findings": findings,
     }
     if status == "collected":
-        value["collection"] = {"toolchain": "1.86.0", "artifacts": ["clippy.jsonl"]}
+        value["collection"] = {"toolchain": "1.88.0", "artifacts": ["clippy.jsonl"]}
     return value
 
 
@@ -203,7 +203,7 @@ class ProductionPanicAuditTests(unittest.TestCase):
     def test_uncollected_baseline_never_passes(self) -> None:
         self.assert_audit_error(
             self.normal_records(), baseline([], status="uncollected"),
-            "baseline is uncollected; real Rust 1.86 Cargo JSONL evidence",
+            "baseline is uncollected; real Rust 1.88 Cargo JSONL evidence",
         )
 
     def test_malformed_or_incomplete_jsonl_fails_closed(self) -> None:
@@ -298,7 +298,7 @@ class ProductionPanicAuditTests(unittest.TestCase):
         self.assert_audit_error(self.normal_records(), missing_collection, "baseline has unexpected or missing fields")
         invalid_toolchain = baseline([])
         invalid_toolchain["collection"]["toolchain"] = "1.87.0"  # type: ignore[index]
-        self.assert_audit_error(self.normal_records(), invalid_toolchain, "collection.toolchain must be Rust 1.86.0")
+        self.assert_audit_error(self.normal_records(), invalid_toolchain, "collection.toolchain must be Rust 1.88.0")
 
     def test_repository_workflow_is_manual_immutable_and_pinned(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "production-panic-audit.yml").read_text(encoding="utf-8")

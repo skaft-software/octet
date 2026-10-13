@@ -1,11 +1,10 @@
 #![allow(missing_docs)]
 
-//! Request-scoped provider timing and authoritative throughput.
+//! Presentation observations and explicitly end-to-end request throughput.
 //!
-//! The sample deliberately separates active decode timing from request E2E,
-//! first-event latency, terminal framing, persistence, and retry backoff. The
-//! token count is supplied by the provider; no character or retry estimate is
-//! accepted here.
+//! First-to-last output is a client observation, not active server decode.
+//! Completed AI-client measurements take precedence over presentation clocks;
+//! neither visible characters nor assembled tool calls estimate token timing.
 
 use std::time::{Duration, Instant};
 
@@ -52,9 +51,9 @@ impl RequestTimingSample {
         self.committed_at
     }
 
-    /// Active generation interval, from the first generated activity through
-    /// the last generated activity. Terminal/provider commit latency is not
-    /// included.
+    /// First-to-last presentation-observed output interval. This does not
+    /// recover hidden server generation or token-level timing.
+    #[cfg(test)]
     pub fn generation_elapsed(&self) -> Option<Duration> {
         Some(
             self.last_generated_at?
@@ -114,16 +113,14 @@ impl RequestTiming {
         self.sample.committed_at = Some(now);
     }
 
-    pub fn generation_elapsed(&self) -> Option<Duration> {
-        self.sample.generation_elapsed()
-    }
-
-    /// Build a throughput value only from provider-reported output tokens and
-    /// a nonzero first-to-last generation interval. A one-chunk response has a
-    /// zero interval and intentionally has no unstable rate.
+    /// Presentation-observed E2E sample, only for legacy event producers without
+    /// frozen AI-client metrics. Never divide billing by a visible-output window.
     pub fn throughput(&self, output_tokens: u64) -> Option<RequestThroughput> {
-        let generation_elapsed = self.generation_elapsed()?;
-        RequestThroughput::new(output_tokens, generation_elapsed, self.sample)
+        let elapsed = self
+            .sample
+            .provider_finished_at?
+            .saturating_duration_since(self.sample.submitted_at);
+        RequestThroughput::new(output_tokens, elapsed, self.sample)
     }
 }
 
@@ -133,23 +130,23 @@ impl Default for RequestTiming {
     }
 }
 
-/// The latest completed request's decode-rate sample.
+/// The latest completed request's end-to-end sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestThroughput {
     output_tokens: u64,
-    generation_elapsed: Duration,
+    request_elapsed: Duration,
     timing: RequestTimingSample,
 }
 
 impl RequestThroughput {
     fn new(
         output_tokens: u64,
-        generation_elapsed: Duration,
+        request_elapsed: Duration,
         timing: RequestTimingSample,
     ) -> Option<Self> {
-        (output_tokens > 0 && !generation_elapsed.is_zero()).then_some(Self {
+        (output_tokens > 0 && !request_elapsed.is_zero()).then_some(Self {
             output_tokens,
-            generation_elapsed,
+            request_elapsed,
             timing,
         })
     }
@@ -160,8 +157,8 @@ impl RequestThroughput {
     }
 
     #[cfg(test)]
-    pub fn generation_elapsed(&self) -> Duration {
-        self.generation_elapsed
+    pub fn request_elapsed(&self) -> Duration {
+        self.request_elapsed
     }
 
     #[cfg(test)]
@@ -179,6 +176,7 @@ pub struct RequestThroughputTracker {
     active: Option<RequestTiming>,
     latest: Option<RequestThroughput>,
     latest_timing: Option<RequestTiming>,
+    client: Option<octet_ai::inference::ClientInferenceMetrics>,
 }
 
 impl RequestThroughputTracker {
@@ -189,6 +187,7 @@ impl RequestThroughputTracker {
         self.active = Some(RequestTiming::started_at(now));
         self.latest = None;
         self.latest_timing = None;
+        self.client = None;
     }
 
     pub fn active(&self) -> Option<&RequestTiming> {
@@ -234,12 +233,36 @@ impl RequestThroughputTracker {
     /// retained until a replacement request supplies a new rate.
     pub fn abort_attempt(&mut self) {
         self.active = None;
+        self.client = None;
+    }
+
+    pub fn observe_client(
+        &mut self,
+        client: &octet_ai::inference::ClientInferenceMetrics,
+        now: Instant,
+    ) {
+        if let Some(active) = self.active.as_mut() {
+            active.provider_finished_at(now);
+            self.client = Some(client.clone());
+        }
     }
 
     pub fn finish_at(&mut self, output_tokens: u64, now: Instant) -> Option<RequestThroughput> {
         let mut active = self.active.take()?;
-        active.provider_finished_at(now);
-        let throughput = active.throughput(output_tokens);
+        active.sample.provider_finished_at.get_or_insert(now);
+        let throughput = match self.client.take() {
+            Some(client)
+                if client.scope == Some(octet_ai::inference::ClientTimingScope::Request) =>
+            {
+                RequestThroughput::new(
+                    client.reported_output_tokens,
+                    Duration::from_nanos(client.elapsed_ns),
+                    active.sample(),
+                )
+            }
+            Some(_) => None,
+            None => active.throughput(output_tokens),
+        };
         self.latest_timing = Some(active);
         self.latest = throughput;
         throughput
@@ -257,7 +280,7 @@ impl RequestThroughputTracker {
         if let Some(throughput) = self.latest {
             self.latest = Some(RequestThroughput {
                 output_tokens: throughput.output_tokens,
-                generation_elapsed: throughput.generation_elapsed,
+                request_elapsed: throughput.request_elapsed,
                 timing,
             });
         }
@@ -268,5 +291,6 @@ impl RequestThroughputTracker {
         self.active = None;
         self.latest = None;
         self.latest_timing = None;
+        self.client = None;
     }
 }

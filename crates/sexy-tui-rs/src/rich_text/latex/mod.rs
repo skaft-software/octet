@@ -1523,26 +1523,4 @@ fn starts_with_case_keyword(condition: &str) -> bool {
 }
 
 #[cfg(test)]
-mod performance_tests {
-    use super::*;
-
-    #[test]
-    fn repeated_relations_preserve_spacing() {
-        let source = "x=".repeat(1024) + "y";
-        assert_eq!(
-            render_latex(&source, RenderLatexOptions::default()),
-            Some("x = ".repeat(1024) + "y")
-        );
-    }
-
-    #[test]
-    fn amplified_matrix_falls_back_before_padding() {
-        let source = format!(
-            "\\begin{{matrix}}{}{}\\end{{matrix}}",
-            "x".repeat(4096),
-            "\\\\y".repeat(128)
-        );
-        assert!(source.len() < super::super::markdown::MAX_DIAGRAM_FENCE_BYTES);
-        assert_eq!(render_latex(&source, RenderLatexOptions::display()), None);
-    }
-}
+mod performance_tests;

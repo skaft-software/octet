@@ -42,7 +42,7 @@ impl ResourceKind {
     fn accepts_file(self, path: &Path) -> bool {
         let extension = path.extension().and_then(|value| value.to_str());
         match self {
-            Self::Theme => extension == Some("toml"),
+            Self::Theme => matches!(extension, Some("toml" | "json")),
             Self::Prompt => matches!(extension, Some("md" | "toml")),
             Self::Extension => false,
         }
@@ -290,7 +290,7 @@ impl ResourceResolver {
                         "{} resources require a directory{}",
                         kind.directory_name(),
                         match kind {
-                            ResourceKind::Theme => " or a .toml file",
+                            ResourceKind::Theme => " or a .toml/.json file",
                             ResourceKind::Prompt => " or a .md/.toml file",
                             ResourceKind::Extension => "",
                         }

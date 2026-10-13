@@ -27,6 +27,15 @@ IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 FIXTURE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
+def workspace_version() -> str:
+    """The distribution version the generated reference documents."""
+    manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(r'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', manifest)
+    if match is None:
+        raise ValueError("Cargo.toml carries no workspace version")
+    return match.group(1)
+
+
 def canonical_json(value: Any, *, max_depth: int, max_integer: int) -> str:
     """Encode one source-selected canonical JSON value."""
 
@@ -1428,7 +1437,10 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
         f"<!-- Source: protocol/extension-api-v0.3.schema.json (sha256: {source_hash}) -->",
         "# octet Extension API 0.4 Reference",
         "",
-        "API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. This reference targets octet 0.8.0; native publication does not publish SDK registries.",
+        (
+            "API `0.4` is the current working-tree extension API version, using the feature-negotiated JSON-RPC wire retained from API `0.2`. Extensions add tools and bounded host-shaped integrations to a small coding host; this is not a promise of Pi execution parity or a general extension platform. Exact host offers and frontend bindings determine product availability. This reference targets octet "
+            f"{workspace_version()}; native publication does not publish SDK registries."
+        ),
         "",
         "## Version policy",
         "",
@@ -1440,6 +1452,14 @@ def render_docs(schema: dict[str, Any], source_hash: str) -> str:
     lines.extend([
         "",
         "API `0.1` remains frozen at its legacy wire. API `0.2` and `0.3` remain runtime and bundle supported; API `0.4` is current and is the version new extensions must declare. Selection is exact and never silently upgrades a legacy manifest. The tables and canonical models below are generated from the retained API `0.3` schema, not a replacement API `0.4` handshake. For the feature-negotiated wire, including commands, status/presentation, dynamic tools, artifacts, agent_sessions, and conditional approvals, see [the protocol reference](PROTOCOL-REFERENCE.md). Existing runtime contracts, SDKs, and conformance tests remain live; documenting a service does not promise that every product host exposes it. On the canonical wire, required host-offer sets are fixed; optional services are omitted when they cannot be safely bound.",
+        "",
+        "## Optional API 0.4 cache-warming advice",
+        "",
+        "On the feature-negotiated API `0.4` wire only, a manifest declaring `hooks = [\"cache_warming_decision\"]` is offered the matching optional feature. Declaring the hook requires selecting that feature. This does not add a canonical API `0.3` capability or method.",
+        "",
+        "`hook/run` carries `payload: {decision, model}` and the ordinary owner-fenced execution context. `decision` contains `phase` (`streaming` or `idle`), `warm_cost_microdollars`, `miss_cost_microdollars`, `continuation_probability`, signed `expected_savings_microdollars`, `economics_available`, and the host `action` (`warm` or `stop`). No prompt, credentials, provider transport, or mutable session is exposed. The response field is `cache_warming_decision: \"warm\" | \"stop\" | null`; absence is also no opinion.",
+        "",
+        "Hooks run in registration order before every due refresh; the last returned action wins. Failure, malformed output, stale generation, timeout or no opinion preserves the preceding decision. Each process wait is capped at 200 ms and the host additionally enforces its aggregate hook budget within the original refresh deadline. Advice cannot change eligibility, spending/attempt budgets, cancellation or replay safety. See [the full hook contract](../extensions.md#cache-warming-decision-advice-api-04) and [typed Python authoring](../../sdk/python/README.md#cache-warming-decision-advice-api-04).",
         "",
         "## Canonical framing and JSON-RPC envelopes",
         "",

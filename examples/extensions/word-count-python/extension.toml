@@ -1,0 +1,16 @@
+name = "word-count-python"
+version = "0.1.0"
+api_version = "0.4"
+description = "Count the words in a file: one model tool and one slash command"
+
+[entrypoint]
+command = "run-extension"
+
+[capabilities]
+filesystem = "workspace"
+process = false
+network = false
+
+[contributes]
+tools = ["word_count"]
+commands = ["wordcount"]

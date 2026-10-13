@@ -7,8 +7,9 @@ use octet_sdk::provider::{
 #[test]
 fn generated_builtin_definitions_are_credential_free() {
     let definitions = builtin_provider_definitions();
-    // Additive presets: Baseten, three Qwen token plans, Meta, and Z.ai Coding CN.
-    assert_eq!(definitions.len(), 37);
+    // Additive presets: Baseten, three Qwen token plans, Meta, Z.ai Coding CN,
+    // and the four subscription logins.
+    assert_eq!(definitions.len(), 41);
     // Host-owned Copilot remains deliberately absent until an embedding host
     // completes discovery; it is not a generated CLI/configuration preset.
     assert!(!definitions
@@ -33,6 +34,74 @@ fn generated_builtin_definitions_are_credential_free() {
     ));
     assert_eq!(codex.catalog(), ProviderCatalogKind::Subscription);
     assert_eq!(codex.pricing(), PricingProfile::Subscription);
+}
+
+#[test]
+fn every_subscription_login_is_a_public_credential_free_definition() {
+    let definitions = builtin_provider_definitions();
+    // Each of these is reachable only through `--login <selector>`, so the
+    // selector is the public contract and must match the documented one.
+    for (id, login, pricing) in [
+        ("xai-subscription", "grok", PricingProfile::Subscription),
+        (
+            "kimi-coding-subscription",
+            "kimi",
+            PricingProfile::Subscription,
+        ),
+        ("meta-subscription", "meta", PricingProfile::Subscription),
+        // OpenRouter's login mints an ordinary metered API key, so its route
+        // keeps the public catalog's per-model pricing rather than the
+        // reviewed subscription allowlist.
+        ("openrouter-oauth", "openrouter", PricingProfile::OpenRouter),
+    ] {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.id() == id)
+            .unwrap_or_else(|| panic!("missing public definition for {id}"));
+        assert!(
+            matches!(
+                definition.authentication(),
+                ProviderAccess::Subscription { login: actual } if actual == login
+            ),
+            "{id} must be a subscription login named {login:?}"
+        );
+        assert_eq!(
+            definition.catalog(),
+            ProviderCatalogKind::Subscription,
+            "{id} catalog kind drifted"
+        );
+        // A subscription route never inherits public API quotes: only the
+        // provider's own reviewed pricing may establish a price.
+        assert_eq!(
+            definition.pricing(),
+            pricing,
+            "{id} pricing profile drifted"
+        );
+        let rendered = format!("{definition:?}");
+        assert!(
+            !rendered.contains("https://") && !rendered.contains("api.x.ai"),
+            "{id} public projection leaked an endpoint: {rendered}"
+        );
+    }
+
+    // The API-key provider for the same vendor stays an independent definition,
+    // so signing in with a plan can never silently replace a paid API key.
+    for (api_key_id, subscription_id) in [
+        ("xai", "xai-subscription"),
+        ("kimi-coding", "kimi-coding-subscription"),
+        ("meta", "meta-subscription"),
+        ("openrouter", "openrouter-oauth"),
+    ] {
+        let api_key = definitions
+            .iter()
+            .find(|definition| definition.id() == api_key_id)
+            .unwrap_or_else(|| panic!("missing public definition for {api_key_id}"));
+        assert!(
+            matches!(api_key.authentication(), ProviderAccess::Environment { .. }),
+            "{api_key_id} must stay an environment-authenticated provider"
+        );
+        assert_ne!(api_key.id(), subscription_id);
+    }
 }
 
 #[test]

@@ -98,9 +98,70 @@ pub fn install_signal_restore() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Installs Windows console control handling with the same coordinated
+/// shutdown as the Unix signals.
+///
+/// Raw mode turns Ctrl-C into a key event, but Ctrl-Break, closing the console
+/// window, logoff, shutdown, and Ctrl-C in plain or print mode still arrive as
+/// control events. Without a handler Windows ends the process immediately and
+/// leaves the console in raw mode for the parent shell.
+#[cfg(windows)]
+pub fn install_signal_restore() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    // SAFETY: the handler is a 'static function with the documented
+    // PHANDLER_ROUTINE signature and stays valid for the process lifetime.
+    if unsafe { SetConsoleCtrlHandler(Some(console_control_handler), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn console_control_handler(kind: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::System::Console::{
+        CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+
+    let Some(signal) = windows_control_signal(kind) else {
+        return 0;
+    };
+    if request_coordinated_shutdown(signal).is_err() {
+        return 0;
+    }
+    if matches!(
+        kind,
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+    ) {
+        // Windows ends the process as soon as this handler returns for these
+        // events. Give coordinated cleanup its watchdog window first; the
+        // watchdog or the mode owner exits the process before this returns.
+        std::thread::sleep(SIGNAL_WATCHDOG_TIMEOUT + std::time::Duration::from_millis(250));
+    }
+    1
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn install_signal_restore() -> std::io::Result<()> {
     Ok(())
+}
+
+/// Map a Windows console control event to the signal number used for the
+/// conventional `128 + signal` exit status. Unknown events keep Windows'
+/// default handling.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_control_signal(kind: u32) -> Option<i32> {
+    const SIGHUP: i32 = 1;
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    const SIGBREAK: i32 = 21;
+    match kind {
+        0 => Some(SIGINT),      // CTRL_C_EVENT
+        1 => Some(SIGBREAK),    // CTRL_BREAK_EVENT
+        2 => Some(SIGHUP),      // CTRL_CLOSE_EVENT: the console went away
+        5 | 6 => Some(SIGTERM), // CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT
+        _ => None,
+    }
 }
 
 #[cfg(test)]

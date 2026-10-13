@@ -16,6 +16,20 @@ use crate::{
 /// Maximum serialized size of one `octet_capabilities` declaration.
 pub const MAX_SELF_DESCRIPTION_BYTES: usize = 4096;
 
+/// Provenance for optional facts returned by an endpoint-owned inventory.
+/// Absent, unrecognized/invalid, and asserted are distinct states.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryMetadataSource {
+    /// The inventory did not include this fact.
+    #[default]
+    Absent,
+    /// The inventory included an unrecognized or unusable fact.
+    Unknown,
+    /// The inventory supplied a validated assertion.
+    Explicit,
+}
+
 /// Host-assigned provenance, never taken from fields in the declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoverySource {

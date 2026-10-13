@@ -260,6 +260,37 @@ class WindowsReleaseFixtureTests(unittest.TestCase):
         self.assertIn("package-octet-windows-release.py", script)
         self.assertIn("Windows release packaging requires a native Windows probe", script)
 
+    def test_msvc_zip_and_powershell_installer_bind_into_release_metadata(self) -> None:
+        assets = self.root / "msvc-assets"
+        assets.mkdir()
+        names = [
+            "install-octet.sh",
+            "install-octet.ps1",
+            *(f"octet-{VERSION}-{target}.tar.gz" for target in metadata.PUBLISHED_TARGETS),
+            f"octet-{VERSION}-x86_64-pc-windows-msvc.zip",
+        ]
+        entries = []
+        for name in names:
+            path = assets / name
+            path.write_bytes(f"fixture {name}\n".encode())
+            entries.append(f"{sha256_bytes(path.read_bytes())}  ./{name}")
+        checksums = assets / "OCTET_SHA256SUMS"
+        checksums.write_text("\n".join(sorted(entries)) + "\n", encoding="ascii")
+        generated = metadata.build_metadata(
+            VERSION,
+            f"v{VERSION}",
+            SOURCE_COMMIT,
+            WORKFLOW_COMMIT,
+            WORKFLOW_REF,
+            REPOSITORY,
+            checksums,
+            include_windows_msvc=True,
+        )
+        by_name = {asset["name"]: asset for asset in generated["assets"]}
+        self.assertEqual(len(by_name), 6)
+        self.assertEqual(by_name[names[-1]]["target"], "x86_64-pc-windows-msvc")
+        self.assertEqual(by_name["install-octet.ps1"]["kind"], "installer")
+
     def test_candidate_metadata_is_opt_in_and_old_fixture_is_unchanged(self) -> None:
         assets = self.root / "assets"
         assets.mkdir()

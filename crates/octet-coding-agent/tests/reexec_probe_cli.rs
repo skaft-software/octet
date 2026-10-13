@@ -1,9 +1,9 @@
-#![cfg(unix)]
-
 //! `--internal-reexec-probe` is the contract `/reload` validates a candidate
 //! binary with before it replaces the running image. These tests run the real
 //! built binary and keep every side effect inside a scratch `HOME`, workspace,
 //! and session directory.
+
+#![cfg(unix)]
 
 use std::collections::BTreeSet;
 use std::fs;

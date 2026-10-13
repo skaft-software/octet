@@ -124,14 +124,14 @@ fn record_request(
 }
 
 #[test]
-fn openai_chat_usage_only_done_uses_provider_output_and_generation_bounds() {
+fn openai_chat_usage_only_done_uses_provider_output_and_end_to_end_bounds() {
     let (mut tracker, id, origin) = start_tracker("openai", "gpt-4o");
     record_request(&mut tracker, id, origin, Protocol::OpenAiChat, 321);
 
     let run = tracker.current().expect("current run");
     let throughput = run.request_throughput().expect("completed request rate");
     assert_eq!(throughput.output_tokens(), 321);
-    assert_eq!(throughput.generation_elapsed(), Duration::from_millis(10));
+    assert_eq!(throughput.request_elapsed(), Duration::from_millis(19));
     assert_eq!(throughput.timing().submitted_at(), instant_after(origin, 1));
     assert_eq!(
         throughput.timing().stream_opened_at(),
@@ -184,7 +184,7 @@ fn vllm_compatible_stream_keeps_authoritative_usage_without_estimation() {
 
     let throughput = tracker.current().unwrap().request_throughput().unwrap();
     assert_eq!(throughput.output_tokens(), 1_455);
-    assert_eq!(throughput.generation_elapsed(), Duration::from_millis(10));
+    assert_eq!(throughput.request_elapsed(), Duration::from_millis(19));
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn retry_replaces_attempt_origin_and_does_not_mix_intervals() {
 
     let throughput = tracker.current().unwrap().request_throughput().unwrap();
     assert_eq!(throughput.output_tokens(), 12);
-    assert_eq!(throughput.generation_elapsed(), Duration::from_millis(8));
+    assert_eq!(throughput.request_elapsed(), Duration::from_millis(12));
     assert_eq!(throughput.timing().submitted_at(), instant_after(origin, 8));
     assert_eq!(
         throughput.timing().first_generated_at(),
@@ -309,7 +309,7 @@ fn retry_replaces_attempt_origin_and_does_not_mix_intervals() {
 }
 
 #[test]
-fn one_chunk_and_zero_token_requests_do_not_create_unstable_or_stale_rates() {
+fn one_chunk_has_end_to_end_sample_and_zero_tokens_clear_stale_rates() {
     let (mut tracker, id, origin) = start_tracker("openai", "gpt-4o");
     assert!(tracker.request_submitted_at(id, instant_after(origin, 1)));
     assert!(
@@ -338,7 +338,15 @@ fn one_chunk_and_zero_token_requests_do_not_create_unstable_or_stale_rates() {
             )
             .accepted
     );
-    assert!(tracker.current().unwrap().request_throughput().is_none());
+    assert_eq!(
+        tracker
+            .current()
+            .unwrap()
+            .request_throughput()
+            .unwrap()
+            .request_elapsed(),
+        Duration::from_millis(4)
+    );
     assert_eq!(
         tracker
             .current()
@@ -434,7 +442,7 @@ fn media_only_request_is_timed_when_origin_is_supplied_but_rate_still_uses_usage
 
     let throughput = tracker.current().unwrap().request_throughput().unwrap();
     assert_eq!(throughput.output_tokens(), 9);
-    assert_eq!(throughput.generation_elapsed(), Duration::from_millis(5));
+    assert_eq!(throughput.request_elapsed(), Duration::from_millis(13));
     assert_eq!(
         throughput.timing().first_generated_at(),
         Some(instant_after(origin, 4))
@@ -551,7 +559,7 @@ fn tool_turn_displays_latest_request_and_excludes_tool_wall_time() {
 
     let throughput = tracker.current().unwrap().request_throughput().unwrap();
     assert_eq!(throughput.output_tokens(), 40);
-    assert_eq!(throughput.generation_elapsed(), Duration::from_millis(8));
+    assert_eq!(throughput.request_elapsed(), Duration::from_millis(20));
     assert_eq!(
         throughput.timing().submitted_at(),
         instant_after(origin, 90)
@@ -712,4 +720,75 @@ fn run_summary_is_value_stable_for_completed_projection() {
     assert_eq!(summary.files_changed, 2);
     assert_eq!(summary.tool_calls, 3);
     assert_eq!(summary.warnings, 1);
+}
+
+#[test]
+fn inference_event_freezes_client_timing_before_delayed_persistence() {
+    let (mut tracker, id, origin) = start_tracker("openai", "fixture");
+    assert!(tracker.request_submitted_at(id, origin));
+    tracker.apply_event_at(id, &AgentEvent::TurnStarted, origin);
+    let metrics = octet_ai::InferenceMetrics {
+        client: Some(octet_ai::ClientInferenceMetrics {
+            scope: Some(octet_ai::ClientTimingScope::Request),
+            elapsed_ns: 1_000_000_000,
+            reported_output_tokens: 200,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    tracker.apply_event_at(
+        id,
+        &AgentEvent::ProviderInference { metrics },
+        instant_after(origin, 1000),
+    );
+    tracker.apply_event_at(
+        id,
+        &text_turn(Protocol::OpenAiChat, 200),
+        instant_after(origin, 10000),
+    );
+    let run = tracker.current().unwrap();
+    let sample = run.request_throughput().unwrap();
+    assert_eq!(sample.request_elapsed(), Duration::from_secs(1));
+    assert_eq!(sample.output_tokens(), 200);
+    assert_eq!(
+        run.request_timing().unwrap().provider_finished_at(),
+        Some(instant_after(origin, 1000))
+    );
+    assert_eq!(
+        run.request_timing().unwrap().committed_at(),
+        Some(instant_after(origin, 10000))
+    );
+}
+
+#[test]
+fn deferred_poll_and_steering_metrics_do_not_create_e2e_generation_rates() {
+    for scope in [
+        octet_ai::ClientTimingScope::DeferredSubmit,
+        octet_ai::ClientTimingScope::DeferredPoll,
+        octet_ai::ClientTimingScope::ResponseSegment,
+    ] {
+        let (mut tracker, id, origin) = start_tracker("faux", "fixture");
+        assert!(tracker.request_submitted_at(id, origin));
+        tracker.apply_event_at(id, &AgentEvent::TurnStarted, origin);
+        let metrics = octet_ai::InferenceMetrics {
+            client: Some(octet_ai::ClientInferenceMetrics {
+                scope: Some(scope),
+                elapsed_ns: 1_000_000,
+                reported_output_tokens: 200,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        tracker.apply_event_at(
+            id,
+            &AgentEvent::ProviderInference { metrics },
+            instant_after(origin, 1),
+        );
+        tracker.apply_event_at(
+            id,
+            &text_turn(Protocol::OpenAiChat, 200),
+            instant_after(origin, 2),
+        );
+        assert!(tracker.current().unwrap().request_throughput().is_none());
+    }
 }

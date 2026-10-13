@@ -110,6 +110,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         Some(tools) => ToolPolicy::only(tools.clone())?,
         None => ToolPolicy::default(),
     };
+    let (cache_warming, show_cache_miss_notices) = crate::cli::user_cache_warming_policy()?;
     Ok(Config {
         workspace,
         invocation_cwd,
@@ -124,14 +125,20 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: true,
         cache_retention: CacheRetention::Short,
+        cache_warming,
+        show_cache_miss_notices,
         effect_policy: octet_agent::EffectPolicy::Controlled,
         sandbox,
         theme: None,
+        theme_explicit: false,
         system_prompt: request.system_prompt.clone(),
         theme_paths: Vec::new(),
         color: ColorMode::Never,
         mouse: MouseMode::Off,
         plain: true,
+        // A host request owns no interactive terminal, so there is no pane to
+        // negotiate a native surface with.
+        tern: crate::config::TernMode::Off,
         show_images: false,
         session_dir,
         compaction: CompactionPolicy::default(),
@@ -153,6 +160,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         extension_activation_overridden: true,
         trusted_extensions: request.trusted_extensions.clone(),
         invocation_trusted_extensions: Vec::new(),
+        start_extension_processes: false,
         experimental_streamable_http_mcp: false,
         extension_flag_values: Default::default(),
         tools,

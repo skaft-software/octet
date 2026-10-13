@@ -51,6 +51,10 @@ artifact, timeout, and process-tree cleanup bounds. octet does not yet enforce O
 CPU/RSS/FD/PID quotas or sandbox trusted extensions; they run with the current
 user's authority.
 
+**Capability declarations decide what services the host routes and what requests
+an extension may make; they do not confine the process. OS-level enforcement is
+future work.**
+
 ## Transport defaults
 
 | Parameter | Default |
@@ -245,6 +249,30 @@ If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
 the six names above. A non-empty subscription without the feature is invalid.
 
+API `0.4` also offers `tool_prompt_metadata_v1`. A tool may then declare
+`prompt_snippet` (optional string) and `prompt_guidelines` (optional string array,
+default empty). These are presentation only: at most 16 guidelines and 1,024
+UTF-8 bytes per string, allowing newline/tab but no other control characters.
+Their encoded bytes share the existing aggregate catalog schema budget.
+Initialization and dynamic registration use the same validation. The Agent
+projects only active, model-visible tools; guidelines need no snippet, and
+ordinary no-metadata tools remain unchanged. See [prompt projection and run
+snapshot semantics](../extensions.md#tool-prompt-metadata-api-04).
+
+The API `0.4` host may additionally offer `tool_composition_v1` when its runtime
+explicitly enables `ExtensionRuntimeConfig.tool_composition` (false by default
+for embedders). The coding host enables this generic service for trusted enabled
+API `0.4` extensions, not just one package name. Negotiation alone conveys no
+authority: only a live model-tool request with a bound composition dispatcher
+can use it. See [composition](#225-compositioncontext-compositioncall-compositionstore-api-04-feature-tool_composition_v1).
+
+API `0.4` offers `session_control_v1` only with a bound active-session lifecycle
+service. `session_compaction_v1` additionally requires that service to opt into a
+real idle compaction consumer; selecting it requires `session_control_v1`.
+Admission still requires an active frontend binding. Neither feature changes
+canonical API `0.3` `session_lifecycle`. See [session control](#session-control-v1)
+and [compaction](#session-compaction-v1) for the distinct parent-lifetime rules.
+
 The coding host conditionally appends `agent_sessions` to
 `optional_features` only for the trusted, enabled first-party
 `octet-subagents` extension when its child-session service can be bound. The
@@ -254,7 +282,12 @@ it only when it was offered. The service is bound after the Agent is
 constructed; calls without a bound service/resource owner fail deterministically
 with `-32002`. When `agent_sessions` is offered, the host also offers
 `agent_model_selection_v1`; negotiating the latter requires `agent_sessions`.
-It enables bounded configured-model discovery and explicit child model selection,
+API `0.4` additionally offers `agent_session_events_v1` and
+`agent_session_lifetime_v1` at that same authorized service boundary; each
+requires `agent_sessions`. These features do not enable child authority for Pi
+factories or other packages in the coding host. Embedders must explicitly bind
+the native child service; feature names alone grant nothing.
+The model-selection feature enables bounded configured-model discovery and explicit child model selection,
 not extension-supplied provider transports or credentials.
 
 The host likewise appends `approvals` only when single-use approval issuance is
@@ -266,6 +299,17 @@ approvals disabled and configures no secret broker, so it offers neither
 conditional feature. Generic `policy/evaluate` requests return `deny`; the
 working-tree `mcp.tool.call` adapter permits exact active owner-scoped MCP calls
 under full access only, as described below.
+
+API `0.2` may also declare `[capabilities].provider_credentials = true`. The
+reviewed declaration is the only source of the conditional
+`provider_credentials` feature: a manifest that omits it can never negotiate the
+feature, even if the process advertises it during initialization, and a declared
+manifest echoes `provider_credentials: true` in the initialize `capabilities`
+object. Negotiating it admits `provider/credentials`, which resolves exactly one
+named native provider/model through the host's own authentication resolution and
+returns that single result to the requesting process. The value reaches neither
+diagnostics nor status nor persistence, and a request for any other identity is
+refused rather than widened.
 
 Secret names are duplicate-free identifiers of at most 64 ASCII bytes. The
 first character is a letter or underscore; subsequent characters may also use
@@ -532,8 +576,85 @@ failure, cancellation, interruption, frontend loss, or shutdown.
 **Dispositions:**
 - `{ "action": "continue" }` — proceed normally.
 - `{ "action": "deny", "reason": "..." }` — deny the intercepted operation
-  (meaningful for `before_prompt` and `before_tool_call` only; other hooks
-  continue regardless).
+  (meaningful for the legacy `before_prompt` and `before_tool_call`; other legacy
+  hooks continue regardless). The awaited session-operation hooks below have
+  their own decision validation, not this ignored-denial rule.
+
+### 1.4b Native model-turn hooks (API `0.4`, feature `session_entries`)
+
+**Source status:** these newly authored native paths and tests are not yet
+compiled or native-test-qualified. This specifies the source contract, not an
+installed-binary or full Pi compatibility claim.
+
+For these model-turn and compaction contracts, an unsupported/safe refusal is a
+boundary, not repair evidence for a captured Pi breakage. Captured Pi breakages
+remain Octet-owned open defects; refusal tests do not establish closure.
+
+Declare `model_turn_start`, `model_turn_end`, or both in `contributes.hooks`,
+select API `0.4`, and negotiate `session_entries`. They use
+`SessionOperationHook`, registered through `ExtensionHost::session_operation_hook`,
+with a real awaited private session-leaf consumer. They are not API `0.3`
+`session_start`/`session_end`, best-effort lifecycle notifications, whole-run
+`turn/started`/`turn/settled`, or `AgentEvent::TurnFinished` aliases.
+
+The host sends ordinary `hook/run` requests with `params.hook` set to the declared
+name. The respective `params.payload` shapes are:
+
+```json
+{"kind":"model_turn_start","run_id":"run:001","turn_index":0,"timestamp_ms":1791129600000}
+```
+
+```json
+{"kind":"model_turn_end","run_id":"run:001","turn_index":0,"timestamp_ms":1791129600123,"assistant_entry":{"id":"002","parent":"001","timestamp_unix_ms":1791129600110,"value":{"type":"message","Assistant":{"content":[{"Text":"Done."}],"model":"local-model","protocol":"open_ai_chat"}}},"tool_result_entries":[]}
+```
+
+IDs and times above illustrate shape; the host uses actual session facts.
+`run_id` is `run:<initiating durable user entry id>`. `turn_index` is zero-based
+within that run, one logical iteration per assistant response. `timestamp_ms`
+is host wall-clock Unix milliseconds at the respective boundary. Start is
+awaited before model-request preparation; provider retries, context-compaction
+re-entry and auxiliary compaction/gate calls do not create duplicate starts or
+additional logical turns. The hooks themselves do not make model calls.
+
+End is awaited only after one real assistant entry and all its paired tool-result
+entries have committed, including tool errors and asynchronous tool settlement.
+`tool_result_entries` is in durable commit order. Asynchronous tools may overlap
+a later model iteration; end observations remain in iteration order, not provider
+completion order. End does not mean whole-run success or terminal-gate approval.
+
+The entries are native `Entry` serializations, unchanged except for the existing
+receiving-namespace metadata filter: retain public extension metadata and the
+receiver's own private metadata, not another extension's private values. Keep
+real IDs, parents, `timestamp_unix_ms`, optional metadata and all content. Native
+assistant content is under `value.Assistant`; tool results are under
+`value.User.content[].ToolResult`, potentially several in one entry. No usage,
+stop reason, provider-specific or Pi message fields are fabricated. An adapter
+unable to project media or opaque content must refuse explicitly, not drop it.
+
+The callback includes the existing owner-fenced session snapshot and private
+`params.session_leaf` grant. While it is awaited, the sole Session writer services
+the authenticated, bounded private `session/append_entry` lane and returns real
+commit receipts; a frontend notification queue is not its consumer. Grants are
+invocation-scoped, with activation/operation, owner, instance and generation
+fences, and are revoked when the invocation settles. Retaining the snapshot does
+not retain append authority or exempt ordinary reverse calls from their parent
+lifetime. Full snapshot/frame bounds still apply; oversize fails, not truncates.
+
+Return the ordinary permitted hook envelope, optionally adding
+`"session_operation":{"action":"continue"}`; absence means Continue:
+
+```json
+{"disposition":{"action":"continue"},"notifications":[],"session_operation":{"action":"continue"}}
+```
+
+Both observations reject `session_operation` actions `cancel` and
+`replace_compaction`, and reject disposition `deny`. Unrelated hook effects and
+nonempty prompt-context contributions are invalid. Callbacks run in registration
+order under the shared cancellation/deadline boundary. Failure or cancellation
+stops the run but cannot undo committed assistant, tool-result or private entries.
+Callbacks are not retried and no duplicate end is synthesized. Preparation,
+persistence or cancellation failure may leave a start without an end; parked or
+separately deferred-resume polling is not represented as a fabricated completion.
 
 ---
 
@@ -621,6 +742,78 @@ remains protocol vocabulary for other host-owned frontends.
 ```
 
 Return `null` to contribute nothing.
+
+---
+
+### 1.6b `menu/collect` (API `0.2`+)
+
+Requires `contributes.menu = true` and at least one declared command. The
+coding TUI sends it when the person selects the extension under `/extensions`,
+and again after every action, so the menu is pulled fresh and never pushed. Keep
+the handler fast and side-effect free: answer from cached state. The host waits
+at most 5 seconds and then falls back to one generated entry per declared
+command.
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "menu/collect",
+  "params": {
+    "context": {
+      "workspace": "/home/user/project",
+      "execution_scope": null,
+      "host": {},
+      "resource_owner": {
+        "session_id": "session-…",
+        "extension_instance_id": "…",
+        "process_generation": 1
+      }
+    }
+  }
+}
+```
+
+**Response:** the complete [`ExtensionMenu`](#extensionmenu-api-02):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "title": "Computer use",
+    "status": {"state": "pending", "label": "Not set up"},
+    "detail": "Set up installs Cua Driver and checks what your desktop needs.",
+    "items": [
+      {"id": "setup", "label": "Set up computer use", "command": "computer-use",
+       "arguments": ["setup"], "recommended": true,
+       "description": "Install the driver, then check permissions"},
+      {"id": "jev", "label": "Jev (optional)", "items": [
+        {"id": "forget", "label": "Forget stored API key", "command": "computer-use",
+         "arguments": ["jev", "forget"], "destructive": true}
+      ]}
+    ]
+  }
+}
+```
+
+Each item is either an action (`command` names one of the extension's declared
+commands, `arguments` are literal) or a submenu (`items`). Choosing an action
+runs `command/execute` with those arguments, so a menu can only run what the
+extension could already run. The host asks for confirmation before a
+`destructive` action and then pre-approves that action's own first
+`confirmation/request`. While the action runs, its `$/progress` status lines,
+`confirmation/request`, and `input/request` appear in place, and the person can
+cancel it. Because a person started it and watches it, the action may run for
+up to 30 minutes instead of the ordinary request deadline.
+
+The host rejects the whole menu (and shows generated entries instead) when an
+action routes to an undeclared command or a bound is exceeded: at most 256
+items across all levels, 4 levels, unique ids per level, at most one
+`recommended` item per level, and a submenu that carries neither `arguments` nor
+`destructive`.
 
 ---
 
@@ -778,7 +971,9 @@ bounded writer queue. Host finalizers remain authoritative if delivery fails.
 
 `after_response` remains success-only in both API versions. It is not sent on
 failure, cancellation, interruption, frontend loss, shutdown, or a turn limit;
-API `0.2` lifecycle settlement covers those terminal outcomes.
+API `0.2` lifecycle settlement covers those terminal outcomes. Root-product
+`turn/started` and `turn/settled` describe the owning run, not each model iteration;
+use the awaited API `0.4` model-turn hooks above for durable per-iteration facts.
 
 ### 1.11 Wave-1 notifications (API `0.2`, negotiated)
 
@@ -795,8 +990,8 @@ with a bounded diagnostic instead of being delivered.
 | `message/started` | `lifecycle_events_v2` | `message_start` |
 | `message/updated` | `lifecycle_events_v2` | `message_update` |
 | `message/settled` | `lifecycle_events_v2` | `message_end` |
-| `compaction/started` | `lifecycle_events_v2` | `session_before_compact` |
-| `compaction/settled` | `lifecycle_events_v2` | `session_compact` |
+| `compaction/started` | `lifecycle_events_v2` | Advisory start only; not the awaited `session_before_compact` hook |
+| `compaction/settled` | `lifecycle_events_v2` | Advisory settlement only; not the awaited `session_compact` hook |
 | `compaction/failed` | `lifecycle_events_v2` | `session_compact_failed` |
 | `session/info_changed` | `lifecycle_events_v2` | `session_info_changed` |
 | `dialog/started` | `lifecycle_events_v2` | `ui_prompt_start` |
@@ -820,9 +1015,13 @@ event: it never splits, re-buffers, or reorders it and never opens a per-delta
 round trip. It also accepts an SDK-shaped batch as a JSON array under `deltas`
 (or the alias `updates`); an array longer than 1024 deltas is refused as
 `bounds_exceeded` and no event is emitted.
-Every other Wave-1 notification forwards its bounded payload as the matching Pi
-event and is never silently dropped: it is either dispatched or refused with a
-typed error name in the diagnostic.
+The API `0.4` `session_before_compact` and `session_compact` callbacks instead
+use declared, awaited `SessionOperationHook` dispatch with negotiated
+`session_entries` and a real private append consumer. The before-hook intercepts
+prepared local compaction; the after-hook observes its actual durable entry.
+Advisory `compaction/started`/`compaction/settled` notifications cannot provide
+these semantics, and the adapter does not re-emit them as duplicate callbacks.
+Other Wave-1 mappings above retain their bounded dispatch/refusal behavior.
 
 These notifications do **not** change the extension API version. They remain API
 `0.2`; there is no API `0.3` variant, and API `0.3` provider manifests do not
@@ -1071,7 +1270,7 @@ recognizes owner-fenced `octet-subagents` activities as a first-party observed
 surface and updates one bounded tool-like **Subagents** transcript block in place
 from native `AgentEvent::DelegationUpdated` events, including between root turns.
 Its heading counts worker states and up to four active child lines show tasks and
-input/output tokens; `/subagents` retains the complete roster, metrics, and cost.
+input/output tokens; the worker list retains the complete roster, metrics, and cost.
 The TUI does not poll a status command, and the extension cannot supply footer
 text or terminal rows. It clears stale state on owner/process replacement; Serve
 action identity includes the instance fence, generation, and revision before
@@ -1382,7 +1581,8 @@ next-boundary rule.
 ### 2.13 `agent/spawn` (API `0.2`)
 
 Requires the conditionally offered `agent_sessions` feature and an active
-host model-tool or declared-command parent. Create one bounded in-harness child
+host model-tool or declared-command parent, unless the additive API `0.4`
+retained-owner contract below was negotiated. Create one bounded in-harness child
 model session:
 
 ```json
@@ -1398,7 +1598,7 @@ model session:
     "message": "Inspect the current Ableton MCP catalog.",
     "idempotency_key": "catalog-audit-2026-08-16",
     "policy": {
-      "tools": ["read", "search"],
+      "tools": ["read"],
       "max_depth": 1,
       "max_concurrent_children": 8,
       "max_turns": null,
@@ -1411,11 +1611,12 @@ model session:
 }
 ```
 
-The host derives the resource owner from `parent_request_id`; the extension
-cannot submit an owner. `policy` is mandatory. Its tools are a non-empty,
-duplicate-free subset of `read`, `search`, `edit`, `write`, and `bash`
-(the first-party extension defaults to all five; explicitly select
-`read`/`search` for read-only work); depth is exactly one;
+The host derives the resource owner from `parent_request_id`; callers cannot
+invent an owner. API `0.4` `agent_session_lifetime_v1` permits returning the
+original host-issued owner as described below. `policy` is mandatory. Its tools are a non-empty,
+duplicate-free subset of `read`, `edit`, `write`, and `bash`
+(the first-party extension defaults to all four; explicitly select
+`read` for hard read-only work; content search uses `bash`, which can mutate); depth is exactly one;
 concurrency is 1..=8; returned UTF-8 bytes are 512..=16,384. The turn, cost,
 and wall-time ceilings are optional per child: `max_turns: null`,
 `max_cost_microdollars: null`, and `timeout_ms: null` inherit the parent
@@ -1485,8 +1686,9 @@ Requires both `agent_sessions` and `agent_model_selection_v1`. Request:
 ```
 
 The active host model-tool or declared-command parent supplies the resource
-owner; callers cannot submit an owner. Discovery is root-owner-only and retains
-the same principal, process-generation, and active-parent fences as other
+owner; only negotiated API `0.4` retained calls may return an explicit issued
+owner. Discovery is root-owner-only and retains
+the same principal and process-generation fences as other
 `agent/*` requests. Missing, foreign, or inactive owners fail closed.
 
 `query` is optional/null, a case-insensitive model/provider/display-name search
@@ -1584,7 +1786,7 @@ without opening its transcript, cumulative disjoint `usage`, optional
 `timed_out`, `failed` (with bounded `error`), and `shutdown`. Private delegation
 JSONL paths are never returned. A current owner-scoped presentation may route
 the opaque reference into Serve, `/extensions inspect`, or the native
-`/subagents` arrow-key browser as a locked read-only transcript; the resolver
+octet-subagents arrow-key worker list as a locked read-only transcript; the resolver
 separately verifies host-written parent-session, extension-principal, and
 resource-owner provenance. The TUI transcript panel starts at the live tail,
 supports bounded scrolling, and returns to the worker list on Escape or Left.
@@ -1645,13 +1847,58 @@ Observe their state through `agent/list`/`agent/wait`. Delegated child turns do
 not currently emit extension `session/*` or `turn/*` lifecycle notifications;
 that notification stream covers the owning/root product session.
 
+### API `0.4` child observations and retained lifetime
+
+`agent_session_lifetime_v1` allows `agent/*` requests to include the original
+host-issued `resource_owner` alongside the required `parent_request_id`. Its
+session, extension-instance, and process-generation tuple must still be issued
+on this connection. With a live parent, the owner must match and normal parent
+cancellation/settlement applies. With no active parent, a still-issued session
+owner permits a new call; a known cancellation tombstone refuses that parent
+reference. This is session-scoped authority: cancelling one request does not
+revoke the owner's ability to make new calls. Retire the owner to revoke it.
+Without an explicit owner, the existing active-parent contract is unchanged.
+Owner retirement invalidates further calls, wakes in-flight waits and requests
+shutdown of only that owner's child trees. This is not an editor-checkpoint
+exception, a new grant, or permission to bypass native delegation limits.
+
+With `agent_session_events_v1`, `agent/events` accepts:
+
+```json
+{"parent_request_id":2,"target":"agent-1","after_sequence":0,"timeout_ms":25000}
+```
+
+`after_sequence` is a required nonnegative integer; `timeout_ms` defaults to
+zero and is bounded to 25,000 ms (not silently clamped). Success returns
+`agent_id`, nullable native `session_id`, `events` (`{sequence,event}` records),
+`next_sequence`, `has_more`, and tagged native `status`. Cursors are
+non-consuming and ordered, not transcript offsets. Future or expired cursors
+fail rather than fabricate missing observations. Each batch contains at most
+256 records and 512 KiB of event bodies; the retained log is bounded to 4,096
+records / 2 MiB. Event bodies over 256 KiB become explicit `observation_error`
+records. Native facts include model-turn start/finish, output delta/discard,
+tool start/finish and run finish, with timestamps. Unsupported media,
+compaction-mirror replacement and uncertain usage are explicit observation
+errors, not a claim of full Pi message projection.
+
+With `agent_session_lifetime_v1`, `agent/stop` accepts
+`{"parent_request_id":2,"target":"agent-1"}` and returns
+`{"agent_id":"agent-1","shutdown_requested":true}`. It requests shutdown of
+that owned tree, not unrelated siblings. The acknowledgement does **not** mean
+settlement, cleanup completion or rollback; observe native state separately.
+Both methods enforce the same principal/owner target isolation and request
+bounds as the existing child service. They are unavailable in API `0.2`/`0.3`.
+
 ### 2.19 `composer/get`, `composer/set`, `composer/insert` (API `0.2`, feature `composer`)
 
 Host-owned composer access. `composer/get` requests `{ "parent_request_id": 2 }`
 and returns `{ "text": "<bounded composer text>" }`. `composer/set` requests
 `{ "parent_request_id": 2, "text": "..." }` and replaces the whole composer;
 `composer/insert` requests the same shape and inserts the text at the host
-composer cursor. Both mutations return `{}`.
+composer cursor. Both ordinary mutations return `{}`. While a remote custom
+editor owns the composer, plain mutations are refused; API `0.4` negotiated
+`remote_ui` permits the owner/mount/revision-fenced `composer/set`
+[editor checkpoint](remote-ui.md) instead, with an explicit revision ACK.
 
 ```json
 { "jsonrpc": "2.0", "id": "pi:4", "method": "composer/set",
@@ -1695,6 +1942,120 @@ of bounded plain JSON (no functions, exotic prototypes, non-finite numbers, or
 nesting beyond the protocol limit), the entry id to 256 bytes, and the name and
 label to 4 KiB. Every method is owner-scoped through `parent_request_id` and is
 refused with `-32002` `not_foreground_owner` for any other owner.
+
+<a id="session-control-v1"></a>
+
+### 2.21b Active-session control (API `0.4`, feature `session_control_v1`)
+
+This optional service targets the product's active session, not extension-owned
+`agent/*` children. It is offered only with a real bound lifecycle service and
+executes through its existing idle-boundary driver. Canonical API `0.3` keeps its
+separate `session_lifecycle` capability and request shapes unchanged.
+
+Every request has closed params with required `parent_request_id: u64` and
+optional/null `resource_owner` (the exact previously issued triple). The only
+other accepted field is `session_id`, required for switch and absent/null for
+all other methods:
+
+| Method | `session_id` | Successful result / effect |
+|---|---|---|
+| `session/wait_for_idle` | absent/null | `{"session_id":"..."}` for the active durable session, only after an observed idle boundary; no mutation |
+| `session/create` | absent/null | `{"session_id":"..."}` for a newly durable session; does not switch |
+| `session/fork` | absent/null | `{"session_id":"..."}` for a durable fork at the active head; does not switch |
+| `session/switch` | existing workspace session ID, at most 256 UTF-8 bytes | `{"session_id":"..."}` after making that session active; not an arbitrary file path |
+| `session/reload` | absent/null | `{"session_id":"..."}` after reopening the active durable session |
+
+```json
+{"jsonrpc":"2.0","id":"idle-1","method":"session/wait_for_idle","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1}}}
+```
+
+A live parent's owner takes precedence; the request remains its ordinary child
+and parent settlement/cancellation cancels it. An explicit owner does **not**
+detach a call made while the parent is live. With a settled parent, a still-issued
+owner permits an independently answered request; missing, foreign or stale owners
+and known cancellation tombstones are refused. Owner validation is not an
+admission-success acknowledgement or replay permit.
+
+The bounded queue preserves operation order. Idle waits cannot overtake earlier
+mutations, and no method returns success before its actual consumer completes.
+An active handler must not wait for a mutation whose idle boundary depends on
+that handler settling. Deactivation/activation epochs fence queued work from a
+replacement application. Cancellation does not roll back a committed mutation.
+Admission uses typed `unsupported_feature`, `invalid_request` and
+`not_foreground_owner` refusals; lifecycle queue/worker exhaustion returns
+`-32012`, and unavailable/failed lifecycle execution returns `-32603`.
+
+<a id="session-compaction-v1"></a>
+
+### 2.21c `session/compact` (API `0.4`, feature `session_compaction_v1`)
+
+**Source status:** newly authored Rust dispatch, consumer and tests are uncompiled
+and unqualified. The source binding is the isolated interactive lifecycle
+consumer, not a claim of installed, headless or Serve support.
+
+Negotiation requires both `session_compaction_v1` and `session_control_v1`.
+The host offers compaction only when a real lifecycle receiver has opted in via
+`ExtensionSessionLifecycleService::with_compaction()` before process startup;
+ordinary `channel()` alone does not enable it. Dispatch additionally requires
+the actual opted-in service and active frontend binding. API `0.1`/`0.2` and
+canonical `0.3` cannot negotiate this service.
+
+The request envelope and params are closed. Required fields are
+`parent_request_id: u64` and `resource_owner`, the complete exact host-issued
+`{session_id,extension_instance_id,process_generation}` triple.
+`custom_instructions` is optional string/null, capped at **16 KiB raw UTF-8**
+before normalization. LF and TAB are allowed; other controls are refused. Blank
+instructions are valid; the native Agent trims and normalizes them to absent.
+
+```json
+{"jsonrpc":"2.0","id":"compact-1","method":"session/compact","params":{"parent_request_id":7,"resource_owner":{"session_id":"host-issued-owner","extension_instance_id":"host-issued-instance","process_generation":1},"custom_instructions":"Keep the open questions."}}
+```
+
+**Send only after the originating host request's successful terminal reply has
+been written.** A live parent is deterministically refused with `-32602`
+`invalid_request`, including recursive awaited calls from a compaction hook.
+Do not await idle or compaction while settling that handler. This is a distinct
+post-reply service, not a blanket editor-checkpoint or ordinary-child lifetime
+exception. Retained contexts may send once no handler scope is live, using their
+original issued owner and cancellation scope.
+
+For an adapter exposing synchronous void `ctx.compact()`, enqueue locally in the
+handler scope and flush the reverse request only **after serially writing the
+successful host reply**. On parent error/cancellation suppress the request and
+invoke `onError`; never include compaction in the handler's awaited flush. Refuse
+calls from `session_before_compact`/`session_compact`, including deferred callbacks
+scheduled by those hooks, rather than starting a recursive callback chain.
+
+The issued owner is session-scoped authority after settlement, not a success ACK
+or replay token. A known parent-cancellation tombstone refuses the request;
+cancelling one request does not itself revoke every future call by that owner.
+Owner retirement, process close/drain or replacement generation, child
+cancellation and lifecycle-epoch change fence queued and executing work. The
+consumer also checks the actual foreground Session owner. Native cancellation is
+cooperative: the operation and provider accounting are driven to settlement,
+not abandoned when the caller disappears.
+
+There is no queue-admission success. Exactly one terminal outcome is admitted;
+success follows actual native Agent compaction, durable commit **and its awaited
+after-hooks**:
+
+```json
+{"jsonrpc":"2.0","id":"compact-1","result":{"entry_id":"checkpoint-id","summary":"Actual stored summary.","first_kept":"retained-entry-id"}}
+```
+
+These three strings come from the newly appended native Compaction entry, not
+`session.head` (an after-hook may append private metadata). No token counts,
+usage, details or other metrics are fabricated. Unsafe/no compactable history,
+a before-hook veto, unavailable consumer or Native Responses mode is a refusal,
+not successful compaction; this is the cancellable local service.
+
+Admission errors use `unsupported_feature` (`-32601`), `invalid_request` or
+`bounds_exceeded` (`-32602`), and `not_foreground_owner` (`-32002`). Execution
+failures use JSON-RPC errors (`-32603`), not success-shaped values. A post-commit
+after-hook failure explicitly retains the checkpoint and forbids retry; it cannot
+roll back or replay compaction. Oversized/undeliverable results are not truncated
+into success. Lost delivery or cancellation never authorizes automatic replay of
+possibly committed work.
 
 ### 2.22 `session/send_message`, `session/send_user_message` (API `0.2`, feature `message_injection`)
 
@@ -1763,6 +2124,358 @@ observation to the holder (it owns the tty for the duration), and the same
 process must not be handed a second grant. The dispatch-level refusal is typed:
 `unsupported_feature` when `terminal_handoff` was not negotiated, and
 `invalid_request`/`bounds_exceeded`/`not_foreground_owner` for everything else.
+
+### 2.24b Host-mediated autocomplete (feature `autocomplete`)
+
+The base profile below retains its existing behavior. API `0.4` may negotiate
+[`autocomplete_edit_v1`](#autocomplete-edit-v1) for the additive edit fields
+and prefix/value control exceptions described below.
+
+`ui/autocomplete/register` accepts `{ "revision": <u64> }`. Registration is
+admitted by an interactive frontend and acknowledged with `{ "accepted": true }`;
+an unavailable frontend refuses rather than fabricating an active chain.
+For an admitted chain, the host sends `ui/autocomplete/complete` with
+`{ "text": "...", "cursor": <UTF-8 byte offset>, "revision": <u64> }`.
+The cursor must be a character boundary in the bounded editor snapshot.
+Reply with `{ "prefix": "...", "items": [{ "value": "...", "label": "...",
+"description": null }] }`. Prefix is the exact suffix before the cursor to
+replace; text fields are at most 1,024 UTF-8 bytes with no controls. At most
+32 items may be returned.
+
+An empty list leaves the query unclaimed. The coding frontend tries the next
+registered live chain and then ordinary native path completion, under one 500 ms
+aggregate deadline. Both menus and fallback apply only if the saved text, cursor,
+revision and focused-editor state still match; a late empty reply cannot edit a
+new draft. Extension choices use suffix replacement, not arbitrary editor edits.
+This contract alone does not cover every Pi completion application's quote,
+cursor, multiline or wrapper semantics.
+
+<a id="autocomplete-edit-v1"></a>
+
+#### API `0.4` profile: `autocomplete_edit_v1`
+
+This optional feature is offered only on API `0.4` and requires negotiated
+`autocomplete`; selecting it without `autocomplete` rejects initialization.
+API `0.1`, `0.2` and canonical `0.3` cannot select it. Registration and the
+`ui/autocomplete/complete` request/response RPC stay unchanged; this profile
+adds two optional fields to each item:
+
+| Item field | Type | Absent default | Validation |
+|---|---|---|---|
+| `replace_after_bytes` | `u32` | `0` | At most 262,144 additional bytes of the original snapshot after the cursor; replacement end must be in range and on a UTF-8 boundary |
+| `cursor_offset_bytes` | `u32` | UTF-8 byte length of `value` | Offset within inserted `value`, from zero through its byte length, on a UTF-8 boundary |
+
+These are nonnegative integer fields, not nullable fields. Explicit null,
+negative/fractional/out-of-u32 values and unknown fields are invalid. Without
+negotiated `autocomplete_edit_v1`, either field's presence is invalid even
+when its value is zero. Absence retains the base insertion/cursor defaults.
+
+With this profile, `prefix` and item `value` permit LF, TAB and CR, but no other
+control characters or terminal escapes. Labels and non-null descriptions remain
+plain/control-free. The existing 1,024 UTF-8 byte bound applies to each string,
+and the response still has at most 32 items. The request snapshot and resulting
+editor text remain within the existing 262,144-byte editor budget; the wire
+frame budget is unchanged.
+
+For original snapshot `text` and byte cursor `c`, let `start = c - prefix.len()`
+and `end = c + replace_after_bytes` (using the absent default). The host requires
+`prefix` to be the **exact suffix** of `text[..c]`, checks original cursor/start/
+end UTF-8 boundaries and range, then replaces `text[start..end]` with `value`.
+The resulting cursor is `start + cursor_offset_bytes`, measured within the
+inserted value, not within the original text. The inserted offset must be a
+UTF-8 boundary, and the complete resulting text must fit the editor budget.
+The entire response is validated against the exact original request on receipt;
+range, UTF-8 and budget validation is repeated at display and explicit acceptance.
+
+Example after both features have been negotiated (cursor immediately before
+an existing quote):
+
+```json
+{"jsonrpc":"2.0","id":42,"method":"ui/autocomplete/complete","params":{"text":"é\"","cursor":2,"revision":7}}
+```
+
+```json
+{"jsonrpc":"2.0","id":42,"result":{"prefix":"é","items":[{"value":"文/\"","label":"Directory","description":"Keep the closing quote","replace_after_bytes":1,"cursor_offset_bytes":4}]}}
+```
+
+Acceptance replaces the two-byte `é` plus the following one-byte quote with
+`文/"` (five UTF-8 bytes), placing the cursor at byte four, after `/` and before
+the retained closing quote. Displaying a choice alone never performs that edit.
+
+The coding host keeps correlation **host-side**, not in extension-supplied DTOs:
+the durable session/resource owner and live registered provider instance and
+process generation are rechecked at display and acceptance. Retired/reloaded/
+replaced providers, changed sessions, changed text/cursor/revision or lost
+normal-editor focus invalidate results and displayed menus. A remote custom
+editor owning the composer also refuses normal-editor completion. Unclaimed
+responses keep the same next-chain/native-path fallback and aggregate deadline;
+fallback retains the queried provider chain's live fences and exact editor
+snapshot, so a late empty result cannot mutate a new draft.
+
+The native editor additionally requires grapheme boundaries. It previews edits
+through checked editor APIs and **refuses an unrepresentable range or cursor**,
+rather than silently flooring/moving the requested byte cursor or bypassing
+editor invariants. Valid UTF-8 boundaries alone therefore do not guarantee
+native acceptance. This native profile does not establish Pi adapter support,
+full Pi completion parity or completed lifecycle qualification.
+
+### 2.25 `composition/context`, `composition/call`, `composition/store` (API `0.4`, feature `tool_composition_v1`)
+
+This is an additive **feature-negotiated API `0.4`** service. API `0.1`, `0.2`
+and canonical `0.3` cannot select it. A tool definition may declare:
+
+```json
+{
+  "name": "compose",
+  "description": "Run a bounded program",
+  "parameters": {"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":false},
+  "composition": {"mode":"on","inline_budget":3000}
+}
+```
+
+`mode` is `on` (ordinary direct tools plus composition) or `only` (composition
+advertised, ordinary tools nested-only). `inline_budget` is an integer from 0
+through 16000 estimated tokens. Unknown composition fields are rejected.
+Optional `constrained_sampling` remains the existing provider grammar/regex
+contract. A composition declaration without negotiated `tool_composition_v1`
+is invalid. Presentation never expands the policy-filtered registry or enables
+excluded tools; nested composition tools are removed to prevent recursion.
+
+Every request below has an exact JSON-RPC request envelope and includes the
+numeric `parent_request_id` of a **currently active model tool/call** in this
+extension process generation. No caller-supplied resource owner is accepted.
+Initialization, commands, hooks, unbound, stale, foreign and settled parents
+are refused. Parent settlement/cancellation revokes executing and queued
+children; cancellation of a reverse request also cancels its nested operation.
+Late replies cannot revive authority. Ordinary extension effects and controlled
+profile restrictions still apply to the outer call.
+
+**Frozen context:**
+
+```json
+{"jsonrpc":"2.0","id":"context-1","method":"composition/context","params":{"parent_request_id":2}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"context-1","result":{"tools":[{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"output_schema":{"type":"object"}}],"store":{},"limits":{"timeout_ms":30000,"max_calls":256}}}
+```
+
+The tools, schemas, workspace, effect broker, hooks and cancellation belong to
+the exact frozen outer-call snapshot. No model routes, credentials or implicit
+LLM authority are provided. The store is private branch-ancestry state scoped
+by the composing tool's host-derived name.
+
+**One nested call:**
+
+```json
+{"jsonrpc":"2.0","id":"call-1","method":"composition/call","params":{"parent_request_id":2,"name":"read","arguments":{"path":"README.md"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"call-1","result":{"value":{"content":"Example","path":"README.md","hash":"...","start_line":1,"end_line":1,"total_lines":1,"next_offset":null,"truncated":false,"lines_clipped":false}}}
+```
+
+`name` is an exact frozen tool name (1..128 UTF-8 bytes); `arguments` is an
+object bounded to 128 KiB encoded JSON and depth 32. The normal host argument
+validator runs before hooks or effects. Each invocation receives a host-issued
+nested ID and fresh effect reservation; safe reads may overlap at most four at
+a time, while mutations, shell and extension effects are exclusive. There are
+at most 256 calls and one 30-second host deadline per parent, not per child.
+Guest preferences can only lower limits.
+
+The host returns programmatic/structured content for a schema-declaring tool,
+or text for a schema-less tool. It never parses arbitrary text as JSON or
+implicitly publishes nested media/raw stdout to chat. Extension output-schema
+validation remains in force. Nested errors use the JSON-RPC error envelope;
+policy refusals, unavailable tools and revoked authority do not become values.
+Completed nested usage is collected even if the program later fails or is
+cancelled, durably accounted before the next admission, and left unpriced when
+no authoritative model route/pricing exists. Hard token/cost ceilings refuse
+nested tools lacking host-authoritative unmetered/pre-execution bounds.
+
+**Commit successful store writes:**
+
+```json
+{"jsonrpc":"2.0","id":"store-1","method":"composition/store","params":{"parent_request_id":2,"set":{"answer":42},"delete":["obsolete"]}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"store-1","result":{}}
+```
+
+The adapter submits writes only after successful noncancelled guest execution.
+The host accepts at most one commit per parent, durably syncing private metadata
+before acknowledgment. There are at most 4096 keys per write batch, keys at
+most 1024 UTF-8 bytes, each value at most 256 KiB JSON and the entire resulting
+store at most 1 MiB. Unknown fields/invalid JSON are refused. Failed/cancelled
+scripts do not submit writes. Earlier completed effects are **not undone**.
+Reopen, fork, switch and compaction use durable active ancestry; portable
+conversation exports omit this private sidecar. Started-but-unfinished nested
+effects and outer scripts are not automatically replayed.
+
+**Oversized private JSON transport:** the normal wire frame bound stays 1 MiB.
+A context or value too large for a frame uses exactly one sidecar envelope:
+
+```json
+{"jsonrpc":"2.0","id":"context-1","result":{"context_file":{"path":"composition-random.json","bytes":1500000,"sha256":"64-lowercase-hex-digits"}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":"call-1","result":{"value_file":{"path":"composition-random.json","bytes":1500000,"sha256":"64-lowercase-hex-digits"}}}
+```
+
+`path` is a host-created **flat basename** beneath `OCTET_EXTENSION_SCRATCH`,
+never an absolute path or guest-selected path. Files use exclusive private
+creation, are regular/no-follow, have exact positive size at most 8 MiB and a
+SHA256 digest. Readers check size, identity, digest, UTF-8 and JSON before use,
+then unlink in `finally`. The host tracks at most 256 such files per parent and
+cleans undelivered/cancelled/settled files. No filesystem capability is exposed
+to guest code. A value above the limit produces an actionable error, not a
+widened frame or fallback to raw output.
+
+Private receipts contain argument digests and host policy/outcomes, not normal
+raw nested output. A tool with provisional delivery can acknowledge only after
+an exact private text receipt is synced, bounded by the smaller of the sandbox
+output cap and 1 MiB; oversized or failed persistence rolls it back.
+
+**Bounded complete outcomes (API `0.4`):** `composition/call` may add
+`full_outcome:true`, returning the native host-issued `tool_call`, canonical
+ordered `content`, `is_error`, and present metadata/structured-content/usage.
+Unknown tools, schema failures, hooks and policy failures become host-created
+error outcomes; transport revocation remains an RPC refusal. Raw JSON arguments
+are admitted only for complete outcomes, before preparation and schema checks;
+ordinary composition still requires object arguments. Absent structured content
+is not converted to null. Complete outcomes use the existing bounded value sidecar.
+
+`updates:true` additionally requests live `composition/update` notifications,
+with `{request_id,sequence,result}` bound to that exact reverse call. Only native
+partial-result snapshots are relayed. The channel holds at most 64 snapshots,
+is nonblocking, and may drop progress under pressure; result/effect settlement is
+not stalled by slow callbacks. Parent/call cancellation and settlement revoke
+updates. Updates never enter the transcript or model context, and remain subject
+to the existing 1 MiB frame bound (no progress sidecar).
+
+During active `tool/call`, negotiated `request_progress` + `content_parts` admit
+`$/progress` event `{type:"partial_result",result:{content,is_error?,metadata?,structured_content?}}`.
+Partial snapshots reuse final-result content-part limits, private detail budgets,
+and exact generation/session artifact resolution including MIME/aggregate-media
+checks, but do not need to satisfy the final output schema. Inactive or
+non-monotonic updates are ignored. This addition is not a Pi parity qualification.
+
+### 2.26 Native resource lifecycle (API `0.4`)
+
+The optional `resource_refs_v1` and `operation_descriptors_v1` features add
+extension-local native values to existing tool calls. They do not create a
+remote-method interface. The closed ResourceRef value is
+`{"$resource":"<opaque host token>","type":"Circuit"}`. Type IDs are nominal,
+1–128 ASCII bytes (letter first, then letters/digits/underscore/dot/hyphen);
+tokens are at most 128 ASCII bytes. Native objects never leave the extension.
+
+ToolDefinition's optional `operation` is a closed descriptor with `id`, optional
+`receiver`, `resource_inputs` and `resource_outputs`. Inputs contain
+`{path,type,access:"exclusive"}`; outputs contain `{path,type}`. Paths are fixed
+JSON Pointers through schema object properties, not arrays or wildcards.
+Schemas must declare the exact closed ResourceRef shape and matching nominal
+`type` using `const` or a singleton `enum`. The receiver, when present, names an
+input path; it is presentation metadata, never argument injection or authority.
+Resource-bearing descriptors require both features. Catalog publication validates
+schema, descriptor and frozen handler together, including dynamic mutations.
+
+| Direction/method | Closed params | Result |
+|---|---|---|
+| Extension → host `resource/register` | `{parent_request_id,type}` | Provisional ResourceRef |
+| Extension → host `resource/release` | `{parent_request_id,resource}` | `{retired:true,cleanup:"pending"}` (or retained completed/failed/unknown cleanup status) |
+| Host → extension `resource/dispose` | `{resources:[ResourceRef,...],reason:"retired"}` | `{results:[{resource:ResourceRef,status:"completed"},...]}`; report `failed` for disposer failure |
+
+Reverse requests require a live, host-owned `tool/call` parent and never accept
+caller-supplied session authority. Registration alone grants no access. Complete
+successful parent admission atomically activates declared exports; failure,
+invalid output or cancellation winning first retires all provisional values.
+All input resources are checked and exclusively pinned at actual dispatch,
+including queued calls and non-receiver slots. Cancellation does **not** release
+pins before execution settlement or generation death. Release rejects pinned
+values with `resource_busy`; successful invalidation precedes separate cleanup.
+Unknown cleanup triggers bounded generation termination, not resurrection.
+
+Initialization advertises `protocol.limits.resource_refs_v1` with `max_records`
+(256) and `max_registrations_per_parent` (32); the current implementation uses
+these fixed bounds. Owner changes, accepted reload and host/process restart
+invalidate resources. A failed candidate reload leaves the old generation live.
+See the [normative resource/descriptor contract](../design/extension-values-v1.md).
+
+Host lookup is opt-in through `ExtensionHost::enable_operation_discovery()` and
+its `get_applicable_operations` tool, **not another extension RPC**. It validates
+the resource first, filters exact nominal matches by live policy, then orders by
+operation ID/input path. Default limit is 8 cards, maximum 32, with fenced
+pagination. Only selected exact schemas enter the next model request; in-flight
+handlers stay frozen and live policy still applies. Ordinary/Pi registry and
+active-tool semantics are unchanged.
+
+### 2.27 Immutable bulk (API `0.4`, feature `bulk_objects_v1`)
+
+This optional feature is offered only when the host configures `BulkStorage`.
+Initialization adds `protocol.bulk_objects_v1` with `profile:"local-file.v1"`,
+absolute host-owned `transfer_directory` and finite `limits`. This context is
+transport-only, never model/domain data. A BlobRef is a closed value:
+
+```json
+{"$blob":"<opaque host token>","bytes":1024,"digest":{"algorithm":"sha256","value":"0000000000000000000000000000000000000000000000000000000000000000"},"media_type":"application/octet-stream"}
+```
+
+The example illustrates shape, not an issued grant. Identity is `$blob`, never
+the digest. Bytes are portable nonnegative integers; digests require exactly 64
+lowercase hex digits. Metadata must match the host record. SDK-generated schemas
+use the closed sha256 descriptor; domain wrappers such as WaveformRef remain
+ordinary typed records, not kernel numerical formats.
+
+All four extension → host methods require a live `parent_request_id` belonging
+to an admitted tool call. Request objects are closed; no caller owner/path is
+accepted:
+
+| Method | Params in addition to `parent_request_id` | Result |
+|---|---|---|
+| `bulk/write` | `{profile:"local-file.v1",capacity,media_type}` | `{ticket,profile,locator,capacity}` |
+| `bulk/commit` | `{ticket,bytes,digest}` | Provisional BlobRef |
+| `bulk/read` | `{profile:"local-file.v1",blob:BlobRef}` | `{lease,profile,locator,bytes}` |
+| `bulk/release` | `{id}` (ticket or lease) | `{released:true}` |
+
+A locator is a flat host-created basename in the negotiated transfer directory,
+valid only with its ticket/lease. Resolve without following symlinks; traversal,
+absolute paths and foreign grants are refused. The host copies and verifies a
+private immutable snapshot, so later producer writes cannot alter publication.
+Commit consumes the ticket; it does not yet export the blob. Complete successful
+parent admission publishes resource/blob outputs together; invalid output,
+cancellation or failed publication leaves no exported record. Diagnostic
+attachments alone cannot export provisional blobs. Close files/mappings before
+releasing leases. Known IDs or equal digests never imply authorization.
+
+Default limits are `object_bytes:268435456`, `owner_bytes:536870912`,
+`write_tickets_per_generation:8`, `read_leases_per_generation:32`, and
+`blobs_per_owner:256`. Owner byte/record bounds apply per host session, including
+reservations. Hosts may explicitly configure different finite bulk limits;
+existing media-artifact limits are not raised. These are protocol quotas, not
+OS filesystem confinement of a trusted subprocess.
+
+Retained blobs survive producer restart; tickets/leases and native resources do
+not. Durable host restart recovery requires the owning host's explicit
+`BulkStorage::retain_durable`/`recover_durable` path, verified bytes and fresh
+session authorization. A temporary store refuses durability. No durable-retain
+RPC or automatic native-object restoration exists. Results/model requests carry
+only BlobRef descriptors and bounded summaries, never bytes or locators.
+See the [bulk lifecycle contract](../design/extension-values-v1.md#e-blobref-and-local-filev1).
+
+### Typed diagnostics in tool results
+
+`metadata.octet_diagnostics_v1` holds closed Diagnostic records with required
+`severity`, `code`, `message` and optional `primary`, `related`, `fixes`,
+`attachments`. The profile has at most 32 diagnostics and 64 KiB total. SDKs
+validate it and emit a bounded explicit text summary; the host validates shape
+and independently checks blob/artifact authority. Fixes are suggestions, not
+permission to edit. Failed operations cannot publish new references through
+diagnostics. The [shared SDK contract](../../sdk/conformance/README.md) specifies
+locations, UTF-8 byte spans, revisions, control handling and individual bounds.
+These additions and their [conformance matrix](../design/extension-values-v1-conformance.md)
+do not imply complete Pi compatibility or completed qualification.
 
 ## 3. Standard JSON-RPC errors
 
@@ -1854,6 +2567,9 @@ do not negotiate these names.
 | `description` | string | Model-facing description |
 | `parameters` | object | JSON Schema (must be an object type) |
 | `output_schema` | object \| null | API `0.2` schema for required `structured_content`; forbidden in `0.1` |
+| `prompt_snippet` | string \| null | API `0.4` negotiated `tool_prompt_metadata_v1` usage summary; absent/null means no snippet |
+| `prompt_guidelines` | string array | API `0.4` negotiated `tool_prompt_metadata_v1` usage guidance; omitted defaults to empty |
+| `operation` | object \| null | API `0.4` negotiated OperationDescriptor; resource-bearing descriptors also require `resource_refs_v1` |
 
 ### `CommandDefinition`
 
@@ -1940,6 +2656,31 @@ result.
 See [`presentation/update`](#25-presentationupdate-api-02) for exact state,
 reference, safety, parentage, and bound rules.
 
+### `ExtensionMenu` (API `0.2`)
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | string \| null | Display title (≤256 bytes); the host falls back to the extension name |
+| `status` | object \| null | Generic `state`, compact `label`, optional `detail`, as in presentation snapshots |
+| `detail` | string \| null | Plain-text explanation (≤16 KiB); its first line is the menu subtitle |
+| `items` | array | Top-level `ExtensionMenuItem`s in display order |
+
+`ExtensionMenuItem`:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique among siblings (≤256 bytes); keeps the selection stable across refreshes |
+| `label` | string | Host-rendered label (≤256 bytes) |
+| `description` | string \| null | One-line explanation (≤2 KiB) |
+| `command` | string \| null | Declared command an action runs; absent for a submenu |
+| `arguments` | string array | Literal arguments (≤32, each ≤4 KiB) |
+| `destructive` | bool | Confirm before running |
+| `recommended` | bool | Preselected and emphasized; at most one per level |
+| `items` | array \| null | Submenu entries; mutually exclusive with `command` |
+| `detail` | string \| null | Shown when the submenu opens (≤16 KiB) |
+
+The encoded menu is at most 256 KiB.
+
 ### API `0.2` protocol features
 
 | Feature | Required | Enables |
@@ -1954,13 +2695,18 @@ reference, safety, parentage, and bound rules.
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
 | `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
+| `agent_session_events_v1` | API 0.4, conditional | Bounded native `agent/events` cursor observations; requires `agent_sessions` |
+| `agent_session_lifetime_v1` | API 0.4, conditional | Explicit issued-owner retained child calls and owned-tree `agent/stop`; requires `agent_sessions` |
 | `agent_model_selection_v1` | conditional | Bounded `agent/models`, `policy.model_selection`, and host-confirmed `resolved_model`; also requires `agent_sessions` |
 | `delegation_telemetry_v1` | conditional first-party requirement | Native owner-run `AgentEvent::DelegationUpdated` child telemetry; required by `octet-subagents` when `agent_sessions` is offered |
 | `approvals` | conditional | Original-intent/active-owner-bound single-use `policy/evaluate` retry tokens; also requires `policy_intents` |
 | `secrets` | conditional | Owner-scoped `secret/get` for exact manifest-allowlisted names |
+| `provider_credentials` | conditional | Reviewed `provider/credentials` resolving exactly one named native provider/model; requires `[capabilities].provider_credentials` |
 | `composer` | no | Host-owned `composer/get`, `composer/set`, and `composer/insert`; the extension API stays `0.2` |
 | `shortcuts` | no | Runtime `shortcut/register` plus admitted `shortcut/trigger` dispatch; at most 64 per process |
-| `session_entries` | no | `session/append_entry`, `session/set_name`, and `session/set_label` durable entry/session metadata |
+| `session_entries` | no | `session/append_entry`, `session/set_name`, and `session/set_label` durable entry/session metadata; declared API `0.4` model-turn/session-operation hooks use the awaited private leaf consumer |
+| `session_control_v1` | API 0.4, conditional | Active-session `session/wait_for_idle`, `session/create`, `session/fork`, `session/switch`, `session/reload`; real bound lifecycle driver required |
+| `session_compaction_v1` | API 0.4, conditional | Post-reply, issued-owner `session/compact` with a durable terminal result; requires `session_control_v1` and an opted-in active compaction consumer |
 | `message_injection` | no | Bounded `session/send_message` (assistant|system) and `session/send_user_message` |
 | `lifecycle_events_v2` | no | Coalesced `message/started`, `message/updated`, `message/settled`, `compaction/*`, `session/info_changed`, `dialog/*`, `model/selected`, `reasoning/selected`, and `bash/user` fan-out |
 | `active_tools` | no | Host-owned `tools/set_active` replacement active tool set |

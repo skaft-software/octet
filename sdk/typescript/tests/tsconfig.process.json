@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false
+  },
+  "files": [
+    "process_types.mts",
+    "../../../examples/extensions/typescript-hello/extension.ts"
+  ]
+}

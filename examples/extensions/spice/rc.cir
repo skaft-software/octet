@@ -1,0 +1,8 @@
+Octet deterministic RC charge: R=1 kohm, C=1 uF, V=1 V
+V1 in 0 DC 1
+R1 in out 1000
+C1 out 0 1u IC=0
+.options numdgt=12
+.tran 10u 5m UIC
+.print tran v(out)
+.end

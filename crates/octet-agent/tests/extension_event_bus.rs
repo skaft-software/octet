@@ -1,5 +1,14 @@
+//! Cross-process event-bus fixtures for the executable-extension host.
+//!
+//! The bus is the only channel that outlives a single process generation, so it
+//! carries the load-bearing reload invariants: a replacement start hook may
+//! re-declare before the old process has shut down, a two-process bus forwards
+//! only validated subscriptions and fences them across a reload, a reader can
+//! publish while a subscribe requester is still waiting for its ack, and
+//! concurrent publishers never overtake that ack. Publishing requires a
+//! service capability, and separate sessions never share topics. Kept in its own
+//! integration target because every case spawns real subprocesses.
 #![cfg(unix)]
-#![allow(missing_docs)]
 
 use octet_agent::extension_process::ExtensionEventBus;
 use octet_agent::{

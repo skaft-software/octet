@@ -1,0 +1,6 @@
+/build/
+/build-*/
+/rust/target/
+/resources/build/
+/blobs/build/
+/typed/build/

@@ -1,6 +1,118 @@
 # Changelog
 
-## Unreleased
+## Unreleased (target: v0.8.2)
+
+### Added
+
+- An options menu under `/extensions` replaces the `/computer-use` slash
+  command in the terminal UI. **Set up computer use** does the whole setup and
+  shows each step live: the driver, cursor themes, the GNOME Shell helper, the
+  permission check, and the optional Jev offer. **Check status** re-runs the
+  self-check. **Jev (optional)** sets Jev up, enters or replaces the API key
+  (asked as a secret), and forgets a stored key. **jev-use recipe (advanced)**
+  checks readiness, installs the recipe, runs the mock, live, TypeScript and
+  visual demos, and lists your jobs to check or cancel. The menu's header shows
+  the last status without starting the driver. The web UI keeps the
+  `/computer-use` command for now.
+
+- Linux support across X11 and Wayland desktops, including Omarchy (Hyprland),
+  Sway and other wlroots compositors, GNOME, and KDE Plasma. Status and the
+  action gate read the driver's Linux session report (X11, native Wayland,
+  AT-SPI) instead of macOS grants. Wayland sessions enable the driver's native
+  backend, and the child receives the desktop-identity and compositor names it
+  uses to pick a route (`XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`,
+  `DESKTOP_SESSION`, `KDE_FULL_SESSION`, `HYPRLAND_INSTANCE_SIGNATURE`,
+  `SWAYSOCK`, `XDG_STATE_HOME`). Apps launched on Linux inherit the
+  host-sanitized `PATH`, `HOME`, and locale.
+- The model-adaptive agent cursor on Linux. The direct runtime draws the
+  bundled themes through Cua's X11 or layer-shell overlay, best-effort. Themes
+  are written straight into the driver's store (the wheel has no theme
+  compiler), both at setup and on first cursor use, so they work however the
+  driver was provisioned. Verified on Xvfb and headless Sway, including a
+  model switch recoloring the cursor.
+- GNOME Wayland: bundle Cua's MIT-licensed WinRects GNOME Shell helper from
+  the matching driver release, with a `SetThemeColor` pin for the model color.
+  Setup installs and enables it; status reports when a login is still needed.
+- Provision on Debian and Ubuntu without `python3-venv`: when the host Python
+  cannot bootstrap pip, install the published Linux wheel directly after
+  verifying the package index's SHA-256.
+- Pinned upstream Cua Driver `jev-use` recipe as owner-fenced background jobs:
+  `computer_use_jev_use_status`, `computer_use_jev_use_setup`,
+  `computer_use_jev_use_run`, `computer_use_jev_use_choose`, plus matching
+  entries in the `/extensions` options menu.
+  Setup explicitly installs the commit-pinned source and locked Python/optional
+  TypeScript dependencies; runs own a separate MCP session and isolated browser
+  against the local form fixture with independent `/state` readback. Mock by
+  default, live with the key configured under Jev, visual path
+  capability-gated.
+  Refused under per-action confirmation policy.
+- An attended, opt-in live observe-act-verify smoke (`tests/live_smoke.py`)
+  that refuses to run in CI, without a confirmation flag, or without an
+  interactive terminal, and a no-driver status/fail-closed test through the
+  real entrypoint. See the README's Windows section.
+
+### Fixed
+
+- Complete macOS setup with Cua's version-matched signed desktop app when it is
+  missing. Verify its release checksum and Developer ID, install only under
+  octet-owned state, and launch that exact app path without replacing a global
+  application or granting permissions.
+- Send an exact window target without the conflicting legacy cursor `scope`,
+  and use a fresh action-session identity after setup/reconnect in the same
+  process so **Set up again** no longer requires restarting octet.
+- The options menu now shows what each action reported. Setup, **Check
+  status**, the Jev actions and the jev-use actions returned a tool-shaped
+  result, and the menu's result document renders only a `text` field, so a
+  completed action showed just "<label> finished" and the report was
+  invisible. Every menu command now returns rendered text; the agent tools
+  keep the structured content.
+- Status, setup and the options menu no longer hang on native Windows when
+  octet hosts the extension. Driver probes inherited the extension's protocol
+  stdin, and a Windows child that shares that pipe can stall at startup until
+  octet sends another message. Every probe now gets its own stdin. A driver
+  check that cannot run is reported as a failing self-check with its reason
+  instead of `internal error`, a failed `computer-use` action names its error,
+  and `computer-use` with no arguments checks status.
+- Require `cua-driver` 0.30.2 or newer. Unpinned setup used to let pip fall
+  back to the newest release with a wheel for the platform, so macOS 11 and 12
+  silently received 0.11.0. Setup now refuses older pins and replaces an older
+  existing install, and status reports it as needing an update. When the
+  driver publishes nothing for the system, setup names the system and the
+  supported platforms instead of blaming the package index.
+- Computer-use setup (the menu action and `computer_use_setup`) no longer fails with an opaque
+  `internal error` when the bundle runs on a Python older than the driver
+  supports. `cua-driver` needs 3.10+, and macOS's Xcode Python is 3.9. Setup
+  now builds the runtime venv from a compatible `python3` on `PATH` or a
+  standard macOS install location. With none available, it stops before
+  touching the venv and names the minimum version. Provisioning failures are
+  reported as tool errors, and a pip no-match on a compatible interpreter
+  points at the package index (#457).
+- Negotiate screenshot artifacts and stage large captures under the host scratch
+  directory instead of exceeding the inline artifact limit. Report bounded
+  publication errors while retaining a usable accessibility tree.
+- Show window/app handles in model-visible text and replace references to hidden
+  structured details with actionable targeting and query guidance.
+- Computer-use setup no longer fails on Linux, whose driver ships no
+  cursor-theme compiler.
+- Status no longer reports null `accessibility`/`screen_recording` fields on
+  hosts that do not have those grants.
+- Desktop-host tests pin Darwin, so their macOS semantics no longer depend on
+  the machine running the suite.
+- Stage full-size screenshots on Windows, where `O_NOFOLLOW` does not exist:
+  exclusive creation plus a final-path check against the resolved scratch
+  root replaces it, and junctions are rejected wherever symlinks were. The
+  optional Jev key gets a protected current-user-only ACL on Windows and is
+  not stored if that cannot be applied.
+
+### Removed
+
+- `code_runtime.py`, the model-code interpreter that never ran. It was not
+  reachable from the extension, and every execution path refused to run
+  without operating-system containment it could not obtain on any platform.
+  The proposed browser and computer-use redesign uses a separate isolate
+  instead.
+
+## Earlier changes
 
 ### Added
 

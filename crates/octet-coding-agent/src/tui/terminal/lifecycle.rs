@@ -12,6 +12,8 @@ use crossterm::{cursor, event, execute, terminal};
 
 static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FOCUS_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Keep ordinary text in the terminal's normal text path while asking Kitty
 /// protocol terminals to include the layout-resolved alternate character for
@@ -31,6 +33,18 @@ pub(super) fn mark_keyboard_enhancement_active() {
     KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
 }
 
+pub(super) fn mark_focus_reporting_active() {
+    FOCUS_REPORTING_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn mark_remote_keyboard_enhancement_active() {
+    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn take_remote_keyboard_enhancement_active() -> bool {
+    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst)
+}
+
 /// Restore the process terminal state. Repeated calls are harmless.
 pub fn force_restore() {
     restore_terminal(true);
@@ -46,14 +60,36 @@ pub(super) fn restore_without_line() {
 ///
 /// Called during teardown to drop Kitty keyboard-protocol repeats/releases
 /// (e.g. the exiting Ctrl+D as `ESC[100;5u`) and stale device-attribute
-/// replies before the parent shell reads them as literal text. Bounded: at
-/// most a handful of polls/reads, never waits for new input.
+/// replies before the parent shell reads them as literal text. Bounded:
+/// at most a handful of short synchronous polls/reads, never leaves a reader
+/// armed for the parent shell.
 fn drain_pending_input() {
     use std::time::Duration;
     // Enough to cover a held-key auto-repeat burst plus a DA reply; the loop
     // exits early as soon as the queue is empty.
     for _ in 0..32 {
-        match event::poll(Duration::from_millis(0)) {
+        let pending = event::poll(Duration::ZERO);
+        #[cfg(unix)]
+        let pending = if matches!(pending, Ok(false)) {
+            // The level-triggered decoder does not inspect its tty at a zero
+            // timeout. Gate its positive poll on existing kernel input: waiting
+            // for new input here can eat the next owner's freshly typed command
+            // during a model/reload rebuild.
+            let mut fd = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, zero timeout, no bytes consumed.
+            if unsafe { libc::poll(&mut fd, 1, 0) } > 0 && fd.revents & libc::POLLIN != 0 {
+                event::poll(Duration::from_millis(1))
+            } else {
+                pending
+            }
+        } else {
+            pending
+        };
+        match pending {
             Ok(true) => {
                 // Poll true means a read will not block on the kernel buffer.
                 // Discard whatever it is (key repeat/release, DA reply).
@@ -69,7 +105,13 @@ fn drain_pending_input() {
 fn restore_terminal(advance_line: bool) {
     let raw_active = RAW_ACTIVE.swap(false, Ordering::SeqCst);
     let keyboard_enhancement_active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
-    if !raw_active && !keyboard_enhancement_active {
+    let remote_keyboard_enhancement_active = take_remote_keyboard_enhancement_active();
+    let focus_reporting_active = FOCUS_REPORTING_ACTIVE.swap(false, Ordering::SeqCst);
+    if !raw_active
+        && !keyboard_enhancement_active
+        && !remote_keyboard_enhancement_active
+        && !focus_reporting_active
+    {
         // Even when modes are already clear, pending input (e.g. a Kitty
         // CSI-u repeat/release of the exiting Ctrl+D, tail `00;5u`) may still
         // sit in the kernel buffer and leak into the parent shell. Drain it.
@@ -78,6 +120,12 @@ fn restore_terminal(advance_line: bool) {
     }
 
     let mut out = std::io::stdout();
+    if focus_reporting_active {
+        let _ = execute!(out, event::DisableFocusChange);
+    }
+    if remote_keyboard_enhancement_active {
+        let _ = execute!(out, event::PopKeyboardEnhancementFlags);
+    }
     if keyboard_enhancement_active {
         let _ = execute!(out, event::PopKeyboardEnhancementFlags);
         // Pop leaves any already-emitted key repeats/releases queued behind
@@ -104,6 +152,13 @@ fn restore_terminal(advance_line: bool) {
         let _ = execute!(out, cursor::MoveToNextLine(1), cursor::MoveToColumn(0));
     }
     let _ = out.flush();
+    // The console output mode changes line-feed and wrapping semantics for
+    // whatever the parent shell writes next, so it is restored only after the
+    // final mode-reset sequences above have reached the console.
+    #[cfg(windows)]
+    if raw_active {
+        super::windows_console::restore();
+    }
     crate::output::end_tui_diagnostics();
 }
 

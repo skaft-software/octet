@@ -62,8 +62,9 @@ def check_release_metadata(event_name: str, base_sha: str) -> None:
 
     print(f"Checking current models.dev metadata: {reason}.", flush=True)
     try:
-        # No --source override: compare all checked-in outputs and the receipt
-        # against the public live snapshot, without writing any generated data.
+        # No --source override: compare all three projections against the public
+        # live snapshot and validate pinned receipt policy/schema, without writes.
+        # Raw digest equality is reserved for saved-source reproducibility checks.
         # Bound the whole command: an HTTP socket timeout alone permits a
         # trickling response to keep the freshness check alive indefinitely.
         subprocess.run([sys.executable, REFRESH, "--check"],

@@ -18,8 +18,8 @@ use std::time::Duration;
 use octet_ai::{ModelCatalog, ModelId};
 
 use crate::auth::custom::{
-    CredentialStore, CustomAuthConfig, CustomCredential, CustomModel, CustomProvider,
-    CustomRegistry, RegistryCommitError, RegistrySnapshot,
+    CredentialStore, CustomAuthConfig, CustomCredential, CustomModel, CustomNativeMetadata,
+    CustomProvider, CustomRegistry, HeaderEntry, RegistryCommitError, RegistrySnapshot,
 };
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -160,6 +160,27 @@ impl BuiltinApiKeyStore {
         Ok(path)
     }
 
+    /// Built-in API-key providers that currently have a stored key. Presence
+    /// only: no key is read, so nothing secret can reach a menu.
+    pub(crate) fn configured_providers(&self) -> Vec<ApiKeyProvider> {
+        builtin_api_key_providers()
+            .into_iter()
+            .filter(|provider| {
+                self.path(provider.id)
+                    .is_ok_and(|path| path.try_exists().unwrap_or(false))
+            })
+            .collect()
+    }
+
+    /// Delete one provider's stored key. Only declaration-owned ids resolve to a
+    /// path, and the file is removed without following links. Returns whether a
+    /// key was present; an environment variable is never touched.
+    pub(crate) fn remove(&self, provider_id: &str) -> Result<bool, ProviderSetupError> {
+        let path = self.path(provider_id)?;
+        octet_agent::secure_fs::remove_regular_file_if_exists(&path)
+            .map_err(|_| ProviderSetupError::Storage)
+    }
+
     /// Private runtime lookup; callers must never place the result in a public
     /// provider definition. Environment precedence is decided by provider auth.
     pub(crate) fn load(&self, provider_id: &str) -> Result<Option<String>, ProviderSetupError> {
@@ -191,6 +212,37 @@ pub(crate) enum SetupAuthentication {
     None,
     Environment { variable: String },
     ApiKey(SecretInput),
+    PreserveExisting,
+    Preserved(ExistingSetupAuthentication),
+}
+
+/// Secret-bearing snapshot of an existing provider's authentication settings.
+/// Its Debug implementation is intentionally unavailable; the containing setup
+/// types redact it at their own boundary.
+pub(crate) struct ExistingSetupAuthentication {
+    api_key: String,
+    headers: Vec<HeaderEntry>,
+    auth: Option<CustomAuthConfig>,
+    api_key_env: Option<String>,
+    legacy_single_endpoint: bool,
+}
+
+struct StoredSetupAuthentication {
+    api_key: String,
+    headers: Vec<HeaderEntry>,
+    auth: Option<CustomAuthConfig>,
+    api_key_env: Option<String>,
+}
+
+impl Drop for ExistingSetupAuthentication {
+    fn drop(&mut self) {
+        let mut key = std::mem::take(&mut self.api_key).into_bytes();
+        key.fill(0);
+        for header in &mut self.headers {
+            let mut value = std::mem::take(&mut header.value).into_bytes();
+            value.fill(0);
+        }
+    }
 }
 
 impl SetupAuthentication {
@@ -208,6 +260,10 @@ impl SetupAuthentication {
         Self::ApiKey(SecretInput::new(value))
     }
 
+    pub(crate) fn preserve_existing() -> Self {
+        Self::PreserveExisting
+    }
+
     fn validate(&self) -> Result<(), ProviderSetupError> {
         match self {
             Self::Environment { variable } if valid_environment_name(variable) => Ok(()),
@@ -215,32 +271,77 @@ impl SetupAuthentication {
             Self::ApiKey(value) if value.is_empty() => {
                 Err(ProviderSetupError::InvalidConfiguration)
             }
-            Self::None | Self::ApiKey(_) => Ok(()),
+            Self::Preserved(_) => Err(ProviderSetupError::InvalidConfiguration),
+            Self::None | Self::ApiKey(_) | Self::PreserveExisting => Ok(()),
         }
     }
 
-    fn authorization_value(&self) -> Result<Option<http::HeaderValue>, ProbeFailure> {
-        let value = match self {
-            Self::None => return Ok(None),
-            Self::Environment { variable } => octet_ai::auth::read_bounded_env(variable)
-                .ok()
-                .flatten()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or(ProbeFailure::AuthenticationFailed)?,
-            Self::ApiKey(value) => value
-                .as_str()
-                .ok_or(ProbeFailure::AuthenticationFailed)?
-                .to_owned(),
+    fn authorization_headers(&self) -> Result<http::HeaderMap, ProbeFailure> {
+        let mut headers = http::HeaderMap::new();
+        let bearer = match self {
+            Self::None => None,
+            Self::PreserveExisting => return Err(ProbeFailure::AuthenticationFailed),
+            Self::Environment { variable } => Some(
+                octet_ai::auth::read_bounded_env(variable)
+                    .ok()
+                    .flatten()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or(ProbeFailure::AuthenticationFailed)?,
+            ),
+            Self::ApiKey(value) => Some(
+                value
+                    .as_str()
+                    .ok_or(ProbeFailure::AuthenticationFailed)?
+                    .to_owned(),
+            ),
+            Self::Preserved(existing) => {
+                for entry in &existing.headers {
+                    let name = http::HeaderName::from_bytes(entry.name.as_bytes())
+                        .map_err(|_| ProbeFailure::AuthenticationFailed)?;
+                    let mut value = http::HeaderValue::from_str(&entry.value)
+                        .map_err(|_| ProbeFailure::AuthenticationFailed)?;
+                    value.set_sensitive(true);
+                    headers.insert(name, value);
+                }
+                let environment = |variable: &str| {
+                    octet_ai::auth::read_bounded_env(variable)
+                        .ok()
+                        .flatten()
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or(ProbeFailure::AuthenticationFailed)
+                };
+                match &existing.auth {
+                    Some(CustomAuthConfig::None) => None,
+                    Some(CustomAuthConfig::BearerEnv { var }) => Some(environment(var)?),
+                    None => match existing.api_key_env.as_deref() {
+                        Some(variable) => Some(environment(variable)?),
+                        None if !existing.api_key.is_empty() => Some(existing.api_key.clone()),
+                        None if existing.legacy_single_endpoint => {
+                            octet_ai::auth::read_bounded_env("OCTET_CUSTOM_API_KEY")
+                                .ok()
+                                .flatten()
+                                .filter(|value| !value.trim().is_empty())
+                        }
+                        None => None,
+                    },
+                }
+            }
         };
-        let mut header = http::HeaderValue::from_str(&format!("Bearer {value}"))
-            .map_err(|_| ProbeFailure::AuthenticationFailed)?;
-        header.set_sensitive(true);
-        Ok(Some(header))
+        if let Some(value) = bearer {
+            let mut header = http::HeaderValue::from_str(&format!("Bearer {value}"))
+                .map_err(|_| ProbeFailure::AuthenticationFailed)?;
+            header.set_sensitive(true);
+            headers.insert(http::header::AUTHORIZATION, header);
+        }
+        Ok(headers)
     }
 
     fn receipt_description(&self) -> String {
         match self {
             Self::None => "no credential is sent or stored".to_owned(),
+            Self::PreserveExisting | Self::Preserved(_) => {
+                "existing credential source is preserved".to_owned()
+            }
             Self::Environment { variable } => format!(
                 "Bearer credential is read from {variable} at runtime; its value is not stored"
             ),
@@ -250,14 +351,50 @@ impl SetupAuthentication {
         }
     }
 
-    fn into_storage(self) -> (String, Option<CustomAuthConfig>) {
+    fn into_storage(self) -> StoredSetupAuthentication {
         match self {
-            Self::None => (String::new(), Some(CustomAuthConfig::None)),
-            Self::Environment { variable } => (
-                String::new(),
-                Some(CustomAuthConfig::BearerEnv { var: variable }),
-            ),
-            Self::ApiKey(value) => (value.into_string(), None),
+            Self::None => StoredSetupAuthentication {
+                api_key: String::new(),
+                headers: Vec::new(),
+                auth: Some(CustomAuthConfig::None),
+                api_key_env: None,
+            },
+            Self::PreserveExisting => StoredSetupAuthentication {
+                api_key: String::new(),
+                headers: Vec::new(),
+                auth: None,
+                api_key_env: None,
+            },
+            Self::Environment { variable } => StoredSetupAuthentication {
+                api_key: String::new(),
+                headers: Vec::new(),
+                auth: Some(CustomAuthConfig::BearerEnv { var: variable }),
+                api_key_env: None,
+            },
+            Self::ApiKey(value) => StoredSetupAuthentication {
+                api_key: value.into_string(),
+                headers: Vec::new(),
+                auth: None,
+                api_key_env: None,
+            },
+            Self::Preserved(mut existing) => {
+                let legacy_environment_fallback = existing.legacy_single_endpoint
+                    && existing.auth.is_none()
+                    && existing.api_key_env.is_none()
+                    && existing.api_key.is_empty();
+                StoredSetupAuthentication {
+                    api_key: std::mem::take(&mut existing.api_key),
+                    headers: std::mem::take(&mut existing.headers),
+                    auth: if legacy_environment_fallback {
+                        Some(CustomAuthConfig::BearerEnv {
+                            var: "OCTET_CUSTOM_API_KEY".to_owned(),
+                        })
+                    } else {
+                        existing.auth.take()
+                    },
+                    api_key_env: existing.api_key_env.take(),
+                }
+            }
         }
     }
 }
@@ -271,6 +408,8 @@ impl fmt::Debug for SetupAuthentication {
                 .field("variable", variable)
                 .finish(),
             Self::ApiKey(_) => formatter.write_str("SetupAuthentication::ApiKey([REDACTED])"),
+            Self::PreserveExisting => formatter.write_str("SetupAuthentication::PreserveExisting"),
+            Self::Preserved(_) => formatter.write_str("SetupAuthentication::Preserved([REDACTED])"),
         }
     }
 }
@@ -309,6 +448,13 @@ impl Drop for SecretInput {
     }
 }
 
+/// The metadata routes explicitly selected for setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiscoveryProfile {
+    OpenAiCompatible,
+    LmStudioNative,
+}
+
 /// User-provided setup values before any network traffic or persistence.
 pub(crate) struct SetupDraft {
     provider_id: String,
@@ -316,6 +462,9 @@ pub(crate) struct SetupDraft {
     endpoint: String,
     authentication: SetupAuthentication,
     replace_existing: bool,
+    edit_existing: bool,
+    allow_credential_reuse_at_new_endpoint: bool,
+    discovery_profile: Option<DiscoveryProfile>,
 }
 
 impl SetupDraft {
@@ -331,16 +480,52 @@ impl SetupDraft {
             endpoint: endpoint.into(),
             authentication,
             replace_existing: false,
+            edit_existing: false,
+            allow_credential_reuse_at_new_endpoint: false,
+            discovery_profile: None,
         }
     }
 
+    pub(crate) fn edit_existing(
+        provider_id: impl Into<String>,
+        label: impl Into<String>,
+        endpoint: impl Into<String>,
+    ) -> Self {
+        let mut draft = Self::new(
+            provider_id,
+            label,
+            endpoint,
+            SetupAuthentication::preserve_existing(),
+        );
+        draft.edit_existing = true;
+        draft.replace_existing = true;
+        draft
+    }
+
     pub(crate) fn lm_studio() -> Self {
-        Self::new(
+        let mut draft = Self::new(
             "local",
             "LM Studio",
             "http://localhost:1234/v1/",
             SetupAuthentication::None,
-        )
+        );
+        draft.discovery_profile = Some(DiscoveryProfile::LmStudioNative);
+        draft
+    }
+
+    pub(crate) fn with_authentication(mut self, authentication: SetupAuthentication) -> Self {
+        self.authentication = authentication;
+        self
+    }
+
+    pub(crate) fn with_discovery_profile(mut self, profile: DiscoveryProfile) -> Self {
+        self.discovery_profile = Some(profile);
+        self
+    }
+
+    pub(crate) fn allow_credential_reuse_at_new_endpoint(mut self, allow: bool) -> Self {
+        self.allow_credential_reuse_at_new_endpoint = allow;
+        self
     }
 
     pub(crate) fn replace_existing(mut self, replace_existing: bool) -> Self {
@@ -358,6 +543,12 @@ impl fmt::Debug for SetupDraft {
             .field("endpoint", &self.endpoint)
             .field("authentication", &self.authentication)
             .field("replace_existing", &self.replace_existing)
+            .field("edit_existing", &self.edit_existing)
+            .field(
+                "allow_credential_reuse_at_new_endpoint",
+                &self.allow_credential_reuse_at_new_endpoint,
+            )
+            .field("discovery_profile", &self.discovery_profile)
             .finish()
     }
 }
@@ -368,6 +559,9 @@ struct ValidatedDraft {
     endpoint: url::Url,
     authentication: SetupAuthentication,
     replace_existing: bool,
+    edit_existing: bool,
+    allow_credential_reuse_at_new_endpoint: bool,
+    discovery_profile: Option<DiscoveryProfile>,
 }
 
 impl ValidatedDraft {
@@ -376,11 +570,49 @@ impl ValidatedDraft {
     }
 }
 
-/// A model ID returned by explicit discovery, safe to display and select.
+/// Credential-source summary safe for interactive display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SetupCredentialSummary {
+    None,
+    Environment { variable: String },
+    StoredCredentialConfigured,
+}
+
+/// Secret-free summary of one configured provider suitable for edit selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExistingProviderSummary {
+    pub(crate) provider_id: String,
+    pub(crate) label: String,
+    pub(crate) endpoint: String,
+    pub(crate) authentication: SetupCredentialSummary,
+    pub(crate) discovery_profile: DiscoveryProfile,
+    pub(crate) models: Vec<SetupModel>,
+}
+
+/// One discovered/configured model and the metadata provenance needed by setup UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SetupModel {
     pub(crate) api_name: String,
     pub(crate) display_name: String,
+    /// Endpoint-asserted effective context, or `None` when unknown/unasserted.
+    pub(crate) context_window: Option<u64>,
+    /// Explicitly configured operational context, distinct from server metadata.
+    pub(crate) configured_context_window: Option<u64>,
+    pub(crate) context_window_asserted: bool,
+    /// True when neither endpoint metadata nor an explicit saved pin establishes
+    /// a usable effective context for catalog registration.
+    pub(crate) requires_context_configuration: bool,
+    pub(crate) max_output_tokens: Option<u64>,
+    pub(crate) stored_max_output_tokens: u64,
+    pub(crate) max_output_tokens_asserted: bool,
+    /// Route-level reasoning support is populated only for an explicit Chat-route
+    /// assertion. Native metadata is deliberately carried separately.
+    pub(crate) reasoning_supported: Option<bool>,
+    pub(crate) reasoning_source: Option<octet_ai::types::ReasoningMetadataSource>,
+    pub(crate) reasoning_values: Vec<String>,
+    pub(crate) reasoning_default: Option<String>,
+    pub(crate) reasoning_profile: Option<octet_ai::OpenAiChatReasoningMode>,
+    pub(crate) native_metadata: Option<CustomNativeMetadata>,
 }
 
 /// A no-write setup transaction. Dropping or cancelling it cannot affect disk.
@@ -448,6 +680,8 @@ pub(crate) struct SetupReceipt {
     endpoint: String,
     endpoint_kind: EndpointKind,
     selected_model: String,
+    context_window: u64,
+    context_source: ContextWindowSource,
     credential_policy: String,
     registry_path: PathBuf,
 }
@@ -469,6 +703,14 @@ impl SetupReceipt {
             "Provider setup ready".to_owned(),
             format!("provider: {} ({})", self.provider_label, self.provider_id),
             format!("model: {}", self.selected_model_id().0),
+            format!(
+                "effective context window: {} tokens ({})",
+                self.context_window,
+                match self.context_source {
+                    ContextWindowSource::DiscoveredEffective => "reported for the active endpoint",
+                    ContextWindowSource::ExplicitConfiguration => "explicitly configured",
+                }
+            ),
             format!("endpoint: {} ({locality})", self.endpoint),
             "traffic: direct only from this octet process to the selected endpoint; no endpoint scanning or setup telemetry".to_owned(),
             format!("credentials: {}", self.credential_policy),
@@ -495,10 +737,11 @@ pub(crate) struct SetupAuthority {
 
 impl SetupAuthority {
     pub(crate) fn from_config(config: &crate::config::Config) -> Self {
-        let tools = ["read", "edit", "write", "bash"]
+        let tools = ["read", "edit", "write", "bash", "powershell"]
             .into_iter()
             .filter(|name| config.tool_available(name))
             .collect::<Vec<_>>();
+        let shell = crate::config::ShellPlatform::host().default_shell_tool();
         Self {
             session_dir: bounded_copy(
                 &config.session_dir.display().to_string(),
@@ -506,7 +749,7 @@ impl SetupAuthority {
             ),
             workspace_trusted: config.workspace_trusted,
             enabled_tools: if tools.is_empty() {
-                "none of read, edit, write, or bash".to_owned()
+                format!("none of read, edit, write, or {shell}")
             } else {
                 tools.join(", ")
             },
@@ -531,6 +774,12 @@ impl SetupAuthority {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextWindowSource {
+    DiscoveredEffective,
+    ExplicitConfiguration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EndpointKind {
     Local,
     Network,
@@ -545,11 +794,14 @@ pub(crate) enum ProviderSetupState {
     AuthenticationFailed,
     EmptyDiscovery,
     ManualModelRequired,
+    ContextWindowRequired,
     UnavailableResumedModel { model: String },
     Offline,
     ConcurrentRegistry,
     Cancelled,
     ProviderAlreadyConfigured,
+    ProviderNotConfigured,
+    CredentialReuseRequiresConfirmation,
     Ready,
 }
 
@@ -571,6 +823,9 @@ impl fmt::Display for ProviderSetupState {
             Self::ManualModelRequired => formatter.write_str(
                 "the requested model was not discovered; enter it with --manual-model",
             ),
+            Self::ContextWindowRequired => formatter.write_str(
+                "the selected model has no known effective context; enter an explicit context limit before saving",
+            ),
             Self::UnavailableResumedModel { model } => {
                 write!(formatter, "the resumed model {model:?} is unavailable; select a replacement or cancel resume")
             }
@@ -583,6 +838,12 @@ impl fmt::Display for ProviderSetupState {
             Self::Cancelled => formatter.write_str("setup cancelled; no provider state was written"),
             Self::ProviderAlreadyConfigured => formatter.write_str(
                 "that provider ID is already configured; choose another ID or explicitly replace it",
+            ),
+            Self::ProviderNotConfigured => formatter.write_str(
+                "the selected provider configuration no longer exists; reload setup choices",
+            ),
+            Self::CredentialReuseRequiresConfirmation => formatter.write_str(
+                "the endpoint changed; confirm credential reuse at the new endpoint or choose a replacement source",
             ),
             Self::Ready => formatter.write_str("provider setup is ready"),
         }
@@ -618,6 +879,7 @@ pub(crate) trait SetupProbe {
         &self,
         endpoint: &url::Url,
         authentication: &SetupAuthentication,
+        profile: DiscoveryProfile,
     ) -> Result<Vec<CustomModel>, ProbeFailure>;
 }
 
@@ -643,11 +905,121 @@ impl Default for HttpSetupProbe {
     }
 }
 
+fn setup_model_summary(model: &CustomModel) -> Option<SetupModel> {
+    if !valid_model_id(model.api_name.trim()) {
+        return None;
+    }
+    let api_name = bounded_copy(model.api_name.trim(), MAX_MODEL_ID_BYTES);
+    let display_name = if valid_display_text(model.display_name.trim(), MAX_MODEL_ID_BYTES) {
+        bounded_copy(model.display_name.trim(), MAX_MODEL_ID_BYTES)
+    } else {
+        api_name.clone()
+    };
+    let reasoning_values = octet_ai::types::ReasoningOptions {
+        values: model.reasoning_values.clone(),
+        default: (!model.reasoning_default.is_empty()).then(|| model.reasoning_default.clone()),
+    };
+    let valid_reasoning_options = reasoning_values.is_valid()
+        && reasoning_values.values.iter().all(|value| {
+            value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        });
+    let discovered_context = model
+        .discovered_context_window
+        .filter(|context| *context > 0)
+        .or_else(|| {
+            model
+                .context_window_asserted
+                .then_some(model.context_window)
+                .filter(|context| *context > 0)
+        });
+    let configured_context = (model.context_window_configured && model.context_window > 0)
+        .then_some(model.context_window);
+    let effective_context = if model.context_window_asserted {
+        discovered_context
+    } else {
+        None
+    };
+    Some(SetupModel {
+        api_name,
+        display_name,
+        context_window: effective_context,
+        configured_context_window: configured_context,
+        context_window_asserted: model.context_window_asserted,
+        requires_context_configuration: configured_context.is_none() && effective_context.is_none(),
+        max_output_tokens: model
+            .max_output_tokens_asserted
+            .then_some(model.max_output_tokens),
+        stored_max_output_tokens: model.max_output_tokens,
+        max_output_tokens_asserted: model.max_output_tokens_asserted,
+        reasoning_supported: (model.reasoning_source
+            == Some(octet_ai::types::ReasoningMetadataSource::Explicit))
+        .then_some(model.reasoning),
+        reasoning_source: model.reasoning_source,
+        reasoning_values: if valid_reasoning_options {
+            reasoning_values.values
+        } else {
+            Vec::new()
+        },
+        reasoning_default: valid_reasoning_options
+            .then_some(reasoning_values.default)
+            .flatten(),
+        reasoning_profile: model.reasoning_profile.clone(),
+        native_metadata: model.native_metadata.clone(),
+    })
+}
+
+fn sanitized_endpoint(value: &str) -> String {
+    let Ok(mut endpoint) = url::Url::parse(value) else {
+        return "<invalid endpoint>".to_owned();
+    };
+    let _ = endpoint.set_username("");
+    let _ = endpoint.set_password(None);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    bounded_copy(endpoint.as_str(), MAX_ENDPOINT_BYTES)
+}
+
+fn setup_credential_summary(
+    provider: &CustomProvider,
+    legacy_single_endpoint: bool,
+) -> SetupCredentialSummary {
+    if let Some(auth) = &provider.auth {
+        return match auth {
+            CustomAuthConfig::None if provider.credential.headers.is_empty() => {
+                SetupCredentialSummary::None
+            }
+            CustomAuthConfig::None => SetupCredentialSummary::StoredCredentialConfigured,
+            CustomAuthConfig::BearerEnv { var } => SetupCredentialSummary::Environment {
+                variable: bounded_copy(var, 128),
+            },
+        };
+    }
+    if let Some(variable) = provider.api_key_env.as_deref() {
+        return SetupCredentialSummary::Environment {
+            variable: bounded_copy(variable, 128),
+        };
+    }
+    if !provider.credential.api_key.is_empty() || !provider.credential.headers.is_empty() {
+        return SetupCredentialSummary::StoredCredentialConfigured;
+    }
+    if legacy_single_endpoint {
+        SetupCredentialSummary::Environment {
+            variable: "OCTET_CUSTOM_API_KEY".to_owned(),
+        }
+    } else {
+        SetupCredentialSummary::None
+    }
+}
+
 impl SetupProbe for HttpSetupProbe {
     fn discover(
         &self,
         endpoint: &url::Url,
         authentication: &SetupAuthentication,
+        profile: DiscoveryProfile,
     ) -> Result<Vec<CustomModel>, ProbeFailure> {
         let models_url = endpoint
             .join("models")
@@ -657,12 +1029,8 @@ impl SetupProbe for HttpSetupProbe {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| ProbeFailure::Unreachable)?;
-        let mut request = client.get(models_url);
-        if let Some(authorization) = authentication.authorization_value()? {
-            let mut headers = http::HeaderMap::new();
-            headers.insert(http::header::AUTHORIZATION, authorization);
-            request = request.headers(headers);
-        }
+        let authorization = authentication.authorization_headers()?;
+        let request = client.get(models_url).headers(authorization.clone());
         let response = request.send().map_err(|_| ProbeFailure::Unreachable)?;
         let status = response.status();
         if matches!(status.as_u16(), 401 | 403) {
@@ -672,7 +1040,23 @@ impl SetupProbe for HttpSetupProbe {
             return Err(ProbeFailure::Unreachable);
         }
         let body = bounded_json(response).map_err(|_| ProbeFailure::InvalidDiscovery)?;
-        models_from_json(&body)
+        let mut models = models_from_json(&body)?;
+        if profile == DiscoveryProfile::LmStudioNative {
+            let native_inventory = crate::app::bootstrap::lm_studio_native_models_url(endpoint)
+                .and_then(|url| {
+                    let request = client.get(url).headers(authorization);
+                    let response = request.send().ok()?;
+                    if !response.status().is_success() {
+                        return None;
+                    }
+                    bounded_json(response).ok()
+                });
+            crate::app::bootstrap::apply_lm_studio_native_metadata(
+                &mut models,
+                native_inventory.as_ref(),
+            );
+        }
+        Ok(models)
     }
 }
 
@@ -707,6 +1091,42 @@ where
     }
 
     /// Classify startup without launching an onboarding surface.
+    pub(crate) fn existing_providers(
+        &self,
+    ) -> Result<Vec<ExistingProviderSummary>, ProviderSetupError> {
+        let snapshot = self
+            .store
+            .load_registry_snapshot()
+            .map_err(|_| ProviderSetupError::Storage)?;
+        let Some(registry) = snapshot.registry() else {
+            return Ok(Vec::new());
+        };
+        Ok(registry
+            .providers
+            .iter()
+            .map(|(provider_id, provider)| ExistingProviderSummary {
+                provider_id: bounded_copy(provider_id, MAX_PROVIDER_ID_BYTES),
+                label: bounded_copy(&provider.label, MAX_LABEL_BYTES),
+                endpoint: sanitized_endpoint(&provider.credential.base_url),
+                authentication: setup_credential_summary(provider, registry.legacy_single_endpoint),
+                discovery_profile: if provider
+                    .credential
+                    .models
+                    .iter()
+                    .any(|model| model.native_metadata.is_some())
+                {
+                    DiscoveryProfile::LmStudioNative
+                } else {
+                    DiscoveryProfile::OpenAiCompatible
+                },
+                models: crate::app::bootstrap::configured_custom_models(&provider.credential)
+                    .iter()
+                    .filter_map(setup_model_summary)
+                    .collect(),
+            })
+            .collect())
+    }
+
     pub(crate) fn readiness(
         catalog: &ModelCatalog,
         requested_model: Option<&ModelId>,
@@ -728,23 +1148,64 @@ where
     /// Capture a private registry snapshot and validate a draft. This does not
     /// probe, write, cache, or otherwise mutate persistent state.
     pub(crate) fn begin(&self, draft: SetupDraft) -> Result<SetupTransaction, ProviderSetupError> {
-        let draft = validate_draft(draft)?;
+        let mut draft = validate_draft(draft)?;
         let snapshot = self
             .store
             .load_registry_snapshot()
             .map_err(|_| ProviderSetupError::Storage)?;
-        // Fail before discovery when an existing provider would need explicit
-        // replacement. The commit path repeats this check against the captured
-        // snapshot, so a provider added after this point remains protected by
-        // the CAS rather than being silently overwritten.
-        if !draft.replace_existing
-            && snapshot
-                .registry()
-                .is_some_and(|registry| registry.providers.contains_key(&draft.provider_id))
-        {
-            return Err(ProviderSetupError::State(
-                ProviderSetupState::ProviderAlreadyConfigured,
-            ));
+        let existing = snapshot
+            .registry()
+            .and_then(|registry| registry.providers.get(&draft.provider_id));
+        if draft.edit_existing {
+            let Some(existing) = existing else {
+                return Err(ProviderSetupError::State(
+                    ProviderSetupState::ProviderNotConfigured,
+                ));
+            };
+            if matches!(&draft.authentication, SetupAuthentication::PreserveExisting) {
+                let endpoint_changed =
+                    !same_endpoint(&existing.credential.base_url, &draft.endpoint);
+                if endpoint_changed
+                    && provider_has_credentials(
+                        existing,
+                        snapshot
+                            .registry()
+                            .is_some_and(|r| r.legacy_single_endpoint),
+                    )
+                    && !draft.allow_credential_reuse_at_new_endpoint
+                {
+                    return Err(ProviderSetupError::State(
+                        ProviderSetupState::CredentialReuseRequiresConfirmation,
+                    ));
+                }
+                draft.authentication =
+                    SetupAuthentication::Preserved(ExistingSetupAuthentication {
+                        api_key: existing.credential.api_key.clone(),
+                        headers: existing.credential.headers.clone(),
+                        auth: existing.auth.clone(),
+                        api_key_env: existing.api_key_env.clone(),
+                        legacy_single_endpoint: snapshot
+                            .registry()
+                            .is_some_and(|registry| registry.legacy_single_endpoint),
+                    });
+            }
+            if draft.discovery_profile.is_none() {
+                draft.discovery_profile = existing
+                    .credential
+                    .models
+                    .iter()
+                    .any(|model| model.native_metadata.is_some())
+                    .then_some(DiscoveryProfile::LmStudioNative);
+            }
+        } else {
+            if matches!(&draft.authentication, SetupAuthentication::PreserveExisting) {
+                return Err(ProviderSetupError::InvalidConfiguration);
+            }
+            if existing.is_some() && !draft.replace_existing {
+                return Err(ProviderSetupError::State(
+                    ProviderSetupState::ProviderAlreadyConfigured,
+                ));
+            }
         }
         Ok(SetupTransaction {
             snapshot,
@@ -769,6 +1230,10 @@ where
             .discover(
                 &transaction.draft.endpoint,
                 &transaction.draft.authentication,
+                transaction
+                    .draft
+                    .discovery_profile
+                    .unwrap_or(DiscoveryProfile::OpenAiCompatible),
             )
             .map_err(probe_error)?;
         if models.is_empty() {
@@ -777,18 +1242,11 @@ where
                 ProviderSetupState::EmptyDiscovery,
             ));
         }
-        transaction.discovered = models;
+        transaction.discovered = merge_existing_model_settings(transaction, models);
         Ok(transaction
             .discovered
             .iter()
-            .map(|model| SetupModel {
-                api_name: model.api_name.clone(),
-                display_name: if model.display_name.trim().is_empty() {
-                    model.api_name.clone()
-                } else {
-                    model.display_name.clone()
-                },
-            })
+            .filter_map(setup_model_summary)
             .collect())
     }
 
@@ -808,7 +1266,7 @@ where
                 ProviderSetupState::ManualModelRequired,
             ))?;
         let models = transaction.discovered.clone();
-        Ok(prepared_from(transaction, models, selected))
+        prepared_from(transaction, models, selected)
     }
 
     /// Prepare an explicit manual model inventory. This path intentionally does
@@ -822,10 +1280,66 @@ where
         let api_name = validate_model_id(model_id.as_ref())?;
         let model = CustomModel {
             api_name: api_name.clone(),
-            display_name: api_name,
+            display_name: api_name.clone(),
             ..CustomModel::default()
         };
-        Ok(prepared_from(transaction, vec![model.clone()], model))
+        let models = merge_existing_model_settings(&transaction, vec![model]);
+        let selected = models
+            .iter()
+            .find(|model| model.api_name == api_name)
+            .cloned()
+            .ok_or(ProviderSetupError::CatalogUnavailable)?;
+        prepared_from(transaction, models, selected)
+    }
+
+    /// Prepare a manually entered model with an explicit operational context.
+    /// The value is a user pin, not endpoint-discovered metadata.
+    pub(crate) fn prepare_manual_with_context(
+        &self,
+        transaction: SetupTransaction,
+        model_id: impl AsRef<str>,
+        context_window: u64,
+    ) -> Result<SetupPrepared, ProviderSetupError> {
+        let api_name = validate_model_id(model_id.as_ref())?;
+        let mut model = CustomModel {
+            api_name: api_name.clone(),
+            display_name: api_name.clone(),
+            ..CustomModel::default()
+        };
+        apply_context_configuration(&mut model, context_window)?;
+        let models = merge_existing_model_settings(&transaction, vec![model]);
+        let mut selected = models
+            .iter()
+            .find(|model| model.api_name == api_name)
+            .cloned()
+            .ok_or(ProviderSetupError::CatalogUnavailable)?;
+        apply_context_configuration(&mut selected, context_window)?;
+        let mut models = models;
+        if let Some(stored) = models.iter_mut().find(|model| model.api_name == api_name) {
+            apply_context_configuration(stored, context_window)?;
+        }
+        prepared_from(transaction, models, selected)
+    }
+
+    /// Override only the effective context for a discovered model when the user
+    /// explicitly configures it. Other discovery facts remain provenance-bearing.
+    pub(crate) fn prepare_discovered_with_context(
+        &self,
+        transaction: SetupTransaction,
+        model_id: &str,
+        context_window: u64,
+    ) -> Result<SetupPrepared, ProviderSetupError> {
+        let model_id = validate_model_id(model_id)?;
+        let mut models = transaction.discovered.clone();
+        let selected = models
+            .iter_mut()
+            .find(|model| model.api_name == model_id)
+            .ok_or(ProviderSetupError::State(
+                ProviderSetupState::ManualModelRequired,
+            ))?;
+        apply_context_configuration(selected, context_window)?;
+        let selected = selected.clone();
+        prepared_from(transaction, models, selected)
     }
 
     /// Persist a prepared transaction with owner-private compare-and-swap
@@ -841,9 +1355,8 @@ where
         self.store
             .save_registry_if_unchanged(&registry.0, &registry.1)
             .map_err(registry_error)?;
-        let catalog =
-            crate::app::bootstrap::model_catalog_with_setup_store(&self.store, self.offline)
-                .map_err(|_| ProviderSetupError::CatalogUnavailable)?;
+        let catalog = crate::app::bootstrap::model_catalog_with_setup_store(&self.store, true)
+            .map_err(|_| ProviderSetupError::CatalogUnavailable)?;
         if catalog.resolve(&selected_model).is_err() {
             return Err(ProviderSetupError::CatalogUnavailable);
         }
@@ -903,12 +1416,19 @@ pub(crate) fn run_cli(
         CredentialStore::new(crate::auth::custom::default_path()),
         command.offline || config.offline,
     );
-    let transaction = service.begin(
-        SetupDraft::new(provider_id, label, endpoint, authentication)
-            .replace_existing(command.replace),
-    )?;
+    let mut draft = SetupDraft::new(provider_id, label, endpoint, authentication)
+        .replace_existing(command.replace);
+    if preset == crate::cli::SetupPreset::LmStudio && command.endpoint.is_none() {
+        draft = draft.with_discovery_profile(DiscoveryProfile::LmStudioNative);
+    }
+    let transaction = service.begin(draft)?;
     let prepared = if let Some(model) = command.manual_model.as_deref() {
-        service.prepare_manual(transaction, model)?
+        match command.context_window {
+            Some(context_window) => {
+                service.prepare_manual_with_context(transaction, model, context_window)?
+            }
+            None => service.prepare_manual(transaction, model)?,
+        }
     } else {
         let mut transaction = transaction;
         let discovered = service.discover(&mut transaction)?;
@@ -919,7 +1439,13 @@ pub(crate) fn run_cli(
             .ok_or(ProviderSetupError::State(
                 ProviderSetupState::EmptyDiscovery,
             ))?;
-        service.prepare_discovered(transaction, selected)?
+        let selected = selected.to_owned();
+        match command.context_window {
+            Some(context_window) => {
+                service.prepare_discovered_with_context(transaction, &selected, context_window)?
+            }
+            None => service.prepare_discovered(transaction, &selected)?,
+        }
     };
     let authority = SetupAuthority::from_config(config);
     let review = prepared.receipt().render(Some(&authority));
@@ -980,6 +1506,11 @@ fn validate_draft(draft: SetupDraft) -> Result<ValidatedDraft, ProviderSetupErro
     {
         return Err(ProviderSetupError::InvalidConfiguration);
     }
+    if matches!(&draft.authentication, SetupAuthentication::PreserveExisting)
+        && !draft.edit_existing
+    {
+        return Err(ProviderSetupError::InvalidConfiguration);
+    }
     draft.authentication.validate()?;
     let mut endpoint = url::Url::parse(draft.endpoint.trim())
         .map_err(|_| ProviderSetupError::InvalidConfiguration)?;
@@ -1005,32 +1536,180 @@ fn validate_draft(draft: SetupDraft) -> Result<ValidatedDraft, ProviderSetupErro
         endpoint,
         authentication: draft.authentication,
         replace_existing: draft.replace_existing,
+        edit_existing: draft.edit_existing,
+        allow_credential_reuse_at_new_endpoint: draft.allow_credential_reuse_at_new_endpoint,
+        discovery_profile: draft.discovery_profile,
     })
+}
+
+fn apply_context_configuration(
+    model: &mut CustomModel,
+    context_window: u64,
+) -> Result<(), ProviderSetupError> {
+    if context_window == 0 {
+        return Err(ProviderSetupError::InvalidConfiguration);
+    }
+    model.context_window = context_window;
+    model.context_window_configured = true;
+    model.max_output_tokens = model.max_output_tokens.min(context_window);
+    Ok(())
+}
+
+fn merge_existing_model_settings(
+    transaction: &SetupTransaction,
+    discovered: Vec<CustomModel>,
+) -> Vec<CustomModel> {
+    if !transaction.draft.edit_existing {
+        return discovered;
+    }
+    let mut configured = transaction
+        .snapshot
+        .registry()
+        .and_then(|registry| registry.providers.get(&transaction.draft.provider_id))
+        .map(|provider| crate::app::bootstrap::configured_custom_models(&provider.credential))
+        .unwrap_or_default();
+    if transaction.draft.discovery_profile == Some(DiscoveryProfile::OpenAiCompatible) {
+        for model in &mut configured {
+            model.native_metadata = None;
+        }
+    }
+    crate::app::bootstrap::apply_configured_custom_model_overrides(discovered, &configured, true)
+}
+
+fn same_endpoint(old: &str, new: &url::Url) -> bool {
+    let Ok(mut old) = url::Url::parse(old) else {
+        return false;
+    };
+    if !old.username().is_empty()
+        || old.password().is_some()
+        || old.query().is_some()
+        || old.fragment().is_some()
+    {
+        return false;
+    }
+    if !old.path().ends_with('/') {
+        let path = format!("{}/", old.path());
+        old.set_path(&path);
+    }
+    old == *new
+}
+
+fn provider_has_credentials(provider: &CustomProvider, legacy_single_endpoint: bool) -> bool {
+    !provider.credential.headers.is_empty()
+        || match provider.auth.as_ref() {
+            Some(CustomAuthConfig::None) => false,
+            Some(CustomAuthConfig::BearerEnv { .. }) => true,
+            None => {
+                provider.api_key_env.is_some()
+                    || !provider.credential.api_key.is_empty()
+                    || legacy_single_endpoint
+            }
+        }
 }
 
 fn prepared_from(
     transaction: SetupTransaction,
     mut models: Vec<CustomModel>,
-    selected: CustomModel,
-) -> SetupPrepared {
+    mut selected: CustomModel,
+) -> Result<SetupPrepared, ProviderSetupError> {
+    let configured_context = selected
+        .context_window_configured
+        .then_some(selected.context_window);
+    let discovered_context = selected.context_window_asserted.then_some(
+        selected
+            .discovered_context_window
+            .unwrap_or(selected.context_window),
+    );
+    let (context_window, context_source) = match configured_context.filter(|value| *value > 0) {
+        Some(context_window) => (context_window, ContextWindowSource::ExplicitConfiguration),
+        None => match discovered_context.filter(|value| *value > 0) {
+            Some(context_window) => (context_window, ContextWindowSource::DiscoveredEffective),
+            None => {
+                return Err(ProviderSetupError::State(
+                    ProviderSetupState::ContextWindowRequired,
+                ));
+            }
+        },
+    };
+    selected.context_window = context_window;
+    selected.max_output_tokens = selected.max_output_tokens.min(context_window);
+    if selected.max_output_tokens == 0 {
+        return Err(ProviderSetupError::InvalidConfiguration);
+    }
+    if let Some(model) = models
+        .iter_mut()
+        .find(|model| model.api_name == selected.api_name)
+    {
+        *model = selected.clone();
+    } else {
+        models.push(selected.clone());
+    }
     models.sort_by(|left, right| left.api_name.cmp(&right.api_name));
     models.dedup_by(|left, right| left.api_name == right.api_name);
+    validate_prepared_models(&models)?;
     let receipt = SetupReceipt {
         provider_id: transaction.draft.provider_id.clone(),
         provider_label: transaction.draft.label.clone(),
         endpoint: transaction.draft.endpoint_string(),
         endpoint_kind: endpoint_kind(&transaction.draft.endpoint),
         selected_model: selected.api_name.clone(),
+        context_window,
+        context_source,
         credential_policy: transaction.draft.authentication.receipt_description(),
         registry_path: transaction.registry_path.clone(),
     };
-    SetupPrepared {
+    Ok(SetupPrepared {
         snapshot: transaction.snapshot,
         draft: transaction.draft,
         models,
         selected,
         receipt,
+    })
+}
+
+fn validate_prepared_models(models: &[CustomModel]) -> Result<(), ProviderSetupError> {
+    for model in models {
+        let configured_context = model.context_window_configured && model.context_window > 0;
+        let discovered_context = model.context_window_asserted
+            && model
+                .discovered_context_window
+                .unwrap_or(model.context_window)
+                > 0;
+        let effective_context = if configured_context {
+            Some(model.context_window)
+        } else if discovered_context {
+            Some(
+                model
+                    .discovered_context_window
+                    .unwrap_or(model.context_window),
+            )
+        } else {
+            None
+        };
+        if let Some(effective_context) = effective_context {
+            if model.max_output_tokens.min(effective_context) == 0 {
+                return Err(ProviderSetupError::InvalidConfiguration);
+            }
+        }
+        if !model.reasoning_values.is_empty() {
+            if !(octet_ai::types::ReasoningOptions {
+                values: model.reasoning_values.clone(),
+                default: (!model.reasoning_default.is_empty())
+                    .then(|| model.reasoning_default.clone()),
+            })
+            .is_valid()
+            {
+                return Err(ProviderSetupError::InvalidConfiguration);
+            }
+        } else if !model.reasoning_default.is_empty() {
+            return Err(ProviderSetupError::InvalidConfiguration);
+        }
+        model
+            .preset
+            .validate()
+            .map_err(|_| ProviderSetupError::InvalidConfiguration)?;
     }
+    Ok(())
 }
 
 fn registry_for_prepared(
@@ -1049,28 +1728,40 @@ fn registry_for_prepared(
         endpoint,
         authentication,
         replace_existing,
+        ..
     } = draft;
+    let previous = snapshot
+        .registry()
+        .and_then(|registry| registry.providers.get(&provider_id))
+        .cloned();
     let base_url = endpoint.to_string();
-    let (api_key, auth) = authentication.into_storage();
+    let stored = authentication.into_storage();
     let provider = CustomProvider {
         label,
         credential: CustomCredential {
             base_url,
-            api_key,
+            api_key: stored.api_key,
             api_name: selected.api_name,
-            headers: Vec::new(),
+            headers: stored.headers,
             models,
-            // The reviewed inventory is explicit. Startup therefore rebuilds
-            // immediately and offline without a second surprise probe.
-            auto_discover: false,
+            // The setup transaction already probed exactly this endpoint and
+            // persists its reviewed inventory. Rebuild from that snapshot without
+            // a second request; normal startup refreshes it when auto-discovery is on.
+            auto_discover: true,
         },
-        auth,
-        api_key_env: None,
-        cache: None,
-        startup_timeout_secs: None,
-        // Lifecycle feedback remains an explicit endpoint opt-in; provider
-        // onboarding must not activate it merely by creating a registry entry.
-        lifecycle_feedback: false,
+        auth: stored.auth,
+        api_key_env: stored.api_key_env,
+        cache: previous
+            .as_ref()
+            .and_then(|provider| provider.cache.clone()),
+        startup_timeout_secs: previous
+            .as_ref()
+            .and_then(|provider| provider.startup_timeout_secs),
+        // Preserve explicit opt-ins during an edit; new providers never gain
+        // lifecycle feedback merely by being created.
+        lifecycle_feedback: previous
+            .as_ref()
+            .is_some_and(|provider| provider.lifecycle_feedback),
     };
     let mut registry = snapshot.registry().cloned().unwrap_or(CustomRegistry {
         version: 1,
@@ -1147,21 +1838,16 @@ fn models_from_json(value: &serde_json::Value) -> Result<Vec<CustomModel>, Probe
                 .unwrap_or_default(),
             ..CustomModel::default()
         };
-        if let Some(context_window) = positive_u64(
-            entry,
-            &[
-                "context_window",
-                "context_length",
-                "max_model_len",
-                "max_context_tokens",
-            ],
-        ) {
+        if let Some(context_window) = crate::app::bootstrap::extract_ctx_from_model_entry(entry) {
             model.context_window = context_window;
+            model.context_window_asserted = true;
+            model.discovered_context_window = Some(context_window);
         }
         if let Some(max_output_tokens) =
             positive_u64(entry, &["max_output_tokens", "max_completion_tokens"])
         {
             model.max_output_tokens = max_output_tokens.min(model.context_window);
+            model.max_output_tokens_asserted = true;
         }
         crate::app::bootstrap::apply_discovered_reasoning(entry, &mut model)
             .map_err(|_| ProbeFailure::InvalidDiscovery)?;
@@ -1261,6 +1947,10 @@ mod tests {
                     .map(|name| CustomModel {
                         api_name: (*name).to_owned(),
                         display_name: (*name).to_owned(),
+                        context_window: 8_192,
+                        max_output_tokens: 1_024,
+                        context_window_asserted: true,
+                        discovered_context_window: Some(8_192),
                         ..CustomModel::default()
                     })
                     .collect()))),
@@ -1274,6 +1964,7 @@ mod tests {
             &self,
             _endpoint: &url::Url,
             _authentication: &SetupAuthentication,
+            _profile: DiscoveryProfile,
         ) -> Result<Vec<CustomModel>, ProbeFailure> {
             *self.requests.lock().unwrap() += 1;
             self.result.lock().unwrap().clone()
@@ -1304,6 +1995,7 @@ mod tests {
             label: None,
             model: None,
             manual_model: None,
+            context_window: None,
             api_key_env: None,
             no_auth: false,
             replace: false,
@@ -1354,6 +2046,9 @@ mod tests {
         let path = store
             .save("anthropic", "  synthetic-key\n".into(), false)
             .unwrap();
+        // Only the permission assertions below name the returned path.
+        #[cfg(not(unix))]
+        let _ = path;
         // A fresh store models the subsequent process's credential lookup.
         let restarted = api_key_store(&directory);
         assert_eq!(
@@ -1440,6 +2135,53 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_stored_api_key_lists_only_configured_providers_and_deletes_one_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        assert!(store.configured_providers().is_empty());
+        store
+            .save("openai", "synthetic-key-1".into(), false)
+            .unwrap();
+        store
+            .save("anthropic", "synthetic-key-2".into(), false)
+            .unwrap();
+        let configured: Vec<_> = store
+            .configured_providers()
+            .iter()
+            .map(|provider| provider.id)
+            .collect();
+        assert_eq!(configured.len(), 2);
+        assert!(configured.contains(&"openai") && configured.contains(&"anthropic"));
+
+        assert!(store.remove("openai").unwrap());
+        assert!(store.load("openai").unwrap().is_none());
+        assert_eq!(
+            store.load("anthropic").unwrap().as_deref(),
+            Some("synthetic-key-2"),
+            "other providers' keys are untouched"
+        );
+        assert!(!store.remove("openai").unwrap(), "removal is idempotent");
+        assert!(
+            store.remove("../escape").is_err() && store.remove("not-a-provider").is_err(),
+            "only declaration-owned ids resolve to a file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_stored_api_key_never_follows_a_link_out_of_the_store() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let store = api_key_store(&directory);
+        std::fs::create_dir_all(&store.directory).unwrap();
+        let target = directory.path().join("unrelated");
+        std::fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, store.directory.join("openai.json")).unwrap();
+        let _ = store.remove("openai");
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+    }
+
+    #[test]
     fn builtin_api_key_store_rejects_malformed_and_oversized_records() {
         let directory = tempfile::tempdir().unwrap();
         let store = api_key_store(&directory);
@@ -1496,7 +2238,7 @@ mod tests {
 
     #[test]
     fn discovered_provider_is_prepared_then_committed_without_secret_receipt() {
-        let (_directory, service) = service(FixtureProbe::models(&["alpha", "beta"]));
+        let (directory, service) = service(FixtureProbe::models(&["alpha", "beta"]));
         let mut transaction = service.begin(draft()).unwrap();
         let models = service.discover(&mut transaction).unwrap();
         assert_eq!(
@@ -1514,6 +2256,11 @@ mod tests {
         assert_eq!(completed.model.0, "custom/local/beta");
         let model = completed.catalog.resolve(&completed.model).unwrap();
         assert!(!model.endpoint.runtime.lifecycle_feedback);
+        let registry = CredentialStore::new(directory.path().join("credentials/custom.json"))
+            .load_registry()
+            .unwrap()
+            .unwrap();
+        assert!(registry.providers["local"].credential.auto_discover);
         assert!(completed.receipt.render(None).contains("Fixture Local"));
     }
 
@@ -1547,7 +2294,16 @@ mod tests {
         let probe = FixtureProbe::models(&["ignored"]);
         let service = ProviderSetupService::with_probe(store, true, probe.clone());
         let transaction = service.begin(draft()).unwrap();
-        let prepared = service.prepare_manual(transaction, "manual-model").unwrap();
+        assert!(matches!(
+            service.prepare_manual(transaction, "manual-model"),
+            Err(ProviderSetupError::State(
+                ProviderSetupState::ContextWindowRequired
+            ))
+        ));
+        let transaction = service.begin(draft()).unwrap();
+        let prepared = service
+            .prepare_manual_with_context(transaction, "manual-model", 32_000)
+            .unwrap();
         let completed = service.commit_and_rebuild(prepared).unwrap();
         assert_eq!(completed.model.0, "custom/local/manual-model");
         assert_eq!(*probe.requests.lock().unwrap(), 0);
@@ -1559,7 +2315,9 @@ mod tests {
         let requests = Arc::clone(&probe.requests);
         let (_directory, service) = service(probe);
         let transaction = service.begin(draft()).unwrap();
-        let prepared = service.prepare_manual(transaction, "manual-model").unwrap();
+        let prepared = service
+            .prepare_manual_with_context(transaction, "manual-model", 8_192)
+            .unwrap();
         service.commit_and_rebuild(prepared).unwrap();
 
         assert!(matches!(
@@ -1571,6 +2329,196 @@ mod tests {
         assert_eq!(*requests.lock().unwrap(), 0);
 
         assert!(service.begin(draft().replace_existing(true)).is_ok());
+    }
+
+    #[test]
+    fn existing_provider_edit_preserves_credentials_settings_and_context_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(directory.path().join("credentials/custom.json"));
+        let mut configured_model = CustomModel {
+            api_name: "alpha".into(),
+            context_window: 4_096,
+            context_window_configured: true,
+            max_output_tokens: 1_024,
+            tools: false,
+            ..Default::default()
+        };
+        configured_model
+            .preset
+            .sampling_params
+            .insert("temperature".into(), serde_json::json!(0.25));
+        store
+            .save_registry(&CustomRegistry::single(
+                "local",
+                CustomProvider {
+                    label: "Original label".into(),
+                    credential: CustomCredential {
+                        base_url: "http://127.0.0.1:1234/v1/".into(),
+                        api_key: "stored-secret".into(),
+                        api_name: String::new(),
+                        headers: vec![HeaderEntry {
+                            name: "x-provider-secret".into(),
+                            value: "header-secret".into(),
+                        }],
+                        models: vec![configured_model.clone()],
+                        auto_discover: true,
+                    },
+                    auth: None,
+                    api_key_env: None,
+                    cache: Some(octet_ai::CacheCompatibility::default()),
+                    startup_timeout_secs: Some(73),
+                    lifecycle_feedback: true,
+                },
+            ))
+            .unwrap();
+
+        let probe = FixtureProbe::models(&["alpha"]);
+        let requests = Arc::clone(&probe.requests);
+        let service = ProviderSetupService::with_probe(store.clone(), false, probe);
+        let summaries = service.existing_providers().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].provider_id, "local");
+        assert_eq!(summaries[0].endpoint, "http://127.0.0.1:1234/v1/");
+        assert_eq!(
+            summaries[0].authentication,
+            SetupCredentialSummary::StoredCredentialConfigured
+        );
+        assert!(!format!("{summaries:?}").contains("stored-secret"));
+        assert!(!format!("{summaries:?}").contains("header-secret"));
+
+        assert!(matches!(
+            service.begin(SetupDraft::edit_existing(
+                "local",
+                "Renamed provider",
+                "http://127.0.0.1:9999/v1/",
+            )),
+            Err(ProviderSetupError::State(
+                ProviderSetupState::CredentialReuseRequiresConfirmation
+            ))
+        ));
+        assert_eq!(*requests.lock().unwrap(), 0);
+
+        let mut transaction = service
+            .begin(SetupDraft::edit_existing(
+                "local",
+                "Renamed provider",
+                "http://127.0.0.1:1234/v1/",
+            ))
+            .unwrap();
+        let discovered = service.discover(&mut transaction).unwrap();
+        assert_eq!(discovered[0].configured_context_window, Some(4_096));
+        assert_eq!(discovered[0].context_window, Some(8_192));
+        assert!(!discovered[0].requires_context_configuration);
+        let prepared = service.prepare_discovered(transaction, "alpha").unwrap();
+        let completed = service.commit_and_rebuild(prepared).unwrap();
+        assert_eq!(
+            completed
+                .catalog
+                .resolve(&completed.model)
+                .unwrap()
+                .spec
+                .limits
+                .context_window,
+            4_096
+        );
+
+        let saved = store.load_registry().unwrap().unwrap();
+        let provider = &saved.providers["local"];
+        assert_eq!(provider.label, "Renamed provider");
+        assert_eq!(provider.credential.api_key, "stored-secret");
+        assert_eq!(provider.credential.headers[0].value, "header-secret");
+        assert!(provider.credential.auto_discover);
+        assert_eq!(provider.startup_timeout_secs, Some(73));
+        assert!(provider.cache.is_some());
+        assert!(provider.lifecycle_feedback);
+        let saved_model = &provider.credential.models[0];
+        assert_eq!(saved_model.context_window, 4_096);
+        assert!(saved_model.context_window_configured);
+        assert_eq!(saved_model.discovered_context_window, Some(8_192));
+        assert!(!saved_model.tools);
+        assert_eq!(saved_model.preset, configured_model.preset);
+        assert!(!format!("{provider:?}").contains("stored-secret"));
+        assert!(!format!("{provider:?}").contains("header-secret"));
+        assert_eq!(*requests.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn legacy_edit_makes_implicit_custom_api_key_source_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credentials/custom.json");
+        octet_agent::secure_fs::write_private_atomic(
+            &path,
+            br#"{"base_url":"http://127.0.0.1:1234/v1/","api_key":"","api_name":"alpha"}"#,
+            64 * 1024,
+        )
+        .unwrap();
+        let store = CredentialStore::new(&path);
+        let service = ProviderSetupService::with_probe(
+            store.clone(),
+            false,
+            FixtureProbe::models(&["alpha"]),
+        );
+        let mut transaction = service
+            .begin(SetupDraft::edit_existing(
+                "custom-openai",
+                "Legacy endpoint",
+                "http://127.0.0.1:1234/v1/",
+            ))
+            .unwrap();
+        service.discover(&mut transaction).unwrap();
+        let prepared = service.prepare_discovered(transaction, "alpha").unwrap();
+        service.commit_and_rebuild(prepared).unwrap();
+        let registry = store.load_registry().unwrap().unwrap();
+        assert!(matches!(
+            &registry.providers["custom-openai"].auth,
+            Some(CustomAuthConfig::BearerEnv { var }) if var == "OCTET_CUSTOM_API_KEY"
+        ));
+    }
+
+    #[test]
+    fn setup_keeps_unknown_siblings_actionable_but_out_of_catalog() {
+        let probe = FixtureProbe::models(&["known", "unknown"]);
+        *probe.result.lock().unwrap() = Ok(vec![
+            CustomModel {
+                api_name: "known".into(),
+                context_window: 8_192,
+                context_window_asserted: true,
+                discovered_context_window: Some(8_192),
+                ..Default::default()
+            },
+            CustomModel {
+                api_name: "unknown".into(),
+                ..Default::default()
+            },
+        ]);
+        let (directory, service) = service(probe);
+        let mut transaction = service.begin(draft()).unwrap();
+        let summaries = service.discover(&mut transaction).unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries[1].requires_context_configuration);
+        assert_eq!(summaries[1].context_window, None);
+
+        let prepared = service.prepare_discovered(transaction, "known").unwrap();
+        let completed = service.commit_and_rebuild(prepared).unwrap();
+        assert!(completed.catalog.resolve(&completed.model).is_ok());
+        assert!(completed
+            .catalog
+            .resolve(&ModelId("custom/local/unknown".to_owned()))
+            .is_err());
+
+        let registry = CredentialStore::new(directory.path().join("credentials/custom.json"))
+            .load_registry()
+            .unwrap()
+            .unwrap();
+        let unknown = registry.providers["local"]
+            .credential
+            .models
+            .iter()
+            .find(|model| model.api_name == "unknown")
+            .unwrap();
+        assert!(!unknown.context_window_asserted);
+        assert!(!unknown.context_window_configured);
+        assert_eq!(unknown.discovered_context_window, None);
     }
 
     #[test]

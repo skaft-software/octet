@@ -220,15 +220,38 @@ decide stale-startup-row replacement, terminal replay, cursor byte streams, or
 PTY behavior. Those are separate concerns owned by the renderer and its
 dedicated regressions.
 
+### Extension management during an active run
+
+Bare `/extensions` opens the ordinary **Manage extensions** root immediately,
+including while a run is active. Enter opens the selected enabled extension's
+options; nested options, Back, and Escape are frontend navigation, never queued
+work. Root Escape closes the picker rather than interrupting the run. Menu
+collection is an owned, five-second-bounded future polled beside input and run
+events. Inspection or collection failure remains a recoverable picker state;
+failed collection offers the captured declared-command fallback and Back.
+
+Only a selected activation, host-authority, runtime-setup, or options leaf is an
+ordered idle effect. It carries the selected session, source, manifest/bundle,
+and exact process-instance/generation identity, not a name-only reroute or a
+preapproval. Execution revalidates those identities, current activation
+eligibility, and the selected options path/ID/signature. Desired activation is
+explicit, not a stale toggle. Existing execution handlers retain fresh approval,
+argument prompts, process policy, and live-worker resource-reload refusal.
+
+The frontend invalidates the menu request token and drops its collection before
+close, cancellation, owner change, or replacement by another surface (especially
+an approval). Late collections cannot reclaim panel ownership or reopen a
+retired page. Browsing and queued selection do not claim an effect has applied.
+
 ### Subagent inspector
 
-`/subagents` reuses ordinary label/detail rows: stacked at narrow and regular
+The worker list reuses ordinary label/detail rows: stacked at narrow and regular
 widths when height permits, side by side on wide terminals. It has no synthetic
 column legend over its variable metadata. Enter is labelled `inspect`; the
 finished-group toggle names its current action (`show all` or `hide finished`).
-A subdued purpose hint says to close the list with Escape, then enter
-`/subagents stop <name|all>` (or the shorter stop-all hint at narrow widths).
-This is command discovery, not a new picker key or a change in cancellation
-authority; the focused worker row takes precedence at constrained heights.
+A subdued purpose hint says `Enter inspects · ^x stops the selected worker` (just
+the Ctrl+X half at narrow widths). Ctrl+X routes to the same owner-bound
+first-party stop, not a change in cancellation authority; the focused worker row
+takes precedence at constrained heights.
 The bounded **Subagents** transcript block remains a mutable tail, not pinned
 chrome; the inspector does not change its lifecycle.

@@ -21,7 +21,8 @@ octet asks capable terminals for unambiguous modified controls at startup with
 `\x1b[>7u` (Kitty keyboard flags 1|2|4) followed by a device-attributes query;
 when the terminal is not in the Kitty family it falls back to
 `modifyOtherKeys` (`\x1b[>4;2m`). Both use the terminal's normal input path for
-ordinary text (`crates/sexy-tui-rs/src/terminal.rs:53`).
+ordinary text (`KITTY_NEGOTIATION_QUERY` and `MODIFY_OTHER_KEYS_ENABLE` in
+`crates/sexy-tui-rs/src/terminal.rs`).
 
 - `set -g extended-keys on` makes tmux forward modified keys at all.
 - `extended-keys-format csi-u` (tmux **3.5+**) forwards them as CSI-u
@@ -46,7 +47,7 @@ newline) and any modified-Enter binding — see
 ## Detection and separate behaviors
 
 octet detects tmux from the `TMUX` environment variable
-(`crates/sexy-tui-rs/src/capabilities.rs:392`). Inside tmux/screen it keeps
+(`TerminalCapabilities::from_process` in `crates/sexy-tui-rs/src/capabilities.rs`). Inside tmux/screen it keeps
 hyperlinks disabled unless overridden, and Kitty graphics are not assumed.
 Mouse scrolling and transcript selection keep working through tmux's own mouse
 reporting; see [terminal scrolling](terminal.md#scrolling-and-rendering).

@@ -130,7 +130,12 @@ inventory = source / "docs/package-assets.txt"
 if inventory.is_symlink() or not inventory.is_file() or b"docs/package-assets.txt" not in tracked:
     raise SystemExit("documentation inventory must be a tracked regular file")
 copied = set()
+private = set()
 for line in inventory.read_text(encoding="utf-8").splitlines():
+    if line.startswith("# private "):
+        # Tracked workstation records: reviewed, listed here, never shipped.
+        private.add(line[len("# private "):])
+        continue
     if not line or line.startswith("#"):
         continue
     kind, separator, name = line.partition(" ")
@@ -161,7 +166,7 @@ for line in inventory.read_text(encoding="utf-8").splitlines():
 public_roots = {
     os.fsdecode(name) for name in tracked
     if name.startswith((b"docs/", b"examples/", b"sdk/"))
-}
+} - private
 if public_roots - copied:
     raise SystemExit("public documentation is missing from docs/package-assets.txt: " + ", ".join(sorted(public_roots - copied)))
 

@@ -16,7 +16,7 @@
 //! builds that preview itself) and publishes the diagram once, when the closing
 //! fence arrives, so a partially received body is never half-drawn. A body line
 //! that merely *looks* like a closer (four-space indentation, trailing text)
-//! does not terminate the block — [`fence_is_closed`] mirrors the parser's own
+//! does not terminate the block — `fence_is_closed` mirrors the parser's own
 //! CommonMark closure rules.
 
 use std::ops::Range;
@@ -298,6 +298,8 @@ enum InlineKind {
     Emphasis,
     Strong,
     Strikethrough,
+    /// A wrapper whose children stay inline and unstyled.
+    Plain,
 }
 
 struct Builder<'a> {
@@ -462,6 +464,9 @@ impl<'a> Builder<'a> {
             Tag::Emphasis => Frame::Inline(InlineKind::Emphasis, Vec::new()),
             Tag::Strong => Frame::Inline(InlineKind::Strong, Vec::new()),
             Tag::Strikethrough => Frame::Inline(InlineKind::Strikethrough, Vec::new()),
+            // `parser_options` does not enable superscript or subscript; if
+            // it ever does, keep their text inline rather than dropping it.
+            Tag::Superscript | Tag::Subscript => Frame::Inline(InlineKind::Plain, Vec::new()),
             Tag::Link { dest_url, .. } => Frame::Link {
                 target: dest_url.into_string(),
                 label: Vec::new(),
@@ -568,11 +573,16 @@ impl<'a> Builder<'a> {
                     self.append_block(Block::List(List::unordered(vec![item])));
                 }
             }
-            Frame::Inline(kind, content) => self.append_inline(match kind {
-                InlineKind::Emphasis => Inline::Emphasis(content),
-                InlineKind::Strong => Inline::Strong(content),
-                InlineKind::Strikethrough => Inline::Strikethrough(content),
-            }),
+            Frame::Inline(kind, content) => match kind {
+                InlineKind::Emphasis => self.append_inline(Inline::Emphasis(content)),
+                InlineKind::Strong => self.append_inline(Inline::Strong(content)),
+                InlineKind::Strikethrough => self.append_inline(Inline::Strikethrough(content)),
+                InlineKind::Plain => {
+                    for inline in content {
+                        self.append_inline(inline);
+                    }
+                }
+            },
             Frame::Link { target, label } => self.append_inline(Inline::Link { label, target }),
             Frame::Image { target, alt } => {
                 let mut label = vec![Inline::Raw("[image: ".into())];
@@ -766,83 +776,4 @@ fn cell_plain(content: &[Inline]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_required_markdown_constructs() {
-        let document = parse(
-            "# Heading\n\nParagraph with **strong**, *emphasis*, ~~old~~, `code`, and [docs](https://example.com).\n\n> quote\n\n1. first\n   - nested\n2. second\n\n```rust\nfn main() {}\n```\n\n---",
-        );
-        assert!(matches!(
-            document.blocks[0],
-            Block::Heading { level: 1, .. }
-        ));
-        assert!(document
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::BlockQuote(_))));
-        assert!(document
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::List(_))));
-        assert!(document
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::CodeBlock(_))));
-        assert!(document
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::Divider)));
-        let plain = document.plain_text();
-        for text in [
-            "Heading", "strong", "emphasis", "old", "code", "quote", "nested",
-        ] {
-            assert!(plain.contains(text), "missing {text:?}: {plain}");
-        }
-        assert!(!plain.contains("**"));
-    }
-
-    #[test]
-    fn tight_list_inline_runs_stay_in_one_paragraph() {
-        let document = parse("- before **strong** `code` after");
-        let Block::List(list) = &document.blocks[0] else {
-            panic!("expected list");
-        };
-        assert_eq!(list.items[0].blocks.len(), 1);
-        assert_eq!(document.plain_text(), "- before strong code after\n");
-    }
-
-    #[test]
-    fn parses_tables_tasks_autolinks_and_escaped_markers() {
-        let document = parse(
-            "- [x] done\n- [ ] todo\n\n| Key | Value |\n| --- | ---: |\n| a | 1 |\n\nhttps://example.com and \\*literal\\*",
-        );
-        let list = document
-            .blocks
-            .iter()
-            .find_map(|block| match block {
-                Block::List(list) => Some(list),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(list.items[0].task, Some(true));
-        assert_eq!(list.items[1].task, Some(false));
-        assert!(document
-            .blocks
-            .iter()
-            .any(|block| matches!(block, Block::Table(_))));
-        let plain = document.plain_text();
-        assert!(plain.contains("https://example.com"));
-        assert!(plain.contains("*literal*"));
-    }
-
-    #[test]
-    fn html_like_and_malformed_markdown_remain_visible() {
-        let source = "<thinking>visible</thinking>\n\n**unfinished `code [link](x";
-        let plain = parse(source).plain_text();
-        assert!(plain.contains("thinking"));
-        assert!(plain.contains("visible"));
-        assert!(plain.contains("unfinished"));
-    }
-}
+mod tests;

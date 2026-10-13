@@ -18,7 +18,7 @@ import termios
 import time
 
 binary = sys.argv[1]
-entry = "tui::view::tests::terminal_handoff_pty_fixture"
+entry = "tui::view::tests::terminal_handoff_pty_tests::terminal_handoff_pty_fixture"
 
 
 def drain(master, data):
@@ -58,6 +58,9 @@ with tempfile.TemporaryDirectory(prefix="octet-handoff-") as root:
         reach("ready")
         assert not (termios.tcgetattr(slave)[3] & termios.ICANON), \
             "the fixture never entered raw mode"
+        # The fixture holds raw mode until told this check is done; without the
+        # handshake a late-scheduled probe can observe the later suspension.
+        (marker / "raw-checked").write_text("1")
 
         reach("ceded")
         # Suspension restored the process terminal exactly, byte for byte.

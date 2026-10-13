@@ -35,10 +35,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         ),
     ];
 
-    match rg_version() {
-        Some(version) => lines.push(format!("ripgrep: ok ({version})")),
-        None => lines.push("ripgrep: MISSING (install rg before starting octet)".to_owned()),
-    }
+    lines.push(search_diagnostic(rg_version().as_deref()));
 
     let mut endpoints: BTreeMap<String, EndpointSummary> = BTreeMap::new();
     for spec in catalog.models() {
@@ -81,9 +78,6 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     }
 
     let mut issues = Vec::new();
-    if rg_version().is_none() {
-        issues.push("ripgrep is unavailable".to_owned());
-    }
     if model_count == 0 {
         issues.push(
             "no usable models are configured; set a provider credential or run `octet --login custom`"
@@ -130,6 +124,15 @@ struct EndpointSummary {
     models: usize,
 }
 
+fn search_diagnostic(rg_version: Option<&str>) -> String {
+    match rg_version {
+        Some(version) => format!("ripgrep: ok ({version}; preferred for content search)"),
+        None => {
+            "ripgrep: unavailable (optional; use grep through bash for content search)".to_owned()
+        }
+    }
+}
+
 fn rg_version() -> Option<String> {
     let output = Command::new("rg").arg("--version").output().ok()?;
     if !output.status.success() {
@@ -164,6 +167,18 @@ fn is_local_endpoint(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ripgrep_diagnostics_prefer_rg_but_allow_grep_fallback() {
+        assert_eq!(
+            search_diagnostic(Some("ripgrep 14.1.1")),
+            "ripgrep: ok (ripgrep 14.1.1; preferred for content search)"
+        );
+        assert_eq!(
+            search_diagnostic(None),
+            "ripgrep: unavailable (optional; use grep through bash for content search)"
+        );
+    }
 
     #[test]
     fn endpoint_display_never_includes_path_or_query() {

@@ -119,7 +119,13 @@ fn render_surface_content_line(
     _collapsed_reasoning: bool,
     marker: Option<&str>,
 ) -> String {
-    let (content_role, border_role, _) = surface_roles(plan.kind);
+    // Event breathing/promotion rows are host spacing, not rail/card cushions.
+    // In particular a reserved Working row must remain byte-visibly blank.
+    if plan.event_spacing && line.is_empty() {
+        return String::new();
+    }
+    let (_, border_role, _) = surface_roles(plan.kind);
+    let content_role = plan.content_role;
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
     let right_padding = " ".repeat(usize::from(plan.padding));
@@ -229,6 +235,68 @@ fn render_surface_content_line(
     }
 }
 
+/// Whether a blank cushion row of this surface carries a visible fill.
+///
+/// A filled cushion is part of the surface itself: the shaded card keeps its
+/// own top and bottom edge, so a neighbouring event's host spacing must stay a
+/// separate, neutral row instead of merging into it. Asking the painter keeps
+/// the answer exact for every chrome, role fill and prompt wash.
+pub(super) fn cushion_row_is_painted(
+    plan: &SurfacePlan<'_>,
+    theme: &OctetTheme,
+    prompt_color: Option<&str>,
+) -> bool {
+    paints_background(&render_surface_content_line(
+        "",
+        plan,
+        theme,
+        prompt_color,
+        false,
+        None,
+    ))
+}
+
+/// Whether any SGR sequence in `row` selects a background colour.
+fn paints_background(row: &str) -> bool {
+    let mut rest = row;
+    while let Some(start) = rest.find("\x1b[") {
+        rest = &rest[start + 2..];
+        // A CSI sequence ends at the first byte in 0x40..=0x7e.
+        let Some(end) = rest.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c)) else {
+            return false;
+        };
+        if rest.as_bytes()[end] == b'm' && sgr_selects_background(&rest[..end]) {
+            return true;
+        }
+        rest = &rest[end + 1..];
+    }
+    false
+}
+
+fn sgr_selects_background(params: &str) -> bool {
+    let mut values = params
+        .split([';', ':'])
+        .map(|value| value.parse::<u16>().unwrap_or(0));
+    while let Some(value) = values.next() {
+        match value {
+            48 | 40..=47 | 100..=107 => return true,
+            // Foreground and underline colours carry their own arguments, which
+            // must not be mistaken for a background selector.
+            38 | 58 => match values.next() {
+                Some(5) => {
+                    values.next();
+                }
+                Some(2) => {
+                    values.nth(2);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
 fn surface_bottom_row(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> Option<String> {
     (plan.chrome == ThemeSurfaceChrome::Card).then(|| {
         let (_, border_role, _) = surface_roles(plan.kind);
@@ -283,6 +351,16 @@ pub(super) fn event_margin_marker(
     )
 }
 
+pub(super) fn spinner_glyph(unicode: bool, frame: usize) -> &'static str {
+    const BRAILLE: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const ASCII: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
+    if unicode {
+        BRAILLE[frame % BRAILLE.len()]
+    } else {
+        ASCII[frame % ASCII.len()]
+    }
+}
+
 pub(super) fn event_margin_marker_with_frame(
     block: &TranscriptBlock,
     theme: &OctetTheme,
@@ -301,7 +379,7 @@ pub(super) fn event_margin_marker_with_frame(
     let quiet_transcript = theme
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false);
-    let active_dot_visible = spinner_frame % 2 == 0;
+    let active_dot_visible = spinner_frame.is_multiple_of(2);
     let active_phase_dot = || {
         if active_dot_visible {
             theme.fg("foreground", event_dot)
@@ -310,23 +388,22 @@ pub(super) fn event_margin_marker_with_frame(
         }
     };
     match block {
-        TranscriptBlock::Reasoning(_) if collapsed_reasoning && thinking_spinner => {
-            const BRAILLE_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            const ASCII_FRAMES: [&str; 10] = [".", ":", "*", "+", "x", "X", "+", "*", ":", "."];
-            let spinner = if theme.unicode() {
-                BRAILLE_FRAMES[spinner_frame % BRAILLE_FRAMES.len()]
-            } else {
-                ASCII_FRAMES[spinner_frame % ASCII_FRAMES.len()]
-            };
-            Some(theme.fg("accent", spinner))
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning && thinking_spinner && !reasoning.finished =>
+        {
+            Some(theme.fg("accent", spinner_glyph(theme.unicode(), spinner_frame)))
         }
         TranscriptBlock::Reasoning(reasoning) if collapsed_reasoning && markers_enabled => {
             Some(status_shimmer_frame.map_or_else(
                 || theme.model_fg(reasoning.model_lab, event_dot),
-                |_| {
+                |shimmer_frame| {
                     if reasoning.is_working_activity() && reasoning.retry_activity.is_none() {
-                        // Only the word Working shimmers; its marker stays at rest.
-                        activity_shimmer_marker(theme, reasoning, 0, 0, event_dot)
+                        // Only the word Working shimmers, and the sweep enters
+                        // before its margin dot: sharing the status frame lets
+                        // the band cross the dot first, so the dot blinks with
+                        // the other activity markers and still holds its rest
+                        // colour on the parked frames.
+                        activity_shimmer_marker(theme, reasoning, shimmer_frame, 0, event_dot)
                     } else {
                         theme.model_fg(reasoning.model_lab, event_dot)
                     }
@@ -467,7 +544,10 @@ pub(super) fn decorate_surface_with_frame(
                 fit_line(&line, outer_width)
             } else {
                 let frame_left = usize::from(plan.frame_left);
-                let prefix = if marker_pending {
+                let prefix = if marker_pending
+                    && (!plan.event_spacing
+                        || row >= plan.geometry.transition_rows + plan.geometry.leading_rows)
+                {
                     marker_pending = false;
                     match marker {
                         Some(marker) if frame_left >= 2 => {
@@ -540,4 +620,38 @@ pub(super) fn decorate_surface_content_suffix(
         rows.push(fit_line(&format!("{frame_left}{bottom}"), outer_width));
     }
     rows
+}
+
+#[cfg(test)]
+mod paint_probe_tests {
+    use super::paints_background;
+
+    #[test]
+    fn background_selectors_are_found_in_every_encoding() {
+        assert!(paints_background("\x1b[48;2;1;2;3m  \x1b[0m"));
+        assert!(paints_background(
+            "\x1b[38;2;230;230;235;48;2;64;92;119m  \x1b[0m"
+        ));
+        assert!(paints_background("\x1b[48;5;236m  \x1b[0m"));
+        assert!(paints_background("\x1b[44m  \x1b[0m"));
+        assert!(paints_background("\x1b[1;103m  \x1b[0m"));
+        assert!(paints_background(
+            "\x1b[38;2;1;2;3m\x1b[0m\x1b[48:2::1:2:3m"
+        ));
+    }
+
+    #[test]
+    fn foreground_only_and_plain_rows_are_not_painted() {
+        assert!(!paints_background(""));
+        assert!(!paints_background("      "));
+        assert!(!paints_background("\x1b[0m"));
+        assert!(!paints_background("\x1b[1m\x1b[31mtext\x1b[0m"));
+        assert!(!paints_background("\x1b[49m"));
+        // 48 and 44 appearing as colour channels of a foreground are not backgrounds.
+        assert!(!paints_background("\x1b[38;2;48;44;100m  \x1b[0m"));
+        assert!(!paints_background("\x1b[38;5;48m  \x1b[0m"));
+        assert!(!paints_background("\x1b[58;2;48;48;48m  \x1b[0m"));
+        // An unterminated sequence is not a paint.
+        assert!(!paints_background("\x1b[48;2;1"));
+    }
 }

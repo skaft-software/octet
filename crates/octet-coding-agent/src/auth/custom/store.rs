@@ -7,6 +7,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use octet_ai::discovery::DiscoveryMetadataSource;
+use octet_ai::types::ReasoningOptions;
 use octet_ai::CacheCompatibility;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -186,73 +188,231 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// A single model served by the custom endpoint.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct CustomModel {
     /// The on-wire model name (sent as `model` in API requests).
     pub api_name: String,
     /// Optional display name in octet's model picker. Defaults to api_name.
-    #[serde(default)]
     pub display_name: String,
     /// Context window size in tokens.
-    #[serde(default = "default_context_window")]
     pub context_window: u64,
     /// Maximum output tokens.
-    #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u64,
-    /// Whether discovery (rather than a fallback) supplied this context limit.
-    /// Persisted so a cached inventory re-merges to the same effective limit on
-    /// the next start; a cached `false` means the limit came from this file.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Whether discovery supplied a positive effective context assertion.
+    /// This is independent of the operational context value and any saved pin.
+    #[serde(skip_serializing_if = "is_false")]
     pub context_window_asserted: bool,
+    /// Whether the operational context value was explicitly saved/configured.
+    /// False is not inferred from the historical deserialization fallback.
+    #[serde(skip_serializing_if = "is_false")]
+    pub context_window_configured: bool,
+    /// Last validated discovery value, kept separate from configured operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_context_window: Option<u64>,
     /// Whether discovery supplied an output limit rather than the fallback.
     /// Persisted for the same reason as `context_window_asserted`.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false")]
     pub max_output_tokens_asserted: bool,
     /// Whether the model supports tools/function calling.
-    #[serde(default = "default_true")]
     pub tools: bool,
     /// Whether the model supports parallel tool calls.
-    #[serde(default)]
     pub parallel_tool_calls: bool,
     /// Whether the model supports vision/image inputs.
-    #[serde(default)]
     pub vision: bool,
     /// Whether the model supports structured output (JSON schema/mode).
-    #[serde(default)]
     pub structured_output: bool,
     /// Whether the model supports reasoning/thinking.
-    #[serde(default)]
     pub reasoning: bool,
     /// Optional typed endpoint wire profile; never inferred from model names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_profile: Option<octet_ai::OpenAiChatReasoningMode>,
     /// Provenance recorded by future setup/discovery. Missing on old/manual entries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_source: Option<octet_ai::types::ReasoningMetadataSource>,
     /// Whether octet can configure reasoning. A model may still reason by
     /// default when this is false.
-    #[serde(default = "default_true")]
     pub reasoning_configurable: bool,
     /// Exact reasoning selector values advertised by the endpoint. Empty
     /// preserves the legacy effort-range behavior for manual configurations.
-    #[serde(default)]
     pub reasoning_values: Vec<String>,
     /// Endpoint-advertised default reasoning selector value.
-    #[serde(default)]
     pub reasoning_default: String,
     /// Whether reasoning-capable requests must keep the system prompt as a
     /// `system` message instead of using OpenAI's `developer` role.
-    #[serde(default)]
     pub reasoning_uses_system_message: bool,
     /// Optional user-declared pricing. When absent, octet treats the model as
     /// free (zero rates), which still satisfies guardrails that require
     /// trusted pricing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing: Option<CustomPricing>,
     /// Explicit user-configured request defaults. Header values remain private
     /// credential data; inventory caches and public model views must omit them.
-    #[serde(default, deserialize_with = "deserialize_model_preset")]
     pub preset: octet_ai::ModelPreset,
+    /// Facts from an explicitly selected provider-native metadata route. These
+    /// never imply support on the provider's separate OpenAI-compatible routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_metadata: Option<CustomNativeMetadata>,
+}
+
+struct Present<T>(Option<T>);
+
+impl<T> Default for Present<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for Present<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(|value| Self(Some(value)))
+    }
+}
+
+#[derive(Deserialize)]
+struct CustomModelWire {
+    api_name: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    context_window: Present<u64>,
+    #[serde(default = "default_max_output_tokens")]
+    max_output_tokens: u64,
+    #[serde(default)]
+    context_window_asserted: bool,
+    #[serde(default)]
+    context_window_configured: Option<bool>,
+    #[serde(default)]
+    discovered_context_window: Option<u64>,
+    #[serde(default)]
+    max_output_tokens_asserted: bool,
+    #[serde(default = "default_true")]
+    tools: bool,
+    #[serde(default)]
+    parallel_tool_calls: bool,
+    #[serde(default)]
+    vision: bool,
+    #[serde(default)]
+    structured_output: bool,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    reasoning_profile: Option<octet_ai::OpenAiChatReasoningMode>,
+    #[serde(default)]
+    reasoning_source: Option<octet_ai::types::ReasoningMetadataSource>,
+    #[serde(default = "default_true")]
+    reasoning_configurable: bool,
+    #[serde(default)]
+    reasoning_values: Vec<String>,
+    #[serde(default)]
+    reasoning_default: String,
+    #[serde(default)]
+    reasoning_uses_system_message: bool,
+    #[serde(default)]
+    pricing: Option<CustomPricing>,
+    #[serde(default, deserialize_with = "deserialize_model_preset")]
+    preset: octet_ai::ModelPreset,
+    #[serde(default)]
+    native_metadata: Option<CustomNativeMetadata>,
+}
+
+impl<'de> Deserialize<'de> for CustomModel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CustomModelWire::deserialize(deserializer)?;
+        let context_window_was_present = wire.context_window.0.is_some();
+        let context_window = wire.context_window.0.unwrap_or_else(default_context_window);
+        // Older schema entries always serialized the default context fallback.
+        // Conservatively treat that ambiguous historical value as unknown; a
+        // non-default legacy value remains a user pin, while new explicit pins
+        // carry the provenance boolean.
+        let context_window_configured = wire.context_window_configured.unwrap_or(
+            context_window_was_present
+                && !wire.context_window_asserted
+                && context_window != default_context_window(),
+        );
+        let discovered_context_window = wire
+            .discovered_context_window
+            .or_else(|| wire.context_window_asserted.then_some(context_window));
+        Ok(Self {
+            api_name: wire.api_name,
+            display_name: wire.display_name,
+            context_window,
+            max_output_tokens: wire.max_output_tokens,
+            context_window_asserted: wire.context_window_asserted,
+            context_window_configured,
+            discovered_context_window,
+            max_output_tokens_asserted: wire.max_output_tokens_asserted,
+            tools: wire.tools,
+            parallel_tool_calls: wire.parallel_tool_calls,
+            vision: wire.vision,
+            structured_output: wire.structured_output,
+            reasoning: wire.reasoning,
+            reasoning_profile: wire.reasoning_profile,
+            reasoning_source: wire.reasoning_source,
+            reasoning_configurable: wire.reasoning_configurable,
+            reasoning_values: wire.reasoning_values,
+            reasoning_default: wire.reasoning_default,
+            reasoning_uses_system_message: wire.reasoning_uses_system_message,
+            pricing: wire.pricing,
+            preset: wire.preset,
+            native_metadata: wire.native_metadata,
+        })
+    }
+}
+
+/// Validated, provenance-bearing metadata from a provider-native model API.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomNativeMetadata {
+    /// Whether a model entry was uniquely matched in the native inventory.
+    #[serde(default)]
+    pub source: DiscoveryMetadataSource,
+    /// Provider maximum supported context, not necessarily the loaded instance's
+    /// effective context and never substituted for an unknown request limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<u64>,
+    /// Provenance of the maximum-context field, including explicit null/unusable.
+    #[serde(default)]
+    pub max_context_source: DiscoveryMetadataSource,
+    /// Effective context configured on the matching loaded instance, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_context_window: Option<u64>,
+    /// Provenance of the loaded-instance effective context.
+    #[serde(default)]
+    pub loaded_context_source: DiscoveryMetadataSource,
+    /// Provider-native capability assertions; no OpenAI-route inference follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    #[serde(default)]
+    pub vision_source: DiscoveryMetadataSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use: Option<bool>,
+    #[serde(default)]
+    pub tool_use_source: DiscoveryMetadataSource,
+    /// Reasoning facts as represented by the native API, not Chat wire support.
+    #[serde(default)]
+    pub reasoning: CustomNativeReasoning,
+}
+
+/// Reasoning details and provenance from a native inventory.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomNativeReasoning {
+    /// Whether the native inventory supplied a usable reasoning assertion.
+    #[serde(default)]
+    pub source: DiscoveryMetadataSource,
+    /// Native reasoning availability, when explicitly represented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported: Option<bool>,
+    /// Exact native selector choices and default, when validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<ReasoningOptions>,
 }
 
 fn deserialize_model_preset<'de, D>(
@@ -330,6 +490,8 @@ impl Default for CustomModel {
             context_window: default_context_window(),
             max_output_tokens: default_max_output_tokens(),
             context_window_asserted: false,
+            context_window_configured: false,
+            discovered_context_window: None,
             max_output_tokens_asserted: false,
             tools: true,
             parallel_tool_calls: false,
@@ -344,6 +506,7 @@ impl Default for CustomModel {
             reasoning_uses_system_message: false,
             pricing: None,
             preset: Default::default(),
+            native_metadata: None,
         }
     }
 }
@@ -543,7 +706,8 @@ impl CredentialStore {
     /// the credential itself.
     pub(crate) fn save_model_cache_for(&self, provider_id: &str, bytes: &[u8]) -> Result<()> {
         let path = self.model_cache_path_for(provider_id);
-        write_private(&path, bytes).with_context(|| format!("writing {}", path.display()))
+        crate::auth::write_private_model_cache(&path, bytes, MAX_MODEL_CACHE_BYTES)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// A background refresh may publish only over the exact cache it observed
@@ -656,6 +820,28 @@ impl CredentialStore {
         let bytes = serde_json::to_vec_pretty(registry)?;
         write_private(&self.path, &bytes)
             .with_context(|| format!("writing {}", self.path.display()))
+    }
+
+    /// Remove one provider from the registry and its cached model inventory,
+    /// leaving every other provider untouched. The registry is rewritten only if
+    /// it is unchanged since it was read; removing the last provider deletes the
+    /// registry and all of its caches. Returns whether the provider existed.
+    pub(crate) fn remove_provider(&self, provider_id: &str) -> Result<bool> {
+        let snapshot = self.load_registry_snapshot()?;
+        let Some(mut registry) = snapshot.registry.clone() else {
+            return Ok(false);
+        };
+        if registry.providers.remove(provider_id).is_none() {
+            return Ok(false);
+        }
+        if registry.providers.is_empty() {
+            self.delete()?;
+            return Ok(true);
+        }
+        self.save_registry_if_unchanged(&snapshot, &registry)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        remove_if_present(&self.model_cache_path_for(provider_id))?;
+        Ok(true)
     }
 
     pub fn delete(&self) -> Result<()> {
@@ -1020,6 +1206,97 @@ mod tests {
         );
     }
 
+    fn provider_at(label: &str, base_url: &str) -> CustomProvider {
+        CustomProvider {
+            label: label.into(),
+            credential: CustomCredential {
+                base_url: base_url.into(),
+                api_key: "sk-secret-value".into(),
+                api_name: String::new(),
+                headers: Vec::new(),
+                models: vec![CustomModel {
+                    api_name: "m".into(),
+                    ..Default::default()
+                }],
+                auto_discover: false,
+            },
+            auth: None,
+            api_key_env: None,
+            cache: None,
+            startup_timeout_secs: None,
+            lifecycle_feedback: false,
+        }
+    }
+
+    #[test]
+    fn removing_one_provider_keeps_the_others_and_drops_only_its_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        let mut registry = CustomRegistry::single("alpha", provider_at("Alpha", "http://a/v1/"));
+        registry
+            .providers
+            .insert("beta".into(), provider_at("Beta", "http://b/v1/"));
+        store.save_registry(&registry).unwrap();
+        store.save_model_cache_for("alpha", b"alpha-cache").unwrap();
+        store.save_model_cache_for("beta", b"beta-cache").unwrap();
+
+        assert!(store.remove_provider("alpha").unwrap());
+        let loaded = store.load_registry().unwrap().unwrap();
+        assert_eq!(
+            loaded.providers.keys().collect::<Vec<_>>(),
+            vec!["beta"],
+            "only the removed provider disappears"
+        );
+        assert!(store.load_model_cache_for("alpha").unwrap().is_none());
+        assert_eq!(
+            store.load_model_cache_for("beta").unwrap().as_deref(),
+            Some(b"beta-cache".as_slice())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the rewritten registry stays owner-only");
+        }
+    }
+
+    #[test]
+    fn removing_the_last_provider_deletes_the_registry_and_every_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        store
+            .save_registry(&CustomRegistry::single(
+                "only",
+                provider_at("Only", "http://o/v1/"),
+            ))
+            .unwrap();
+        store.save_model_cache_for("only", b"cache").unwrap();
+
+        assert!(store.remove_provider("only").unwrap());
+        assert!(!path.exists());
+        assert!(store.load_registry().unwrap().is_none());
+        assert!(store.load_model_cache_for("only").unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_an_unknown_provider_or_from_an_empty_store_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        assert!(!store.remove_provider("ghost").unwrap());
+        store
+            .save_registry(&CustomRegistry::single(
+                "alpha",
+                provider_at("Alpha", "http://a/v1/"),
+            ))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(!store.remove_provider("ghost").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
     #[test]
     fn unified_registry_round_trips_labels_and_auth_without_secret_debug_output() {
         let dir = tempfile::tempdir().unwrap();
@@ -1086,6 +1363,52 @@ mod tests {
             store.load().is_err(),
             "single-credential access must reject a registry"
         );
+    }
+
+    #[test]
+    fn custom_model_context_provenance_distinguishes_pins_assertions_and_legacy_fallbacks() {
+        let fallback: CustomModel = serde_json::from_value(serde_json::json!({
+            "api_name": "fallback"
+        }))
+        .unwrap();
+        assert_eq!(fallback.context_window, default_context_window());
+        assert!(!fallback.context_window_configured);
+        assert!(!fallback.context_window_asserted);
+        assert_eq!(fallback.discovered_context_window, None);
+
+        let historical_default: CustomModel = serde_json::from_value(serde_json::json!({
+            "api_name": "historical-default",
+            "context_window": 131_072
+        }))
+        .unwrap();
+        assert!(!historical_default.context_window_configured);
+
+        let legacy_pin: CustomModel = serde_json::from_value(serde_json::json!({
+            "api_name": "legacy-pin",
+            "context_window": 8_192
+        }))
+        .unwrap();
+        assert!(legacy_pin.context_window_configured);
+
+        let discovered: CustomModel = serde_json::from_value(serde_json::json!({
+            "api_name": "discovered",
+            "context_window": 16_384,
+            "context_window_asserted": true
+        }))
+        .unwrap();
+        assert!(!discovered.context_window_configured);
+        assert!(discovered.context_window_asserted);
+        assert_eq!(discovered.discovered_context_window, Some(16_384));
+
+        let explicit_default: CustomModel = serde_json::from_value(serde_json::json!({
+            "api_name": "explicit-default",
+            "context_window": 131_072,
+            "context_window_configured": true
+        }))
+        .unwrap();
+        assert!(explicit_default.context_window_configured);
+        let wire = serde_json::to_value(&explicit_default).unwrap();
+        assert_eq!(wire["context_window_configured"], true);
     }
 
     #[test]

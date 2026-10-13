@@ -55,10 +55,11 @@ fn model(base_url: &str, protocol: Protocol) -> Model {
     }
 }
 
-fn codex_model(base_url: &str) -> Model {
-    let mut model = model(base_url, Protocol::OpenAiResponses);
-    let spec = Arc::make_mut(&mut model.spec);
-    spec.capabilities.reasoning = Some(ReasoningCapability {
+/// Effort-controlled reasoning over the full portable range, the shape both
+/// compact fixtures below start from. Integration binaries cannot reach the
+/// crate's `#[cfg(test)]` fixture seam, so the shared value lives here.
+fn reasoning_capability() -> ReasoningCapability {
+    ReasoningCapability {
         options: None,
         control: ReasoningControl::Effort,
         exposes_text: true,
@@ -67,7 +68,13 @@ fn codex_model(base_url: &str) -> Model {
         openai_chat_mode: OpenAiChatReasoningMode::Standard,
         min_effort: ReasoningEffort::Minimal,
         max_effort: ReasoningEffort::High,
-    });
+    }
+}
+
+fn codex_model(base_url: &str) -> Model {
+    let mut model = model(base_url, Protocol::OpenAiResponses);
+    let spec = Arc::make_mut(&mut model.spec);
+    spec.capabilities.reasoning = Some(reasoning_capability());
     spec.cache.session_affinity_format = Some(octet_ai::SessionAffinityFormat::Codex);
     Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
         octet_ai::ResponsesRuntimeProfile::Codex;
@@ -82,14 +89,8 @@ fn responses_lite_model(base_url: &str) -> Model {
     spec.capabilities.responses_lite = true;
     spec.capabilities.agent_delegation = Some(AgentDelegation::V2);
     spec.capabilities.reasoning = Some(ReasoningCapability {
-        options: None,
-        control: ReasoningControl::Effort,
-        exposes_text: true,
-        preserves_state: true,
-        effort_budgets: None,
-        openai_chat_mode: OpenAiChatReasoningMode::Standard,
-        min_effort: ReasoningEffort::Minimal,
         max_effort: ReasoningEffort::Ultra,
+        ..reasoning_capability()
     });
     model
 }
@@ -488,16 +489,20 @@ async fn compact_rejects_oversized_chunked_body_while_streaming() {
 
 #[tokio::test]
 async fn compact_response_header_timeout_is_classified_separately() {
+    // The endpoint timeout must cover the request/headers window without
+    // racing connection setup on a loaded host: the response is held far
+    // beyond the timeout, while the deadline still leaves room for the request
+    // to be accepted by the server.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/responses/compact"))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
         .expect(1)
         .mount(&server)
         .await;
 
     let mut model = model(&format!("{}/", server.uri()), Protocol::OpenAiResponses);
-    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(10);
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(250);
     let error = AiClient::new()
         .compact_responses(&model, compact_request(ResponsesInput::default(), None))
         .await

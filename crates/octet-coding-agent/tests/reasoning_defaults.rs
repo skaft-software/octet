@@ -1,3 +1,12 @@
+//! Reasoning-effort resolution against the real binary.
+//!
+//! Every process runs against a disposable `HOME`/workspace and a loopback
+//! OpenAI-compatible server, so the assertions are about how a reasoning
+//! preference travels from a custom model declaration through the CLI and into
+//! the outbound request — model defaults, explicit `--reasoning` flags, and a
+//! preference persisted for the next process. Separate from the in-crate
+//! reasoning suites because this exercises the process boundary, not a unit.
+
 #![cfg(unix)]
 #![allow(missing_docs)]
 

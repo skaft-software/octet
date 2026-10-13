@@ -477,6 +477,11 @@ fn service_account_assertion(client_email: &str, signer: &RsaKeyPair) -> Result<
 
 #[async_trait::async_trait]
 impl CredentialResolver for VertexAdcResolver {
+    // Application Default Credentials, not a subscription login.
+    fn is_oauth(&self) -> Option<bool> {
+        Some(false)
+    }
+
     async fn resolve(&self) -> Result<ResolvedCredential, AuthError> {
         let value = self.access_token().await?;
         Ok(ResolvedCredential {

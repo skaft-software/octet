@@ -91,6 +91,7 @@ def initialize_request(*, agent_sessions: bool = True):
                 "commands": ["subagents"],
                 "ui": ["status"],
                 "presentation": True,
+                "menu": True,
             },
             "host": {
                 "session_id": "parent-session",

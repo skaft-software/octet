@@ -176,9 +176,9 @@ pub(crate) struct ToolCallBuilder {
     pub(crate) name: String,
     pub(crate) arguments_json: String,
     pub(crate) argument_error: Option<ToolCallArgumentError>,
-    /// True once arguments were normalized and schema-checked at an explicit
-    /// `ToolCallEnd`; malformed max-token output remains false for final
-    /// truncation handling.
+    /// True once arguments were normalized at an explicit `ToolCallEnd` or by
+    /// the final pass; unrepairable output stays false until the stop reason
+    /// decides between the truncation and malformed envelopes.
     pub(crate) arguments_normalized: bool,
 }
 
@@ -219,6 +219,7 @@ pub(crate) struct ResponseBuilder {
     pub(crate) requested_service_tier: Option<crate::types::ServiceTier>,
     /// None until a codec settles pricing; Some(None) explicitly means unpriced.
     pub(crate) response_cost: Option<Option<crate::pricing::Cost>>,
+    pub(crate) server_timing: crate::inference::wire::ServerTiming,
     /// The request's exact tool-definition snapshot. `None` is reserved for
     /// direct schema-less codec fixtures; production assembly sets `Some`, even
     /// when the request has no tools, so known response tools are validated
@@ -307,6 +308,7 @@ impl ResponseBuilder {
             pricing,
             requested_service_tier: None,
             response_cost: None,
+            server_timing: Default::default(),
             tool_definitions: None,
             strict_tool_sampling: false,
             response_id: None,
@@ -587,8 +589,9 @@ impl ResponseBuilder {
                 // A completed, parseable call is schema-checked before this
                 // terminal event reaches consumers. This prevents downstream
                 // speculative execution from observing unchecked arguments.
-                // Unparseable output is deferred to `finish`: a MaxTokens
-                // terminal can safely retain its envelope with discarded args.
+                // Unparseable output is deferred to `finish`, where the stop
+                // reason decides whether it is a max-token truncation or a
+                // malformed call that keeps its envelope for the model.
                 self.normalize_completed_tool_arguments(*index)?;
                 self.ended_indices.insert(*index);
             }
@@ -721,8 +724,9 @@ impl ResponseBuilder {
     /// Normalizes a parseable call at its explicit terminal event.
     ///
     /// A malformed value is deliberately deferred to [`Self::normalize_tool_arguments`]:
-    /// the eventual stop reason determines whether a max-token response may retain
-    /// the call envelope with discarded arguments. A parseable call, including a
+    /// the eventual stop reason decides whether a max-token response discards
+    /// truncated arguments or a malformed call keeps its envelope marked
+    /// [`ToolCallArgumentError::Malformed`]. A parseable call, including a
     /// schema mismatch, is marked before consumers can speculate on it.
     fn normalize_completed_tool_arguments(&mut self, index: usize) -> Result<(), AiError> {
         let tool_definitions = self.tool_definitions.as_deref();
@@ -751,9 +755,9 @@ impl ResponseBuilder {
         )
     }
 
-    /// Returns the schema-mismatch marker computed for an explicitly completed
-    /// streamed call. `None` also covers a call whose malformed arguments must
-    /// wait for final truncation handling.
+    /// Returns the recoverable argument marker computed for an explicitly
+    /// completed streamed call. `None` also covers a call whose unparseable
+    /// arguments must wait for final stop-reason handling.
     pub(crate) fn tool_call_argument_error(&self, index: usize) -> Option<ToolCallArgumentError> {
         self.tool_call_builders
             .get(&index)
@@ -795,13 +799,17 @@ impl ResponseBuilder {
     ///
     /// A max-token terminal may cut a tool argument string in the middle. Keep
     /// the call envelope so the agent can pair it with a synthetic error result,
-    /// but never expose guessed partial arguments for execution. Other malformed
-    /// completions remain decode failures. Performing this pass before
-    /// [`Self::finish_mut`] replaces the builder also preserves stream-progress
-    /// counters when strict normalization fails.
+    /// but never expose guessed partial arguments for execution. Any other
+    /// unrepairable completion keeps its envelope too, marked
+    /// [`ToolCallArgumentError::Malformed`]: Pi parses such arguments leniently
+    /// and lets the call fail its own validation, so one malformed call must not
+    /// end the run. Performing this pass before [`Self::finish_mut`] replaces the
+    /// builder also preserves stream-progress counters when strict normalization
+    /// of a repairable call fails.
     fn normalize_tool_arguments(&mut self) -> Result<(), AiError> {
         let output_truncated = matches!(self.stop_reason, Some(StopReason::MaxTokens));
         let mut discarded_truncated_arguments = false;
+        let mut malformed_arguments = false;
         {
             let tool_definitions = self.tool_definitions.as_deref();
             for builder in self.tool_call_builders.values_mut() {
@@ -813,18 +821,25 @@ impl ResponseBuilder {
                 } else {
                     builder.arguments_json.as_str()
                 };
-                let arguments_json = match crate::json_repair::normalize_json_object(raw_arguments)
-                {
-                    Ok(arguments_json) => arguments_json,
-                    Err(_) if output_truncated => {
-                        builder.arguments_json = "{}".to_owned();
-                        builder.argument_error = None;
-                        builder.arguments_normalized = true;
+                let (arguments_json, argument_error) =
+                    crate::json_repair::normalize_completed_tool_arguments(raw_arguments);
+                if let Some(argument_error) = argument_error {
+                    // An authoritative max-token terminal makes truncation the
+                    // expected explanation, so the call is discarded without a
+                    // marker and the agent's truncation path names it. Any other
+                    // unrepairable text is malformed provider output the model
+                    // must see and correct.
+                    builder.arguments_json =
+                        crate::json_repair::UNREPAIRABLE_TOOL_ARGUMENTS.to_owned();
+                    builder.argument_error = (!output_truncated).then_some(argument_error);
+                    builder.arguments_normalized = true;
+                    if output_truncated {
                         discarded_truncated_arguments = true;
-                        continue;
+                    } else {
+                        malformed_arguments = true;
                     }
-                    Err(error) => return Err(AiError::Decode(error)),
-                };
+                    continue;
+                }
                 Self::apply_normalized_tool_arguments(
                     builder,
                     arguments_json,
@@ -838,6 +853,9 @@ impl ResponseBuilder {
                 code: "discarded_truncated_tool_arguments".to_owned(),
                 message: "Tool arguments truncated at the provider output limit were replaced with an empty object and must not be executed".to_owned(),
             });
+        }
+        if malformed_arguments {
+            self.add_diagnostic(crate::json_repair::malformed_tool_arguments_diagnostic());
         }
         Ok(())
     }
@@ -917,6 +935,7 @@ impl ResponseBuilder {
             response_id: self.response_id,
             responses_output: self.responses_output,
             deferred: self.deferred,
+            inference: Some(self.server_timing.finish()),
             diagnostics: self.diagnostics,
         })
     }
@@ -926,7 +945,7 @@ impl ResponseBuilder {
 /// Public, strict assembler for canonical events emitted by host-mediated
 /// provider transports.
 ///
-/// Native protocol codecs keep using the crate-private [`ResponseBuilder`].
+/// Native protocol codecs keep using the crate-private `ResponseBuilder`.
 /// This adapter intentionally exposes only canonical event ingestion: an
 /// integration cannot alter pricing, diagnostics, response snapshots, or the
 /// request tool-definition snapshot while a response is being assembled.
@@ -1246,746 +1265,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{AudioFormat, AudioMedia, AudioPayload, StopReason};
-    use futures_util::StreamExt;
-
-    #[tokio::test]
-    async fn test_response_builder_full() {
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-
-        builder
-            .on_event(&StreamEvent::Started {
-                response_id: Some("resp_1".to_string()),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::TextStart { index: 0 })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::TextDelta {
-                index: 0,
-                delta: "Hello ".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::TextDelta {
-                index: 0,
-                delta: "world!".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::TextEnd { index: 0 })
-            .unwrap();
-
-        builder
-            .on_event(&StreamEvent::MediaCompleted {
-                index: 1,
-                media: Media::Audio(AudioMedia {
-                    payload: AudioPayload::Inline(bytes::Bytes::from("voice")),
-                    format: AudioFormat::Wav,
-                    transcript: Some("hello".to_string()),
-                }),
-            })
-            .unwrap();
-
-        builder.set_stop_reason(StopReason::EndTurn);
-
-        let resp = builder.finish().unwrap();
-        assert_eq!(resp.response_id, Some("resp_1".to_string()));
-        assert_eq!(resp.message.content.len(), 2);
-        if let AssistantPart::Text(ref t) = resp.message.content[0] {
-            assert_eq!(t, "Hello world!");
-        } else {
-            panic!("Expected Text part first");
-        }
-    }
-
-    #[test]
-    fn response_builder_bounds_parts_events_and_aggregate_bytes() {
-        let mut parts = ResponseBuilder::new(ModelId("m".into()), Protocol::OpenAiChat, None);
-        for index in 0..MAX_RESPONSE_PARTS {
-            parts.on_event(&StreamEvent::TextStart { index }).unwrap();
-        }
-        assert!(matches!(
-            parts.on_event(&StreamEvent::TextStart {
-                index: MAX_RESPONSE_PARTS
-            }),
-            Err(AiError::Decode(DecodeError::TooManyResponseParts))
-        ));
-
-        let mut events = ResponseBuilder::new(ModelId("m".into()), Protocol::OpenAiChat, None);
-        for _ in 0..MAX_RESPONSE_EVENTS {
-            events
-                .on_event(&StreamEvent::Usage(Usage::default()))
-                .unwrap();
-        }
-        assert!(matches!(
-            events.on_event(&StreamEvent::Usage(Usage::default())),
-            Err(AiError::Decode(DecodeError::TooManyStreamEvents))
-        ));
-
-        let mut bytes = ResponseBuilder::new(ModelId("m".into()), Protocol::OpenAiChat, None);
-        bytes
-            .on_event(&StreamEvent::TextStart { index: 0 })
-            .unwrap();
-        let chunk = "x".repeat(1024 * 1024);
-        for _ in 0..64 {
-            bytes
-                .on_event(&StreamEvent::TextDelta {
-                    index: 0,
-                    delta: chunk.clone(),
-                })
-                .unwrap();
-        }
-        assert!(matches!(
-            bytes.on_event(&StreamEvent::TextDelta {
-                index: 0,
-                delta: "x".into()
-            }),
-            Err(AiError::Decode(DecodeError::ResponseTooLarge))
-        ));
-    }
-
-    fn opaque_reasoning_fixtures(payload: &str) -> Vec<(ReasoningState, usize)> {
-        use crate::types::ReasoningStateKind;
-        [
-            (
-                Protocol::AnthropicMessages,
-                ReasoningStateKind::AnthropicSignature {
-                    signature: payload.into(),
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::AnthropicMessages,
-                ReasoningStateKind::AnthropicRedacted {
-                    data: payload.into(),
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::BedrockConverse,
-                ReasoningStateKind::AnthropicSignature {
-                    signature: payload.into(),
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::BedrockConverse,
-                ReasoningStateKind::AnthropicRedacted {
-                    data: payload.into(),
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::OpenAiResponses,
-                ReasoningStateKind::OpenAiReasoning {
-                    item_id: Some(payload.into()),
-                    encrypted_content: None,
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::OpenAiResponses,
-                ReasoningStateKind::OpenAiReasoning {
-                    item_id: None,
-                    encrypted_content: Some(payload.into()),
-                },
-                payload.len(),
-            ),
-            (
-                Protocol::OpenAiResponses,
-                ReasoningStateKind::OpenAiReasoning {
-                    item_id: Some(payload.into()),
-                    encrypted_content: Some(payload.into()),
-                },
-                payload.len() * 2,
-            ),
-        ]
-        .into_iter()
-        .map(|(protocol, kind, bytes)| {
-            (
-                ReasoningState {
-                    protocol,
-                    model: ModelId("m".into()),
-                    kind,
-                },
-                bytes,
-            )
-        })
-        .collect()
-    }
-
-    #[test]
-    fn opaque_reasoning_bounds_replacement_and_error_preservation() {
-        for (((state, bytes), (larger, _)), (empty, _)) in opaque_reasoning_fixtures("é")
-            .into_iter()
-            .zip(opaque_reasoning_fixtures("éx"))
-            .zip(opaque_reasoning_fixtures(""))
-        {
-            let mut builder = ResponseBuilder::new(state.model.clone(), state.protocol, None);
-            // Synthetic existing content keeps boundary tests small.
-            builder
-                .add_content_bytes(MAX_RESPONSE_CONTENT_BYTES - bytes - 3)
-                .unwrap();
-            builder.reserve_buffered_content(3).unwrap();
-            builder.set_reasoning_state(0, state.clone()).unwrap();
-            assert_eq!(
-                builder.aggregate_content_bytes,
-                MAX_RESPONSE_CONTENT_BYTES - 3
-            );
-            let retained = serde_json::to_value(&builder.reasoning_states[&0]).unwrap();
-
-            // Repeating the same state must not accumulate its retained bytes.
-            builder.set_reasoning_state(0, state.clone()).unwrap();
-            assert_eq!(
-                builder.aggregate_content_bytes,
-                MAX_RESPONSE_CONTENT_BYTES - 3
-            );
-            for (index, replacement) in [(0, larger), (1, state.clone())] {
-                assert!(matches!(
-                    builder.set_reasoning_state(index, replacement),
-                    Err(AiError::Decode(DecodeError::ResponseTooLarge))
-                ));
-                assert_eq!(
-                    builder.aggregate_content_bytes,
-                    MAX_RESPONSE_CONTENT_BYTES - 3
-                );
-                assert_eq!(builder.buffered_content_bytes, 3);
-                assert_eq!(builder.reasoning_states.len(), 1);
-                assert_eq!(
-                    serde_json::to_value(&builder.reasoning_states[&0]).unwrap(),
-                    retained
-                );
-            }
-            builder.set_reasoning_state(0, empty).unwrap();
-            assert_eq!(
-                builder.aggregate_content_bytes,
-                MAX_RESPONSE_CONTENT_BYTES - bytes - 3
-            );
-            builder.set_reasoning_state(0, state).unwrap();
-            assert_eq!(
-                builder.aggregate_content_bytes,
-                MAX_RESPONSE_CONTENT_BYTES - 3
-            );
-            assert!(matches!(
-                builder.add_content_bytes(1),
-                Err(AiError::Decode(DecodeError::ResponseTooLarge))
-            ));
-        }
-    }
-
-    #[test]
-    fn opaque_reasoning_cross_variant_replacement_releases_old_bytes() {
-        let mut builder =
-            ResponseBuilder::new(ModelId("m".into()), Protocol::OpenAiResponses, None);
-        builder.add_content_bytes(7).unwrap();
-        for (state, bytes) in opaque_reasoning_fixtures("opaque") {
-            builder.set_reasoning_state(0, state).unwrap();
-            assert_eq!(builder.aggregate_content_bytes, 7 + bytes);
-        }
-        builder
-            .set_reasoning_state(
-                0,
-                ReasoningState {
-                    model: ModelId("m".into()),
-                    protocol: Protocol::OpenAiResponses,
-                    kind: crate::types::ReasoningStateKind::OpenAiReasoning {
-                        item_id: None,
-                        encrypted_content: None,
-                    },
-                },
-            )
-            .unwrap();
-        assert_eq!(builder.aggregate_content_bytes, 7);
-    }
-
-    #[test]
-    fn opaque_reasoning_temp_buffer_transfer_is_counted_once() {
-        for (state, bytes) in opaque_reasoning_fixtures("opaque") {
-            let mut builder = ResponseBuilder::new(state.model.clone(), state.protocol, None);
-            builder
-                .add_content_bytes(MAX_RESPONSE_CONTENT_BYTES - bytes)
-                .unwrap();
-            builder
-                .replace_temp_buffer("opaque".into(), "x".repeat(bytes))
-                .unwrap();
-            assert_eq!(builder.buffered_content_bytes, bytes);
-            assert_eq!(builder.take_temp_buffer("opaque").unwrap().len(), bytes);
-            assert_eq!(builder.buffered_content_bytes, 0);
-            builder.set_reasoning_state(0, state.clone()).unwrap();
-            builder.set_reasoning_state(0, state).unwrap();
-            assert_eq!(builder.aggregate_content_bytes, MAX_RESPONSE_CONTENT_BYTES);
-            assert!(builder.temp_buffers.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_response_builder_tool_call_invalid_json() {
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-
-        builder
-            .on_event(&StreamEvent::ToolCallStart {
-                async_execution: false,
-                index: 0,
-                id: ToolCallId("call_1".to_string()),
-                name: "grep".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallArgsDelta {
-                index: 0,
-                delta: "invalid-json".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallEnd {
-                index: 0,
-                argument_error: None,
-            })
-            .unwrap();
-
-        assert!(builder.finish().is_err());
-    }
-
-    #[test]
-    fn strict_optional_nulls_are_omitted_in_streamed_and_completed_calls() {
-        let definition = ToolDef {
-            async_execution: false,
-            name: "lookup".into(),
-            description: String::new(),
-            constrained_sampling: Some(crate::types::ConstrainedSampling::JsonSchema {
-                strict: crate::types::ConstrainedSamplingStrict::Require,
-            }),
-            parameters: serde_json::json!({"type":"object", "properties":{
-                "city":{"type":"string"}, "note":{"type":"string"},
-                "nullable":{"type":["string","null"]},
-                "rows":{"type":"array", "items":{"type":"object", "properties":{"optional":{"type":"integer"}}}},
-                "variant":{"anyOf":[{"type":"string"},{"type":"null"}]}
-            }, "required":["city"]}),
-        };
-        for explicit_end in [false, true] {
-            for strict in [false, true] {
-                let mut builder =
-                    ResponseBuilder::new(ModelId("test".into()), Protocol::OpenAiChat, None);
-                builder
-                    .set_tool_definitions(std::slice::from_ref(&definition))
-                    .unwrap();
-                builder.strict_tool_sampling = strict;
-                builder
-                    .on_event(&StreamEvent::ToolCallStart {
-                        index: 0,
-                        id: ToolCallId("call".into()),
-                        name: "lookup".into(),
-                        async_execution: false,
-                    })
-                    .unwrap();
-                builder.on_event(&StreamEvent::ToolCallArgsDelta { index:0,
-                    delta: serde_json::json!({"city":"Paris","note":null,"nullable":null,"rows":[{"optional":null}],"variant":null}).to_string() }).unwrap();
-                if explicit_end {
-                    builder
-                        .on_event(&StreamEvent::ToolCallEnd {
-                            index: 0,
-                            argument_error: None,
-                        })
-                        .unwrap();
-                }
-                builder.set_stop_reason(StopReason::ToolUse);
-                let response = builder.finish().unwrap();
-                let AssistantPart::ToolCall(call) = &response.message.content[0] else {
-                    panic!("tool call");
-                };
-                if strict {
-                    assert!(call.argument_error.is_none());
-                    assert_eq!(
-                        serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
-                        serde_json::json!({"city":"Paris","nullable":null,"rows":[{}],"variant":null})
-                    );
-                } else {
-                    assert_eq!(
-                        call.argument_error,
-                        Some(ToolCallArgumentError::SchemaMismatch)
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn replacing_tool_arguments_reclaims_preview_budget_and_fails_atomically() {
-        let mut builder = ResponseBuilder::new(ModelId("test".into()), Protocol::PiMessages, None);
-        builder
-            .on_event(&StreamEvent::ToolCallStart {
-                index: 0,
-                id: ToolCallId("id".into()),
-                name: "t".into(),
-                async_execution: false,
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallArgsDelta {
-                index: 0,
-                delta: "1234".into(),
-            })
-            .unwrap();
-        builder
-            .reserve_buffered_content(MAX_RESPONSE_CONTENT_BYTES - builder.aggregate_content_bytes)
-            .unwrap();
-        assert!(builder.replace_tool_arguments(0, "12345".into()).is_err());
-        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
-        builder.replace_tool_arguments(0, "{}".into()).unwrap();
-        builder.replace_tool_arguments(0, "1234".into()).unwrap();
-        assert!(builder
-            .replace_tool_arguments(0, "x".repeat(MAX_TOOL_ARGUMENT_BYTES + 1))
-            .is_err());
-        assert_eq!(builder.tool_call_builders[&0].arguments_json, "1234");
-    }
-
-    #[test]
-    fn schema_mismatch_marks_the_completed_event_and_retains_normalized_call() {
-        let definitions = [ToolDef {
-            async_execution: false,
-            constrained_sampling: None,
-            name: "strict".to_owned(),
-            description: String::new(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"count": {"type": "integer"}},
-                "required": ["count"],
-                "additionalProperties": false,
-            }),
-        }];
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-        builder.set_tool_definitions(&definitions).unwrap();
-        let mut events = Vec::new();
-        crate::protocol::emit_event(
-            &mut events,
-            &mut builder,
-            StreamEvent::ToolCallStart {
-                async_execution: false,
-                index: 0,
-                id: ToolCallId("call-canonical".to_owned()),
-                name: "strict".to_owned(),
-            },
-        )
-        .unwrap();
-        crate::protocol::emit_event(
-            &mut events,
-            &mut builder,
-            StreamEvent::ToolCallArgsDelta {
-                index: 0,
-                delta: r#"{"unexpected":"provider-secret","count":"bad"}"#.to_owned(),
-            },
-        )
-        .unwrap();
-        crate::protocol::emit_event(
-            &mut events,
-            &mut builder,
-            StreamEvent::ToolCallEnd {
-                index: 0,
-                argument_error: None,
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(
-            events.last(),
-            Some(StreamEvent::ToolCallEnd {
-                argument_error: Some(ToolCallArgumentError::SchemaMismatch),
-                ..
-            })
-        ));
-        builder.set_stop_reason(StopReason::ToolUse);
-        let response = builder.finish().unwrap();
-        let AssistantPart::ToolCall(call) = &response.message.content[0] else {
-            panic!("expected retained tool call");
-        };
-        assert_eq!(call.id.0, "call-canonical");
-        assert_eq!(
-            call.arguments_json,
-            r#"{"count":"bad","unexpected":"provider-secret"}"#
-        );
-        assert_eq!(
-            call.argument_error,
-            Some(ToolCallArgumentError::SchemaMismatch)
-        );
-    }
-
-    #[test]
-    fn max_token_response_retains_call_envelope_without_guessing_truncated_arguments() {
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-        builder
-            .on_event(&StreamEvent::ToolCallStart {
-                async_execution: false,
-                index: 0,
-                id: ToolCallId("call_truncated".to_string()),
-                name: "write".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallArgsDelta {
-                index: 0,
-                delta: r#"{"path":"src/main.rs","content":"unterminated"#.to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallEnd {
-                index: 0,
-                argument_error: None,
-            })
-            .unwrap();
-        builder.set_stop_reason(StopReason::MaxTokens);
-
-        let response = builder.finish().unwrap();
-        assert_eq!(response.stop_reason, StopReason::MaxTokens);
-        let AssistantPart::ToolCall(call) = &response.message.content[0] else {
-            panic!("expected retained tool call");
-        };
-        assert_eq!(call.id.0, "call_truncated");
-        assert_eq!(call.name, "write");
-        assert_eq!(call.arguments_json, "{}");
-        assert!(response
-            .diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.code == "discarded_truncated_tool_arguments" }));
-    }
-
-    #[test]
-    fn finish_mut_keeps_progress_when_strict_tool_argument_decode_fails() {
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-        builder.observe_provider_stream_event().unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallStart {
-                async_execution: false,
-                index: 0,
-                id: ToolCallId("call_bad".to_string()),
-                name: "write".to_string(),
-            })
-            .unwrap();
-        builder
-            .on_event(&StreamEvent::ToolCallArgsDelta {
-                index: 0,
-                delta: r#"{"content":"unterminated"#.to_string(),
-            })
-            .unwrap();
-
-        assert!(builder.finish_mut().is_err());
-        assert_eq!(builder.provider_event_count, 1);
-        assert!(builder.event_count >= 2);
-        assert!(builder.aggregate_content_bytes > 0);
-    }
-
-    #[tokio::test]
-    async fn test_response_builder_oversized_args() {
-        let mut builder = ResponseBuilder::new(
-            ModelId("test-model".to_string()),
-            Protocol::OpenAiChat,
-            None,
-        );
-
-        builder
-            .on_event(&StreamEvent::ToolCallStart {
-                async_execution: false,
-                index: 0,
-                id: ToolCallId("call_1".to_string()),
-                name: "grep".to_string(),
-            })
-            .unwrap();
-
-        let delta = "x".repeat(16 * 1024 * 1024 + 1);
-        let res = builder.on_event(&StreamEvent::ToolCallArgsDelta { index: 0, delta });
-        assert!(matches!(
-            res,
-            Err(AiError::Decode(DecodeError::ToolArgumentsTooLarge))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_guard_missing_start() {
-        let raw_stream = futures_util::stream::iter(vec![Ok(StreamEvent::TextStart { index: 0 })]);
-        let mut guarded = guard(raw_stream);
-        let res = guarded.next().await.unwrap();
-        assert!(matches!(
-            res,
-            Err(AiError::StreamProtocol(StreamProtocolError::MissingStart))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_guard_rejects_lifecycle_before_start() {
-        let raw_stream = futures_util::stream::iter(vec![Ok(StreamEvent::ProviderLifecycle(
-            ProviderLifecycle {
-                state: ProviderLifecycleState::Loading,
-                detail: Some("warming".into()),
-            },
-        ))]);
-        let mut guarded = guard(raw_stream);
-        let res = guarded.next().await.unwrap();
-        assert!(matches!(
-            res,
-            Err(AiError::StreamProtocol(StreamProtocolError::MissingStart))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_guard_duplicate_start() {
-        let raw_stream = futures_util::stream::iter(vec![
-            Ok(StreamEvent::Started { response_id: None }),
-            Ok(StreamEvent::Started { response_id: None }),
-        ]);
-        let mut guarded = guard(raw_stream);
-        let _started = guarded.next().await.unwrap();
-        let res = guarded.next().await.unwrap();
-        assert!(matches!(
-            res,
-            Err(AiError::StreamProtocol(StreamProtocolError::DuplicateStart))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_drop_cancels_inner_stream() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        struct DropStream {
-            yielded: bool,
-            dropped: Arc<AtomicBool>,
-        }
-        impl futures_core::Stream for DropStream {
-            type Item = Result<StreamEvent, AiError>;
-
-            fn poll_next(
-                mut self: std::pin::Pin<&mut Self>,
-                _cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Option<Self::Item>> {
-                if self.yielded {
-                    std::task::Poll::Pending
-                } else {
-                    self.yielded = true;
-                    std::task::Poll::Ready(Some(Ok(StreamEvent::Started { response_id: None })))
-                }
-            }
-        }
-        impl Drop for DropStream {
-            fn drop(&mut self) {
-                self.dropped.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let dropped = Arc::new(AtomicBool::new(false));
-        let mut guarded = guard(DropStream {
-            yielded: false,
-            dropped: dropped.clone(),
-        });
-        assert!(matches!(
-            guarded.next().await,
-            Some(Ok(StreamEvent::Started { .. }))
-        ));
-        drop(guarded);
-        assert!(dropped.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn canonical_assembler_keeps_final_response_host_owned() {
-        let mut assembler = CanonicalStreamAssembler::new(
-            ModelId("host-model".to_owned()),
-            Protocol::OpenAiChat,
-            None,
-            &[],
-        )
-        .expect("valid assembler");
-        assert!(matches!(
-            assembler.push(StreamEvent::TextStart { index: 0 }),
-            Err(AiError::StreamProtocol(StreamProtocolError::MissingStart))
-        ));
-        assembler
-            .push(StreamEvent::Started {
-                response_id: Some("response-1".to_owned()),
-            })
-            .expect("started");
-        assembler
-            .push(StreamEvent::ProviderLifecycle(ProviderLifecycle {
-                state: ProviderLifecycleState::Loading,
-                detail: Some("warming".to_owned()),
-            }))
-            .expect("lifecycle feedback");
-        assembler
-            .push(StreamEvent::TextStart { index: 0 })
-            .expect("text start");
-        assembler
-            .push(StreamEvent::TextDelta {
-                index: 0,
-                delta: "hello".to_owned(),
-            })
-            .expect("text delta");
-        assembler
-            .push(StreamEvent::TextEnd { index: 0 })
-            .expect("text end");
-        let response = assembler.finish(StopReason::EndTurn).expect("finished");
-        assert_eq!(response.response_id.as_deref(), Some("response-1"));
-        assert!(matches!(
-            response.message.content.as_slice(),
-            [AssistantPart::Text(text)] if text == "hello"
-        ));
-        assert!(matches!(
-            assembler.push(StreamEvent::Started { response_id: None }),
-            Err(AiError::StreamProtocol(
-                StreamProtocolError::EventAfterFinish
-            ))
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_guard_event_after_finish() {
-        let raw_stream = futures_util::stream::iter(vec![
-            Ok(StreamEvent::Started { response_id: None }),
-            Ok(StreamEvent::Finished(Response {
-                message: AssistantMessage {
-                    content: vec![],
-                    model: ModelId("m".to_string()),
-                    protocol: Protocol::OpenAiChat,
-                },
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
-                cost: None,
-                response_id: None,
-                responses_output: None,
-                deferred: None,
-                diagnostics: vec![],
-            })),
-            Ok(StreamEvent::TextStart { index: 0 }),
-        ]);
-        let mut guarded = guard(raw_stream);
-        let _started = guarded.next().await.unwrap();
-        let _finished = guarded.next().await.unwrap();
-        let res = guarded.next().await.unwrap();
-        assert!(matches!(
-            res,
-            Err(AiError::StreamProtocol(
-                StreamProtocolError::EventAfterFinish
-            ))
-        ));
-    }
-}
+mod tests;

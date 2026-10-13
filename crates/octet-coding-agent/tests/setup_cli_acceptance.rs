@@ -464,6 +464,8 @@ fn cli_setup_discovers_selected_model_uses_env_credential_and_matches_tui_receip
             "EXAMPLE_API_KEY",
             "--model",
             "fixture-model",
+            "--context-window",
+            "32768",
             "--yes",
         ])
         .env("EXAMPLE_API_KEY", SECRET);
@@ -527,6 +529,8 @@ fn cli_setup_manual_review_cancel_and_offline_paths_do_not_probe_or_prompt() {
             "--offline",
             "--manual-model",
             "review-model",
+            "--context-window",
+            "32768",
         ],
     );
     assert!(review.status.success(), "review failed: {}", review.stderr);
@@ -575,6 +579,8 @@ fn cli_setup_manual_review_cancel_and_offline_paths_do_not_probe_or_prompt() {
             "--offline",
             "--manual-model",
             "manual-model",
+            "--context-window",
+            "32768",
             "--no-auth",
             "--yes",
         ],
@@ -675,6 +681,8 @@ fn cli_setup_rejects_a_concurrent_registry_change_instead_of_overwriting_it() {
         "race",
         "--model",
         "fixture-model",
+        "--context-window",
+        "32768",
         "--yes",
     ]);
     let child = spawn_captured(command);
@@ -769,7 +777,13 @@ fn selected_route_trace_brackets_inventory_after_the_cheap_base_phase() {
         if selected_inventory {
             expected.push("catalog.selected");
         }
-        expected.extend(["catalog.codex", "catalog.copilot"]);
+        expected.extend([
+            "catalog.codex",
+            "catalog.copilot",
+            // The shared subscription logins bracket their own phase so a
+            // slow one is attributable rather than hidden inside "catalog.base".
+            "catalog.subscriptions",
+        ]);
         assert_eq!(phases, expected, "{}", output.stderr);
         assert_no_prompt(&output);
         assert_secret_free(&output);
@@ -788,7 +802,7 @@ fn no_session_rpc_preserves_both_sessions_accounting_before_discarding_transcrip
         fixture.registry_path(),
         serde_json::json!({
             "base_url":"http://127.0.0.1:9/v1/", "api_key":"", "api_name":"probe",
-            "auto_discover":false, "models":[{"api_name":"probe"}],
+            "auto_discover":false, "models":[{"api_name":"probe", "context_window": 32768}],
         })
         .to_string(),
     )

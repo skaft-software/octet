@@ -18,6 +18,7 @@ import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from octet_computer_use.driver_client import DriverClient, McpError, ToolInfo
+from octet_computer_use.jev_use_binding import TOOLS as JEV_USE_TOOLS, PREFIX as JEV_USE_PREFIX
 
 
 # Driver tools republished as octet tools. Each entry names the driver tool and
@@ -25,7 +26,7 @@ from octet_computer_use.driver_client import DriverClient, McpError, ToolInfo
 # have been started, but never raise a confirmation.
 PUBLISHED_TOOLS: Sequence[Tuple[str, str, str]] = (
     ("computer_use_status", "read_driver_health", "Report whether the Cua Driver is provisioned, its version, and OS permission status without changing anything."),
-    ("computer_use_setup", "provision", "Provision the MIT-licensed Cua Driver into octet-owned state. Downloads from the configured package index."),
+    ("computer_use_setup", "provision", "Provision the MIT-licensed Cua Driver into octet-owned state. Downloads from the package index and, on macOS, installs its verified signed host from Cua releases when needed."),
     ("computer_use_installed_apps", "list_apps", "List installed and running applications available to the driver."),
     ("computer_use_windows", "list_windows", "List top-level windows currently known to the desktop session."),
         ("computer_use_window_state", "get_window_state", "Return one window's accessibility tree, with a screenshot when include_screenshot is true. Re-snapshot before each element-indexed action."),
@@ -42,6 +43,11 @@ PUBLISHED_TOOLS: Sequence[Tuple[str, str, str]] = (
     ("computer_use_end_session", "end_session", "End a driver session and run its cleanup hooks."),
     ("computer_use_jev_status", "jev_status", "Report whether the optional Jev action chooser is installed and configured. Never returns the API key."),
     ("computer_use_jev_choose", "jev_choose", "Ask Jev to pick one offered candidate id, including reobserve or abstain. Returns a suggestion only; it does not execute or verify an action."),
+)
+
+PUBLISHED_TOOLS = tuple(PUBLISHED_TOOLS) + tuple(
+    (JEV_USE_PREFIX + operation, "jev_use_" + operation, description)
+    for operation, (description, _schema) in JEV_USE_TOOLS.items()
 )
 
 # Argument allowlists per published tool. Anything not named is dropped before
@@ -85,6 +91,12 @@ _ARGUMENTS: Dict[str, Sequence[str]] = {
     "start_session": ("session", "capture_scope"),
     "end_session": ("session",),
 }
+
+# Local recipe tools are validated by their binding and never reach Driver.
+_ARGUMENTS.update({
+    "jev_use_" + operation: tuple(schema["properties"])
+    for operation, (_description, schema) in JEV_USE_TOOLS.items()
+})
 
 # Ceilings applied to forwarded arguments.
 MAX_TEXT_BYTES = 4096
@@ -204,7 +216,7 @@ def sanitize(driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
             if driver_tool == "move_cursor" and coordinate < 0:
                 raise ArgumentError(f"{name} must be a non-negative window-local coordinate")
             forwarded[name] = coordinate
-        elif name in {"include_screenshot", "include_accessibility_tree"}:
+        elif name in {"include_screenshot", "include_accessibility_tree", "on_screen_only"}:
             if not isinstance(value, bool):
                 raise ArgumentError(f"{name} must be a boolean")
             forwarded[name] = value

@@ -1,13 +1,10 @@
 //! Native-scrollback commit boundaries for the rendered transcript.
 
-use std::time::Instant;
-
 use sexy_tui_rs::{CommitCursor, CommitPosition, PinnedFrame};
 
 use super::bash_render::bash_output_changes_when_expanded;
 use super::tool_render::tool_diff;
-use super::welcome_card::welcome_animating;
-use super::{ShellState, ToolPanel, TranscriptBlock, COMPACT_EXEC_OUTPUT_ROWS};
+use super::{ShellState, ToolPanel, TranscriptBlock};
 
 pub(super) const FINAL_COMMIT_SEGMENT: u64 = u64::MAX;
 
@@ -118,15 +115,11 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
     }
 
     let disclosure_sensitive = match panel.name.as_str() {
+        // Both the source preview and the output preview can expand.
+        "codemode" => true,
         "bash" | "exec" => {
             panel.display.shell_command.is_some() && bash_output_changes_when_expanded(panel)
         }
-        "search" if !panel.is_error => panel
-            .output
-            .lines()
-            .filter(|line| !line.trim().is_empty() && *line != "(no output)")
-            .nth(COMPACT_EXEC_OUTPUT_ROWS)
-            .is_some(),
         // Rendering determines diff truncation after width-dependent wrap.
         // A recognized diff is therefore kept atomic conservatively.
         "edit" | "write" if !panel.is_error => tool_diff(panel).is_some(),
@@ -154,10 +147,6 @@ fn finalized_block_rows_are_stable(block: &TranscriptBlock) -> bool {
 }
 
 fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>) -> usize {
-    if welcome_animating(state, Instant::now()) {
-        return 0;
-    }
-
     // Semantic acknowledgement proves the earlier prefix is already terminal
     // owned. Resume classification at that block instead of rescanning a long
     // settled transcript on every streaming tick.
@@ -227,9 +216,6 @@ fn transcript_commit_target(
     maximum_row: usize,
     acknowledged: Option<CommitCursor>,
 ) -> Option<CommitPosition> {
-    if welcome_animating(state, Instant::now()) {
-        return None;
-    }
     let cache = state.transcript_cache.borrow();
     let mut target = None;
     let start_block = acknowledged
@@ -323,7 +309,9 @@ mod tests {
     use crate::presentation::summarize_tool;
     use octet_ai::ToolCallId;
 
-    use super::super::{AssistantBlock, CompactionBlock, ShellOutput, ToolPanel};
+    use super::super::{
+        AssistantBlock, CompactionBlock, ShellOutput, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS,
+    };
 
     #[test]
     fn exploration_summary_is_not_committed_before_failure_settles() {
@@ -333,7 +321,6 @@ mod tests {
         state.start_activity_group(crate::hydrate::ToolActivityGroup {
             member_ids: vec![read.clone(), bash.clone()],
             read_files: 1,
-            searches: 0,
             commands: 1,
             file_paths: vec!["file.rs".into()],
             ..Default::default()
@@ -386,6 +373,14 @@ mod tests {
             .join("\n");
         let six_lines = format!("{five_lines}\nline 5");
 
+        let codemode = finalized_tool(
+            "codemode",
+            serde_json::json!({"code":"return 1"}),
+            "short output",
+            false,
+        );
+        assert!(!finalized_block_rows_are_stable(&codemode));
+
         let short_bash = finalized_tool(
             "bash",
             serde_json::json!({"command": "printf short"}),
@@ -407,21 +402,6 @@ mod tests {
         assert!(!finalized_block_rows_are_stable(&short_bash));
         assert!(!finalized_block_rows_are_stable(&long_bash));
         assert!(!finalized_block_rows_are_stable(&failed_bash));
-
-        let short_search = finalized_tool(
-            "search",
-            serde_json::json!({"query": "needle", "path": "."}),
-            &five_lines,
-            false,
-        );
-        let long_search = finalized_tool(
-            "search",
-            serde_json::json!({"query": "needle", "path": "."}),
-            &six_lines,
-            false,
-        );
-        assert!(finalized_block_rows_are_stable(&short_search));
-        assert!(!finalized_block_rows_are_stable(&long_search));
 
         let diff = finalized_tool(
             "edit",

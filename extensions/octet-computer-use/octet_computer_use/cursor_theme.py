@@ -1,16 +1,19 @@
 """Bundled Cua cursor themes matching Octet's stable model-prompt palette.
 
-Theme installation is a trusted local setup operation, never an agent-facing
-Cua tool. Custom Cua themes are static; selecting a different installed theme
-on the next Octet tool boundary follows a model switch without recompilation.
+Theme installation is a trusted local operation, never an agent-facing Cua
+tool, and it only ever installs the reviewed artifacts bundled here. Custom Cua
+themes are static; selecting a different installed theme on the next Octet tool
+boundary follows a model switch without recompilation.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import platform
 import subprocess
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 THEMES = Path(__file__).resolve().parent.parent / "themes"
 PALETTE = json.loads((THEMES / "palette.json").read_text(encoding="utf-8"))
@@ -77,9 +80,121 @@ def theme_id(lab: str) -> str:
     return PALETTE[lab]["id"]
 
 
+# The compiled-artifact header Cua Driver accepts: an 8-byte magic followed by
+# a little-endian u16 artifact version. The driver fully re-validates every
+# artifact when it loads one; this check only keeps a stale bundle from being
+# written into its store.
+_ARTIFACT_MAGIC = b"CUATHEM3"
+_ARTIFACT_VERSION = 3
+_MAX_ARTIFACT_BYTES = 24 * 1024 * 1024 + 46
+
+
+def _sidecar(binary: Path) -> Optional[Path]:
+    """Cua's ``cua-cursor-theme`` compiler beside the driver, if shipped.
+
+    Every ``cua-driver cursor-theme`` subcommand delegates to it. Cua's app
+    bundles ship it; the ``cua-driver`` wheels do not.
+    """
+
+    name = "cua-cursor-theme.exe" if platform.system() == "Windows" else "cua-cursor-theme"
+    candidate = Path(binary).parent / name
+    return candidate if candidate.is_file() else None
+
+
+def theme_store_root() -> Optional[Path]:
+    """Where Cua Driver loads installed themes from, mirroring its own lookup.
+
+    Returns None where the store is not resolvable from this process.
+    """
+
+    override = os.environ.get("CUA_DRIVER_CURSOR_THEME_DIR")
+    if override:
+        path = Path(override)
+        return path if path.is_absolute() else None
+    system = platform.system()
+    if system == "Windows":
+        root = os.environ.get("LOCALAPPDATA")
+        return Path(root) / "Cua Driver" / "cursor-themes" if root else None
+    home = os.environ.get("HOME")
+    if system == "Darwin":
+        return (Path(home) / "Library" / "Application Support" / "Cua Driver"
+                / "cursor-themes") if home else None
+    data = os.environ.get("XDG_DATA_HOME")
+    if data:
+        return Path(data) / "cua-driver" / "cursor-themes"
+    return Path(home) / ".local" / "share" / "cua-driver" / "cursor-themes" if home else None
+
+
+def _bundled_artifact(lab: str) -> bytes:
+    artifact = THEMES / (lab + ".cua-theme")
+    if not artifact.is_file():
+        raise RuntimeError(f"bundled cursor theme is missing: {lab}")
+    data = artifact.read_bytes()
+    if (len(data) > _MAX_ARTIFACT_BYTES or data[:8] != _ARTIFACT_MAGIC
+            or int.from_bytes(data[8:10], "little") != _ARTIFACT_VERSION):
+        raise RuntimeError(f"bundled cursor theme {lab} is not a Cua v{_ARTIFACT_VERSION} artifact")
+    return data
+
+
+def _store_install(root: Path) -> int:
+    """Install every bundled artifact into the driver's theme store.
+
+    This is exactly what ``cua-driver cursor-theme install`` does after its own
+    validation: an atomic write of ``<id>.cua-theme`` into the store. The driver
+    decodes and validates each file again whenever it loads one, so a copy it
+    would reject is never shown. An identical file is left untouched, and an
+    outdated one is replaced.
+    """
+
+    if root.is_symlink():
+        raise RuntimeError("the Cua cursor-theme store must not be a symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    installed = 0
+    for lab, entry in PALETTE.items():
+        data = _bundled_artifact(lab)
+        target = root / (entry["id"] + ".cua-theme")
+        if target.is_symlink():
+            raise RuntimeError(f"installed cursor theme {entry['id']} must not be a symlink")
+        try:
+            current = target.read_bytes() if target.is_file() else None
+        except OSError:
+            current = None
+        if current != data:
+            staged = root / (".%s.%d.tmp" % (entry["id"], os.getpid()))
+            try:
+                staged.write_bytes(data)
+                os.replace(staged, target)
+            finally:
+                if staged.exists():
+                    staged.unlink()
+        installed += 1
+    return installed
+
+
+def _store_ids(root: Path) -> set[str]:
+    ids = {"cua.default"}
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return ids
+    for entry in entries:
+        if entry.name.endswith(".cua-theme") and entry.is_file() and not entry.is_symlink():
+            ids.add(entry.name[: -len(".cua-theme")])
+    return ids
+
+
 def installed_theme_ids(binary: Path) -> set[str]:
+    if _sidecar(binary) is None:
+        root = theme_store_root()
+        if root is None:
+            raise ValueError("the Cua cursor-theme store is not resolvable")
+        return _store_ids(root)
+    # stdin is never inherited: inside octet it is the protocol pipe (see
+    # driver._run).
     result = subprocess.run([str(binary), "cursor-theme", "list", "--json"],
-                            capture_output=True, text=True, timeout=15, check=True)
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=15, check=True)
     ids = json.loads(result.stdout)
     if not isinstance(ids, list) or not all(isinstance(value, str) for value in ids):
         raise ValueError("invalid Cua cursor-theme inventory")
@@ -87,12 +202,19 @@ def installed_theme_ids(binary: Path) -> set[str]:
 
 
 def install_bundled_themes(binary: Path) -> int:
-    """Install only reviewed, bundled artifacts from an explicit local setup.
+    """Install only reviewed, bundled artifacts.
 
-    The driver CLI validates each artifact again. No caller-supplied path, source,
-    or color reaches the installer. Existing same-ID installs are accepted.
+    With Cua's compiler present, the driver CLI validates and installs each
+    artifact. The pip-provisioned driver has no compiler, so its store receives
+    the same atomic file install directly. No caller-supplied path, source, or
+    color reaches either route. Existing same-ID installs are accepted.
     """
 
+    if _sidecar(binary) is None:
+        root = theme_store_root()
+        if root is None:
+            raise RuntimeError("the Cua cursor-theme store is not resolvable")
+        return _store_install(root)
     installed = 0
     for lab in PALETTE:
         artifact = THEMES / (lab + ".cua-theme")
@@ -100,7 +222,9 @@ def install_bundled_themes(binary: Path) -> int:
             raise RuntimeError(f"bundled cursor theme is missing: {lab}")
         command = subprocess.run(
             [str(binary), "cursor-theme", "install", str(artifact)],
-            capture_output=True, text=True, timeout=30, check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30, check=False,
         )
         if command.returncode != 0:
             raise RuntimeError(f"cursor theme {lab} installation failed: "

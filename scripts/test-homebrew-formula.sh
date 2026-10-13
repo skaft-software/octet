@@ -61,7 +61,6 @@ required = (
     'on_arm do',
     'on_intel do',
     'depends_on :macos',
-    'depends_on "ripgrep"',
     'bin.install File.join(root, "octet")',
     'bin.install File.join(root, "octet-host")',
     'sha256 "',
@@ -69,6 +68,8 @@ required = (
 for marker in required:
     if marker not in formula:
         raise SystemExit(f"formula is missing required Homebrew contract: {marker}")
+if 'depends_on "ripgrep"' in formula:
+    raise SystemExit("formula must not require the optional ripgrep search helper")
 if "Cargo.toml" in formula or "api.github.com" in formula:
     raise SystemExit("formula contains a mutable release source")
 PY
@@ -122,7 +123,16 @@ if python3 "$generator" "$work_directory/bad.json" --assets-dir "$fixture_direct
     exit 1
 fi
 
-if rg -n 'Cargo\.toml|api\.github\.com|releases/latest|gh release|curl ' "$generator"; then
+if command -v rg >/dev/null 2>&1; then
+    search=(rg -n)
+else
+    command -v grep >/dev/null 2>&1 || {
+        echo "Homebrew formula validation requires rg or grep" >&2
+        exit 1
+    }
+    search=(grep -E -n)
+fi
+if "${search[@]}" 'Cargo\.toml|api\.github\.com|releases/latest|gh release|curl ' "$generator"; then
     echo "formula generator contains a mutable release lookup" >&2
     exit 1
 fi

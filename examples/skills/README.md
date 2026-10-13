@@ -15,14 +15,14 @@ loaded lazily and only for an active skill.
 ## Repro First
 
 Before activating [Repro First](repro-first/SKILL.md), explicitly select
-`read,search,bash` as the session's tool set. `search` is opt-in; loading the skill
-does not replace that separate tool-selection choice.
+`read,bash` as the session's tool set. Content search uses `rg` through `bash`;
+loading the skill does not replace that separate tool-selection choice.
 
 This selection provides neither a read-only guarantee nor an OS sandbox.
 `bash` executes commands under the host's permissions and approval policy.
 
 ```sh
-octet --tools read,search,bash
+octet --tools read,bash
 ```
 
 Then use `/skills` to select the reviewed skill.

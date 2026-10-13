@@ -723,6 +723,11 @@ impl CopilotResolver {
 
 #[async_trait::async_trait]
 impl CredentialResolver for CopilotResolver {
+    // A GitHub device-flow login exchanged for short-lived inference tokens.
+    fn is_oauth(&self) -> Option<bool> {
+        Some(true)
+    }
+
     async fn resolve(&self) -> Result<ResolvedCredential, octet_ai::AuthError> {
         // Serialize exchange/refresh so concurrent request starts cannot fan out
         // into multiple device-session exchanges. Holding this async mutex is

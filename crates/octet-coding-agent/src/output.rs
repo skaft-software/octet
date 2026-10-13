@@ -41,6 +41,47 @@ pub(crate) enum DiagnosticComponent {
     Keybindings(String),
 }
 
+impl DiagnosticComponent {
+    /// Whether a problem from this component is worth the user's attention.
+    ///
+    /// Only what the user must act on, or what reports the failure of something
+    /// they asked for, is shown: unreadable credentials or registries, an
+    /// invalid pin or override, a rejected resource, a keybinding conflict.
+    /// Best-effort background work (model inventory and metadata caches, model
+    /// discovery, provider registration and merging, optional local probes) is
+    /// not: an unreachable provider reports its real error when one of its
+    /// models is used, and a stale cache heals on its own.
+    pub(crate) fn is_user_relevant(&self) -> bool {
+        const BACKGROUND: &[&str] = &[
+            "inventory-cache",
+            "inventory-write",
+            "custom-cache",
+            "custom-cache-write",
+            "custom-discovery",
+            "custom-merge",
+            "codex-cache",
+            "codex-cache-write",
+            "codex-discovery",
+            "codex-inventory",
+            "codex-registration",
+            "copilot-registration",
+            "provider-spawn",
+            "provider-merge",
+            "apple-foundation",
+            "openrouter-offline",
+        ];
+        match self {
+            Self::Resource(_) | Self::Keybindings(_) => true,
+            Self::Bootstrap(name) => {
+                let family = name.split(':').next().unwrap_or(name);
+                !(BACKGROUND.contains(&family)
+                    || family.ends_with("-inventory")
+                    || family.ends_with("-registration"))
+            }
+        }
+    }
+}
+
 /// Only automatic passes suppress unchanged problems. Plain/print and explicit
 /// checks keep chronological feedback; work-loss events use stderr directly.
 pub(crate) struct AutomaticDiagnostics(bool);
@@ -113,6 +154,9 @@ pub(crate) fn checked_diagnostics(
     messages: Vec<String>,
     checked: bool,
 ) {
+    if !component.is_user_relevant() {
+        return;
+    }
     let terminal = io::stderr().is_terminal();
     let mut route = TUI_DIAGNOSTICS
         .lock()
@@ -563,5 +607,42 @@ mod tests {
         assert!(rendered.contains("first\nsecond\tvalue"));
         assert!(!rendered.contains('\x1b'));
         assert!(!rendered.contains('\x07'));
+    }
+
+    #[test]
+    fn only_actionable_components_are_shown_and_background_work_is_quiet() {
+        let relevant = |name: &str| DiagnosticComponent::Bootstrap(name.into()).is_user_relevant();
+        for shown in [
+            "custom-registry",
+            "provider-credential:openai",
+            "provider-pin:openai",
+            "custom-provider:home",
+            "reasoning-migration",
+            "codex-context-override",
+            "session-workspace-marker",
+        ] {
+            assert!(relevant(shown), "{shown} needs the user");
+        }
+        for quiet in [
+            "inventory-cache:openai",
+            "inventory-write:openai",
+            "custom-cache:home",
+            "custom-cache-write:home",
+            "custom-discovery:home",
+            "codex-cache",
+            "codex-discovery",
+            "codex-registration",
+            "copilot-registration",
+            "apple-foundation",
+            "openrouter-offline",
+            "provider-spawn:xai",
+            "provider-merge:xai",
+            "xai-inventory",
+            "xai-registration",
+        ] {
+            assert!(!relevant(quiet), "{quiet} is background work");
+        }
+        assert!(DiagnosticComponent::Resource("skills").is_user_relevant());
+        assert!(DiagnosticComponent::Keybindings("user".into()).is_user_relevant());
     }
 }

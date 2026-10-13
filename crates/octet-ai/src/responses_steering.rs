@@ -163,7 +163,7 @@ where
                         };
                         if let Some(update) = update { publish(&command.reply, update).await?; }
                         if let Some(id) = &current {
-                            send_waiting(socket, &command.reply, ledger, id, command.liveness.acknowledgement_timeout).await?;
+                            send_waiting(socket, &command.reply, ledger, id, command.liveness.acknowledgement_timeout, command.trace.as_ref()).await?;
                         }
                     }
                     Some(Command::Continue { mut body, request: next_request, reply }) => {
@@ -174,6 +174,9 @@ where
                         let object = body.as_object_mut().ok_or_else(|| invalid("continuation body must be an object"))?;
                         object.insert("type".into(), Value::String("response.create".into()));
                         object.insert("previous_response_id".into(), Value::String(current.clone().expect("checked response")));
+                        if let Some(trace) = &command.trace {
+                            trace.request("websocket", body.get("model").and_then(Value::as_str).unwrap_or(""), &body);
+                        }
                         let sent = send_json(socket, body, command.liveness.acknowledgement_timeout).await;
                         if let Err(error) = sent {
                             let _ = reply.send(Err(invalid("continuation send failed; acceptance unknown")));
@@ -266,6 +269,7 @@ where
                 ledger,
                 id,
                 command.liveness.acknowledgement_timeout,
+                command.trace.as_ref(),
             )
             .await?;
         }
@@ -278,6 +282,7 @@ async fn send_waiting<S>(
     ledger: &Ledger,
     current: &str,
     timeout: Duration,
+    trace: Option<&crate::request_trace::RequestTrace>,
 ) -> Result<(), AiError>
 where
     S: futures_util::Sink<Message, Error = tungstenite::Error> + Unpin,
@@ -302,7 +307,11 @@ where
             return Ok(());
         };
         publish(reply, update).await?;
-        send_json(socket, serde_json::json!({"type":"response.steer", "previous_response_id":current, "input":input}), timeout).await?;
+        let frame = serde_json::json!({"type":"response.steer", "previous_response_id":current, "input":input});
+        if let Some(trace) = trace {
+            trace.request("websocket", "", &frame);
+        }
+        send_json(socket, frame, timeout).await?;
     }
 }
 
@@ -329,19 +338,35 @@ async fn process(
         return Err(protocol("reserved steering event type"));
     }
     if kind.starts_with("response.steer.") {
-        if bounded_event_size(&value, 64 * 1024).is_none() {
+        // A failure echoes the admitted input. JSON escapes can use six bytes
+        // per input byte; retain the ordinary envelope bound in addition.
+        let limit = if kind == "response.steer.failed" {
+            64 * 1024 + 6 * crate::steering::MAX_INPUT_BYTES
+        } else {
+            64 * 1024
+        };
+        if bounded_event_size(&value, limit).is_none() {
             return Err(crate::DecodeError::ResponseTooLarge.into());
         }
         let steer = value
             .get("steer")
             .ok_or_else(|| protocol("missing steering envelope"))?;
-        let id = identifier(steer.get("id"))?;
+        // Rejections before allocation have no ID. Accepted/pending input
+        // always has one; a post-acceptance failure must retain that same ID.
+        let id = match (kind, steer.get("id")) {
+            ("response.steer.failed", None | Some(Value::Null)) => None,
+            (_, value) => Some(identifier(value)?),
+        };
         let parent = identifier(steer.get("previous_response_id"))?;
         let update = {
             let mut entries = ledger.lock().unwrap_or_else(|p| p.into_inner());
-            let index = entries
-                .iter()
-                .position(|e| e.update.steer_id.as_ref() == Some(&id))
+            let index = id
+                .as_ref()
+                .and_then(|id| {
+                    entries
+                        .iter()
+                        .position(|e| e.update.steer_id.as_ref() == Some(id))
+                })
                 .or_else(|| {
                     entries.iter().position(|e| {
                         e.sent
@@ -375,7 +400,13 @@ async fn process(
                     if entry.update.steer_id.is_none() {
                         return Err(protocol("pending steering was not accepted"));
                     }
-                    *needs_client_input = true;
+                    // Pending reasons are extensible. An unknown reason alone
+                    // does not authorize an explicit response.create.
+                    if value.get("reason").and_then(Value::as_str)
+                        == Some("waiting_for_required_input")
+                    {
+                        *needs_client_input = true;
+                    }
                     entry.update.state = SteeringState::Pending {
                         required_input: value.get("required_input").cloned().unwrap_or(Value::Null),
                     };
@@ -395,7 +426,7 @@ async fn process(
                 }
                 _ => return Err(protocol("unknown steering acknowledgement")),
             }
-            entry.update.steer_id = Some(id);
+            entry.update.steer_id = id;
             entry.update.clone()
         };
         publish(&command.reply, update).await?;

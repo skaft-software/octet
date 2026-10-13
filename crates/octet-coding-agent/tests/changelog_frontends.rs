@@ -49,7 +49,7 @@ async fn invoke(frontend: Frontend, input: &str, template: Option<&str>) -> (Out
         json!({
             "base_url": format!("{}/v1/", server.uri()),
             "api_key": "", "api_name": "probe", "headers": [],
-            "models": [], "auto_discover": false,
+            "models": [{"api_name": "probe", "context_window": 32768}], "auto_discover": false,
         })
         .to_string(),
     )

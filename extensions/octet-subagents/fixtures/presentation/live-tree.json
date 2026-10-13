@@ -92,7 +92,7 @@
     "detail": {
       "node_id": "worker:agent-2",
       "title": "parent > inspect-tests",
-      "body": "State: done\nWorker: inspect-tests (agent-2)\nRequested tool policy: read-only [read, search]\nSandbox/approval/environment/extensions: inherited and host-enforced.\nExact host-observed final summary:\nTests cover the owner boundary.",
+      "body": "State: done\nWorker: inspect-tests (agent-2)\nRequested tool policy: read-only [read]\nSandbox/approval/environment/extensions: inherited and host-enforced.\nExact host-observed final summary:\nTests cover the owner boundary.",
       "references": [
         {
           "kind": "session",

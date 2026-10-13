@@ -44,6 +44,27 @@ fn paste_classification_checks_paths_before_size() {
 }
 
 #[test]
+fn path_led_multiline_prompts_stay_verbatim_pastes_and_classify_as_paths() {
+    let prompt = "/Users/example/project/new-file.txt\n\nPlease review this destination.";
+    assert_eq!(classify_paste(prompt), PasteKind::Verbatim);
+    assert!(looks_like_absolute_path(prompt));
+
+    // Explicit shell quoting/escaping disambiguates missing one-component
+    // destinations from slash commands without creating test files.
+    assert!(looks_like_absolute_path(
+        "\"/octet-missing-path-with-space\"\n\nCreate this file."
+    ));
+    assert!(looks_like_absolute_path(
+        "/octet-missing-path\\ with-space\n\nCreate this file."
+    ));
+
+    // An unknown one-segment slash name remains on the slash-command path.
+    assert!(!looks_like_absolute_path(
+        "/unknown-command\n\nPlease explain this command."
+    ));
+}
+
+#[test]
 fn media_batch_is_atomic_and_ordered() {
     let temp = tempfile::tempdir().expect("tempdir");
     let first = temp.path().join("first.png");

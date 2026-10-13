@@ -7,7 +7,7 @@
     "export_reference": "export:agent-2",
     "read_only": true,
     "effective_policy": {
-      "requested_tools": ["read", "search"],
+      "requested_tools": ["read"],
       "cwd": "inherited",
       "sandbox": "inherited_host_enforced",
       "approvals": "inherited_host_enforced",

@@ -15,7 +15,7 @@ tags:
 
 Use this procedure only after explicit activation and only when current public web evidence is needed.
 
-1. If provider setup is required, direct the user to select `octet-web-search` in `/extensions` (Brave Search is recommended) or run `/web-search setup ...`. The API key belongs only in octet's private input surface; never ask the user to paste it into chat, a prompt, or a tool argument.
+1. If provider setup is required, direct the user to select `octet-web-search` in `/extensions` and pick **Use Brave Search** (recommended) or **Use SearXNG**. The API key belongs only in octet's private input surface; never ask the user to paste it into chat, a prompt, or a tool argument.
 2. Start with `web_search`; keep the query specific and use `domains` when authoritative sources are known.
 3. Cite claims with the exact stable ID returned by the tool, for example `[web-0123456789abcdef]`.
 4. Use `web_fetch` only for the few sources needed to verify a claim. Prefer `web_find` when a literal term can avoid returning a whole bounded page.

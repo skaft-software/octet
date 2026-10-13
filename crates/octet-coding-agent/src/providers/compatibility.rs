@@ -1,8 +1,11 @@
 //! Prompt-cache compatibility selected by provider declarations.
 
-use octet_ai::{CacheCompatibility, CacheControlFormat, Protocol, SessionAffinityFormat};
+use octet_ai::{
+    CacheCompatibility, CacheControlFormat, EndpointId, EndpointTransport, ModelCatalog,
+    PromptCacheLifetimes, Protocol, SessionAffinityFormat,
+};
 
-use super::contract::CompatibilityProfile;
+use super::contract::{CompatibilityProfile, ProviderDeclaration, ProviderRoute, ANTHROPIC};
 
 /// Return the tested prompt-cache compatibility for a declaration-selected
 /// provider route. The OpenCode header helper also checks the declared route
@@ -21,7 +24,10 @@ pub(crate) fn cache_compatibility(
             // Discovery and static registration share this exact public-API
             // contract. A copied name on another provider is not sufficient.
             cache.supports_explicit_prompt_cache_mode = protocol == Protocol::OpenAiResponses
-                && matches!(model_id, "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna");
+                && matches!(
+                    model_id,
+                    "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+                );
         }
         // OpenRouter forwards Anthropic's explicit cache-control blocks only
         // for its Anthropic routes. These markers are required for prompt
@@ -95,6 +101,33 @@ pub(crate) fn cache_compatibility(
     cache
 }
 
+/// Add lifetime hints only for the canonical direct Anthropic declaration and
+/// its actual registered destination. A copied protocol/name or a configured
+/// gateway override does not establish the upstream cache lifetime.
+pub(crate) fn cache_compatibility_for_route(
+    catalog: &ModelCatalog,
+    declaration: &ProviderDeclaration,
+    model_id: &str,
+    route: &ProviderRoute,
+) -> CacheCompatibility {
+    let mut cache = cache_compatibility(declaration.compatibility, model_id, route.protocol);
+    if *declaration == ANTHROPIC
+        && *route == ANTHROPIC.routes[0]
+        && catalog
+            .endpoint(&EndpointId(route.endpoint_id.into()))
+            .is_some_and(|endpoint| {
+                endpoint.base_url.as_str() == ANTHROPIC.base_url
+                    && endpoint.transport == EndpointTransport::Http
+            })
+    {
+        cache.prompt_cache = PromptCacheLifetimes {
+            short: Some(300),
+            long: Some(3600),
+        };
+    }
+    cache
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,8 +136,93 @@ mod tests {
     };
 
     #[test]
+    fn lifetime_hints_require_the_direct_anthropic_declaration_not_a_name_or_protocol() {
+        for declaration in super::super::contract::ALL_PROVIDER_DECLARATIONS {
+            for route in declaration.routes {
+                let mut catalog = ModelCatalog::default();
+                catalog
+                    .register_endpoint(octet_ai::Endpoint {
+                        id: EndpointId(route.endpoint_id.into()),
+                        // Even the real Anthropic URL cannot qualify a gateway's
+                        // declaration merely because it speaks the same protocol.
+                        base_url: url::Url::parse(ANTHROPIC.base_url).unwrap(),
+                        auth: octet_ai::Auth::none(),
+                        default_headers: http::HeaderMap::new(),
+                        transport: route.transport,
+                        runtime: route.runtime,
+                        timeout: std::time::Duration::from_secs(1),
+                    })
+                    .unwrap();
+                for name in [
+                    "claude-sonnet-4-6",
+                    "anthropic/claude-sonnet-4.6",
+                    "discovered-model",
+                ] {
+                    let cache = cache_compatibility_for_route(&catalog, declaration, name, route);
+                    let expected = if *declaration == ANTHROPIC {
+                        PromptCacheLifetimes {
+                            short: Some(300),
+                            long: Some(3600),
+                        }
+                    } else {
+                        PromptCacheLifetimes::default()
+                    };
+                    assert_eq!(cache.prompt_cache, expected, "{} / {name}", declaration.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifetime_hints_require_the_actual_direct_destination_and_http_transport() {
+        let route = &ANTHROPIC.routes[0];
+        for base_url in [
+            "https://gateway.example.test/v1/",
+            "https://api.anthropic.com/proxy/v1/",
+            "https://api.anthropic.com/v1/?api-version=preview",
+            "http://api.anthropic.com/v1/",
+        ] {
+            let mut catalog = ModelCatalog::default();
+            catalog
+                .register_endpoint(octet_ai::Endpoint {
+                    id: EndpointId(route.endpoint_id.into()),
+                    base_url: url::Url::parse(base_url).unwrap(),
+                    auth: octet_ai::Auth::none(),
+                    default_headers: http::HeaderMap::new(),
+                    transport: route.transport,
+                    runtime: route.runtime,
+                    timeout: std::time::Duration::from_secs(1),
+                })
+                .unwrap();
+            assert_eq!(
+                cache_compatibility_for_route(&catalog, &ANTHROPIC, "claude-sonnet-4-6", route)
+                    .prompt_cache,
+                PromptCacheLifetimes::default(),
+                "{base_url}"
+            );
+        }
+        let mut catalog = ModelCatalog::default();
+        catalog
+            .register_endpoint(octet_ai::Endpoint {
+                id: EndpointId(route.endpoint_id.into()),
+                base_url: url::Url::parse(ANTHROPIC.base_url).unwrap(),
+                auth: octet_ai::Auth::none(),
+                default_headers: http::HeaderMap::new(),
+                transport: EndpointTransport::WebSocketPreferred,
+                runtime: route.runtime,
+                timeout: std::time::Duration::from_secs(1),
+            })
+            .unwrap();
+        assert_eq!(
+            cache_compatibility_for_route(&catalog, &ANTHROPIC, "claude-sonnet-4-6", route)
+                .prompt_cache,
+            PromptCacheLifetimes::default()
+        );
+    }
+
+    #[test]
     fn explicit_cache_mode_requires_verified_public_openai_responses_model() {
-        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
             assert!(
                 cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
                     .supports_explicit_prompt_cache_mode

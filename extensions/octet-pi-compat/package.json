@@ -1,0 +1,22 @@
+{
+  "name": "@skaft-software/octet-pi-compat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional, process-isolated Pi extension factories for octet; Rust owns the agent and terminal",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "setup": "node setup.mjs",
+    "configure": "node configure.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:editor-native": "node --test test/phase2/*.test.mjs test/upstream-editor.test.mjs test/upstream-editor-history-keybindings.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "1.0.2",
+    "jiti": "2.7.0",
+    "typebox": "1.3.27",
+    "yaml": "2.9.0"
+  }
+}

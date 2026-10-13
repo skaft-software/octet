@@ -14,6 +14,16 @@ pub(super) struct InputDispatch {
     models: Vec<String>,
     cycle_target: Option<String>,
     generated_command: bool,
+    thinking_cycle: Option<ThinkingCycle>,
+}
+
+/// Local keyboard selection survives waits that temporarily borrow the App.
+/// It is not an acknowledgement from the provider or a second config store.
+struct ThinkingCycle {
+    owner: String,
+    choices: Vec<octet_ai::ReasoningConfig>,
+    selected: octet_ai::ReasoningConfig,
+    pending: Option<octet_ai::ReasoningConfig>,
 }
 
 impl InputDispatch {
@@ -24,11 +34,85 @@ impl InputDispatch {
             models: Vec::new(),
             cycle_target: None,
             generated_command: false,
+            thinking_cycle: None,
         }
     }
 }
 
 impl InteractiveShell {
+    pub(crate) fn set_thinking_cycle(
+        &mut self,
+        owner: String,
+        choices: Vec<octet_ai::ReasoningConfig>,
+        selected: &octet_ai::ReasoningConfig,
+    ) {
+        match self.input_dispatch.thinking_cycle.as_mut() {
+            Some(cycle) if cycle.owner == owner => {
+                cycle.choices = choices;
+                if cycle.pending.is_none() {
+                    cycle.selected = selected.clone();
+                }
+            }
+            _ => {
+                self.input_dispatch.thinking_cycle = Some(ThinkingCycle {
+                    owner,
+                    choices,
+                    selected: selected.clone(),
+                    pending: None,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn deferred_thinking(&self) -> Option<&octet_ai::ReasoningConfig> {
+        self.input_dispatch
+            .thinking_cycle
+            .as_ref()?
+            .pending
+            .as_ref()
+    }
+
+    pub(crate) fn take_deferred_thinking(&mut self) -> Option<octet_ai::ReasoningConfig> {
+        self.input_dispatch.thinking_cycle.as_mut()?.pending.take()
+    }
+
+    /// Publish the initiating selection before a rebuild yields input ownership.
+    /// It is already being applied, so only subsequent presses become deferred.
+    pub(crate) fn begin_thinking_selection(&mut self, reasoning: &octet_ai::ReasoningConfig) {
+        if let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() {
+            cycle.selected = reasoning.clone();
+        }
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        let label = crate::app::reasoning_label(reasoning);
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
+    pub(crate) fn cycle_thinking_during_wait(&mut self) {
+        let Some(cycle) = self.input_dispatch.thinking_cycle.as_mut() else {
+            return;
+        };
+        if cycle.choices.is_empty() {
+            self.error("no thinking levels are available".into());
+            return;
+        }
+        let next = cycle
+            .choices
+            .iter()
+            .position(|choice| choice == &cycle.selected)
+            .map_or(0, |index| (index + 1) % cycle.choices.len());
+        cycle.selected = cycle.choices[next].clone();
+        cycle.pending = Some(cycle.selected.clone());
+        let label = crate::app::reasoning_label(&cycle.selected);
+        let (provider, model) = {
+            let state = self.state.borrow();
+            (state.provider.clone(), state.model.clone())
+        };
+        self.set_identity(&provider, &model, &format!("{label} (queued)"));
+    }
+
     pub(super) fn reset_input_interaction(&mut self) {
         self.input_dispatch.jump_forward = None;
     }
@@ -130,11 +214,50 @@ impl InteractiveShell {
         event.clone()
     }
 
+    /// Read-only action map from this shell's actual resolved input policy.
+    pub(crate) fn extension_keybindings(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.input_dispatch.bindings.get_resolved_bindings()
+    }
+
     /// Reload only the user-owned keybinding file. No project input policy or
-    /// executable resource is loaded here.
+    /// executable resource is loaded here. A live session overlay is re-layered
+    /// over the reloaded file instead of being silently replaced by it.
     pub fn reload_keybindings(&mut self) {
         self.input_dispatch.bindings.reload();
+        self.base_user_bindings = self.input_dispatch.bindings.user_bindings().clone();
+        self.publish_keybindings();
+    }
+
+    /// Layer session-only keybinding overrides over the user's own file. An
+    /// empty overlay restores exactly the user's file, and the captured base
+    /// map is never mutated by an extension.
+    pub fn set_session_keybindings(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) {
+        self.session_keybindings = overrides.clone();
+        self.publish_keybindings();
+    }
+
+    /// Recompute the effective input policy from the captured user file plus
+    /// the live session overlay, and publish it to the native mailbox.
+    fn publish_keybindings(&mut self) {
+        let mut merged = self.base_user_bindings.clone();
+        for (id, keys) in &self.session_keybindings {
+            merged.insert(id.clone(), keys.clone());
+        }
+        if self.input_dispatch.bindings.user_bindings() == &merged {
+            self.refresh_terminal_input_policy();
+            return;
+        }
+        self.input_dispatch.bindings.set_user_bindings(merged);
+        {
+            let mut mailbox = self.state.native().lock().expect("native mailbox poisoned");
+            mailbox.bindings = Some(self.input_dispatch.bindings.clone());
+            mailbox.editor_resync = mailbox.editor_resync.saturating_add(1);
+        }
         self.input_dispatch.jump_forward = None;
+        self.refresh_terminal_input_policy();
     }
 
     /// Ordered, available model ids supplied by the App's scoped catalog. A
@@ -160,28 +283,65 @@ impl InteractiveShell {
         }
     }
 
-    /// Resolved hotkeys, not a static table that silently ignores user overrides.
-    pub fn hotkeys_text(&self) -> String {
+    /// The resolved keymap as a grouped Markdown reference: bound actions as
+    /// `keys | action` tables per area, then the unbound ids a user can assign.
+    /// It is resolved from the loaded user map, not a static table, and both
+    /// renderers typeset it, so ids never stand in for descriptions.
+    pub fn hotkeys_markdown(&self) -> String {
         let bindings = &self.input_dispatch.bindings;
-        let mut text = String::from("Keybindings (~/.octet/keybindings.json)\nCtrl+D always coordinates close. /reload applies changes.\n\n");
+        let mut groups: Vec<(&'static str, Vec<String>)> = Vec::new();
+        let mut unbound = Vec::new();
         for definition in bindings.definitions() {
             let keys = bindings.get_keys(&definition.id);
-            text.push_str(&format!(
-                "{}  {}\n",
-                definition.id,
-                if keys.is_empty() {
-                    "(unbound)".to_owned()
-                } else {
-                    keys.join(", ")
-                }
-            ));
+            if keys.is_empty() {
+                unbound.push(format!("`{}`", definition.id));
+                continue;
+            }
+            let chips = keys
+                .iter()
+                .map(|key| markdown_key_chip(key))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let row = format!(
+                "| {chips} | {} |",
+                markdown_table_cell(&definition.description)
+            );
+            let group = hotkey_group(&definition.id);
+            match groups.iter_mut().find(|(name, _)| *name == group) {
+                Some((_, rows)) => rows.push(row),
+                None => groups.push((group, vec![row])),
+            }
         }
-        for conflict in bindings.get_conflicts() {
+        let mut text = String::from(
+            "Edit `~/.octet/keybindings.json`, then `/reload`. Ctrl+D always coordinates close.\n",
+        );
+        for (name, rows) in groups {
             text.push_str(&format!(
-                "\nConflict: {}: {}",
-                conflict.key,
-                conflict.keybindings.join(", ")
+                "\n### {name}\n\n| Keys | Action |\n| --- | --- |\n"
             ));
+            for row in rows {
+                text.push_str(&row);
+                text.push('\n');
+            }
+        }
+        let conflicts = bindings.get_conflicts();
+        if !conflicts.is_empty() {
+            text.push_str("\n### Conflicts\n\n");
+            for conflict in conflicts {
+                text.push_str(&format!(
+                    "- {} is claimed by {}\n",
+                    markdown_key_chip(&conflict.key),
+                    conflict
+                        .keybindings
+                        .iter()
+                        .map(|id| format!("`{id}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        if !unbound.is_empty() {
+            text.push_str(&format!("\n### Unbound\n\n{}\n", unbound.join(" · ")));
         }
         text
     }
@@ -216,15 +376,23 @@ impl InteractiveShell {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let hit = {
                     let state = self.state.borrow();
-                    let chrome = shell_chrome(&state, state.size.0, Instant::now());
-                    let length = state.rendered_transcript(state.size.0).len();
-                    let scroll =
-                        resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-                    let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
-                    scroll > 0
-                        && capacity < chrome.transcript_rows
-                        && usize::from(mouse.row) == capacity
-                        && mouse.column < state.size.0
+                    if state.render_threaded {
+                        state.retained_render_geometry().is_some_and(|geometry| {
+                            state.scroll_from_bottom.get() > 0
+                                && usize::from(mouse.row) == geometry.viewport_rows
+                                && mouse.column < state.size.0
+                        })
+                    } else {
+                        let chrome = shell_chrome(&state, state.size.0, Instant::now());
+                        let length = state.rendered_transcript(state.size.0).len();
+                        let scroll =
+                            resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
+                        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
+                        scroll > 0
+                            && capacity < chrome.transcript_rows
+                            && usize::from(mouse.row) == capacity
+                            && mouse.column < state.size.0
+                    }
                 };
                 if hit {
                     return InputAction::JumpToTail;
@@ -258,7 +426,28 @@ impl InteractiveShell {
                     InputAction::Ignore
                 };
             }
-            let bindings = &self.input_dispatch.bindings;
+            // A clone of the shared binding table: list navigation below needs
+            // `&mut self`, and the resolver is reference-counted like the
+            // mailbox copy the renderer already holds.
+            let bindings = self.input_dispatch.bindings.clone();
+            // A displayed extension menu owns list navigation while it is open:
+            // Up/Down select a completion instead of moving the draft cursor.
+            if !popup && key.kind == KeyEventKind::Press {
+                let navigation = [("tui.select.up", false), ("tui.select.down", true)]
+                    .into_iter()
+                    .find_map(|(id, forward)| bindings.matches(key, id).then_some(forward));
+                if let Some(forward) = navigation {
+                    if self.move_extension_autocomplete_selection(forward) {
+                        return InputAction::Ignore;
+                    }
+                }
+                // Tab accepts the displayed menu through the same explicit
+                // acceptance path, instead of querying an unchanged draft again.
+                if bindings.matches(key, "tui.input.tab") && self.extension_autocomplete_displayed()
+                {
+                    return InputAction::CompletePath;
+                }
+            }
             if !popup {
                 // Dedicated history actions win over model cycling even in the
                 // middle of a multiline draft. Capture the original cursor.
@@ -267,28 +456,27 @@ impl InteractiveShell {
                     ("tui.editor.historyNext", false),
                 ] {
                     if bindings.matches(key, id) {
-                        if !active {
-                            let mut state = self.state.borrow_mut();
-                            if previous
-                                && state.prompt_history_navigation.is_none()
-                                && !state.prompt_history.is_empty()
-                            {
-                                let draft = capture_prompt_history_draft(&mut state);
-                                let index = state.prompt_history.len() - 1;
-                                state.prompt_history_navigation =
-                                    Some(PromptHistoryNavigation { index, draft });
-                                restore_prompt_history_entry(&mut state, index);
-                            } else {
-                                navigate_prompt_history(
-                                    &mut state,
-                                    &if previous {
-                                        EditAction::Up
-                                    } else {
-                                        EditAction::Down
-                                    },
-                                );
-                            }
+                        let mut state = self.state.borrow_mut();
+                        if previous
+                            && state.prompt_history_navigation.is_none()
+                            && !state.prompt_history.is_empty()
+                        {
+                            let draft = capture_prompt_history_draft(&mut state);
+                            let index = state.prompt_history.len() - 1;
+                            state.prompt_history_navigation =
+                                Some(PromptHistoryNavigation { index, draft });
+                            restore_prompt_history_entry(&mut state, index);
+                        } else {
+                            navigate_prompt_history(
+                                &mut state,
+                                &if previous {
+                                    EditAction::Up
+                                } else {
+                                    EditAction::Down
+                                },
+                            );
                         }
+                        drop(state);
                         self.render();
                         return InputAction::Ignore;
                     }
@@ -306,7 +494,7 @@ impl InteractiveShell {
                 }
                 // Explicit editor bindings have priority over default model and
                 // viewport shortcuts while the composer owns focus.
-                if let Some(action) = keymap::editor_binding(key, bindings, true) {
+                if let Some(action) = keymap::editor_binding(key, &bindings, true) {
                     return InputAction::Edit(action);
                 }
                 if key.kind == KeyEventKind::Press && bindings.matches(key, "app.message.copy") {
@@ -399,7 +587,7 @@ impl InteractiveShell {
         }
         let typed_submission = matches!(event.as_ref(), Some(Event::Key(key))
             if self.input_dispatch.bindings.matches(key, "tui.input.submit")
-                || (key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL));
+                || self.input_dispatch.bindings.matches(key, "app.message.followUp"));
         let action = {
             let state = self.state.borrow();
             keymap::translate_with_bindings(
@@ -416,6 +604,7 @@ impl InteractiveShell {
     }
 
     fn scroll_to_top(&mut self) {
+        self.request_native_scroll(octet_tern::wire::ScrollBy::Start, 1);
         self.state.borrow().transcript_scroll_activity();
         if !self.state.borrow().run.is_active() {
             if let Err(error) = self.materialize_deferred_history() {
@@ -468,6 +657,58 @@ impl InteractiveShell {
     }
 }
 
+/// The reference section a binding id belongs to, by its namespace.
+fn hotkey_group(id: &str) -> &'static str {
+    let mut parts = id.split('.');
+    match (parts.next(), parts.next()) {
+        (Some("tui"), Some("editor" | "input")) | (Some("app"), Some("editor" | "clipboard")) => {
+            "Editing"
+        }
+        (Some("tui"), Some("select")) => "Lists and pickers",
+        (Some("tui"), Some("altScreen")) => "Scrollback",
+        (Some("app"), Some("model" | "models" | "thinking")) => "Models and thinking",
+        (Some("app"), Some("session")) => "Sessions",
+        (Some("app"), Some("message")) => "Messages",
+        _ => "General",
+    }
+}
+
+/// One key id as a Markdown code chip, title-cased (`ctrl+b` → `Ctrl+B`).
+fn markdown_key_chip(key: &str) -> String {
+    let label = key
+        .split('+')
+        .map(|part| match part {
+            "pageup" => "PageUp".to_owned(),
+            "pagedown" => "PageDown".to_owned(),
+            "escape" => "Esc".to_owned(),
+            "" => "+".to_owned(),
+            _ => {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+        .replace("++", "+");
+    let label = markdown_table_cell(&label);
+    if label.contains('`') {
+        format!("`` {label} ``")
+    } else {
+        format!("`{label}`")
+    }
+}
+
+/// Escape a value for a single Markdown table cell.
+fn markdown_table_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,9 +732,53 @@ mod tests {
     fn configure(shell: &mut InteractiveShell, json: &str) -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("keybindings.json"), json).unwrap();
-        shell.input_dispatch.bindings =
-            KeybindingsManager::create(directory.path(), "linux", false);
+        shell.test_set_keybindings(KeybindingsManager::create(directory.path(), "linux", false));
         directory
+    }
+
+    #[test]
+    fn session_keybinding_overlay_survives_a_user_file_reload_and_withdraws_cleanly() {
+        let mut shell = InteractiveShell::test_shell();
+        let directory = configure(&mut shell, r#"{"tui.editor.undo":"ctrl+z"}"#);
+        let mut overlay = std::collections::BTreeMap::new();
+        overlay.insert("app.exit".to_owned(), vec!["ctrl+q".to_owned()]);
+        shell.set_session_keybindings(&overlay);
+        assert_eq!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()])
+        );
+        // The user edits their own file, then reloads: the reloaded file and the
+        // live session overlay both stay effective.
+        std::fs::write(
+            directory.path().join("keybindings.json"),
+            r#"{"tui.editor.undo":[]}"#,
+        )
+        .unwrap();
+        shell.reload_keybindings();
+        assert_eq!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()]),
+            "reload must not drop the session overlay"
+        );
+        assert!(!shell
+            .input_dispatch
+            .bindings
+            .matches_key_id("ctrl+z", "tui.editor.undo"));
+        // Withdrawal removes only the session overlay; the reloaded file stays.
+        shell.set_session_keybindings(&std::collections::BTreeMap::new());
+        assert_ne!(
+            shell.extension_keybindings().get("app.exit"),
+            Some(&vec!["ctrl+q".to_owned()])
+        );
+        assert!(!shell
+            .input_dispatch
+            .bindings
+            .matches_key_id("ctrl+z", "tui.editor.undo"));
+        assert_eq!(
+            shell.input_dispatch.bindings.get_keys("app.exit"),
+            &["ctrl+d".to_owned()],
+            "withdrawal restores the built-in binding"
+        );
     }
 
     #[test]
@@ -536,7 +821,17 @@ mod tests {
             dispatch(&mut shell, key(KeyCode::Char('z'), KeyModifiers::CONTROL)),
             InputAction::Ignore
         );
-        assert!(shell.hotkeys_text().contains("tui.editor.undo  (unbound)"));
+        let markdown = shell.hotkeys_markdown();
+        assert!(
+            markdown.contains("### Editing\n\n| Keys | Action |"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| `Left` `Ctrl+B` | Move cursor left |"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("tui.editor.cursorUp"), "{markdown}");
+        assert!(markdown.contains("### Unbound\n\n") && markdown.contains("`tui.editor.undo`"));
         assert_eq!(
             shell.translate_input(Some(key(KeyCode::Char('d'), KeyModifiers::CONTROL)), false),
             InputAction::Closed
@@ -609,6 +904,9 @@ mod tests {
     #[test]
     fn product_model_cycle_uses_ordered_scope_and_queues_from_last_target() {
         let mut shell = InteractiveShell::test_shell();
+        // Pin the Linux bindings: win32 remaps model-cycle-backward to
+        // `alt+p`, while this test asserts the `ctrl+shift+p` gesture.
+        let _directory = configure(&mut shell, "{}");
         shell.set_identity("fixture", "b", "high");
         shell.set_model_cycle(vec!["c".into(), "b".into(), "a".into(), "c".into()]);
         for expected in ["/model a", "/model c", "/model b"] {
@@ -650,6 +948,31 @@ mod tests {
             InputAction::Ignore
         );
         assert_eq!(shell.pending(), "historic");
+    }
+
+    #[test]
+    fn dedicated_history_keys_preserve_active_run_and_original_caret() {
+        let mut shell = InteractiveShell::test_shell();
+        let _directory = configure(
+            &mut shell,
+            r#"{"tui.editor.historyPrevious":"ctrl+p","tui.editor.historyNext":"ctrl+n"}"#,
+        );
+        shell.on_prompt_submitted("previous");
+        shell.prefill_editor("unsent\nmultiline draft".into());
+        shell.state.borrow_mut().editor.set_cursor(10);
+        let run = shell.begin_run("background work");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('p'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "previous");
+        assert_eq!(
+            shell.translate_input(Some(key(KeyCode::Char('n'), KeyModifiers::CONTROL)), true),
+            InputAction::Ignore
+        );
+        assert_eq!(shell.pending(), "unsent\nmultiline draft");
+        assert_eq!(shell.state.borrow().editor.cursor(), 10);
+        assert_eq!(shell.current_run_id(), Some(run));
     }
 
     #[test]

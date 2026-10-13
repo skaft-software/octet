@@ -91,6 +91,7 @@ fn response(model: &HostStreamModel, turn: &ScriptedTurn) -> Response {
         response_id: None,
         responses_output: None,
         deferred: None,
+        inference: None,
         diagnostics: Vec::new(),
     }
 }

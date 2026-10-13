@@ -4,8 +4,10 @@ use std::collections::HashMap;
 /// Load theme values from a TOML config file.
 pub fn load_toml(path: &str, values: &mut HashMap<String, String>) {
     if let Ok(contents) = std::fs::read_to_string(path) {
-        if let Ok(toml_val) = contents.parse::<toml::Value>() {
-            flatten_toml(&toml_val, "", values);
+        // A theme file is a TOML document: since toml 0.9, `str::parse` into
+        // `toml::Value` accepts a single value only, so parse a table.
+        if let Ok(table) = contents.parse::<toml::Table>() {
+            flatten_toml(&toml::Value::Table(table), "", values);
         }
     }
 }

@@ -48,6 +48,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use octet_agent::AgentEvent;
 use octet_ai::ToolCallId;
+// Only the canonical socket encoding speaks JSON; see the `impl Request<'_>`
+// block below. Platforms without that transport still need the names for the
+// encoder tests.
+#[cfg(any(unix, test))]
 use serde_json::{json, Value};
 
 pub(crate) mod plugin;
@@ -94,7 +98,11 @@ const AGENT_LABEL: &str = "octet";
 const MESSAGE_MAX_CHARS: usize = 200;
 /// Delivery attempts, matching the official Pi integration: one short
 /// attempt, then one longer retry only when the first was not delivered.
+/// Only the direct socket transport has a retry budget to tune; the CLI
+/// wrapper owns its own single bounded wait, so these live with the socket.
+#[cfg(unix)]
 const FIRST_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(unix)]
 const RETRY_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Bounded wait for the CLI transport used where raw socket IPC is not
 /// available (Windows named pipes). The CLI wrapper talks to the same server.
@@ -149,6 +157,10 @@ enum Request<'a> {
     },
 }
 
+/// The canonical socket wire encoding. Only the direct socket transport
+/// speaks it, so it exists on non-unix builds solely for the encoder tests
+/// that pin the payload shape.
+#[cfg(any(unix, test))]
 impl Request<'_> {
     /// The `pane.report_*` method name this request maps to.
     fn method(&self) -> &'static str {
@@ -208,7 +220,9 @@ impl Request<'_> {
             "params": params,
         })
     }
+}
 
+impl Request<'_> {
     /// The same report as an argv list for the CLI transport. Every value is a
     /// separate argument; no shell is ever involved, so a message can never
     /// widen the command.

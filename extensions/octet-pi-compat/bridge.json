@@ -1,0 +1,7 @@
+{
+  "extensions": [],
+  "registrations": {
+    "tools": [], "commands": [], "hooks": [], "flags": [],
+    "shortcuts": [], "events": [], "tool_renderers": []
+  }
+}

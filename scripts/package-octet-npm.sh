@@ -86,6 +86,7 @@ import stat
 import sys
 import tarfile
 import unicodedata
+import zipfile
 
 archive_directory = pathlib.Path(sys.argv[1])
 checksums_path = pathlib.Path(sys.argv[2])
@@ -131,7 +132,17 @@ TARGETS = {
         "x64",
         "octet-linux-x64-gnu-" + version + ".tgz",
     ),
+    "x86_64-pc-windows-msvc": (
+        "@skaft/octet-win32-x64",
+        "win32",
+        "x64",
+        "octet-win32-x64-" + version + ".tgz",
+    ),
 }
+NATIVE_ARCHIVES = {
+    target: f"octet-{version}-{target}.tar.gz" for target in TARGETS if target != "x86_64-pc-windows-msvc"
+}
+NATIVE_ARCHIVES["x86_64-pc-windows-msvc"] = f"octet-{version}-x86_64-pc-windows-msvc.zip"
 
 
 def fail(message):
@@ -162,9 +173,10 @@ def parse_checksums():
         if name in entries:
             fail(f"native release checksum metadata repeats {name}")
         entries[name] = digest
-    expected = {f"octet-{version}-{target}.tar.gz" for target in TARGETS}
-    if set(entries) not in (expected, expected | {"install-octet.sh"}):
-        fail("native release checksum metadata does not contain exactly the three target archives")
+    expected = set(NATIVE_ARCHIVES.values())
+    allowed_extras = (set(), {"install-octet.sh"}, {"install-octet.ps1"}, {"install-octet.sh", "install-octet.ps1"})
+    if not any(set(entries) == expected | extras for extras in allowed_extras):
+        fail("native release checksum metadata does not contain exactly the target archives and known installers")
     return entries
 
 
@@ -183,14 +195,18 @@ def validate_archive(target, archive, expected_digest):
     destination = native_directory / target
     destination.mkdir(parents=True, exist_ok=False)
     seen = set()
+    windows_seen: set[str] = set()
     expanded = 0
-    required = {"octet", "octet-host", "LICENSE", "README.md"} | documentation_files
-    with tarfile.open(archive, mode="r:gz") as source:
-        members = source.getmembers()
+    windows = target == "x86_64-pc-windows-msvc"
+    binary_names = ("octet.exe", "octet-host.exe") if windows else ("octet", "octet-host")
+    required = set(binary_names) | {"LICENSE", "README.md"} | documentation_files
+    with (zipfile.ZipFile(archive) if windows else tarfile.open(archive, mode="r:gz")) as source:
+        zipped = windows
+        members = source.infolist() if zipped else source.getmembers()
         if len(members) > MAX_ENTRIES:
             fail(f"native release archive has too many entries: {archive.name}")
         for member in members:
-            name = member.name
+            name = member.filename if zipped else member.name
             if "\\" in name or name.startswith("/"):
                 fail(f"native release archive has an unsafe path: {name}")
             parts = pathlib.PurePosixPath(name).parts
@@ -200,40 +216,58 @@ def validate_archive(target, archive, expected_digest):
                 fail(f"native release archive repeats an entry: {name}")
             seen.add(name)
             relative = "/".join(parts[1:])
+            if windows:
+                for part in pathlib.PurePosixPath(relative).parts:
+                    stem = part.rstrip(" .").split(".", 1)[0].upper()
+                    if (any(char in WINDOWS_FORBIDDEN for char in part)
+                            or part.endswith((" ", ".")) or stem in WINDOWS_DEVICES):
+                        fail(f"native release ZIP contains a Windows-incompatible path: {name}")
+                folded = relative.casefold()
+                if folded in windows_seen:
+                    fail(f"native release ZIP repeats a case-insensitive path: {name}")
+                windows_seen.add(folded)
+            if zipped:
+                mode = member.external_attr >> 16
+                is_directory = member.is_dir()
+                is_regular = not is_directory and (mode == 0 or stat.S_IFMT(mode) == 0 or stat.S_ISREG(mode))
+                size = member.file_size
+            else:
+                mode = member.mode
+                is_directory = member.isdir()
+                is_regular = member.isreg()
+                size = member.size
             if relative and not (
-                (relative in required and member.isfile())
-                or (member.isdir() and any(path.startswith(relative + "/") for path in documentation_extras))
+                (relative in required and is_regular)
+                or (is_directory and any(path.startswith(relative + "/") for path in documentation_extras))
                 or relative in {"docs", "examples", "sdk"}
-                or relative.startswith("docs/")
-                or relative.startswith("examples/")
-                or relative.startswith("sdk/")
+                or relative.startswith(("docs/", "examples/", "sdk/"))
             ):
                 fail(f"native release archive has an unexpected member: {name}")
-            if member.size > MAX_MEMBER_BYTES:
+            if size > MAX_MEMBER_BYTES:
                 fail(f"native release archive member exceeds {MAX_MEMBER_BYTES} bytes: {name}")
-            if not (member.isdir() or member.isreg()):
+            if not (is_directory or is_regular) or (zipped and stat.S_ISLNK(mode)):
                 fail(f"native release archive contains a link or special file: {name}")
-            expanded += member.size
+            expanded += size
             if expanded > MAX_EXPANDED_BYTES:
                 fail(f"native release archive expands beyond {MAX_EXPANDED_BYTES} bytes: {archive.name}")
             destination_path = destination / pathlib.PurePosixPath(relative)
-            if member.isdir():
+            if is_directory:
                 destination_path.mkdir(parents=True, exist_ok=True)
                 continue
             destination_path.parent.mkdir(parents=True, exist_ok=True)
-            stream = source.extractfile(member)
+            stream = source.open(member) if zipped else source.extractfile(member)
             if stream is None:
                 fail(f"native release archive member cannot be read: {name}")
-            with destination_path.open("wb") as output:
+            with stream, destination_path.open("wb") as output:
                 shutil.copyfileobj(stream, output, length=1024 * 1024)
-            destination_path.chmod(0o755 if member.mode & 0o111 else 0o644)
+            destination_path.chmod(0o755 if (windows and relative in binary_names) or mode & 0o111 else 0o644)
     extracted_members = {
         candidate.relative_to(destination).as_posix()
         for candidate in destination.rglob("*") if candidate.is_file()
     }
     if not required.issubset(extracted_members):
         fail(f"native release archive is missing a required native or inventoried documentation file: {archive.name}")
-    for binary_name in ("octet", "octet-host"):
+    for binary_name in binary_names:
         binary = destination / binary_name
         if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
             fail(f"native release binary is missing or not executable: {archive.name}/{binary_name}")
@@ -279,8 +313,8 @@ def set_mtimes(root):
 checksum_entries = parse_checksums()
 native = {}
 licenses = None
-for target in TARGETS:
-    archive_name = f"octet-{version}-{target}.tar.gz"
+for target, (_, _, _, artifact_name) in TARGETS.items():
+    archive_name = NATIVE_ARCHIVES[target]
     archive = archive_directory / archive_name
     digest = checksum_entries.get(archive_name)
     if digest is None:
@@ -308,10 +342,7 @@ launcher.mkdir()
 copy_file(template_directory / "launcher/bin/octet", launcher / "bin/octet", executable=True)
 copy_file(template_directory / "launcher/bin/octet-host", launcher / "bin/octet-host", executable=True)
 (launcher / "lib").mkdir()
-(launcher / "lib/launch.sh").write_text(
-    render("launcher/lib/launch.sh.in", {"__VERSION__": version}), encoding="utf-8"
-)
-(launcher / "lib/launch.sh").chmod(0o755)
+copy_file(template_directory / "launcher/lib/launch.js", launcher / "lib/launch.js", executable=False)
 set_mtimes(launcher)
 
 for target, (package_name, operating_system, cpu, _) in TARGETS.items():
@@ -336,8 +367,9 @@ for target, (package_name, operating_system, cpu, _) in TARGETS.items():
     )
     (platform / "LICENSE").write_bytes(licenses)
     source = native[target]
-    copy_file(source / "octet", platform / "bin/octet", executable=True)
-    copy_file(source / "octet-host", platform / "bin/octet-host", executable=True)
+    windows = target == "x86_64-pc-windows-msvc"
+    for binary_name in (("octet.exe", "octet-host.exe") if windows else ("octet", "octet-host")):
+        copy_file(source / binary_name, platform / "bin" / binary_name, executable=True)
     (platform / "share/octet/.octet-version").parent.mkdir(parents=True, exist_ok=True)
     (platform / "share/octet/.octet-version").write_text(version + "\n", encoding="utf-8")
     for name in sorted(documentation_extras):
@@ -357,10 +389,22 @@ for descriptor in \
     "launcher|$staging_directory/launcher|octet-$version.tgz" \
     "aarch64-apple-darwin|$staging_directory/aarch64-apple-darwin|octet-darwin-arm64-$version.tgz" \
     "x86_64-apple-darwin|$staging_directory/x86_64-apple-darwin|octet-darwin-x64-$version.tgz" \
-    "x86_64-unknown-linux-gnu|$staging_directory/x86_64-unknown-linux-gnu|octet-linux-x64-gnu-$version.tgz"; do
+    "x86_64-unknown-linux-gnu|$staging_directory/x86_64-unknown-linux-gnu|octet-linux-x64-gnu-$version.tgz" \
+    "x86_64-pc-windows-msvc|$staging_directory/x86_64-pc-windows-msvc|octet-win32-x64-$version.tgz"; do
     IFS='|' read -r label stage expected_name <<EOF
 $descriptor
 EOF
+    case "$label" in
+        launcher) target_name=octet ;;
+        aarch64-apple-darwin) target_name=octet-darwin-arm64 ;;
+        x86_64-apple-darwin) target_name=octet-darwin-x64 ;;
+        x86_64-unknown-linux-gnu) target_name=octet-linux-x64-gnu ;;
+        x86_64-pc-windows-msvc) target_name=octet-win32-x64 ;;
+    esac
+    if [[ "$expected_name" != "$target_name-$version.tgz" && "$label" != launcher ]]; then
+        printf 'npm artifact name does not match target %s\\n' "$label" >&2
+        exit 1
+    fi
     destination="$pack_directory/$label"
     mkdir -p "$destination"
     (

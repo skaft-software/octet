@@ -17,7 +17,6 @@ COPY .octet-container-source /tmp/octet-container-source
 RUN grep -Eq '^[0-9a-f]{40}$' /tmp/octet-container-source
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY extensions/octet-serve ./extensions/octet-serve
 RUN cargo build --locked --release --target x86_64-unknown-linux-musl -p octet-coding-agent --bins
 
 FROM --platform=linux/amd64 debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
@@ -43,9 +42,9 @@ RUN test -f /usr/local/share/octet/docs/sdk.md \
     && test -f /usr/local/share/octet/examples/README.md \
     && test -f /usr/local/share/octet/sdk/python/README.md \
     && test -f /usr/local/share/octet/SECURITY.md \
-    && test -f /usr/local/share/octet/extensions/octet-browse/REFERENCE.md \
+    && test -f /usr/local/share/octet/extensions/octet-mcp/REFERENCE.md \
     && test -f /usr/local/share/octet/sdk/typescript/src/api_v03.ts \
-    && test ! -e /usr/local/share/octet/extensions/octet-browse/extension.toml
+    && test ! -e /usr/local/share/octet/extensions/octet-mcp/extension.toml
 ENV OCTET_PACKAGE_DIR=/usr/local/share/octet
 USER octet
 WORKDIR /workspace

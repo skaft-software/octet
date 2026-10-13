@@ -117,8 +117,8 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "default": list(CHILD_TOOLS),
             "description": (
                 "Host-enforced tool whitelist for the child; defaults to the parent's full "
-                "standard scope [read, search, edit, write, bash]. Pass a subset such as "
-                "[read, search] to keep a worker read-only."
+                "standard scope [read, edit, write, bash]. Pass a subset such as "
+                "[read] to keep a worker read-only."
             ),
         },
         "timeout_seconds": {
@@ -733,6 +733,10 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                     }
                 ],
             }
+
+    @extension.menu
+    def subagents_menu(_request: Mapping[str, Any], context: Mapping[str, Any]):
+        return orchestrator.menu(context)
 
     @extension.status("status")
     def subagents_status(_params: Mapping[str, Any], context: Mapping[str, Any]):

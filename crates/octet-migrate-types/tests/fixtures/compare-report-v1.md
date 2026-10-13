@@ -6,8 +6,8 @@ Schema version: 1
 
 | Component | Version |
 | --- | --- |
-| octet | 0.6.7 |
-| pi | 0.84.4 |
+| octet | 0.8.2 |
+| pi | 1.0.2 |
 
 ## Hardware
 

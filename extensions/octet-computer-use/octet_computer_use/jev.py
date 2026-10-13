@@ -35,12 +35,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from octet_computer_use import windows_security
+
 #: Name of the environment variable holding the TypeSafe API key. The value is
 #: only ever passed to the SDK constructor; it is never logged or returned.
 API_KEY_ENV = "TYPESAFE_API_KEY"
 
 #: Where a key entered through setup is stored, relative to octet's state
-#: directory. This is octet's own private state and is written mode 0600.
+#: directory. This is octet's own private state and is written mode 0600 (on
+#: Windows, with a protected DACL granting only the current user access).
 _KEY_FILE = Path("computer-use") / "jev-key"
 
 
@@ -56,6 +59,9 @@ def store_key(value: str, *, home: Optional[Path] = None) -> Optional[Path]:
 
     Returns the path written, or ``None`` if the value was not a usable key. The
     value is never logged, and the file is created 0600 inside a 0700 directory.
+    Windows ignores those modes, so there the temporary file receives a
+    protected current-user-only DACL before the key is written; if that cannot
+    be applied the key is not stored.
     """
 
     key = (value or "").strip()
@@ -67,6 +73,10 @@ def store_key(value: str, *, home: Optional[Path] = None) -> Optional[Path]:
         # Write via a private temp file so the key is never briefly world-readable.
         temporary = path.with_suffix(".tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if windows_security.IS_WINDOWS and not windows_security.restrict_to_current_user(temporary):
+            os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+            return None
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(key)
         os.replace(temporary, path)

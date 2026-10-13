@@ -113,7 +113,11 @@ async fn test_client_stream_sse_openai_chat() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events.len() >= 4);
@@ -393,7 +397,11 @@ async fn test_client_stream_non_streaming_chat_audio() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     // Started, TextStart, TextDelta, TextEnd, MediaCompleted, Usage, Finished
@@ -511,6 +519,24 @@ async fn test_client_stream_google_generate_content() {
         response.message.content.as_slice(),
         [octet_ai::AssistantPart::Text(text)] if text == "hello"
     ));
+}
+
+fn assert_request_inference(response: &octet_ai::Response) {
+    let metrics = response
+        .inference
+        .as_ref()
+        .expect("client always measures a completed request");
+    let client = metrics.client.as_ref().unwrap();
+    assert_eq!(
+        client.scope,
+        Some(octet_ai::inference::ClientTimingScope::Request)
+    );
+    assert_eq!(client.reported_output_tokens, response.usage.output_tokens);
+    assert!(client.elapsed_ns >= client.first_event_ns.unwrap());
+    assert_eq!(
+        metrics.server_unavailable,
+        Some(octet_ai::inference::ServerTimingUnavailable::NotReported)
+    );
 }
 
 fn text_request() -> Request {
@@ -877,6 +903,64 @@ fn fallback_responses_body() -> String {
 }
 
 #[tokio::test]
+async fn request_trace_records_the_websocket_continuation_shape_without_content() {
+    let server =
+        TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body()).await;
+    let model = websocket_test_model(&server.base_url);
+    let client = AiClient::new();
+    let session_id = "session-ws-trace";
+    client
+        .prewarm_responses(
+            &model,
+            responses_request(vec![user_message("first")], Some(session_id)),
+        )
+        .await
+        .unwrap();
+
+    let trace_path =
+        std::env::temp_dir().join(format!("octet-ws-trace-{}.jsonl", std::process::id()));
+    let overrides = octet_ai::RequestOverrides {
+        env: std::collections::BTreeMap::from([(
+            "OCTET_PROVIDER_REQUEST_TRACE".to_owned(),
+            trace_path.to_string_lossy().into_owned(),
+        )]),
+        ..Default::default()
+    };
+    let mut stream = client
+        .stream_with_overrides(
+            &model,
+            responses_request(
+                vec![user_message("first"), user_message("SECRET second prompt")],
+                Some(session_id),
+            ),
+            overrides,
+        )
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+
+    let written = std::fs::read_to_string(&trace_path).unwrap();
+    std::fs::remove_file(&trace_path).unwrap();
+    assert!(!written.contains("SECRET"), "prompt leaked: {written}");
+    assert!(
+        !written.contains("resp-prewarm"),
+        "continuation id leaked: {written}"
+    );
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{written}");
+    assert_eq!(lines[0]["event"], "request");
+    assert_eq!(lines[0]["transport"], "websocket");
+    assert_eq!(lines[0]["previous_response_id"], true);
+    assert_eq!(lines[0]["input_items"], 1);
+    assert_eq!(lines[0]["item_types"]["message"], 1);
+}
+
+#[tokio::test]
 async fn responses_websocket_decodes_events_and_uses_continuation_suffix() {
     let server =
         TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body()).await;
@@ -1026,6 +1110,7 @@ async fn request_local_codex_transport_controls_sse_and_cached_context() {
             )
             .await
             .unwrap();
+        assert_request_inference(&response);
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
         match selection {
@@ -1142,6 +1227,74 @@ async fn responses_websocket_prewarm_body_timeout_is_not_a_connection_failure() 
     let requests = server.requests().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["generate"], false);
+}
+
+#[tokio::test]
+async fn prewarm_and_inference_settle_dynamic_credentials_once_and_preserve_auth_failures() {
+    struct Resolver {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl octet_ai::CredentialResolver for Resolver {
+        async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                // Longer than the optional socket timeout: credential exchange
+                // is not an ignorable warmup and must not be re-entered.
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                return Err(octet_ai::AuthError::Resolve);
+            }
+            Ok(octet_ai::ResolvedCredential {
+                scheme: octet_ai::CredentialScheme::Bearer,
+                value: octet_ai::Secret::from("request-group-credential"),
+                extra_headers: http::HeaderMap::new(),
+            })
+        }
+    }
+    for fail in [false, true] {
+        let server =
+            TestResponsesServer::start(WebSocketBehavior::Complete, fallback_responses_body())
+                .await;
+        let resolver = Arc::new(Resolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail,
+        });
+        let mut model = websocket_test_model(&server.base_url);
+        Arc::make_mut(&mut model.endpoint).auth = Auth::Dynamic(resolver.clone());
+        if fail {
+            Arc::make_mut(&mut model.endpoint).timeout = Duration::from_millis(10);
+        }
+        let request = responses_request(
+            vec![user_message("warm"), user_message("inference")],
+            Some("settled-auth"),
+        );
+        let warm = responses_request(vec![user_message("warm")], Some("settled-auth"));
+        let opened = AiClient::new()
+            .stream_with_responses_prewarm(&model, request, warm)
+            .await;
+        if fail {
+            assert!(matches!(
+                opened,
+                Err(AiError::Auth(octet_ai::AuthError::Resolve))
+            ));
+            assert!(server.requests().await.is_empty());
+        } else {
+            let mut stream = opened.unwrap();
+            let mut completed = false;
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), StreamEvent::Finished(_)) {
+                    completed = true;
+                }
+            }
+            assert!(completed);
+            let requests = server.requests().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["generate"], false);
+            assert!(requests[1].get("generate").is_none());
+        }
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -2057,7 +2210,11 @@ async fn test_client_custom_gateway_prefix_preserved() {
 
     let mut events = Vec::new();
     while let Some(ev) = stream.next().await {
-        events.push(ev.unwrap());
+        let event = ev.unwrap();
+        if let StreamEvent::Finished(response) = &event {
+            assert_request_inference(response);
+        }
+        events.push(event);
     }
 
     assert!(events
@@ -2255,4 +2412,113 @@ async fn dispatch_tracking_distinguishes_credentials_from_pending_http_headers()
         .request_may_have_been_sent());
     assert!(!credential_attempt.request_may_have_been_sent());
     assert!(!client.request_may_have_been_sent());
+}
+
+#[tokio::test]
+async fn native_server_generation_survives_the_public_http_client_boundary() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        "data: {\"id\":\"native-metrics\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":150},\"timings\":{\"predicted_n\":100,\"predicted_ms\":500}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let response = AiClient::new()
+        .complete(
+            &make_test_model(&server.uri(), Protocol::OpenAiChat, false),
+            text_request(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.usage.output_tokens, 150);
+    let metrics = response.inference.unwrap();
+    let client = metrics.client.unwrap();
+    assert_eq!(client.reported_output_tokens, 150);
+    assert_eq!(client.output_events, 1);
+    assert_eq!(client.output_interval_ns(), Some(0));
+    let server = metrics.server.unwrap();
+    assert_eq!(server.tokens, 100);
+    assert_eq!(server.tokens_per_second(), Some(200.0));
+    assert_eq!(metrics.server_unavailable, None);
+}
+
+/// A loopback provider with known timing: 300 ms before the first frame
+/// (queueing and prefill), five answer frames 100 ms apart, then a usage frame
+/// reporting 80 output tokens of which 30 are reasoning. The output rate counts
+/// every reported output token over request dispatch to the end of the stream,
+/// and consumer work after the terminal event (tool execution) is outside it.
+#[tokio::test]
+async fn output_rate_uses_reported_usage_over_dispatch_to_stream_end() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            request.extend_from_slice(&buf[..n]);
+            if n == 0 || request.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        let chunk = |data: &str| format!("{:x}\r\n{data}\r\n", data.len());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for _ in 0..5 {
+            let frame =
+                "data: {\"id\":\"rate\",\"choices\":[{\"delta\":{\"content\":\"word \"}}]}\n\n";
+            socket.write_all(chunk(frame).as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let terminal = "data: {\"id\":\"rate\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":80,\"completion_tokens_details\":{\"reasoning_tokens\":30}}}\n\ndata: [DONE]\n\n";
+        socket.write_all(chunk(terminal).as_bytes()).await.unwrap();
+        socket.write_all(b"0\r\n\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let model = make_test_model(&uri, Protocol::OpenAiChat, false);
+    let mut stream = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let mut finished = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::Finished(response) = event.unwrap() {
+            finished = Some(response);
+            // Simulated tool execution after the response completed.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let response = finished.expect("terminal response");
+    assert_eq!(response.usage.output_tokens, 80);
+    let metrics = response.inference.unwrap();
+    let sample = metrics.client.unwrap().output_rate_sample().unwrap();
+    assert_eq!(sample.tokens, 80, "reasoning is output; input is not");
+    assert!(!sample.estimated_tokens);
+    // 300 ms to first frame + 5 x 100 ms of streaming.
+    assert!(
+        sample.active_ns >= 800_000_000,
+        "time to first token is provider-active time: {sample:?}"
+    );
+    assert!(
+        sample.active_ns < 1_300_000_000,
+        "the interval closes at the terminal event, before tool work: {sample:?}"
+    );
+    let rate = sample.tokens_per_second().unwrap();
+    assert!(
+        (61.0..=100.0).contains(&rate),
+        "80 tokens over 0.8-1.3 s: {rate}"
+    );
 }

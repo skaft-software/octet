@@ -12,8 +12,10 @@ fn keyboard_enhancement_uses_only_selective_disambiguation_flags() {
 fn restoration_guards_are_idempotent_and_clear_their_state() {
     mark_raw_active();
     mark_keyboard_enhancement_active();
+    mark_focus_reporting_active();
     force_restore();
     force_restore();
     assert!(!RAW_ACTIVE.load(Ordering::SeqCst));
     assert!(!KEYBOARD_ENHANCEMENT_ACTIVE.load(Ordering::SeqCst));
+    assert!(!FOCUS_REPORTING_ACTIVE.load(Ordering::SeqCst));
 }

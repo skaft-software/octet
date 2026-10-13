@@ -2,12 +2,9 @@
 
 use std::io::{self, Write};
 
-use octet_agent::compaction::{finish_handoff_bounded, MAX_COMPACTION_HANDOFF_BYTES};
-use octet_agent::{
-    build_handoff_message, build_turn_prefix_handoff_message, prepare_handoff, CancellationToken,
-    EntryId, InputPart, Session, SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS,
-    TURN_PREFIX_OUTPUT_TOKENS,
-};
+#[cfg(test)]
+use octet_agent::{compaction::MAX_COMPACTION_HANDOFF_BYTES, prepare_handoff, EntryId};
+use octet_agent::{AgentError, CancellationToken, Entry, EntryValue, InputPart, Session};
 use octet_ai::{AssistantPart, Media, Message, ToolResultPart, UserPart};
 
 use crate::app::App;
@@ -153,6 +150,7 @@ pub fn context_window(model: &octet_ai::Model) -> u64 {
 }
 
 /// Select the first retained entry using the shared Pi-compatible token walk.
+#[cfg(test)]
 pub fn choose_first_kept(session: &Session, keep_recent_tokens: u64) -> Option<EntryId> {
     octet_agent::choose_first_kept_by_tokens(session, keep_recent_tokens, |message| {
         estimate_messages_tokens(std::slice::from_ref(message))
@@ -161,35 +159,57 @@ pub fn choose_first_kept(session: &Session, keep_recent_tokens: u64) -> Option<E
     .flatten()
 }
 
-fn summary_request_size(
-    model: &octet_ai::Model,
-    system: &str,
-    message: &Message,
-    output_limit: u64,
-) -> (u64, u64) {
-    let output_tokens = model.spec.limits.max_output_tokens.clamp(1, output_limit);
-    let estimated_input = estimate_text_tokens(system)
-        .saturating_add(estimate_messages_tokens(std::slice::from_ref(message)))
-        .saturating_add(FRAMING_OVERHEAD_TOKENS);
-    let input_budget = model
-        .spec
-        .limits
-        .context_window
-        .saturating_sub(output_tokens);
-    (estimated_input, input_budget)
+/// The newest local checkpoint on the selected ancestry, not an abandoned branch
+/// or a metadata leaf appended by a post-compaction hook.
+pub(crate) fn latest_compaction(session: &Session) -> Option<&Entry> {
+    let mut cursor = session.head_ref();
+    while let Some(id) = cursor {
+        let entry = session.entry(id)?;
+        if matches!(entry.value, EntryValue::Compaction { .. }) {
+            return Some(entry);
+        }
+        cursor = entry.parent.as_ref();
+    }
+    None
 }
 
-/// Attempt one nonfatal semantic-boundary compaction.
+/// Attempt one semantic-boundary compaction. Provider failures remain best-effort;
+/// hook refusals and policy errors propagate to the initiating command.
 pub async fn attempt_compaction(app: &mut App) -> anyhow::Result<CompactionOutcome> {
     attempt_compaction_with_instructions(app, None).await
 }
 
 /// Manual summary instructions affect only this bounded compaction request.
-/// The agent owns retries, uncertainty, hard budgets and accounting; this layer
-/// commits the final handoff once and never records a second usage receipt.
+/// The agent owns hooks, retries, uncertainty, hard budgets, accounting and the
+/// single durable checkpoint commit.
 pub async fn attempt_compaction_with_instructions(
     app: &mut App,
     instructions: Option<&str>,
+) -> anyhow::Result<CompactionOutcome> {
+    attempt_compaction_with_cancellation(app, instructions, CancellationToken::default()).await
+}
+
+pub(crate) async fn attempt_compaction_with_cancellation(
+    app: &mut App,
+    instructions: Option<&str>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<CompactionOutcome> {
+    attempt_compaction_for_agent(
+        &mut app.agent,
+        &app.config.compaction,
+        instructions,
+        cancellation,
+    )
+    .await
+}
+
+/// Split the sole Session owner from the frontend so admitted reverse requests
+/// can keep draining while awaited compaction hooks run.
+pub(crate) async fn attempt_compaction_for_agent(
+    agent: &mut octet_agent::Agent,
+    policy: &crate::config::CompactionPolicy,
+    instructions: Option<&str>,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<CompactionOutcome> {
     let instructions = instructions
         .map(str::trim)
@@ -202,17 +222,13 @@ pub async fn attempt_compaction_with_instructions(
     }) {
         anyhow::bail!("compaction instructions must be at most 16 KiB without terminal controls");
     }
-    let system = match instructions {
-        Some(instructions) => format!("{SUMMARIZATION_SYSTEM_PROMPT}\n\nAdditional user instructions for this handoff:\n{instructions}"),
-        None => SUMMARIZATION_SYSTEM_PROMPT.to_owned(),
-    };
-    if app.config.compaction.mode == crate::config::CompactionMode::NativeResponses {
+    if policy.mode == crate::config::CompactionMode::NativeResponses {
         if instructions.is_some() {
             return Ok(CompactionOutcome::Skipped {
                 reason: "custom instructions require local compaction mode".into(),
             });
         }
-        return Ok(match app.agent.compact_responses_native().await {
+        return Ok(match agent.compact_responses_native().await {
             Ok(_) => CompactionOutcome::NativeCompacted,
             Err(error) => CompactionOutcome::Skipped {
                 reason: error.to_string(),
@@ -220,163 +236,44 @@ pub async fn attempt_compaction_with_instructions(
         });
     }
 
-    let first_kept = match choose_first_kept(
-        app.agent.session(),
-        app.config.compaction.keep_recent_tokens,
-    ) {
-        Some(entry) => entry,
-        None => {
-            return Ok(CompactionOutcome::Skipped {
-                reason: "no safe turn boundary to compact".into(),
-            })
-        }
-    };
-    let preparation = match prepare_handoff(app.agent.session(), &first_kept) {
-        Ok(preparation)
-            if !preparation.messages.is_empty() || !preparation.turn_prefix_messages.is_empty() =>
-        {
-            preparation
-        }
-        Ok(preparation) => {
-            // An empty preparation behind a previous compaction boundary means
-            // there is no new history since the last compaction; without a
-            // previous summary the session genuinely has nothing to summarize.
-            let reason = if preparation.previous_summary.is_some() {
-                "no new history since the last compaction to summarize"
-            } else {
-                "no prior messages to summarize"
-            };
-            return Ok(CompactionOutcome::Skipped {
-                reason: reason.into(),
-            });
-        }
-        Err(error) => {
-            return Ok(CompactionOutcome::Skipped {
-                reason: error.to_string(),
-            })
-        }
-    };
-    // Bootstrap resolves an explicit override and stores it on the agent. The
-    // active route remains the safe default for credentials and cache affinity.
-    let model = app
-        .agent
-        .compaction_model()
-        .cloned()
-        .unwrap_or_else(|| app.model.clone());
-
-    let mut summary = if preparation.messages.is_empty() {
-        preparation
-            .previous_summary
-            .clone()
-            .unwrap_or_else(|| "No prior history.".to_owned())
-    } else {
-        let summary_message = build_handoff_message(&preparation);
-        let (estimated_input, input_budget) =
-            summary_request_size(&model, &system, &summary_message, SUMMARY_OUTPUT_TOKENS);
-        if estimated_input > input_budget {
-            return Ok(CompactionOutcome::Skipped {
-                reason: format!(
-                    "compaction input exceeds summary model capacity ({estimated_input} > {input_budget} tokens)"
-                ),
-            });
-        }
-        let output_tokens = model
-            .spec
-            .limits
-            .max_output_tokens
-            .clamp(1, SUMMARY_OUTPUT_TOKENS);
-        if let Err(error) =
-            app.agent
-                .ensure_request_cost_capacity(&model, estimated_input, output_tokens)
-        {
-            return Ok(CompactionOutcome::Skipped {
-                reason: error.to_string(),
-            });
-        }
-        match app
-            .agent
-            .summarize_with_retry(
-                &model,
-                &system,
-                vec![summary_message],
-                output_tokens,
-                CancellationToken::default(),
-                std::mem::drop,
-            )
-            .await
-        {
-            Ok(summary) => summary,
-            Err(error) => {
-                return Ok(CompactionOutcome::Skipped {
-                    reason: error.to_string(),
-                })
-            }
-        }
-    };
-
-    if !preparation.turn_prefix_messages.is_empty() {
-        let prefix_message = build_turn_prefix_handoff_message(&preparation.turn_prefix_messages);
-        let (estimated_input, input_budget) =
-            summary_request_size(&model, &system, &prefix_message, TURN_PREFIX_OUTPUT_TOKENS);
-        if estimated_input > input_budget {
-            return Ok(CompactionOutcome::Skipped {
-                reason: format!(
-                    "split-turn prefix exceeds summary model capacity ({estimated_input} > {input_budget} tokens)"
-                ),
-            });
-        }
-        let output_tokens = model
-            .spec
-            .limits
-            .max_output_tokens
-            .clamp(1, TURN_PREFIX_OUTPUT_TOKENS);
-        if let Err(error) =
-            app.agent
-                .ensure_request_cost_capacity(&model, estimated_input, output_tokens)
-        {
-            return Ok(CompactionOutcome::Skipped {
-                reason: error.to_string(),
-            });
-        }
-        let prefix_summary = match app
-            .agent
-            .summarize_with_retry(
-                &model,
-                &system,
-                vec![prefix_message],
-                output_tokens,
-                CancellationToken::default(),
-                std::mem::drop,
-            )
-            .await
-        {
-            Ok(summary) => summary,
-            Err(error) => {
-                return Ok(CompactionOutcome::Skipped {
-                    reason: error.to_string(),
-                })
-            }
-        };
-        summary.push_str("\n\n---\n\n**Turn Context (split turn):**\n\n");
-        summary.push_str(&prefix_summary);
-    }
-    let Some(summary) =
-        finish_handoff_bounded(summary, &preparation.details, MAX_COMPACTION_HANDOFF_BYTES)
-    else {
-        return Ok(CompactionOutcome::Skipped {
-            reason: format!(
-                "compaction summary exceeded the {MAX_COMPACTION_HANDOFF_BYTES}-byte handoff limit"
-            ),
+    let previous_boundary =
+        latest_compaction(agent.session()).and_then(|entry| match &entry.value {
+            EntryValue::Compaction { first_kept, .. } => Some(first_kept.clone()),
+            _ => None,
         });
-    };
-    match app
-        .agent
-        .session_mut()
-        .compact_with_details(summary, first_kept, preparation.details)
-    {
-        Ok(_) => Ok(CompactionOutcome::Compacted {
-            elided: preparation.messages.len() + preparation.turn_prefix_messages.len(),
-        }),
+    // `/compact` temporarily reduces the frontend retention budget. Apply it
+    // to the sole compaction owner, then restore the autonomous policy on every
+    // settled result (including cooperative cancellation and hook veto).
+    let mode = agent.compaction_mode();
+    let (_, threshold, original_keep) = agent.compaction_token_policy();
+    agent.set_compaction_token_mode(mode, threshold, policy.keep_recent_tokens)?;
+    let result = agent
+        .compact_session_with_instructions(instructions, cancellation, std::mem::drop)
+        .await;
+    agent.set_compaction_token_mode(mode, threshold, original_keep)?;
+    match result {
+        Ok(info) => {
+            // Count the actual replacement boundary, not the proposed one: a
+            // hook may retain a different tail. Metadata leaves don't count.
+            let session = agent.session();
+            let mut cursor = session
+                .entry(&info.first_kept)
+                .and_then(|entry| entry.parent.as_ref());
+            let mut elided = 0;
+            while let Some(entry) = cursor.and_then(|id| session.entry(id)) {
+                elided += usize::from(matches!(entry.value, EntryValue::Message(_)));
+                if Some(&entry.id) == previous_boundary.as_ref() {
+                    break;
+                }
+                cursor = entry.parent.as_ref();
+            }
+            Ok(CompactionOutcome::Compacted { elided })
+        }
+        // A refused or committed-but-failed hook must reach the caller as a
+        // failure, not become an optimistic successful command acknowledgement.
+        Err(error @ (AgentError::Cancelled | AgentError::InvalidCompactionPolicy(_))) => {
+            Err(error.into())
+        }
         Err(error) => Ok(CompactionOutcome::Skipped {
             reason: error.to_string(),
         }),
@@ -433,6 +330,7 @@ pub(crate) mod tests {
                     response_id: None,
                     responses_output: None,
                     deferred: None,
+                    inference: None,
                     diagnostics: Vec::new(),
                 })),
             ])))
@@ -618,14 +516,18 @@ pub(crate) mod tests {
             reasoning_mode: octet_ai::ReasoningMode::Standard,
             reasoning_mode_explicit: false,
             cache_retention: octet_ai::CacheRetention::Short,
+            cache_warming: octet_agent::CacheWarmMode::default(),
+            show_cache_miss_notices: false,
             effect_policy: octet_agent::EffectPolicy::Controlled,
             sandbox: SandboxPolicy::default(),
             theme: None,
+            theme_explicit: false,
             system_prompt: None,
             theme_paths: vec![],
             color: crate::config::ColorMode::Auto,
             mouse: crate::config::MouseMode::Auto,
             plain: false,
+            tern: crate::config::TernMode::Auto,
             show_images: false,
             session_dir: directory.path().join("sessions"),
             compaction: CompactionPolicy::default(),
@@ -645,6 +547,7 @@ pub(crate) mod tests {
             extension_activation_overridden: false,
             trusted_extensions: vec![],
             invocation_trusted_extensions: vec![],
+            start_extension_processes: true,
             experimental_streamable_http_mcp: false,
             extension_flag_values: Default::default(),
             tools: crate::config::ToolPolicy::default(),
@@ -666,6 +569,153 @@ pub(crate) mod tests {
         )
         .unwrap();
         (directory, app)
+    }
+
+    pub(crate) fn app_for_session_operation(
+        hook: impl octet_agent::compaction::SessionOperationHook + 'static,
+    ) -> (tempfile::TempDir, App) {
+        let (directory, mut app) = app_for_estimate();
+        let mut extensions = octet_agent::ExtensionHost::new();
+        extensions.session_operation_hook(hook);
+        app.agent = octet_agent::Agent::new(octet_agent::AgentConfig {
+            client: app.client.clone(),
+            model: app.model.clone(),
+            session: Session::create(directory.path().join("session-operation.jsonl")).unwrap(),
+            system: "system".into(),
+            sandbox: octet_agent::SandboxConfig::new(directory.path()),
+            effect_broker: octet_agent::EffectBroker::default(),
+            extensions,
+            max_turns: None,
+            reasoning: app.reasoning.clone(),
+            reasoning_mode: app.reasoning_mode,
+            cache_retention: app.config.cache_retention,
+            session_id: None,
+        })
+        .unwrap();
+        (directory, app)
+    }
+
+    struct ManualSessionHook {
+        veto: bool,
+        fail_after: bool,
+        seen: Arc<Mutex<Vec<octet_agent::compaction::SessionOperation>>>,
+    }
+
+    struct ManualSessionReply(Option<octet_agent::compaction::SessionOperationDecision>);
+
+    impl octet_agent::compaction::SessionOperationInvocation for ManualSessionReply {
+        fn take_future(&mut self) -> octet_agent::compaction::SessionOperationFuture {
+            let decision = self.0.take().unwrap();
+            Box::pin(async move { Ok(decision) })
+        }
+    }
+
+    impl octet_agent::compaction::SessionOperationHook for ManualSessionHook {
+        fn begin(
+            &self,
+            session: &Session,
+            operation: &octet_agent::compaction::SessionOperation,
+        ) -> Result<Option<Box<dyn octet_agent::compaction::SessionOperationInvocation>>, String>
+        {
+            use octet_agent::compaction::{
+                SessionCompactionReplacement, SessionOperation, SessionOperationDecision,
+            };
+            self.seen.lock().unwrap().push(operation.clone());
+            let decision = match operation {
+                SessionOperation::BeforeCompact { first_kept, .. } => {
+                    if self.veto {
+                        SessionOperationDecision::Cancel
+                    } else {
+                        SessionOperationDecision::ReplaceCompaction {
+                            replacement: SessionCompactionReplacement {
+                                summary: "frontend hook handoff".into(),
+                                first_kept: first_kept.clone(),
+                            },
+                        }
+                    }
+                }
+                SessionOperation::Compacted { entry, .. } => {
+                    assert_eq!(session.head_ref(), Some(&entry.id));
+                    if self.fail_after {
+                        return Err("after-hook refused".into());
+                    }
+                    SessionOperationDecision::Continue
+                }
+                _ => SessionOperationDecision::Continue,
+            };
+            Ok(Some(Box::new(ManualSessionReply(Some(decision)))))
+        }
+    }
+
+    #[tokio::test]
+    async fn frontend_compaction_honors_hooks_restores_policy_and_retains_committed_failure() {
+        for (veto, fail_after) in [(true, false), (false, false), (false, true)] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (_directory, mut app) = app_for_session_operation(ManualSessionHook {
+                veto,
+                fail_after,
+                seen: seen.clone(),
+            });
+            app.agent
+                .set_compaction_token_policy(true, 0.8, 20_000)
+                .unwrap();
+            app.config.compaction.keep_recent_tokens = 1;
+            for entry in [
+                user("first"),
+                assistant("answer one"),
+                user("second"),
+                assistant("answer two"),
+            ] {
+                app.agent.session_mut().append(entry).unwrap();
+            }
+            let first_kept = choose_first_kept(app.agent.session(), 1).unwrap();
+            let policy = app.agent.compaction_token_policy();
+            let head = app.agent.session().head();
+            let path = app.agent.session().path().to_owned();
+            let provider = Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::new()),
+                calls: AtomicUsize::new(0),
+            });
+            app.client
+                .register_host_stream_transport(app.model.endpoint.id.clone(), provider.clone());
+            let result =
+                attempt_compaction_with_instructions(&mut app, Some("  preserve API  ")).await;
+            assert_eq!(app.agent.compaction_token_policy(), policy);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            assert!(app.agent.session().usage_records().is_empty());
+            let events = seen.lock().unwrap();
+            assert!(
+                matches!(&events[0], octet_agent::compaction::SessionOperation::BeforeCompact {
+                first_kept: boundary, custom_instructions: Some(instructions), ..
+            } if boundary == &first_kept && instructions == "preserve API")
+            );
+            if veto {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled by extension"));
+                assert_eq!(events.len(), 1);
+                assert_eq!(app.agent.session().head(), head);
+            } else {
+                assert_eq!(events.len(), 2);
+                if fail_after {
+                    assert!(result.unwrap_err().to_string().contains("do not retry"));
+                } else {
+                    assert_eq!(result.unwrap(), CompactionOutcome::Compacted { elided: 3 });
+                }
+                assert_ne!(app.agent.session().head(), head);
+                assert!(
+                    matches!(&latest_compaction(app.agent.session()).unwrap().value,
+                    EntryValue::Compaction { summary, .. } if summary == "frontend hook handoff")
+                );
+            }
+            let committed_head = app.agent.session().head();
+            drop(app);
+            assert_eq!(
+                Session::open_read_only(path).unwrap().head(),
+                committed_head
+            );
+        }
     }
 
     #[tokio::test]

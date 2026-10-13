@@ -719,7 +719,12 @@ def select_provider(
     *,
     path: Optional[Path] = None,
     searxng_endpoint: Optional[str] = None,
+    replace_endpoint: bool = False,
 ) -> Configuration:
+    """Select a provider; ``replace_endpoint`` swaps a saved SearXNG endpoint.
+
+    A replaced endpoint keeps the saved label and private-endpoint choice.
+    """
     if kind not in ("brave", "searxng"):
         raise ConfigError("web search provider must be 'brave' or 'searxng'")
     config_path = default_config_path() if path is None else Path(path)
@@ -734,7 +739,14 @@ def select_provider(
         provider: Dict[str, Any] = {"kind": "brave", "label": "Brave Search"}
     else:
         saved = settings.get("searxng")
-        if isinstance(current, dict) and current.get("kind") == "searxng":
+        if replace_endpoint and searxng_endpoint is not None:
+            provider = copy.deepcopy(saved) if isinstance(saved, dict) else {
+                "kind": "searxng",
+                "label": "SearXNG",
+                "allow_private_endpoint": False,
+            }
+            provider["endpoint"] = searxng_endpoint
+        elif isinstance(current, dict) and current.get("kind") == "searxng":
             provider = copy.deepcopy(current)
         elif isinstance(saved, dict):
             provider = copy.deepcopy(saved)

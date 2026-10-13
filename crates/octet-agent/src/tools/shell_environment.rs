@@ -103,6 +103,14 @@ impl PowerShellTool {
 }
 #[async_trait::async_trait]
 impl Tool for SessionShellTool {
+    fn composition_is_unmetered(&self) -> bool {
+        self.bash.composition_is_unmetered()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.bash.output_schema()
+    }
+
     fn definition(&self) -> octet_ai::ToolDef {
         if self.powershell {
             super::powershell::definition(&self.bash)
@@ -112,7 +120,7 @@ impl Tool for SessionShellTool {
     }
     fn prompt_snippet(&self) -> Option<&str> {
         if self.powershell {
-            Some("Execute PowerShell commands")
+            Some(super::powershell::PROMPT_SNIPPET)
         } else {
             self.bash.prompt_snippet()
         }

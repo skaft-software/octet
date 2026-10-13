@@ -718,8 +718,9 @@ class Orchestrator:
                 # an explicit bounded state, never a silent stall.
                 raise SubagentError(
                     "worker %s is still owned by this session but is currently "
-                    "detached from any host run; reattach it with /subagents wait "
-                    "or subagent_status once the host republishes its live session"
+                    "detached from any host run; reattach it with subagent_wait (or "
+                    "/subagents wait) once the host republishes its "
+                    "live session"
                     % display,
                     code="detached",
                 )
@@ -817,8 +818,8 @@ class Orchestrator:
                         "%d worker(s) are still owned by this parent session but "
                         "detached from any host run (%d reattachable). The cached "
                         "fallback cannot observe the live host service, so no wait "
-                        "or reattachment was performed. Run /subagents wait from an "
-                        "interactive owner-bound session or call subagent_wait."
+                        "or reattachment was performed. Run /subagents wait "
+                        "in an interactive session or call subagent_wait."
                         % (len(detached), reattachable)
                     ),
                     "notifications": [
@@ -835,8 +836,8 @@ class Orchestrator:
             return {
                 "text": (
                     "No detached workers. An explicit live wait needs the owner-bound "
-                    "command context: run /subagents wait from an interactive session "
-                    "or call subagent_wait."
+                    "command context: run /subagents wait in an "
+                    "interactive session or call subagent_wait."
                 ),
                 "notifications": [],
             }
@@ -854,7 +855,7 @@ class Orchestrator:
             return {
                 "text": (
                     "Stop was not issued by the cached fallback. "
-                    "Use the owner-bound /subagents stop action or subagent_stop tool (target=%s)."
+                    "Stop it from the worker list (Ctrl+X) or with the subagent_stop tool (target=%s)."
                     % arguments[1]
                 ),
                 "notifications": [
@@ -959,6 +960,15 @@ class Orchestrator:
             "notifications": notifications,
             "panes": [pane.plan_row() for pane in plan.panes],
             "skipped": skipped,
+        }
+
+    def menu(self, _context: Mapping[str, Any]) -> Dict[str, Any]:
+        """Extension management only; worker operations belong to /subagents."""
+
+        return {
+            "title": "Subagents",
+            "detail": "Browse and control this session's workers with /subagents.",
+            "items": [],
         }
 
     def status_contribution(self, context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
