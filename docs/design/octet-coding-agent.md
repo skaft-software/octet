@@ -344,6 +344,11 @@ into the composed prompt.
 
 Commands run immediately when safe or queue to the next idle boundary when they
 need Agent/session ownership.
+Preferences apply the moment they are issued, mid-run included: `/settings`
+values (steering and follow-up delivery, default model and reasoning, the screen
+mode) are written at once, and a delivery mode also reaches the running turn
+through its control handle. Changes that rebuild the Agent or session (model,
+thinking, `/new`, compaction, `/fast`, `/auto-compact`) still queue.
 
 octet uses one compiled default theme with built-in `auto`, `light`, and `dark`
 terminal appearances. Theme-file customization and filesystem theme discovery

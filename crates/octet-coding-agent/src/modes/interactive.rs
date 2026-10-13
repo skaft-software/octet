@@ -572,9 +572,6 @@ pub enum PendingIdleAction {
     },
     /// `/pi` lifecycle and setup review, applied only with idle application ownership.
     Pi(commands::PiSubcommand),
-    /// `/settings` mutations that must own the application (theme, images,
-    /// default model/reasoning). Reports are rendered immediately instead.
-    Settings(commands::SettingsCommand),
     /// Display is already changed; only config synchronization/persistence waits.
     SyncTheme(String),
     SyncImages(bool),
@@ -2488,16 +2485,11 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::ExtensionsSubcommand::Status
                 | commands::ExtensionsSubcommand::Inspect { .. }
         ),
-        Command::Settings(sub) => !matches!(
+        // Only the display settings keep a deferred step: the preference write
+        // that follows an immediate theme or image change.
+        Command::Settings(sub) => matches!(
             sub,
-            commands::SettingsCommand::Menu
-                | commands::SettingsCommand::Show
-                | commands::SettingsCommand::Transport
-                | commands::SettingsCommand::Padding
-                | commands::SettingsCommand::Theme(None)
-                | commands::SettingsCommand::Images(None)
-                | commands::SettingsCommand::TuiMode(None)
-                | commands::SettingsCommand::QueueMode(_, None)
+            commands::SettingsCommand::Theme(Some(_)) | commands::SettingsCommand::Images(Some(_))
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -2857,7 +2849,9 @@ where
         Command::Theme(requested) => apply_active_theme(shell, requested, queue)?,
         // A template catalogue is resource-owned text, not a built-in fact grammar.
         Command::Prompt(None) => shell.show_report_text(
-            "Prompts", "Available prompt templates", shell.prompt_templates_report(),
+            "Prompts",
+            "Available prompt templates",
+            shell.prompt_templates_report(),
         ),
         Command::Prompt(Some(invocation)) => {
             shell.queue_follow_up(ComposedInput::from_text(format!("/{invocation}")));
@@ -2929,7 +2923,11 @@ where
                 id,
                 output,
                 &inspection.invocation_cwd,
-                if shell.theme().background() == TerminalBackground::Light { "light" } else { "dark" },
+                if shell.theme().background() == TerminalBackground::Light {
+                    "light"
+                } else {
+                    "dark"
+                },
             ) {
                 Ok(report) => shell.show_overlay_text(format!(
                     "Exported {}\nRedacted {} potentially sensitive values{}",
@@ -3100,9 +3098,30 @@ where
                     push_pending_action(queue, PendingIdleAction::SyncImages(enabled));
                     shell.notice("image display updated; preference saves at the next idle boundary");
                 }
-                mutation => {
-                    push_pending_action(queue, PendingIdleAction::Settings(mutation));
-                    shell.notice("settings change queued for the next idle boundary");
+                // Preferences apply the moment they are issued, mid-run or idle:
+                // they are written now, and a delivery mode also reaches the
+                // running turn through its control handle.
+                commands::SettingsCommand::QueueMode(kind, Some(mode)) => {
+                    save_queue_mode(shell, extensions, inspection.cache_warming_control.as_ref(), kind, mode).await;
+                }
+                commands::SettingsCommand::TuiMode(Some(mode)) => save_tui_mode(shell, extensions, mode).await,
+                commands::SettingsCommand::DefaultModel(None) => shell.notice(format!(
+                    "default model for new sessions: {}",
+                    inspection
+                        .settings
+                        .default_model
+                        .as_deref()
+                        .unwrap_or("(chosen at startup or by the session)")
+                )),
+                commands::SettingsCommand::DefaultModel(Some(id)) => {
+                    save_default_model(shell, extensions, &inspection.catalog, id).await;
+                }
+                commands::SettingsCommand::DefaultReasoning(None) => shell.notice(format!(
+                    "default reasoning: {}",
+                    inspection.settings.reasoning
+                )),
+                commands::SettingsCommand::DefaultReasoning(Some(level)) => {
+                    save_default_reasoning(shell, extensions, level).await;
                 }
             }
         }
@@ -8643,28 +8662,6 @@ async fn apply_pending_actions(
             PendingIdleAction::Pi(sub) => {
                 app = apply_pi_command(app, shell, input, sub).await?;
             }
-            PendingIdleAction::Settings(sub) => {
-                // Reuse the idle dispatcher verbatim so a queued mutation takes
-                // exactly the path an immediate `/settings` would.
-                match run_idle_command(
-                    app,
-                    shell,
-                    input,
-                    Command::Settings(sub),
-                    goal_deadline,
-                    None,
-                    reload,
-                )
-                .await?
-                {
-                    IdleCommandOutcome::Continue(next)
-                    | IdleCommandOutcome::Quit(next)
-                    | IdleCommandOutcome::Submit { app: next, .. }
-                    // `/settings` dispatch never plans a re-exec; the arm only
-                    // keeps the match exhaustive.
-                    | IdleCommandOutcome::Reexec { app: next, .. } => app = *next,
-                }
-            }
             PendingIdleAction::ScopedModels(sub) => {
                 apply_scoped_models_command(&mut app, shell, sub).await;
                 shell.notice("model scope change applied at the idle boundary");
@@ -9712,6 +9709,136 @@ async fn apply_pi_command(
 
 /// `/settings` at the idle boundary. Reports render immediately; mutations
 /// persist through the shared configuration writer and apply in-session.
+/// Persist one steering or follow-up delivery mode. During a run the mode also
+/// reaches that run's control handle, so its next delivery decision uses it.
+async fn save_queue_mode(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    live: Option<&RunControl>,
+    kind: crate::cli::QueueKind,
+    mode: octet_agent::QueueDeliveryMode,
+) {
+    save_queue_mode_with(shell, extensions, live, kind, mode, || {
+        crate::cli::persist_queue_mode(kind, mode)
+    })
+    .await;
+}
+
+/// [`save_queue_mode`] with the preference writer supplied by the caller, so the
+/// live-delivery decision is testable without touching the user's configuration.
+async fn save_queue_mode_with(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    live: Option<&RunControl>,
+    kind: crate::cli::QueueKind,
+    mode: octet_agent::QueueDeliveryMode,
+    persist: impl FnOnce() -> anyhow::Result<()>,
+) {
+    if let Err(error) = persist_configuration(Some(extensions), persist).await {
+        shell.error(format!("failed to save the {} mode: {error}", kind.label()));
+        return;
+    }
+    let applied = match live {
+        Some(control) => match kind {
+            crate::cli::QueueKind::Steering => control.set_steering_mode(mode).await,
+            crate::cli::QueueKind::FollowUp => control.set_follow_up_mode(mode).await,
+        }
+        .is_ok(),
+        None => false,
+    };
+    shell.notice(format!(
+        "{} mode saved as {}; {}",
+        kind.label(),
+        crate::config::queue_delivery_mode_label(mode),
+        if applied {
+            "the running turn uses it from its next delivery"
+        } else {
+            "it applies from the next run"
+        },
+    ));
+}
+
+/// Persist the interactive screen policy and switch the live renderer.
+async fn save_tui_mode(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    mode: crate::config::TuiMode,
+) {
+    if crate::cli::tui_mode_is_explicit() {
+        shell.error(
+            "TUI preference unchanged: --tui-mode overrides saved settings for this invocation"
+                .to_owned(),
+        );
+        return;
+    }
+    if let Err(error) =
+        persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode)).await
+    {
+        shell.error(format!("failed to save the TUI mode preference: {error}"));
+        return;
+    }
+    if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
+        shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
+        return;
+    }
+    shell.notice(format!(
+        "interactive terminal mode saved as {}",
+        mode.as_str()
+    ));
+}
+
+/// Save the default model for new sessions. It never switches the live session.
+async fn save_default_model(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    catalog: &octet_ai::ModelCatalog,
+    id: String,
+) {
+    let model = ModelId(id);
+    if catalog.resolve(&model).is_err() {
+        shell.error(format!(
+            "unknown or unavailable model {:?}; /model lists the credential-scoped catalog",
+            model.0
+        ));
+        return;
+    }
+    if let Err(error) =
+        persist_configuration(Some(extensions), || crate::cli::persist_model(&model.0)).await
+    {
+        shell.error(format!("failed to save the default model: {error}"));
+        return;
+    }
+    shell.notice(format!(
+        "default model for new sessions: {} (use /model to switch this session now)",
+        model.0
+    ));
+}
+
+/// Save the default reasoning level for new sessions. It never changes the
+/// live session's thinking level.
+async fn save_default_reasoning(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    level: String,
+) {
+    match crate::config::parse_reasoning(&level) {
+        Ok(reasoning) => {
+            let label = reasoning_label(&reasoning);
+            if let Err(error) =
+                persist_configuration(Some(extensions), || crate::cli::persist_reasoning(&label))
+                    .await
+            {
+                shell.error(format!("failed to save the default reasoning: {error}"));
+                return;
+            }
+            shell.notice(format!(
+                "default reasoning for new sessions: {label} (use /thinking to change this session now)"
+            ));
+        }
+        Err(error) => shell.error(format!("invalid reasoning level {level:?}: {error}")),
+    }
+}
+
 async fn apply_settings_command(
     app: &mut App,
     shell: &mut InteractiveShell,
@@ -9750,40 +9877,10 @@ async fn apply_settings_command(
         ),
         Sub::QueueMode(kind, None) => shell.notice(queue_mode_report(kind)),
         Sub::QueueMode(kind, Some(mode)) => {
-            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
-                crate::cli::persist_queue_mode(kind, mode)
-            })
-            .await
-            {
-                shell.error(format!("failed to save the {} mode: {error}", kind.label()));
-                return Ok(());
-            }
-            shell.notice(format!(
-                "{} mode saved as {}; it applies from the next run",
-                kind.label(),
-                crate::config::queue_delivery_mode_label(mode),
-            ));
+            save_queue_mode(shell, &mut app.executable_extensions, None, kind, mode).await;
         }
         Sub::TuiMode(None) => shell.notice(tui_mode_report()),
-        Sub::TuiMode(Some(mode)) => {
-            if crate::cli::tui_mode_is_explicit() {
-                shell.error("TUI preference unchanged: --tui-mode overrides saved settings for this invocation".to_owned());
-                return Ok(());
-            }
-            if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
-                crate::cli::persist_tui_mode(mode)
-            })
-            .await
-            {
-                shell.error(format!("failed to save the TUI mode preference: {error}"));
-                return Ok(());
-            }
-            if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
-                shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
-                return Ok(());
-            }
-            shell.notice(format!("interactive terminal mode saved as {}", mode.as_str()));
-        }
+        Sub::TuiMode(Some(mode)) => save_tui_mode(shell, &mut app.executable_extensions, mode).await,
         Sub::Theme(requested) => {
             configure_terminal_theme(
                 shell,
@@ -9821,53 +9918,14 @@ async fn apply_settings_command(
                     .map(|model| model.0.as_str())
                     .unwrap_or("(chosen at startup or by the session)")
             )),
-            Some(id) => {
-                let model = ModelId(id);
-                if app.catalog.resolve(&model).is_err() {
-                    shell.error(format!(
-                        "unknown or unavailable model {:?}; /model lists the credential-scoped catalog",
-                        model.0
-                    ));
-                    return Ok(());
-                }
-                if let Err(error) = persist_configuration(Some(&mut app.executable_extensions), || {
-                    crate::cli::persist_model(&model.0)
-                })
-                .await
-                {
-                    shell.error(format!("failed to save the default model: {error}"));
-                    return Ok(());
-                }
-                shell.notice(format!(
-                    "default model for new sessions: {} (use /model to switch this session now)",
-                    model.0
-                ));
-            }
+            Some(id) => save_default_model(shell, &mut app.executable_extensions, &app.catalog, id).await,
         },
         Sub::DefaultReasoning(level) => match level {
             None => shell.notice(format!(
                 "default reasoning: {}",
                 reasoning_label(&app.reasoning)
             )),
-            Some(level) => match crate::config::parse_reasoning(&level) {
-                Ok(reasoning) => {
-                    let label = reasoning_label(&reasoning);
-                    if let Err(error) =
-                        persist_configuration(Some(&mut app.executable_extensions), || {
-                            crate::cli::persist_reasoning(&label)
-                        })
-                        .await
-                    {
-                        shell.error(format!("failed to save the default reasoning: {error}"));
-                        return Ok(());
-                    }
-                    shell.notice(format!(
-                        "default reasoning for new sessions: {label} (use /thinking to change this session now)"
-                    ));
-                }
-                Err(error) => shell
-                    .error(format!("invalid reasoning level {level:?}: {error}")),
-            },
+            Some(level) => save_default_reasoning(shell, &mut app.executable_extensions, level).await,
         },
     }
     Ok(())
