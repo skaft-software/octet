@@ -6,7 +6,7 @@ datasets==5.0.1
 python-dotenv==1.2.3
 unidiff==1.0.0
 requests==2.34.2
-GitPython==3.1.61
+GitPython==3.1.62
 rich==15.0.0
 tqdm==4.70.0
 # Install the evaluator checkout at EVALUATOR_COMMIT separately when a local
