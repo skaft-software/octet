@@ -993,6 +993,8 @@ class StreamableHttpTests(unittest.TestCase):
     def test_permanent_get_stream_reconnects_with_the_committed_cursor(self) -> None:
         session = "stream-session"
         stop = threading.Event()
+        first_headers = threading.Event()
+        reconnect_headers = threading.Event()
         gets: list[Optional[str]] = []
         changed: list[int] = []
 
@@ -1002,6 +1004,7 @@ class StreamableHttpTests(unittest.TestCase):
             if request.method == "GET":
                 gets.append(request.header("last-event-id"))
                 if len(gets) == 1:
+                    first_headers.wait(timeout=5)
                     return _HttpReply(
                         headers={"Content-Type": "text/event-stream"},
                         body=_sse_event(
@@ -1010,6 +1013,9 @@ class StreamableHttpTests(unittest.TestCase):
                         ),
                         include_content_length=False,
                     )
+                # Request receipt precedes validated SSE headers. Hold the
+                # response so both opening and open are causally observable.
+                reconnect_headers.wait(timeout=5)
                 # Later connections stay open until the test ends.
                 return _HttpReply(
                     headers={"Content-Type": "text/event-stream"},
@@ -1035,9 +1041,13 @@ class StreamableHttpTests(unittest.TestCase):
         try:
             client.start()
             self.assertEqual(client.notification_stream, "opening")
+            first_headers.set()
             wait_for(lambda: len(gets) >= 2, message="stream reconnection")
             self.assertIsNone(gets[0])
             self.assertEqual(gets[1], "stream-1")
+            self.assertEqual(client.notification_stream, "opening")
+            reconnect_headers.set()
+            wait_for(lambda: client.notification_stream == "open", message="validated reconnect headers")
             self.assertEqual(client.notification_stream, "open")
             wait_for(lambda: changed, message="tools-changed notification")
             stream_gets = [request for request in fixture.requests if request.method == "GET"]
@@ -1045,6 +1055,8 @@ class StreamableHttpTests(unittest.TestCase):
             self.assertTrue(all(request.header("mcp-session-id") == session for request in stream_gets))
             self.assertTrue(all("authorization" not in request.headers for request in stream_gets))
         finally:
+            first_headers.set()
+            reconnect_headers.set()
             stop.set()
             client.close()
 
