@@ -261,3 +261,40 @@ test('legacy unfrozen mirror configuration refuses before executing factories', 
   assert.match(inspected.stderr, /mirror static registrations require review/);
   assert.doesNotMatch(inspected.stderr, /executed legacy factory/);
 });
+
+// The automatic mirror prepares at every start, before octet's first frame. An
+// unchanged setup must reuse its captured catalog instead of importing every
+// factory again; any change to a factory's sources reruns the capture.
+test('automatic mirror reuses its capture for an unchanged setup and recaptures a changed one', async t => {
+  const f = fixture(t);
+  const imports = join(f.dir, 'imports.log');
+  const factory = command => `import {appendFileSync} from 'node:fs'; appendFileSync(${JSON.stringify(imports)}, 'x');
+    export default pi => pi.registerCommand(${JSON.stringify(command)},{handler(){}});`;
+  put(f.entry, factory('kept'));
+  const cacheDir = join(f.dir, 'mirror-cache');
+  const options = { ...f.options, env: { ...f.env, OCTET_PI_COMPAT_CACHE: cacheDir }, cache: true, overwrite: true };
+  const count = () => existsSync(imports) ? readFileSync(imports, 'utf8').length : 0;
+  const first = await configureMirror(options);
+  const imported = count();
+  assert.ok(imported > 0, 'a cold start captures the factories');
+  const second = await configureMirror(options);
+  assert.equal(count(), imported, 'an unchanged setup imports no factory');
+  assert.deepEqual(second.registrations, first.registrations);
+  // The review fingerprint also records that the output now exists; the
+  // catalog itself is identical.
+  const { pi_setup_fingerprint: _second, ...secondConfig } = second.config;
+  const { pi_setup_fingerprint: _first, ...firstConfig } = first.config;
+  assert.deepEqual(secondConfig, firstConfig);
+  const p = peer(t, f, second);
+  assert.ok((await initialize(p, second)).result);
+  assert.ok((await p.command('kept', [], { has_ui: false }).response).result);
+  await p.close();
+  put(f.entry, factory('changed'));
+  const third = await configureMirror(options);
+  assert.ok(count() > imported, 'a changed factory is captured again');
+  assert.deepEqual(third.registrations.commands.map(command => command.name), ['changed']);
+  // An explicit review never takes the shortcut.
+  const before = count();
+  await configureMirror({ ...options, cache: false });
+  assert.ok(count() > before);
+});

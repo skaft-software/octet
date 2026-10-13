@@ -20,6 +20,14 @@ function display(value, maxBytes = 4096) {
   return result + '…';
 }
 
+// A factory that stops with its own machine-readable code ("some_code: ...")
+// is named by that code alone. A bare snake_case identifier carries no prompt
+// text; everything after it stays redacted.
+function reportedCode(text) {
+  const code = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=[:\s]|$)/.exec(String(text))?.[1];
+  return code && code.length <= 96 ? code : undefined;
+}
+
 export function loadIssue(failure) {
   const { entry, code, name, error = '' } = failure;
   let reason, next;
@@ -50,6 +58,9 @@ export function loadIssue(failure) {
   } else if (name === 'SyntaxError' || error.startsWith('invalid_request default export must be a factory:')) {
     reason = 'The extension source is invalid or does not export a factory; it was skipped.';
     next = 'Fix the extension source or update it, then review and reconfigure.';
+  } else if (reportedCode(error)) {
+    reason = `The extension stopped while loading with "${reportedCode(error)}" and was skipped.`;
+    next = 'Check its dependencies and settings; update or disable this extension, then reconfigure.';
   } else {
     reason = 'The extension failed while loading and was skipped (private error details redacted).';
     next = 'Check its dependencies and settings; update or disable this extension, then reconfigure.';
@@ -61,10 +72,12 @@ export function loadIssue(failure) {
 // start, with the one reason that is safe to show, never its raw error text.
 export function excludedIssue({ entry, reason = '' }) {
   const stalled = /setup did not finish within [0-9.]+ s/.exec(reason)?.[0];
+  const code = reportedCode(reason);
   return { path: entry,
     reason: stalled
       ? `The extension's ${stalled}; it was left out of the mirror.`
-      : 'The extension could not be loaded by the adapter and was left out of the mirror (private error details redacted).',
+      : code ? `The extension stopped while loading with "${code}"; it was left out of the mirror.`
+        : 'The extension could not be loaded by the adapter and was left out of the mirror (private error details redacted).',
     next: 'Update or disable this extension. octet tries it again the next time it starts.' };
 }
 

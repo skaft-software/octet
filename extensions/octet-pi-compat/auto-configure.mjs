@@ -5,5 +5,5 @@ import { configureMirror } from './configure.mjs';
 
 const [output, projectTrusted] = process.argv.slice(2);
 if (!output || !['true', 'false'].includes(projectTrusted)) throw new Error('native mirror activation arguments required');
-await configureMirror({ output, reviewed: true, projectTrusted: projectTrusted === 'true',
+await configureMirror({ output, reviewed: true, projectTrusted: projectTrusted === 'true', cache: true,
   log: message => console.error(`[pi-compat] ${message}`) });
