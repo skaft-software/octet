@@ -235,6 +235,68 @@ fn render_surface_content_line(
     }
 }
 
+/// Whether a blank cushion row of this surface carries a visible fill.
+///
+/// A filled cushion is part of the surface itself: the shaded card keeps its
+/// own top and bottom edge, so a neighbouring event's host spacing must stay a
+/// separate, neutral row instead of merging into it. Asking the painter keeps
+/// the answer exact for every chrome, role fill and prompt wash.
+pub(super) fn cushion_row_is_painted(
+    plan: &SurfacePlan<'_>,
+    theme: &OctetTheme,
+    prompt_color: Option<&str>,
+) -> bool {
+    paints_background(&render_surface_content_line(
+        "",
+        plan,
+        theme,
+        prompt_color,
+        false,
+        None,
+    ))
+}
+
+/// Whether any SGR sequence in `row` selects a background colour.
+fn paints_background(row: &str) -> bool {
+    let mut rest = row;
+    while let Some(start) = rest.find("\x1b[") {
+        rest = &rest[start + 2..];
+        // A CSI sequence ends at the first byte in 0x40..=0x7e.
+        let Some(end) = rest.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c)) else {
+            return false;
+        };
+        if rest.as_bytes()[end] == b'm' && sgr_selects_background(&rest[..end]) {
+            return true;
+        }
+        rest = &rest[end + 1..];
+    }
+    false
+}
+
+fn sgr_selects_background(params: &str) -> bool {
+    let mut values = params
+        .split([';', ':'])
+        .map(|value| value.parse::<u16>().unwrap_or(0));
+    while let Some(value) = values.next() {
+        match value {
+            48 | 40..=47 | 100..=107 => return true,
+            // Foreground and underline colours carry their own arguments, which
+            // must not be mistaken for a background selector.
+            38 | 58 => match values.next() {
+                Some(5) => {
+                    values.next();
+                }
+                Some(2) => {
+                    values.nth(2);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
 fn surface_bottom_row(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> Option<String> {
     (plan.chrome == ThemeSurfaceChrome::Card).then(|| {
         let (_, border_role, _) = surface_roles(plan.kind);
@@ -558,4 +620,38 @@ pub(super) fn decorate_surface_content_suffix(
         rows.push(fit_line(&format!("{frame_left}{bottom}"), outer_width));
     }
     rows
+}
+
+#[cfg(test)]
+mod paint_probe_tests {
+    use super::paints_background;
+
+    #[test]
+    fn background_selectors_are_found_in_every_encoding() {
+        assert!(paints_background("\x1b[48;2;1;2;3m  \x1b[0m"));
+        assert!(paints_background(
+            "\x1b[38;2;230;230;235;48;2;64;92;119m  \x1b[0m"
+        ));
+        assert!(paints_background("\x1b[48;5;236m  \x1b[0m"));
+        assert!(paints_background("\x1b[44m  \x1b[0m"));
+        assert!(paints_background("\x1b[1;103m  \x1b[0m"));
+        assert!(paints_background(
+            "\x1b[38;2;1;2;3m\x1b[0m\x1b[48:2::1:2:3m"
+        ));
+    }
+
+    #[test]
+    fn foreground_only_and_plain_rows_are_not_painted() {
+        assert!(!paints_background(""));
+        assert!(!paints_background("      "));
+        assert!(!paints_background("\x1b[0m"));
+        assert!(!paints_background("\x1b[1m\x1b[31mtext\x1b[0m"));
+        assert!(!paints_background("\x1b[49m"));
+        // 48 and 44 appearing as colour channels of a foreground are not backgrounds.
+        assert!(!paints_background("\x1b[38;2;48;44;100m  \x1b[0m"));
+        assert!(!paints_background("\x1b[38;5;48m  \x1b[0m"));
+        assert!(!paints_background("\x1b[58;2;48;48;48m  \x1b[0m"));
+        // An unterminated sequence is not a paint.
+        assert!(!paints_background("\x1b[48;2;1"));
+    }
 }

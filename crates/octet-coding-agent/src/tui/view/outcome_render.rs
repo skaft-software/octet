@@ -48,14 +48,9 @@ pub(super) fn completion_rate_detail(generation: &super::RunGenerationRate) -> S
     } else {
         ""
     };
-    let response_label = if generation.responses == 1 {
-        "response"
-    } else {
-        "responses"
-    };
     format!(
-        "{approx}{:.1} tok/s{estimated} · {} {response_label}",
-        generation.tokens_per_second, generation.responses
+        "{approx}{:.1} tok/s{estimated}",
+        generation.tokens_per_second
     )
 }
 
@@ -202,7 +197,6 @@ mod tests {
         let generation = super::super::RunGenerationRate {
             tokens_per_second: 100.0,
             is_estimate: false,
-            responses: 1,
         };
         for rate in [None, Some(&generation)] {
             assert_eq!(
@@ -423,7 +417,7 @@ mod inference_tests {
             .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(text, "✓ completed · 9.0s · 50.0 tok/s · 1 response");
+        assert_eq!(text, "✓ completed · 9.0s · 50.0 tok/s");
     }
 }
 
@@ -478,10 +472,7 @@ mod decode_estimate_tests {
             " · ",
             estimated_block.generation.as_ref(),
         );
-        assert_eq!(
-            text,
-            "completed · 1m00s · ~50.0 tok/s (estimated tokens) · 1 response"
-        );
+        assert_eq!(text, "completed · 1m00s · ~50.0 tok/s (estimated tokens)");
         assert_eq!(
             super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(estimated_block)),
             text

@@ -6,7 +6,8 @@ use sexy_tui_rs::{strip_terminal_sequences, visible_width};
 use super::super::{render_block_planned, AssistantBlock, NoticeTone, OutcomeBlock, ToolPanel};
 use super::*;
 use crate::presentation::{summarize_tool, RunOutcome, RunSummary};
-use crate::tui::theme::{test_theme, test_theme_from_source};
+use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+use crate::tui::theme::{test_theme, test_theme_for, test_theme_from_source, TerminalBackground};
 
 fn themes() -> Vec<(String, OctetTheme)> {
     let mut themes = vec![
@@ -132,23 +133,6 @@ fn byte_rows(blocks: &[&TranscriptBlock], theme: &OctetTheme, width: u16) -> Vec
         .collect()
 }
 
-fn blank_runs(rows: &[String], needle: &str) -> (usize, usize) {
-    let index = rows
-        .iter()
-        .position(|row| row.contains(needle))
-        .unwrap_or_else(|| panic!("missing {needle:?}: {rows:?}"));
-    let before = rows[..index]
-        .iter()
-        .rev()
-        .take_while(|row| row.trim().is_empty())
-        .count();
-    let after = rows[index + 1..]
-        .iter()
-        .take_while(|row| row.trim().is_empty())
-        .count();
-    (before, after)
-}
-
 #[test]
 fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
     let prompt = prompt();
@@ -166,15 +150,15 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
         TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
     for (name, theme) in themes() {
         for width in [32, 80, 120] {
-            let initial = byte_rows(&[&prompt, &working], &theme, width);
+            let initial = raw_rows(&[&prompt, &working], &theme, width);
             assert_eq!(
-                blank_runs(&initial, "Working"),
+                neutral_runs(&initial, "Working"),
                 (1, 1),
                 "{name}/{width}: {initial:?}"
             );
-            let promoted = byte_rows(&[&prompt, &thinking], &theme, width);
+            let promoted = raw_rows(&[&prompt, &thinking], &theme, width);
             assert_eq!(
-                blank_runs(&promoted, "Thinking").0,
+                neutral_runs(&promoted, "Thinking").0,
                 1,
                 "{name}/{width}: {promoted:?}"
             );
@@ -184,40 +168,43 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
                 "{name}/{width}: composer promotion bounce"
             );
 
-            let handoff = byte_rows(&[&prompt, &thinking, &working], &theme, width);
+            let handoff = raw_rows(&[&prompt, &thinking, &working], &theme, width);
             assert_eq!(
-                blank_runs(&handoff, "Working"),
+                neutral_runs(&handoff, "Working"),
                 (1, 1),
                 "{name}/{width}: {handoff:?}"
             );
-            let tools_live = byte_rows(&[&prompt, &tool, &working], &theme, width);
+            let tools_live = raw_rows(&[&prompt, &tool, &working], &theme, width);
             assert_eq!(
-                blank_runs(&tools_live, "Working"),
+                neutral_runs(&tools_live, "Working"),
                 (1, 1),
                 "{name}/{width}: {tools_live:?}"
             );
-            let settled = byte_rows(
+            let settled = raw_rows(
                 &[&prompt, &tool, &completed, &notice, &status, &prose],
                 &theme,
                 width,
             );
             for needle in ["completed", "Notice marker", "Status marker"] {
                 assert_eq!(
-                    blank_runs(&settled, needle),
+                    neutral_runs(&settled, needle),
                     (1, 1),
                     "{name}/{width}/{needle}: {settled:?}"
                 );
             }
             assert!(
-                settled.iter().any(|row| row.contains("1m23s")),
+                visible_position(&settled, "1m23s").is_some(),
                 "{name}/{width}: {settled:?}"
             );
         }
     }
 }
 
+/// A filled cushion row is part of its own card. Host event spacing stays a
+/// separate, unpainted row on both sides of it; only unpainted cushions (a band
+/// with padding but no fill) merge with that spacing.
 #[test]
-fn filled_neighbor_cushions_collapse_with_host_event_spacing_in_both_directions() {
+fn filled_neighbor_cushions_never_merge_with_host_event_spacing() {
     let theme = test_theme_from_source(
         "[layout]\nprompt_padding = true\ndensity = \"airy\"\n\
          [surfaces.user]\nchrome = \"band\"\npadding = 1\n\
@@ -230,12 +217,15 @@ fn filled_neighbor_cushions_collapse_with_host_event_spacing_in_both_directions(
     let notice = TranscriptBlock::Notice("Notice marker".into());
     let tool = tool();
     for width in [32, 80, 120] {
-        let rows = byte_rows(&[&prompt, &working], &theme, width);
-        assert_eq!(blank_runs(&rows, "Working"), (1, 1), "{rows:?}");
-        let rows = byte_rows(&[&tool, &completed, &notice, &prompt], &theme, width);
+        let rows = raw_rows(&[&prompt, &working], &theme, width);
+        assert_eq!(neutral_runs(&rows, "Working"), (1, 1), "{rows:?}");
+        let rows = raw_rows(&[&tool, &completed, &notice, &prompt], &theme, width);
         for needle in ["completed", "Notice marker"] {
-            assert_eq!(blank_runs(&rows, needle), (1, 1), "{rows:?}");
+            assert_eq!(neutral_runs(&rows, needle), (1, 1), "{rows:?}");
         }
+        // The prompt that follows keeps its own painted top row.
+        let at = visible_position(&rows, "Ready for work").expect("prompt row");
+        assert!(painted_row(&rows[at - 1]), "{rows:?}");
     }
 }
 
@@ -350,5 +340,147 @@ fn content_width_incremental_rows_match_full_rows_and_committed_semantics() {
             "{final_rows:?}"
         );
         assert_eq!(block_copy_text(&block), copy);
+    }
+}
+
+/// Rows exactly as the terminal receives them. A painted cushion row keeps its
+/// background escape, so a filled card edge is never mistaken for blank spacing
+/// the way an ANSI-stripped comparison would.
+fn raw_rows(blocks: &[&TranscriptBlock], theme: &OctetTheme, width: u16) -> Vec<String> {
+    let renderer = theme.rich_renderer();
+    let reasoning = theme.reasoning_renderer();
+    let mut rows = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        rows.extend(
+            render_block_planned(
+                index.checked_sub(1).map(|previous| blocks[previous]),
+                block,
+                theme,
+                &renderer,
+                &reasoning,
+                width,
+                false,
+                1,
+                7,
+            )
+            .lines,
+        );
+    }
+    rows
+}
+
+fn has_background_paint(row: &str) -> bool {
+    row.contains("48;2;") || row.contains("[48;")
+}
+
+/// A cushion row of a filled surface: no visible text, but painted.
+fn painted_row(row: &str) -> bool {
+    strip_terminal_sequences(row).trim().is_empty() && has_background_paint(row)
+}
+
+/// Host spacing: no visible text and no paint.
+fn neutral_blank_row(row: &str) -> bool {
+    strip_terminal_sequences(row).trim().is_empty() && !has_background_paint(row)
+}
+
+fn visible_position(rows: &[String], needle: &str) -> Option<usize> {
+    rows.iter()
+        .position(|row| strip_terminal_sequences(row).contains(needle))
+}
+
+fn neutral_runs(rows: &[String], needle: &str) -> (usize, usize) {
+    let index =
+        visible_position(rows, needle).unwrap_or_else(|| panic!("missing {needle:?}: {rows:?}"));
+    let before = rows[..index]
+        .iter()
+        .rev()
+        .take_while(|row| neutral_blank_row(row))
+        .count();
+    let after = rows[index + 1..]
+        .iter()
+        .take_while(|row| neutral_blank_row(row))
+        .count();
+    (before, after)
+}
+
+fn prompt_with(text: &str) -> TranscriptBlock {
+    TranscriptBlock::User {
+        text: text.into(),
+        model_lab: None,
+        prompt_color: Some("#123456".into()),
+        persisted: true,
+    }
+}
+
+/// Themes whose prompt cards are painted: the compiled default on a known dark
+/// terminal (the wash) and a band surface with explicit padding.
+fn painted_card_themes() -> Vec<(&'static str, OctetTheme)> {
+    vec![
+        (
+            "default/dark",
+            test_theme_for(
+                TerminalBackground::Dark,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            ),
+        ),
+        (
+            "band+padding",
+            test_theme_from_source(
+                "[layout]\nprompt_padding = true\ndensity = \"airy\"\n\
+                 [surfaces.user]\nchrome = \"band\"\npadding = 1\n",
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn every_filled_prompt_card_keeps_its_own_top_and_bottom_padding_rows() {
+    for (name, theme) in painted_card_themes() {
+        let first = prompt_with("First prompt marker");
+        let second = prompt_with("Second prompt marker");
+        let done = completion();
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&first, &done, &second], &theme, width);
+            for needle in ["First prompt marker", "Second prompt marker"] {
+                let at = visible_position(&rows, needle)
+                    .unwrap_or_else(|| panic!("{name}/{width}: missing {needle:?}: {rows:?}"));
+                assert!(
+                    at > 0 && painted_row(&rows[at - 1]),
+                    "{name}/{width}/{needle}: no painted padding row above the text: {rows:?}"
+                );
+                assert!(
+                    rows.get(at + 1).is_some_and(|row| painted_row(row)),
+                    "{name}/{width}/{needle}: no painted padding row below the text: {rows:?}"
+                );
+            }
+            // The completion line keeps its one neutral row before the next card;
+            // the card's own padding row never doubles as that separator.
+            assert_eq!(
+                neutral_runs(&rows, "completed").1,
+                1,
+                "{name}/{width}: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
+    for (name, theme) in painted_card_themes() {
+        let prompt = prompt_with("Ready for work");
+        let working = working();
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&prompt, &working], &theme, width);
+            assert_eq!(
+                neutral_runs(&rows, "Working"),
+                (1, 1),
+                "{name}/{width}: {rows:?}"
+            );
+            let at = visible_position(&rows, "Working").expect("working row");
+            assert!(
+                at >= 2 && painted_row(&rows[at - 2]),
+                "{name}/{width}: the card's bottom padding row must sit above the gap: {rows:?}"
+            );
+        }
     }
 }

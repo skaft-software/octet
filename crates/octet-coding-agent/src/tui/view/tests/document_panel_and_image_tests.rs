@@ -505,59 +505,104 @@ fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     }
 }
 
-#[test]
-fn shell_backspace_atomically_removes_paste_and_attachment_chips() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut pastes = vec!["DELETED-PASTE-PAYLOAD\n".repeat(20)];
+/// Pastes and attachments appear in the composer as ordinary text. The cursor
+/// and every editing key act on their characters one at a time; only a chip
+/// that is still intact when the draft is submitted resolves to its payload.
+fn chip_shell_with(paste: &str) -> (InteractiveShell, String) {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_input_modalities(
+        octet_ai::ModalitySet::none()
+            .with(octet_ai::Modality::Image)
+            .with(octet_ai::Modality::Audio),
+    );
+    shell.apply_edit(EditAction::Paste("keep ".into()));
+    shell.apply_edit(EditAction::Paste(paste.to_owned()));
+    let chip = shell.pending().strip_prefix("keep ").unwrap().to_owned();
+    assert!(chip.starts_with('[') && chip.ends_with(']'), "{chip}");
+    assert!(!shell.state.borrow().ledger.is_empty());
+    (shell, chip)
+}
+
+fn chip_fixtures(dir: &std::path::Path) -> Vec<String> {
+    let mut pastes = vec!["EDITED-PASTE-PAYLOAD\n".repeat(20)];
     for name in ["image.png", "audio.wav", "document.pdf"] {
-        let path = dir.path().join(name);
+        let path = dir.join(name);
         std::fs::write(&path, b"fixture attachment payload").unwrap();
         pastes.push(path.display().to_string());
     }
-    for paste in pastes {
-        // Exercise both the chip's end and an interior editor cursor through
-        // the shell's real key-action path, not the ledger helper alone.
+    pastes
+}
+
+#[test]
+fn shell_backspace_edits_paste_and_attachment_chips_one_character_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    for paste in chip_fixtures(dir.path()) {
         for interior in [false, true] {
-            let mut shell = InteractiveShell::test_shell();
-            shell.set_input_modalities(
-                octet_ai::ModalitySet::none()
-                    .with(octet_ai::Modality::Image)
-                    .with(octet_ai::Modality::Audio),
-            );
-            shell.apply_edit(EditAction::Paste("keep ".into()));
-            shell.apply_edit(EditAction::Paste(paste.clone()));
-            assert!(shell.pending().starts_with("keep ["), "{}", shell.pending());
-            assert!(!shell.state.borrow().ledger.is_empty());
+            let (mut shell, chip) = chip_shell_with(&paste);
             if interior {
                 for _ in 0..3 {
                     shell.apply_edit(EditAction::Left);
                 }
             }
-            {
-                let mut state = shell.state.borrow_mut();
-                state.slash_selection = 7;
-                state.slash_scroll = 3;
-                state.slash_popup_dismissed = true;
-            }
+            let cursor = shell.state.borrow().editor.cursor();
             shell.apply_edit(EditAction::Backspace);
-            assert_eq!(shell.pending(), "keep ");
-            {
-                let state = shell.state.borrow();
-                assert!(state.ledger.is_empty());
-                assert_eq!(state.editor.cursor(), "keep ".len());
-                assert_eq!(state.slash_selection, 0);
-                assert_eq!(state.slash_scroll, 0);
-                assert!(!state.slash_popup_dismissed);
-            }
-            // Ordinary Backspace still reaches the generic editor, and the
-            // revoked payload cannot be composed after its mask disappears.
-            shell.apply_edit(EditAction::Backspace);
+            let edited = shell.pending().to_owned();
+            assert_eq!(edited.len(), format!("keep {chip}").len() - 1, "{edited}");
+            assert_eq!(shell.state.borrow().editor.cursor(), cursor - 1);
+            // The chip is now literal text: its payload is not attached, and
+            // nothing else the user typed is lost.
             let composed = shell.drain_composed();
-            assert_eq!(composed.display_text, "keep");
-            assert!(matches!(composed.parts.as_slice(),
-                [octet_agent::InputPart::Text(text)] if text == "keep"));
+            assert_eq!(composed.display_text, edited);
+            assert!(composed.attachments.is_empty(), "{edited}");
+            assert!(
+                matches!(composed.parts.as_slice(), [octet_agent::InputPart::Text(text)] if text == &edited),
+                "{:?}",
+                composed.parts
+            );
+            assert!(!composed.transcript_text.contains("EDITED-PASTE-PAYLOAD"));
         }
     }
+}
+
+#[test]
+fn deleting_or_typing_inside_a_chip_edits_its_text_too() {
+    let dir = tempfile::tempdir().unwrap();
+    for paste in chip_fixtures(dir.path()) {
+        let (mut shell, chip) = chip_shell_with(&paste);
+        shell.apply_edit(EditAction::Home);
+        for _ in 0.."keep [".len() {
+            shell.apply_edit(EditAction::Right);
+        }
+        shell.apply_edit(EditAction::Paste("X".into()));
+        assert_eq!(shell.pending(), format!("keep [X{}", &chip[1..]));
+        shell.apply_edit(EditAction::Delete);
+        shell.apply_edit(EditAction::Delete);
+        let edited = shell.pending().to_owned();
+        assert_eq!(edited.len(), format!("keep {chip}").len() - 1, "{edited}");
+        assert!(shell.drain_composed().attachments.is_empty());
+    }
+}
+
+#[test]
+fn an_intact_chip_still_resolves_and_undo_restores_an_edited_one() {
+    let (mut shell, chip) = chip_shell_with(&"RESTORED-PASTE-PAYLOAD\n".repeat(20));
+    shell.apply_edit(EditAction::Backspace);
+    assert_eq!(shell.pending(), format!("keep {}", &chip[..chip.len() - 1]));
+    shell.apply_edit(EditAction::Undo);
+    assert_eq!(shell.pending(), format!("keep {chip}"));
+    let composed = shell.drain_composed();
+    assert_eq!(composed.attachments.len(), 1);
+    assert!(composed.transcript_text.contains("RESTORED-PASTE-PAYLOAD"));
+    assert_eq!(composed.display_text, format!("keep {chip}"));
+}
+
+#[test]
+fn an_emptied_composer_no_longer_blocks_prefill_after_its_chip_was_edited_away() {
+    let (mut shell, _) = chip_shell_with(&"CLEARED-PASTE-PAYLOAD\n".repeat(20));
+    shell.apply_edit(EditAction::DeleteToLineStart);
+    assert_eq!(shell.pending(), "");
+    shell.prefill_empty_editor("restored prompt".into());
+    assert_eq!(shell.pending(), "restored prompt");
 }
 
 #[test]

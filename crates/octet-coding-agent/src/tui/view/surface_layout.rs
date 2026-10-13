@@ -208,6 +208,20 @@ fn whitespace_cushion(chrome: ThemeSurfaceChrome, theme: &OctetTheme) -> bool {
         || (chrome == ThemeSurfaceChrome::Rail && theme.glyph("rail").trim().is_empty())
 }
 
+/// The stored model colour that washes a prompt's cell. Planning and painting
+/// read the same value, so a probe of a cushion row matches what is rendered.
+pub(super) fn block_prompt_color<'b>(
+    block: &'b TranscriptBlock,
+    theme: &OctetTheme,
+) -> Option<&'b str> {
+    match block {
+        TranscriptBlock::User { prompt_color, .. } => prompt_color
+            .as_deref()
+            .filter(|_| theme.uses_model_lab_color()),
+        _ => None,
+    }
+}
+
 pub(super) fn compile_surface_plan<'a>(
     previous: Option<&TranscriptBlock>,
     block: &TranscriptBlock,
@@ -381,6 +395,73 @@ pub(super) fn compile_surface_plan_for_render<'a>(
                 && padding > 0),
     );
     let event_spacing = has_event_spacing(block, expanded_reasoning);
+    // A theme that caps the reading column would otherwise paint its band/rail
+    // fills inside that column only, leaving terminal-coloured bars beside
+    // them on a wide screen. Borderless filled chrome extends its fill to the
+    // terminal edges while the text inside stays in the reading column. Cards
+    // keep their own border, and a heading or bottom row is rendered without
+    // the fill, so neither bleeds.
+    let bleeds = presentation.capped
+        && matches!(chrome, ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail)
+        && !has_heading_row
+        && !has_bottom_row;
+    let (bleed_left, bleed_right) = if bleeds {
+        (
+            frame_left,
+            outer_width
+                .saturating_sub(frame_left)
+                .saturating_sub(frame_width),
+        )
+    } else {
+        (0, 0)
+    };
+    let content_role = if theme.is_pi_theme() {
+        match block {
+            TranscriptBlock::Tool(panel) if !panel.finished => "extension.pi.toolPendingBg",
+            TranscriptBlock::Tool(panel) if panel.is_error => "extension.pi.toolErrorBg",
+            TranscriptBlock::Tool(_) => "extension.pi.toolSuccessBg",
+            TranscriptBlock::Shell(shell) if shell.running => "extension.pi.toolPendingBg",
+            TranscriptBlock::Shell(shell) if shell.exit_code != 0 => "extension.pi.toolErrorBg",
+            TranscriptBlock::Shell(_) => "extension.pi.toolSuccessBg",
+            _ => surface_roles(kind).0,
+        }
+    } else {
+        surface_roles(kind).0
+    };
+    // Row counts are decided below, once the neighbouring seams are known; the
+    // draft only needs what the painter reads to answer "is my cushion filled?".
+    let mut surface = SurfacePlan {
+        kind,
+        content_role,
+        chrome,
+        heading,
+        label: resolved.label,
+        user_model_lab: match block {
+            TranscriptBlock::User { model_lab, .. } => *model_lab,
+            _ => None,
+        },
+        padding,
+        event_spacing,
+        frame_left,
+        frame_width,
+        bleed_left,
+        bleed_right,
+        geometry: SurfaceGeometry {
+            transition_rows: 0,
+            leading_rows: 0,
+            trailing_rows: 0,
+            content_left,
+            content_width,
+        },
+    };
+    // A filled cushion row is part of the surface (the card's own top and
+    // bottom edge), never spacing, so it must not merge with a neighbour's
+    // host-owned blank row.
+    let own_cushion_painted = super::surface_frame::cushion_row_is_painted(
+        &surface,
+        theme,
+        block_prompt_color(block, theme),
+    );
     // Only decorative whitespace participates in seam collapse. A border/rail
     // glyph or a media reservation is content, never a blank spacing row.
     let previous_blank = previous.map_or(0, |previous| {
@@ -421,7 +502,13 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             } else {
                 plan.geometry.trailing_rows
             }
-        } else if whitespace_cushion(plan.chrome, theme) {
+        } else if whitespace_cushion(plan.chrome, theme)
+            && !super::surface_frame::cushion_row_is_painted(
+                &plan,
+                theme,
+                block_prompt_color(previous, theme),
+            )
+        {
             plan.geometry.trailing_rows
         } else {
             0
@@ -435,6 +522,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         && previous_blank > 0
         && !has_heading_row
         && whitespace_cushion(chrome, theme)
+        && !own_cushion_painted
     {
         0
     } else {
@@ -474,63 +562,14 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     } else {
         transcript_transition_rows(previous, layout.density)
     };
-    // A theme that caps the reading column would otherwise paint its band/rail
-    // fills inside that column only, leaving terminal-coloured bars beside
-    // them on a wide screen. Borderless filled chrome extends its fill to the
-    // terminal edges while the text inside stays in the reading column. Cards
-    // keep their own border, and a heading or bottom row is rendered without
-    // the fill, so neither bleeds.
-    let bleeds = presentation.capped
-        && matches!(chrome, ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail)
-        && !has_heading_row
-        && !has_bottom_row;
-    let (bleed_left, bleed_right) = if bleeds {
-        (
-            frame_left,
-            outer_width
-                .saturating_sub(frame_left)
-                .saturating_sub(frame_width),
-        )
-    } else {
-        (0, 0)
+    surface.geometry = SurfaceGeometry {
+        transition_rows,
+        leading_rows,
+        trailing_rows,
+        content_left,
+        content_width,
     };
-    let content_role = if theme.is_pi_theme() {
-        match block {
-            TranscriptBlock::Tool(panel) if !panel.finished => "extension.pi.toolPendingBg",
-            TranscriptBlock::Tool(panel) if panel.is_error => "extension.pi.toolErrorBg",
-            TranscriptBlock::Tool(_) => "extension.pi.toolSuccessBg",
-            TranscriptBlock::Shell(shell) if shell.running => "extension.pi.toolPendingBg",
-            TranscriptBlock::Shell(shell) if shell.exit_code != 0 => "extension.pi.toolErrorBg",
-            TranscriptBlock::Shell(_) => "extension.pi.toolSuccessBg",
-            _ => surface_roles(kind).0,
-        }
-    } else {
-        surface_roles(kind).0
-    };
-    SurfacePlan {
-        kind,
-        content_role,
-        chrome,
-        heading,
-        label: resolved.label,
-        user_model_lab: match block {
-            TranscriptBlock::User { model_lab, .. } => *model_lab,
-            _ => None,
-        },
-        padding,
-        event_spacing,
-        frame_left,
-        frame_width,
-        bleed_left,
-        bleed_right,
-        geometry: SurfaceGeometry {
-            transition_rows,
-            leading_rows,
-            trailing_rows,
-            content_left,
-            content_width,
-        },
-    }
+    surface
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use super::reasoning_render::render_reasoning_on_surface_with_rainbow;
 use super::surface_frame::{
     decorate_surface_content_suffix, decorate_surface_with_frame, event_margin_marker_with_frame,
 };
-use super::surface_layout::compile_surface_plan_for_render;
+use super::surface_layout::{block_prompt_color, compile_surface_plan_for_render};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
     render_diff_only, render_tool_failure_reason, tool_diff, tool_display_label, tool_grid_label,
@@ -562,12 +562,7 @@ pub(super) fn render_block_planned_with_rainbow(
         // themes keep that slot blank instead. Promotion never moves composer.
         lines.resize(lines.len().max(2), String::new());
     }
-    let prompt_color = match block {
-        TranscriptBlock::User { prompt_color, .. } => prompt_color
-            .as_deref()
-            .filter(|_| theme.uses_model_lab_color()),
-        _ => None,
-    };
+    let prompt_color = block_prompt_color(block, theme);
     let marker = event_margin_marker_with_frame(
         block,
         theme,

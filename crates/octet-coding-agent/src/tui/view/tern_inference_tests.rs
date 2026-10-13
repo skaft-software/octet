@@ -55,10 +55,7 @@ fn single_response_completion_uses_reported_output_over_dispatch_to_stream_end()
         reported_output_tokens: 120,
         ..Default::default()
     });
-    assert_eq!(
-        text(metrics),
-        "2.0s · completed · 0 tools · 75.0 tok/s · 1 response"
-    );
+    assert_eq!(text(metrics), "2.0s · completed · 0 tools · 75.0 tok/s");
 }
 
 #[test]
@@ -121,7 +118,7 @@ fn outcome_views_use_owner_gated_whole_run_rate_instead_of_last_response() {
         .map(|span| span.t)
         .collect::<String>();
     let copied = super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block));
-    let expected = "60.0 tok/s · 2 responses";
+    let expected = " · 60.0 tok/s";
     for view in [rendered, tern, copied] {
         assert!(view.contains(expected), "{view:?}");
         assert!(

@@ -384,11 +384,6 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             let raw_cursor = utf16_boundary(&edited, *cursor)?;
             let cursor = sexy_tui_rs::TextEditor::normalize_paste(&edited[..raw_cursor]).len();
             let text = sexy_tui_rs::TextEditor::normalize_paste(text);
-            if source[from..to] != text && shell.ledger.edit_touches_chip(source, from, to) {
-                // Native chip mutation still needs ledger-aware undo. Until
-                // then resync instead of corrupting or orphaning a payload.
-                return None;
-            }
             let text_revision = shell.editor.text_revision();
             if !shell.editor.edit_range(from..to, &text, cursor) {
                 return None;
@@ -694,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn native_edits_cannot_corrupt_or_revoke_admitted_chip_payloads() {
+    fn native_edits_to_a_chip_apply_like_any_other_text() {
         let shell = native_slash_shell();
         let chip = shell
             .state
@@ -704,7 +699,7 @@ mod tests {
         let draft = format!("before {chip} after");
         shell.state.borrow_mut().editor.set_text(&draft);
         let handler = shell.tern_input_handler();
-        for (from, to, text) in [(9, 10, ""), (9, 9, "Q"), (7, 7 + chip.len(), "")] {
+        let edit = |from, to, text: &str, len| {
             handler(Incoming::Event(Event::Edit {
                 sf: super::super::tern::SURFACE.into(),
                 id: "composer.editor".into(),
@@ -712,30 +707,44 @@ mod tests {
                 to,
                 text: text.into(),
                 cursor: from + text.len(),
-                len: draft.len(),
+                len,
             }));
-            assert_eq!(shell.pending(), draft);
-            assert!(!shell.state.borrow().ledger.is_empty());
+        };
+        // Surrounding prose stays editable and the intact chip still resolves.
+        edit(0, 6, "/tmp/image.png", draft.len());
+        let edited = format!("/tmp/image.png {chip} after");
+        assert_eq!(shell.pending(), edited);
+        {
+            let mut state = shell.state.borrow_mut();
+            let text = state.editor.text().to_owned();
+            let composed = crate::tui::composer::compose(text, &mut state.ledger);
+            assert_eq!(
+                composed.transcript_text,
+                "/tmp/image.png private payload after"
+            );
+            assert_eq!(composed.attachments.len(), 1);
         }
-        // Plain surrounding prose stays editable; typing never admits a file.
-        handler(Incoming::Event(Event::Edit {
-            sf: super::super::tern::SURFACE.into(),
-            id: "composer.editor".into(),
-            from: 0,
-            to: 6,
-            text: "/tmp/image.png".into(),
-            cursor: 14,
-            len: draft.len(),
-        }));
-        assert_eq!(shell.pending(), format!("/tmp/image.png {chip} after"));
+
+        // Editing inside the chip is an ordinary edit: the characters change,
+        // the chip stops being a chip, and its payload is not attached.
+        let chip = shell
+            .state
+            .borrow_mut()
+            .ledger
+            .attach_pasted_text("second payload".into());
+        let draft = format!("before {chip} after");
+        shell.state.borrow_mut().editor.set_text(&draft);
+        edit(9, 10, "", draft.len());
+        edit(9, 9, "Q", draft.len() - 1);
+        assert_eq!(
+            shell.pending(),
+            format!("before {}Q{} after", &chip[..2], &chip[3..])
+        );
         let mut state = shell.state.borrow_mut();
         let text = state.editor.text().to_owned();
-        let composed = crate::tui::composer::compose(text, &mut state.ledger);
-        assert_eq!(
-            composed.transcript_text,
-            "/tmp/image.png private payload after"
-        );
-        assert_eq!(composed.attachments.len(), 1);
+        let composed = crate::tui::composer::compose(text.clone(), &mut state.ledger);
+        assert_eq!(composed.transcript_text, text);
+        assert!(composed.attachments.is_empty());
     }
 
     #[test]

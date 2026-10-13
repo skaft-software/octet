@@ -197,7 +197,6 @@ struct RunGenerationSummary {
 struct RunGenerationRate {
     tokens_per_second: f64,
     is_estimate: bool,
-    responses: u64,
 }
 
 impl RunGenerationSummary {
@@ -226,7 +225,6 @@ impl RunGenerationSummary {
         (tokens_per_second.is_finite() && tokens_per_second > 0.0).then_some(RunGenerationRate {
             tokens_per_second,
             is_estimate: self.estimated_responses > 0,
-            responses: self.responses,
         })
     }
 }
@@ -276,7 +274,7 @@ mod run_generation_tests {
         // 75; the final response alone would be 50.
         assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
         assert!(!rate.is_estimate);
-        assert_eq!(rate.responses, 2);
+        assert_eq!(run.responses, 2);
     }
 
     #[test]
@@ -369,7 +367,6 @@ mod run_generation_tests {
         shell.on_run_event(run, &settled_turn());
         let rate = finish_run(&mut shell, run).generation.unwrap();
         assert!((rate.tokens_per_second - 100.0).abs() < 1e-9);
-        assert_eq!(rate.responses, 2);
     }
 
     #[test]
@@ -500,7 +497,6 @@ mod run_generation_tests {
         );
         shell.on_run_event(run, &settled_turn());
         let rate = finish_run(&mut shell, run).generation.unwrap();
-        assert_eq!(rate.responses, 2);
         assert!((rate.tokens_per_second - 60.0).abs() < 1e-9);
     }
 
@@ -529,7 +525,6 @@ mod run_generation_tests {
         );
         shell.on_run_event(run, &settled_turn());
         let rate = finish_run(&mut shell, run).generation.unwrap();
-        assert_eq!(rate.responses, 1);
         assert!((rate.tokens_per_second - 200.0).abs() < 1e-9);
 
         // A legacy producer's settled turn without client metrics has no
@@ -5938,14 +5933,6 @@ impl InteractiveShell {
                         .editor
                         .apply(EditAction::Paste(inserted), geometry.text_width());
                 }
-                EditAction::Backspace => {
-                    let state = &mut *state;
-                    if !state.ledger.backspace_chip(&mut state.editor) {
-                        state
-                            .editor
-                            .apply(EditAction::Backspace, geometry.text_width());
-                    }
-                }
                 action => {
                     state.editor.apply(action, geometry.text_width());
                 }
@@ -8013,13 +8000,13 @@ impl InteractiveShell {
     }
 
     /// Pi tree navigation restores a selected prompt only into an empty draft.
-    /// Existing text or attachment chips always remain user-owned.
+    /// Existing text, including attachment chips, always remains user-owned. A
+    /// chip is ordinary text, so an empty editor holds none and any payload the
+    /// ledger still carries belongs to chips the user already edited away.
     pub(crate) fn prefill_empty_editor(&mut self, text: String) {
-        let empty = {
-            let state = self.state.borrow();
-            state.editor.text().is_empty() && state.ledger.is_empty()
-        };
+        let empty = self.state.borrow().editor.text().is_empty();
         if empty {
+            self.state.borrow_mut().ledger.clear();
             self.prefill_editor(text);
         }
     }

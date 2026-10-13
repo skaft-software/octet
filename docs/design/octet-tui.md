@@ -214,9 +214,13 @@ completion for relative, parent, home-relative, and absolute path tokens.
 Up/Down selects from a visible path or mention menu, whose bounded window follows
 the selection; Tab inserts that result. With no visible menu or a cursor inside
 the draft, arrows retain visual editor navigation.
-Backspace inside or immediately after a registered paste/attachment chip removes
-the whole mask and its ledger association. Ordinary bracketed text is not a chip;
-neighboring Unicode text and other attachments remain unchanged.
+Paste and attachment chips are ordinary text. The cursor moves through them and
+every editing key (Backspace, Delete, word deletion, typing) changes their
+characters one at a time, exactly like the surrounding text, in both the
+terminal composer and the native Tern editor. A chip that is still intact when the
+draft is submitted resolves to its payload; one that has been edited is plain
+text and its payload is dropped. Undo restores an edited chip and its payload.
+Ordinary bracketed text is not a chip.
 Slash-command discovery, file mentions, and filesystem completion render inline
 directly below the composer. While matches are visible, the suggestion surface
 temporarily replaces the model and token status row; the status returns as soon
