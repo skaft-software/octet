@@ -122,7 +122,11 @@ commands = ["release-start"]
     runtime.resource_paths = true; // Handwritten test peer, not a production offer.
     runtime.supervise = false;
     if hold {
-        runtime.request_timeout = Duration::from_millis(250);
+        // This deadline also covers Python startup and initialize. A 250ms
+        // fixture budget failed there under CI load, before the held hook was
+        // exercised. Keep a bounded setup budget and assert the actual hook
+        // timeout below rather than relying on any timeout being the failure.
+        runtime.request_timeout = Duration::from_secs(5);
     }
     let process = ExtensionProcess::start(
         DiscoveredExtension {
@@ -538,12 +542,12 @@ async fn failed_or_cancelled_start_never_discovers_even_after_late_terminal_repl
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let (mut app, process, captures) = fixture_with_start(&root, true).await;
+        let (p, owner) = app
+            .executable_extensions
+            .pending_session_hook_starts
+            .pop()
+            .unwrap();
         if cancel {
-            let (p, owner) = app
-                .executable_extensions
-                .pending_session_hook_starts
-                .pop()
-                .unwrap();
             let task = tokio::spawn(async move { p.start_session_hook_binding(owner).await });
             // An explicit subprocess log receipt, not a fixed timer grace.
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -561,6 +565,15 @@ async fn failed_or_cancelled_start_never_discovers_even_after_late_terminal_repl
             .unwrap();
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(
+                matches!(
+                    p.start_session_hook_binding(owner).await,
+                    Err(octet_agent::extension_process::ExtensionRuntimeError::Timeout { method })
+                        if method == "hook/run"
+                ),
+                "the held session_start must time out after initialization succeeds"
+            );
         }
         app.refresh_resource_paths_headless().await.unwrap();
         assert!(

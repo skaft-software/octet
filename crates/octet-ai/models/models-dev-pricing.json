@@ -3696,10 +3696,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 50000,
+    "cache_read": 18200,
     "cache_write_5m": 0,
-    "input": 50000,
-    "output": 1280000,
+    "input": 91000,
+    "output": 182000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
@@ -3717,10 +3717,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 37178,
+    "cache_read": 36337,
     "cache_write_5m": 0,
-    "input": 446136,
-    "output": 892272,
+    "input": 436044,
+    "output": 872088,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 876,
+    "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 43800,
-    "output": 175200,
+    "input": 44100,
+    "output": 621000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -5880,17 +5880,17 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 876,
+    "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 43800,
-    "output": 175200,
+    "input": 44100,
+    "output": 621000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 8232,
+    "cache_read": 7938,
     "cache_write_5m": 0,
-    "input": 258720,
-    "output": 776160,
+    "input": 249480,
+    "output": 748440,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {

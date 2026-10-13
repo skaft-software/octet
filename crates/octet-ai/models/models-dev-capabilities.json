@@ -13781,7 +13781,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -13938,7 +13938,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -21704,7 +21704,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [

@@ -127,7 +127,12 @@ async fn post_mutation_sdk_round_trip_validates_subsets_and_deduplicates_across_
         assert!(extensions.notify_post_mutation(committed).await.is_empty());
 
         let rollback = mutation("mutation:rollback", PostMutationState::RolledBack);
-        assert_eq!(extensions.notify_post_mutation(rollback).await.len(), 1);
+        assert_eq!(
+            extensions.notify_post_mutation(rollback).await.len(),
+            1,
+            "post-mutation diagnostics: {:?}",
+            extensions.diagnostics.entries
+        );
         extensions.shutdown().await;
         let records = std::fs::read_to_string(root.path().join("hooks.jsonl")).unwrap();
         let records = records
@@ -267,7 +272,12 @@ async fn post_mutation_queue_and_dedup_window_stay_bounded_and_rescans_coalesce(
             PostMutationState::Committed,
         )
         .unwrap();
-        assert_eq!(extensions.notify_post_mutation(mutation).await.len(), 1);
+        assert_eq!(
+            extensions.notify_post_mutation(mutation).await.len(),
+            1,
+            "mutation {index} diagnostics: {:?}",
+            extensions.diagnostics.entries
+        );
     }
     assert_eq!(
         extensions.seen_post_mutation_ids.len(),
@@ -367,7 +377,12 @@ async fn product_drain_drops_out_of_scope_and_stale_rescans_with_bounded_diagnos
         PostMutationState::Committed,
     )
     .unwrap();
-    assert_eq!(extensions.notify_post_mutation(own).await.len(), 1);
+    assert_eq!(
+        extensions.notify_post_mutation(own).await.len(),
+        1,
+        "post-mutation diagnostics: {:?}",
+        extensions.diagnostics.entries
+    );
     extensions.shutdown().await;
     assert_eq!(
         extensions.drain_post_mutation_rescans(),
@@ -387,7 +402,9 @@ async fn product_drain_fails_closed_without_a_bound_discovery_configuration() {
             .notify_post_mutation(mutation("mutation:unbound", PostMutationState::Committed))
             .await
             .len(),
-        1
+        1,
+        "post-mutation diagnostics: {:?}",
+        extensions.diagnostics.entries
     );
     assert_eq!(
         extensions.drain_post_mutation_rescans(),

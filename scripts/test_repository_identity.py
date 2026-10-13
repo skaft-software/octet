@@ -16,7 +16,7 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
 # Explicitly promoted native release; SDK/registry publication stays independent.
-PUBLISHED_NATIVE_VERSION = "0.8.2"
+PUBLISHED_NATIVE_VERSION = "0.9.0"
 
 
 def load_script(name):
@@ -236,7 +236,13 @@ class ReleaseDocumentationTests(unittest.TestCase):
                             (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
         self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
         self.assertIn(f"distribution target is **{version}**", text)
-        self.assertIn("source candidate, not a published release", text)
+        changelog = (SCRIPTS.parent / "CHANGELOG.md").read_text()
+        candidate = f"## [{version}] - Release candidate" in changelog.splitlines()
+        if candidate:
+            self.assertIn("source candidate, not a published release", text)
+        else:
+            self.assertNotIn("source candidate, not a published release", text)
+            self.assertIn("Pi compatibility is excluded", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
         self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
         self.assertIn(f"**{version} is not published to npm.**", text)

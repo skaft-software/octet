@@ -99,7 +99,8 @@ The artifact contains:
 | `extensions/octet-computer-use/` | The version-matched source computer-use bundle, for the [attended procedure](../extensions/octet-computer-use/README.md#windows) |
 
 Manually dispatched [dogfood candidates](distribution.md#unsigned-dogfood-candidates)
-also include all six official extension bundles and extracted payloads. Their
+also include all five official extension bundles and extracted payloads.
+The experimental Pi compatibility adapter is not shipped in v0.9.0. Their
 root checksum manifest covers those extracted files as well as the binaries,
 metadata and archives; verify it before running the extracted extensions.
 

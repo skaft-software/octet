@@ -6,29 +6,23 @@
 
 ## Install native binaries
 
-**0.9.0 is a source release candidate, not a published release.** Its GitHub tag, release
-assets and npm packages are unavailable. Use [a checkout](#build-from-a-checkout)
-until qualification and publication are approved. The commands in the native
-and npm sections below apply only after verified publication, and until promotion
-they keep naming the preceding 0.8.2 candidate, whose assets are also unavailable.
+Native v0.9.0 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
+and Windows x86-64 (MSVC). Use the version-pinned
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.9.0)
+for signed assets, exact-source CI and public-install receipts. Use only channels
+recorded as available there; unsigned development artifacts are not a release.
+The [v0.9.0 notes](releases/v0.9.0.md) separate shipped scope from unqualified
+acceptance. The experimental Pi compatibility extension is not shipped.
 
-Planned native release packages target macOS Apple silicon and Intel, GNU/Linux
-x86-64, and Windows x86-64 (MSVC). The Windows build has not yet been run on a
-Windows host; CI will be the first verification. The [v0.9.0 notes](releases/v0.9.0.md) list the candidate changes.
-After publication, signed assets and public-install verification must be recorded
-on the version-pinned
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.8.2).
-Then install with its matching installer. On Windows x86-64, after a verified
-Windows release is published, download `install-octet.ps1` from that release and
-run it in PowerShell. It checks the downloaded ZIP against the release checksum
-manifest, but does not independently verify the Sigstore signature. Until the
-Windows build and installer are verified on Windows, this route is not yet
-published or verified.
+On Windows x86-64, download the version-matched `install-octet.ps1` from that
+release and run it in PowerShell. It checks the ZIP against the checksum manifest,
+but does not independently verify its Sigstore signature. Native MSVC artifact
+qualification is separate from GNU test builds.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
-octet --version   # octet 0.8.2
+  https://github.com/skaft-software/octet/releases/download/v0.9.0/install-octet.sh | sh
+octet --version   # octet 0.9.0
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data stay
@@ -43,8 +37,8 @@ After approved npm publication, Node.js can install the same signed platform
 package on macOS Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64:
 
 ```sh
-npm install -g @skaft/octet@0.8.2
-octet --version   # octet 0.8.2
+npm install -g @skaft/octet@0.9.0
+octet --version   # octet 0.9.0
 ```
 
 This installs the `@skaft/octet` launcher plus the matching platform package
@@ -53,10 +47,10 @@ This installs the `@skaft/octet` launcher plus the matching platform package
 from the same verified
 release assets as the native installer. The launcher has no install-time
 lifecycle scripts. To pin an exact version instead of tracking `latest`, use
-`npm install -g @skaft/octet@0.8.2` ([distribution](distribution.md)). The
-Windows x86-64 package is planned but not yet published; its first native build
-and runtime verification will be in CI. Build from source or use a pull-request test build instead
-([Windows](windows.md)). [Distribution channels](distribution.md) has the exact
+`npm install -g @skaft/octet@0.9.0` ([distribution](distribution.md)). npm
+publication is separate from native publication; do not use this command until
+v0.9.0 registry publication and provenance are recorded on the release page.
+See [Windows](windows.md) for native versus unsigned test-build boundaries. [Distribution channels](distribution.md) has the exact
 boundaries. The [historical Ygg
 instructions](reference/historical-installation.md) describe older releases, not
 a way to install or migrate to octet.
@@ -111,7 +105,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets the octet 0.9.0 candidate. Check `octet --version`, and use matching
+This checkout targets octet 0.9.0. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -169,15 +163,16 @@ reference](cli.md#packages).
 | `octet-computer-use` | [Native desktop control](../extensions/octet-computer-use/README.md) (macOS, Windows, Linux) through a locally installed, MIT-licensed Cua Driver. Provisioning is explicit, and the OS permissions are yours to grant. |
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), one Rust executable with the embedded QuickJS/WASM engine; no Node.js or Python is required. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
-| `octet-pi-compat` | [Bring your Pi 1.0.2 extensions](pi-compatibility.md#bring-your-pi-extensions), with automatic per-extension loading routes and explicit setup. Requires Node 22.19+ or Bun. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 
-The six executable-bundle manifests declare API `0.4`, distribution version
+The five shipped executable-bundle manifests declare API `0.4`, distribution version
 `0.9.0`, and require octet `=0.9.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.
-Generated contract bindings alone aren't a process runtime.
+Generated contract bindings alone aren't a process runtime. `octet-pi-compat`
+is source-only experimental work and is excluded from the v0.9.0 catalog;
+previously installed experimental copies are not automatically removed.
 
 ## Container
 

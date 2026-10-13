@@ -1,10 +1,15 @@
 # Changelog
 
-## [0.9.0] - Release candidate
+## [0.9.0] - 2026-10-13
 
-This is an unreleased source candidate: everything below is in this checkout, not
-in a published package. The [release notes](docs/releases/v0.9.0.md) record scope
-and known limitations.
+The [release notes](docs/releases/v0.9.0.md) record shipped scope, qualification
+boundaries and known limitations. The version-pinned release page records actual
+artifact and channel publication.
+
+**Pi compatibility is excluded from this release.** Entries below about
+`octet-pi-compat`, imported Pi factories and Pi editors describe source-only
+experimental development, not shipped features. The release catalog contains
+five bundles: codemode, computer use, MCP, subagents and web search.
 
 ### Added
 
@@ -158,7 +163,7 @@ and known limitations.
   Apple companions, the `serve` cargo feature and its embedded host, the `web`
   CI lane, and the deprecated `octet-browse` bundle. The extension release
   workflow (still named `release-serve.yml`) stays for first-party extension
-  bundles, and the other six first-party bundles are unchanged. Computer use
+  bundles. Five first-party bundles ship; Pi compatibility remains source-only. Computer use
   drives your own browser.
 
 ### Fixed
@@ -301,10 +306,10 @@ and known limitations.
   needing prerequisites the test machine did not have, and 4 that are not
   extension factories. Later adapter repairs have not been re-measured against
   that matrix.
-- **Nothing is published.** Windows and macOS binaries are built by CI and were
-  not built or smoke-tested here; only the linux x86-64 packaging path was
-  exercised locally, without signing. There is no 0.9.0 tag, release asset or npm
-  package.
+- **Qualification is artifact-specific.** Previous candidate runs do not qualify
+  another source SHA. The version-pinned release page records exact-source CI,
+  signing and public-install results; unrun or incomplete acceptance remains
+  explicitly unqualified. npm, Homebrew and SDK registries are separate channels.
 - **Live services are not exercised.** Provider, subscription and audio
   acceptance use a loopback mock provider; no paid model, live credential or
   physical display path is part of this candidate's evidence.

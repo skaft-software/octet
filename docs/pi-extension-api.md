@@ -1,5 +1,8 @@
 # Pi 1.0.2 extension API ledger
 
+> **Source-only; not shipped in v0.9.0.** These are development API receipts,
+> not a promise of installed-Pi parity or release-artifact qualification.
+
 Target: Pi 1.0.2 (`200387122ca450d6387f033949423114a270b96c`),
 `packages/coding-agent/src/core/extensions/types.ts` and `docs/extensions.md`.
 Octet replicates that public API under its extension protocol through the

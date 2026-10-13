@@ -2,9 +2,9 @@
 
 octet is a fast, small coding host for cloud and local models. Extensions add
 tools and bounded, host-shaped integrations. They don't promise Pi execution
-parity or an everything-as-extension platform. These docs describe **octet
-0.9.0 candidate**, not a published release. [Installation](installation.md) separates
-source builds from planned publication channels.
+parity or an everything-as-extension platform. These docs describe the octet
+**0.9.0** release. [Installation](installation.md) separates source builds from
+version-pinned publication channels and their recorded qualification.
 
 ## Getting started
 
@@ -21,7 +21,7 @@ source builds from planned publication channels.
 - [CLI options](cli.md)
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
-- [Inference measurements (unreleased)](inference-metrics.md)
+- [Inference measurements](inference-metrics.md)
 - [Images and audio](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)
@@ -49,7 +49,7 @@ source builds from planned publication channels.
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Optional Pi extension adapter (source preview)](pi-compatibility.md)
+- [Pi extension adapter (source-only; not shipped in v0.9.0)](pi-compatibility.md)
 - [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 
 ## Development

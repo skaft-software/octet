@@ -1,5 +1,9 @@
 # Optional Pi extension compatibility
 
+> **Not shipped in v0.9.0.** This page documents experimental source-only work.
+> `octet-pi-compat` is excluded from the official release catalog and assets;
+> these development receipts do not qualify installed-Pi lifecycle or workflow parity.
+
 Octet can load explicitly reviewed Pi extension factories through the optional
 `extensions/octet-pi-compat` Node package. **Rust remains the agent and terminal
 host.** The fallback loads installed Pi helpers in the extension process, not a

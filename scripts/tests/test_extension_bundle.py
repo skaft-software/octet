@@ -236,9 +236,16 @@ class PiCompatBundleTests(unittest.TestCase):
             capture_output=True, text=True, timeout=90,
         )
 
-    def test_manifest_joins_official_catalog_with_exact_host_pin(self):
+    def test_source_only_manifest_is_excluded_from_official_catalog_with_exact_host_pin(self):
         catalog = (self.repository / "extensions/release-catalog.txt").read_text().splitlines()
-        self.assertEqual(catalog.count("octet-pi-compat"), 1)
+        self.assertNotIn("octet-pi-compat", catalog)
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "octet-pi-compat", str(self.output), "v0.9.0"],
+            env=self.env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("not in the official release catalog", result.stderr)
+        self.assertFalse(self.archive.exists())
         manifest = tomllib.loads((self.source / "extension.toml").read_text())
         self.assertEqual(manifest["version"], "0.9.0")
         self.assertEqual(manifest["api_version"], "0.4")

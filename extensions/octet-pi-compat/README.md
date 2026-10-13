@@ -1,5 +1,9 @@
 # Optional Pi factory compatibility
 
+> **Experimental source-only work; excluded from v0.9.0.** No Pi compatibility
+> bundle is shipped or offered in this release's catalog. Instructions below
+> describe development setup, not a qualified release integration.
+
 One optional Node/Bun process loads unchanged Pi extension factories after explicit
 review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
 still owns octet's agent, sessions, approvals, terminal, keyboard focus and

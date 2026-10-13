@@ -208,7 +208,7 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and six executable
+names or imports. The local host, SDK source packages and five shipped executable
 bundles have distribution version **0.9.0**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release

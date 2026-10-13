@@ -873,7 +873,6 @@ mod tests {
                 "octet-codemode",
                 "octet-computer-use",
                 "octet-mcp",
-                "octet-pi-compat",
                 "octet-subagents",
                 "octet-web-search",
             ]

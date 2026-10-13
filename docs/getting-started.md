@@ -8,28 +8,27 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** This guide targets the octet 0.9.0 source candidate,
-> not a published release. Use the checkout lane below; native and npm installation
-> commands become usable only after verified publication, and until then they keep
-> naming the preceding 0.8.2 release. Check `octet --version`
-> and `octet --help` for the binary you will run. Source builds are not signed
-> release artifacts, and older binaries may not include these options.
+> **Version boundary.** This guide targets octet 0.9.0. The version-pinned
+> release page records published channels and their qualification; npm and native
+> publication are separate. Check `octet --version` and `octet --help` for the
+> binary you will run. Source builds are not signed release artifacts.
+> The experimental Pi compatibility extension is not shipped.
 
 ## 1. Choose an installation lane
 
 ### macOS or GNU/Linux: published native binary
 
-The planned native release targets macOS Apple silicon/Intel and GNU/Linux
-x86-64, and needs no Node.js. After publication, install from the version-pinned
-release, then check the version:
+The native release targets macOS Apple silicon/Intel and GNU/Linux x86-64,
+and needs no Node.js. Install from the version-pinned release with its recorded
+signed assets and public-install receipts, then check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.8.2/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.9.0/install-octet.sh | sh
 octet --version
 ```
 
-Expected output includes `octet 0.8.2`. The release page is authoritative for
+Expected output includes `octet 0.9.0`. The release page is authoritative for
 signed assets and availability; Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
 
@@ -38,16 +37,16 @@ separate unpublished channels.
 After npm publication, Node.js can install the same signed platform package:
 
 ```sh
-npm install -g @skaft/octet@0.8.2
+npm install -g @skaft/octet@0.9.0
 octet --version
 ```
 
-Expected output includes `octet 0.8.2`. npm resolves the matching platform
+Expected output includes `octet 0.9.0`. npm resolves the matching platform
 package automatically.
 
 ### Intentional source checkout: macOS or GNU/Linux
 
-This is the available lane for the candidate under test. Install Rust 1.88+,
+This is also available independently of binary publication. Install Rust 1.88+,
 then build and run the binary by its full path. Content search prefers
 [ripgrep](https://github.com/BurntSushi/ripgrep) when available and otherwise
 uses `grep`; installing ripgrep is optional:
@@ -62,11 +61,10 @@ publication. Use the matching binary consistently for the rest of this guide.
 
 ### Native Windows
 
-There is no published native Windows download or support claim in this release
-snapshot. Do not treat WSL, cross-compilation, or a macOS/Linux check as native
-Windows qualification, and do not invent a download URL. Testers can run the
-unsigned native build attached to a pull request's CI run, or build from a
-checkout, as described in [Windows](windows.md); neither is a release.
+Use the v0.9.0 release page's MSVC ZIP and `install-octet.ps1`, with their
+native qualification receipts. WSL, cross-compilation and GNU PR test builds do
+not qualify that executable. Unsigned test artifacts remain separate from the
+stable release; see [Windows](windows.md).
 
 ## 2. Start in the repository you want to change
 

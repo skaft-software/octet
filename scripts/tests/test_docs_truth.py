@@ -136,10 +136,13 @@ class DocsTruthTests(unittest.TestCase):
         shipped = _shipped_markdown()
         notes = f"docs/releases/v{version}.md"
         self.assertIn(notes, shipped, f"{notes} must ship with the candidate docs")
+        mode = ("candidate" if "Release candidate" in
+                _release_section(shipped["CHANGELOG.md"], version).splitlines()[0]
+                else "release")
         self.assertRegex(
             shipped["README.md"],
-            rf"candidate-{re.escape(version)}|candidate: {re.escape(version)}",
-            "the README badge must name the candidate version",
+            rf"{mode}-{re.escape(version)}|{mode}: {re.escape(version)}",
+            "the README badge must name the current distribution version and state",
         )
         self.assertIn(
             f"]({notes})",
@@ -148,10 +151,14 @@ class DocsTruthTests(unittest.TestCase):
         )
         self.assertRegex(
             shipped["docs/README.md"],
-            rf"octet\s+\**{re.escape(version)}\**\s+candidate",
-            "docs/README.md must name the candidate version",
+            rf"octet\s+\**{re.escape(version)}\**\s+{mode}",
+            "docs/README.md must name the distribution version and state",
         )
-        self.assertRegex(shipped[notes], r"unreleased|candidate")
+        self.assertRegex(shipped[notes], rf"^# octet {re.escape(version)}\b")
+        if mode == "candidate":
+            self.assertRegex(shipped[notes], r"unreleased|candidate")
+        else:
+            self.assertNotIn("unreleased source candidate", shipped[notes])
         self.assertIn(f"## [{version}]", shipped["CHANGELOG.md"])
         for name in ("README.md", "docs/installation.md", "docs/getting-started.md"):
             self.assertNotRegex(
@@ -159,6 +166,15 @@ class DocsTruthTests(unittest.TestCase):
                 rf"\bcandidate: {re.escape(version)}\b.*\bpublished\b",
                 f"{name} must not describe the candidate as published",
             )
+
+    def test_shipped_extension_table_matches_the_release_catalog(self):
+        catalog = [line.strip() for line in _read("extensions/release-catalog.txt").splitlines()
+                   if line.strip() and not line.lstrip().startswith("#")]
+        table = re.findall(r"(?m)^\| `(octet-[a-z-]+)` \|", _read("docs/installation.md"))
+        self.assertEqual(sorted(table), sorted(catalog))
+        self.assertNotIn("octet-pi-compat", catalog)
+        for name in ("README.md", "docs/releases/v0.9.0.md", "docs/pi-compatibility.md"):
+            self.assertRegex(_read(name), r"(?i)does not ship|not shipped")
 
     def test_removed_products_are_not_advertised(self):
         failures = {}
