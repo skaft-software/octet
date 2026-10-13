@@ -1011,4 +1011,3 @@ tool-result images (`MODEL_VISIBLE_TOOL_IMAGE_LIMIT`) are sent to the model;
 older ones are replaced in the request with a short text placeholder. The
 session journal keeps every image, so reopening, export and audit are
 unchanged. Images you attach to a prompt are not affected.
-
