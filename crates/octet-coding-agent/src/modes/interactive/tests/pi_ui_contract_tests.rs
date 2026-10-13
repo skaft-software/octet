@@ -310,7 +310,12 @@ export default function(pi) {
     command(&mut app, &mut shell, "mount").await.unwrap();
     command(&mut app, &mut shell, "edit").await.unwrap();
     assert_eq!(shell.extension_editor_snapshot().text, "native-draft!");
-    assert!(rendered(&mut shell).await.contains("native-draft!"));
+    // The mounted Pi editor repaints from its own frame; a loaded run can
+    // render before that frame lands.
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("native-draft!")
+    })
+    .await;
     command(&mut app, &mut shell, "clear").await.unwrap();
     assert_eq!(shell.extension_editor_snapshot().text, "native-draft!");
     assert!(!rendered(&mut shell).await.contains("Ctrl+G restore editor"));
