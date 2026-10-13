@@ -3,11 +3,13 @@
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
 octet builds and runs as a native Windows x64 program (`octet.exe` and
-`octet-host.exe`); WSL is not used or required. There is **no published native
-Windows release or support claim yet**. Pull requests produce unsigned Windows
-test builds, described below. A CI pass is not native GUI qualification:
-Windows Terminal visual behavior and live Cua Driver computer use need the
-manual checks on this page, run by a person at an unlocked desktop.
+`octet-host.exe`); WSL is not used or required. The
+[v0.9.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.0)
+records actual MSVC artifact availability and qualification. Pull requests
+produce unsigned GNU test builds, described below; these do not qualify the
+MSVC release archive. Automated terminal checks are not physical-display or
+live Cua Driver acceptance: those need the manual checks on this page, run by a
+person at an unlocked desktop.
 
 ## Target and toolchain
 

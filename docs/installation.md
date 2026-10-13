@@ -33,6 +33,8 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
+**v0.9.0 is not yet published to npm.**
+
 After approved npm publication, Node.js can install the same signed platform
 package on macOS Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64:
 

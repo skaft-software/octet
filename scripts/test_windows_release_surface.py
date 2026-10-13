@@ -103,6 +103,10 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("install-octet.ps1", docs)
         self.assertIn("Windows x86-64", docs)
         self.assertIn("not yet published", docs)
+        self.assertIn("v0.9.0 is not yet published to npm", docs)
+        windows = (ROOT / "docs/windows.md").read_text()
+        self.assertIn("/releases/tag/v0.9.0", windows)
+        self.assertIn("these do not qualify the\nMSVC release archive", windows)
 
 
 if __name__ == "__main__":
