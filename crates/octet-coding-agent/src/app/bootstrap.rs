@@ -1150,69 +1150,86 @@ fn cached_provider_inventory_offline_at(
     }
 }
 
-/// Use an existing inventory immediately, but never make startup wait for a
-/// cold supplemental catalog. This is used by providers such as OpenCode that
-/// already have a substantial embedded model set; discovery fills the cache for
-/// the next launch in the background.
+/// Use an existing inventory immediately, but never make a launch that named
+/// its model wait for a cold supplemental catalog. This is used by providers
+/// such as OpenCode that already have a substantial embedded model set; a
+/// listing (`ColdInventory::Wait`) fetches the live set instead.
 fn cached_provider_inventory_or_schedule(
     provider_id: &'static str,
     inventory_url: String,
     headers: http::HeaderMap,
     credential: &str,
+    cold: ColdInventory,
 ) -> Option<serde_json::Value> {
-    let path = provider_inventory_cache_path(provider_id);
+    cached_provider_inventory_or_schedule_with(
+        provider_inventory_cache_path(provider_id),
+        provider_id,
+        inventory_url,
+        headers,
+        credential,
+        cold,
+        fetch_provider_inventory,
+    )
+}
+
+fn cached_provider_inventory_or_schedule_with<F>(
+    path: PathBuf,
+    provider_id: &'static str,
+    inventory_url: String,
+    headers: http::HeaderMap,
+    credential: &str,
+    cold: ColdInventory,
+    fetch: F,
+) -> Option<serde_json::Value>
+where
+    F: FnOnce(String, http::HeaderMap) -> anyhow::Result<ProviderInventoryResponse>,
+{
     let fingerprint = credential_fingerprint(credential);
-    match bootstrap_check(
+    let cached = bootstrap_check(
         format!("inventory-cache:{provider_id}"),
         load_provider_inventory_cache(&path, provider_id, &inventory_url, &fingerprint),
         |error| format!("warning: {provider_id} model cache unavailable: {error}"),
-    ) {
-        Ok(Some(CachedProviderInventory::Available(body))) => {
-            schedule_provider_inventory_refresh(
-                path,
-                provider_id,
-                inventory_url,
-                fingerprint,
-                headers,
-                false,
-            );
-            Some(body)
-        }
-        Ok(Some(CachedProviderInventory::Unavailable)) => {
-            schedule_provider_inventory_refresh(
-                path,
-                provider_id,
-                inventory_url,
-                fingerprint,
-                headers,
-                true,
-            );
-            None
-        }
-        Ok(None) => {
-            schedule_provider_inventory_refresh(
-                path,
-                provider_id,
-                inventory_url,
-                fingerprint,
-                headers,
-                true,
-            );
-            None
-        }
-        Err(error) => {
-            let _ = error;
-            schedule_provider_inventory_refresh(
-                path,
-                provider_id,
-                inventory_url,
-                fingerprint,
-                headers,
-                true,
-            );
-            None
-        }
+    );
+    if let Ok(Some(CachedProviderInventory::Available(body))) = cached {
+        schedule_provider_inventory_refresh(
+            path,
+            provider_id,
+            inventory_url,
+            fingerprint,
+            headers,
+            false,
+        );
+        return Some(body);
     }
+    // No usable inventory. A launch that named its model keeps the built-in
+    // list and refreshes for the next launch; a surface that lists models
+    // fetches it now. A failed fetch keeps the built-in list too, but says so.
+    if cold == ColdInventory::Refresh {
+        schedule_provider_inventory_refresh(
+            path,
+            provider_id,
+            inventory_url,
+            fingerprint,
+            headers,
+            true,
+        );
+        return None;
+    }
+    bootstrap_check(
+        format!("inventory-fetch:{provider_id}"),
+        refresh_provider_inventory_with(
+            &path,
+            provider_id,
+            inventory_url,
+            headers,
+            &fingerprint,
+            fetch,
+        ),
+        |error| {
+            format!("warning: {provider_id} live model list unavailable, showing built-in models: {error}")
+        },
+    )
+    .ok()
 }
 
 async fn bounded_discovery_json_async(
@@ -2882,6 +2899,7 @@ fn register_openai_compatible_models(
                 models_url.to_string(),
                 headers,
                 credential.value(),
+                cold,
             )
         }
         crate::providers::InventoryCacheMode::Required => cached_provider_inventory(

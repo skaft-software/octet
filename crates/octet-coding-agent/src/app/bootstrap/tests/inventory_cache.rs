@@ -478,3 +478,79 @@ fn rejected_discovery_reports_status_and_a_redacted_provider_message() {
         prefix.chars().count() + MAX_REJECTION_DETAIL_CHARS + 1
     );
 }
+
+/// A supplemental catalog (OpenCode, OpenCode Go) ships a built-in model list,
+/// so a launch that already named its model never waits for the endpoint. A
+/// surface that has to list models (the picker, setup) does fetch it: otherwise
+/// the first launch after an install, or any launch whose prompts never reached
+/// a provider, only ever showed the built-in list.
+#[test]
+fn cold_supplemental_inventory_is_fetched_when_a_listing_needs_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache/opencode-go.json");
+    let url = "https://opencode.test/zen/go/v1/models";
+    let credential = "key-one";
+    let fingerprint = credential_fingerprint(credential);
+    let live = serde_json::json!({"data": [{"id": "glm-5.3"}]});
+
+    let fetched = std::cell::Cell::new(false);
+    let named = cached_provider_inventory_or_schedule_with(
+        path.clone(),
+        "opencode-go",
+        url.to_string(),
+        http::HeaderMap::new(),
+        credential,
+        ColdInventory::Refresh,
+        |_, _| {
+            fetched.set(true);
+            anyhow::bail!("a launch that named its model must not call the endpoint")
+        },
+    );
+    assert!(named.is_none(), "the built-in list carries the launch");
+    assert!(!fetched.get());
+
+    let listed = cached_provider_inventory_or_schedule_with(
+        path.clone(),
+        "opencode-go",
+        url.to_string(),
+        http::HeaderMap::new(),
+        credential,
+        ColdInventory::Wait,
+        |_, _| {
+            Ok(ProviderInventoryResponse::Modified {
+                body: live.clone(),
+                etag: None,
+            })
+        },
+    );
+    assert_eq!(listed, Some(live.clone()));
+    assert!(matches!(
+        load_provider_inventory_cache(&path, "opencode-go", url, &fingerprint).unwrap(),
+        Some(CachedProviderInventory::Available(body)) if body == live
+    ));
+}
+
+/// A listing whose live fetch fails keeps the built-in models: the discovery
+/// error must not withdraw the provider's routes with it.
+#[test]
+fn failed_supplemental_listing_keeps_the_built_in_models() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache/opencode-go.json");
+    let url = "https://opencode.test/zen/go/v1/models";
+    let fetched = std::cell::Cell::new(false);
+    let listed = cached_provider_inventory_or_schedule_with(
+        path.clone(),
+        "opencode-go",
+        url.to_string(),
+        http::HeaderMap::new(),
+        "key-one",
+        ColdInventory::Wait,
+        |_, _| {
+            fetched.set(true);
+            anyhow::bail!("model discovery request failed")
+        },
+    );
+    assert!(fetched.get(), "a listing tries the live inventory");
+    assert!(listed.is_none(), "the built-in list stays in place");
+    assert!(!path.exists(), "a failure is never cached as an inventory");
+}
