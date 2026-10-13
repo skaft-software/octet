@@ -77,16 +77,57 @@ pub(crate) fn resolve_model(catalog: &ModelCatalog, provider: &str, id: &str) ->
 /// the current context unmeasured. In particular, a model switch must not reuse
 /// the previous model's tokenizer measurement.
 pub(crate) fn context_usage(session: &Session, model: &Model) -> Option<Value> {
-    let tokens = observed_context_tokens(session, &model.endpoint.id, &model.spec.id)?;
     let window = model.spec.limits.context_window;
     if window == 0 || window > 9_007_199_254_740_991 {
         return None;
     }
+    // A conversation with nothing in it holds measurably zero tokens, which is
+    // what Pi reports for a fresh session. Anything else needs provider counters.
+    let tokens = if conversation_is_empty(session) {
+        0
+    } else {
+        observed_context_tokens(session, &model.endpoint.id, &model.spec.id)?
+    };
     Some(serde_json::json!({
         "tokens": tokens,
         "contextWindow": window,
-        "percent": tokens as f64 / window as f64 * 100.0,
+        "percent": percent_value(tokens, window),
     }))
+}
+
+/// `tokens` as a percentage of `window`. A whole percentage is sent as an
+/// integer: API 0.3's canonical JSON permits only portable integers, and the
+/// host state is part of every extension's initialize request.
+fn percent_value(tokens: u64, window: u64) -> Value {
+    let percent = tokens as f64 / window as f64 * 100.0;
+    if percent.fract() == 0.0 && percent < 9_007_199_254_740_991.0 {
+        Value::from(percent as u64)
+    } else {
+        Value::from(percent)
+    }
+}
+
+/// Whether the current branch holds no conversation content at all.
+fn conversation_is_empty(session: &Session) -> bool {
+    let mut cursor = session.head_ref();
+    while let Some(id) = cursor {
+        let Some(entry) = session.entry(id) else {
+            return false;
+        };
+        if matches!(
+            &entry.value,
+            octet_agent::EntryValue::Message(_)
+                | octet_agent::EntryValue::Compaction { .. }
+                | octet_agent::EntryValue::ResponsesCompaction { .. }
+                | octet_agent::EntryValue::SkillActivated { .. }
+                | octet_agent::EntryValue::SkillResourceRead { .. }
+                | octet_agent::EntryValue::SkillDeactivated { .. }
+        ) {
+            return false;
+        }
+        cursor = entry.parent.as_ref();
+    }
+    true
 }
 
 fn observed_context_tokens(
@@ -199,6 +240,76 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_conversation_has_a_measured_zero_context_and_new_content_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let empty = context_usage(&session, &model).expect("an empty branch is measured");
+        assert_eq!(empty["tokens"], 0);
+        // Whole percentages stay integers: API 0.3's canonical JSON refuses floats.
+        assert!(empty["percent"].is_u64(), "{empty}");
+        assert_eq!(empty["percent"], 0);
+        assert_eq!(
+            empty["contextWindow"],
+            serde_json::json!(model.spec.limits.context_window)
+        );
+        session
+            .append(octet_agent::EntryValue::Message(Message::User(
+                UserMessage {
+                    content: vec![UserPart::Text("not yet provider-tokenized".into())],
+                },
+            )))
+            .unwrap();
+        assert_eq!(
+            context_usage(&session, &model),
+            None,
+            "content without provider counters stays unmeasured, never estimated"
+        );
+    }
+
+    #[test]
+    fn the_model_view_states_oauth_from_the_resolver_never_from_the_endpoint_name() {
+        struct Login(Option<bool>);
+        #[async_trait::async_trait]
+        impl octet_ai::CredentialResolver for Login {
+            fn is_oauth(&self) -> Option<bool> {
+                self.0
+            }
+            async fn resolve(&self) -> Result<octet_ai::ResolvedCredential, octet_ai::AuthError> {
+                panic!("metadata must not resolve credentials")
+            }
+        }
+        let mut model = ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        // A static key is known not to be a subscription login.
+        assert_eq!(
+            super::composition::extension_model_view(&model)
+                .unwrap()
+                .oauth,
+            Some(false)
+        );
+        for (resolver, expected) in [
+            (Some(true), Some(true)),
+            (Some(false), Some(false)),
+            (None, None),
+        ] {
+            std::sync::Arc::make_mut(&mut model.endpoint).auth =
+                octet_ai::Auth::dynamic(std::sync::Arc::new(Login(resolver)));
+            assert_eq!(
+                super::composition::extension_model_view(&model)
+                    .unwrap()
+                    .oauth,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn host_refresh_preserves_native_palette_but_recomputes_context_measurement() {
         let directory = tempfile::tempdir().unwrap();
         let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();
@@ -211,9 +322,13 @@ mod tests {
         let palette = serde_json::json!({"name":"actual-native-palette"});
         extensions.host_state.lock().unwrap().theme = Some(palette.clone());
         extensions.refresh_host_state(&session, &model, &ReasoningConfig::Off, &sessions);
+        let empty = extensions.host_state.lock().unwrap().context_usage.clone();
         assert_eq!(
-            extensions.host_state.lock().unwrap().context_usage,
-            Some(Value::Null)
+            empty
+                .as_ref()
+                .map(|usage| (&usage["tokens"], &usage["percent"])),
+            Some((&serde_json::json!(0), &serde_json::json!(0))),
+            "an empty conversation is a measured zero, as Pi reports it: {empty:?}"
         );
         let assistant = session
             .append(octet_agent::EntryValue::Message(Message::Assistant(

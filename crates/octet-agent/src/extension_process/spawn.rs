@@ -599,8 +599,18 @@ pub(super) async fn spawn_connection(
                     value: value.clone(),
                 })
                 .collect(),
-            host: serde_json::to_value(&host_state)
-                .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+            host: {
+                let mut host = serde_json::to_value(&host_state)
+                    .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+                // `context_usage` is not part of the 0.3 contract, and its
+                // fractional percentage is refused by 0.3's canonical JSON
+                // (integers only). A session with a measured reply must not
+                // stop a 0.3 extension from starting.
+                if let Some(object) = host.as_object_mut() {
+                    object.remove("context_usage");
+                }
+                host
+            },
             contract: contract.clone(),
         };
         api_v03::validate_initialize_request(&initialize).map_err(api_v03_protocol_error)?;
@@ -712,7 +722,12 @@ pub(super) async fn spawn_connection(
             return Err(error);
         }
     };
-    let (contributions, protocol, api_v03_contract) = negotiated;
+    let (mut contributions, protocol, api_v03_contract) = negotiated;
+    // The host already provides these names; the rest of the process keeps
+    // running and simply never contributes them.
+    contributions
+        .tools
+        .retain(|tool| !config.withheld_tools.contains(&tool.name));
     if let Some(contract) = &api_v03_contract {
         // The reader waits after the initialize response, so this single atomic
         // install becomes visible to both outbound serialization and the next

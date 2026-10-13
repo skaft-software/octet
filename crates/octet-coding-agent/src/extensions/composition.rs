@@ -568,6 +568,7 @@ pub(super) fn extension_model_view(
         }),
         context_window: spec.limits.context_window,
         max_tokens: spec.limits.max_output_tokens,
+        oauth: model.endpoint.auth.is_oauth(),
     })
 }
 

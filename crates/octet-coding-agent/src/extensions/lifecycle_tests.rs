@@ -72,6 +72,11 @@ struct ProbeState {
 }
 
 async fn start_probe(mode: &str) -> ProbeState {
+    start_probe_primed(mode, |_, _| {}).await
+}
+
+/// Starts the probe in a session that `prime` has already given history.
+async fn start_probe_primed(mode: &str, prime: impl FnOnce(&mut Session, &Model)) -> ProbeState {
     let root = tempfile::tempdir().unwrap();
     let extension_root = root.path().join("extensions");
     let directory = extension_root.join(PROBE_EXTENSION);
@@ -102,11 +107,12 @@ tools = ["probe"]
     config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     config.sandbox.allow_process = true;
     config.sandbox.allow_shell = true;
-    let session = Session::create(root.path().join("session.jsonl")).unwrap();
+    let mut session = Session::create(root.path().join("session.jsonl")).unwrap();
     let model = ModelCatalog::builtin()
         .unwrap()
         .resolve(&ModelId("gpt-4o-mini".into()))
         .unwrap();
+    prime(&mut session, &model);
     let sessions = SessionStore::new(&config.session_dir, root.path());
     let mut host = ExtensionHost::new();
     let extensions = ExecutableExtensions::discover_and_start(
@@ -167,6 +173,40 @@ async fn next_driver_request(
     })
     .await
     .expect("active-session request reaches the product driver")
+}
+
+/// The host state in every initialize request carries the measured context
+/// usage. API 0.3's canonical JSON refuses non-integers, so a fractional
+/// percentage must not stop a 0.3 extension from starting mid-session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_api_03_extension_starts_in_a_session_with_measured_context_usage() {
+    let state = start_probe_primed("omit", |session, model| {
+        let assistant = session
+            .append(octet_agent::EntryValue::Message(
+                octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                    content: vec![],
+                    model: model.spec.id.clone(),
+                    protocol: model.spec.protocol,
+                }),
+            ))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                assistant,
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                octet_ai::Usage {
+                    total_tokens: 1234,
+                    ..octet_ai::Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+    })
+    .await;
+    assert!(state.process.is_running());
+    let mut extensions = state.extensions;
+    extensions.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

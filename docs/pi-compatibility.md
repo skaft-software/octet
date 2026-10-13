@@ -22,6 +22,36 @@ Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
 are not targets. The [package README](../extensions/octet-pi-compat/README.md)
 describes the adapter; historical package acceptance is not public API parity.
 
+<a id="use-your-pi-setup"></a>
+
+## Use your Pi setup
+
+Install the adapter and turn it on. That is the whole setup; there is nothing to
+configure and no folder to be in:
+
+```bash
+octet extension install octet-pi-compat
+octet --enable-extension octet-pi-compat   # or choose Enable in /extensions
+```
+
+Each time octet starts with the adapter on, it reads this machine's Pi setup
+(`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
+that session: your enabled Pi extensions, skills, prompt templates, themes,
+`keybindings.json`, the global context file and the selected model. A Pi footer
+extension such as `powerline-footer` draws the footer, so it matches the one in
+Pi. Nothing is written to your Pi directory or to octet's saved settings, and
+turning the adapter off returns octet to its own setup. Enabling is the review:
+it lets the adapter run your enabled Pi extensions with your OS permissions, as
+Pi does. Project `.pi` resources load only in a trusted workspace. It needs
+Node 22.19+ on `PATH`.
+
+Because the setup is read at every start, a change you make in Pi shows up the
+next time octet starts, with no step in between. An extension that cannot run
+under octet is left out and named in `[Extension issues]` at start; the rest of
+your setup still loads. One that is slow is cut off after a few seconds and
+named too (see [Slow or stalled extensions](#slow-or-stalled-extensions)). The
+sections below are for a frozen, reviewed snapshot instead of the live mirror.
+
 <a id="explicit-local-setup"></a>
 
 ## Bring your Pi extensions
@@ -88,9 +118,11 @@ octet --extension-dir "$HOME/.octet/pi-import" --enable-extension octet-pi-compa
 Without `--expected-fingerprint`, the first command runs nothing: it prints
 every factory and resource it would mirror plus the exact command to run. If a
 factory cannot load on either route (for example one that needs its own
-alternate-screen terminal), the mirror is refused as a whole; rerun with
-`--skip-unsupported` to mirror the rest. Excluded factories are recorded in the
-bridge, reported at every start, and stay excluded until you configure again.
+alternate-screen terminal), it is left out and the rest of the setup is mirrored;
+a registration collision still needs your decision and refuses the mirror. Pass
+`--strict` to refuse the whole mirror when any factory is unsupported. Excluded
+factories are listed when you configure, recorded in the bridge, reported at
+every start, and stay excluded until you configure again.
 
 `--mirror` captures reviewed entrypoints, bounded literal-relative import hashes,
 routes and static commands/tools/shortcuts/flags, and records the Pi agent directory.
@@ -152,6 +184,30 @@ trust the generated extension with the normal [extension
 commands](extensions.md). Alternatively use octet's interactive
 extension manager. Keep the Node package at its configured absolute path;
 the generated manifest references it. Node dependencies are extension-local.
+
+## Slow or stalled extensions
+
+Every hook the host sends runs on one ordered queue, so a single factory that
+never answers (a network call, a child process, an MCP connection) must not hold
+everything else. Each handler gets a time budget: 5 s for lifecycle,
+notification, provider and discovery callbacks; 2 s each and 4 s in total for the
+prompt hooks (`before_agent_start`, `input`), which share the host's 5 s prompt
+deadline. A handler that outlives its budget keeps running but is no longer
+waited for. It is named once in `[Extension issues]`, and later hooks skip it
+while it is still busy instead of waiting on it again. A tool-call guard that
+cannot answer in time blocks the call rather than letting it through. A prompt
+sent while an extension is still starting waits up to 12 s for it, then
+continues without it. A factory's own setup (the work its default export does
+before it returns) gets 8 s, and 16 s across all factories; one that is still
+going is left out of the mirror, named in `[Extension issues]`, and tried again
+the next time octet starts.
+
+To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and
+redirect stderr, for example `OCTET_STARTUP_TRACE=1 octet 2>trace.txt`. Each
+handler prints one line, such as
+`octet-startup: pi-compat.handler elapsed=… event=session_start factory=pi-lens/dist/index.js took=99ms outcome=ok`
+(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed` or
+`skipped-busy`).
 
 ## Message observations
 

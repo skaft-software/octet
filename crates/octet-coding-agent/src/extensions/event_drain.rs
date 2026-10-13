@@ -96,7 +96,8 @@ impl ExecutableExtensions {
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
         self.schedule_session_hook_starts();
-        let messages = self.drain_events_inner(ForegroundAdmission::Shell);
+        let mut messages = std::mem::take(&mut self.held_messages);
+        messages.extend(self.drain_events_inner(ForegroundAdmission::Shell));
         self.drain_editor_requests_into_shell(shell);
         self.drain_host_requests_into_shell(shell);
         self.reconcile_terminal_grant_for_shell(shell);
@@ -118,7 +119,9 @@ impl ExecutableExtensions {
         // registration), even without a resource-discovery contributor. Start
         // them only once this frontend is pumping their requests/refusals.
         self.schedule_session_hook_starts();
-        self.drain_events_inner(self.foreground_admission())
+        let mut messages = std::mem::take(&mut self.held_messages);
+        messages.extend(self.drain_events_inner(self.foreground_admission()));
+        messages
     }
 
     /// The authority this host can exercise for a reverse request. A bound

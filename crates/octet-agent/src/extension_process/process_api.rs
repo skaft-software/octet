@@ -381,6 +381,18 @@ impl ExtensionProcess {
             .await
     }
 
+    /// Waits for any session start, settle or reload in flight on this process.
+    ///
+    /// Those hold the process's lifecycle guard while the extension answers on
+    /// its ordered hook queue, so a prompt hook sent now would queue behind them
+    /// and spend its own deadline on the wait. Returns `false` when the wait
+    /// itself outlasts `limit`.
+    pub async fn wait_until_idle(&self, limit: Duration) -> bool {
+        tokio::time::timeout(limit, self.inner.reload_guard.lock())
+            .await
+            .is_ok()
+    }
+
     /// Starts a binding with the actual host transition, rather than inferring
     /// it from transcript length. API 0.3 retains its canonical binding-only payload.
     pub async fn start_session_hook_binding_with_reason(

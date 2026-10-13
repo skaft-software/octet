@@ -2,6 +2,7 @@
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
+import { HookBudget } from './handler-budget.mjs';
 export const pipelineHooks = ['before_provider_request', 'before_provider_headers', 'after_provider_response'];
 function headers(value, deleting = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 256) invalid('provider header map');
@@ -36,13 +37,18 @@ export async function providerPipeline(runtime, params, store) {
     const originalHeaders = hook !== 'before_provider_request' ? headers(body.headers) : undefined;
     const mutableHeaders = originalHeaders && structuredClone(originalHeaders);
     if (hook === 'after_provider_response' && (!Number.isInteger(body.status) || body.status < 100 || body.status > 599)) invalid('provider response status');
+    const budget = new HookBudget(runtime, store, hook);
     for (const entry of [...runtime.events.get(hook) || []]) {
       live(); const child = { ...store, factory: entry.factory };
       const event = hook === 'before_provider_request' ? { type: hook, payload }
         : hook === 'before_provider_headers' ? { type: hook, headers: mutableHeaders }
         : { type: hook, status: body.status, headers: Object.fromEntries(Object.entries(originalHeaders).map(([key, value]) => [key, Array.isArray(value) ? value.join(', ') : value])) };
       let result;
-      try { result = await cancellable(runtime.scope.run(child, () => entry.handler(facade(event, `${hook} event`), createContext(runtime, child))), signal); }
+      try {
+        const run = await cancellable(budget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(facade(event, `${hook} event`), createContext(runtime, child)))), signal);
+        if (!run.ran) continue; // a stalled provider callback must not hold the model request
+        result = run.value;
+      }
       catch (error) {
         live();
         // These callbacks see private wire material. Never echo their exception
@@ -55,6 +61,7 @@ export async function providerPipeline(runtime, params, store) {
       // Pi header/response callback return values have no semantic effect;
       // headers are changed in place, and response arrival is observation only.
     }
+    budget.finish();
     await cancellable(runtime.flush(store), signal); live();
     if (hook === 'before_provider_request') {
       if (!payload || typeof payload !== 'object') invalid('provider payload replacement must be JSON object/array');

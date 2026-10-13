@@ -2,7 +2,7 @@ import { bounded, facade, fields, invalid } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
-import { performance } from 'node:perf_hooks';
+import { HookBudget } from './handler-budget.mjs';
 
 function system(text) {
   bounded(text, 'before_agent_start systemPrompt', 262144, { controls: true });
@@ -19,31 +19,32 @@ export async function beforeAgentStart(runtime, payload, store) {
   let effective = system(payload.system_prompt);
   const messages = [];
   store.providerContext = true;
-  for (const entry of [...runtime.events.get('before_agent_start') || []]) {
-    store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
-    const child = { ...store, factory: entry.factory };
-    const event = facade({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
-    let result;
-    const trace = process.env.OCTET_PI_TRACE_HOOKS === '1';
-    const entrypoint = runtime.config.extensions[entry.factory];
-    const started = performance.now();
-    if (trace) console.error(`[pi-compat hook] before_agent_start begin ${entrypoint}`);
-    try {
-      result = await cancellable(runtime.scope.run(child, () => entry.handler(event, createContext(runtime, child))), store.controller.signal);
-    } catch (error) {
-      if (error?.code || store.controller.signal.aborted) throw error;
-      runtime.reportCallbackError('before_agent_start', entry.factory, error);
-      continue;
-    } finally {
-      if (trace) console.error(`[pi-compat hook] before_agent_start end ${entrypoint} ${(performance.now() - started).toFixed(1)}ms`);
+  // Every handler shares the host's 5 s before_prompt deadline: a stalled one is
+  // detached and skipped (reported once) instead of failing the whole prompt.
+  const budget = new HookBudget(runtime, store, 'before_agent_start');
+  try {
+    for (const entry of [...runtime.events.get('before_agent_start') || []]) {
+      store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
+      const child = { ...store, factory: entry.factory };
+      const event = facade({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
+      let result;
+      try {
+        const run = await cancellable(budget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(event, createContext(runtime, child)))), store.controller.signal);
+        if (!run.ran) continue;
+        result = run.value;
+      } catch (error) {
+        if (error?.code || store.controller.signal.aborted) throw error;
+        runtime.reportCallbackError('before_agent_start', entry.factory, error);
+        continue;
+      }
+      store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
+      if (result !== undefined) {
+        fields(result, ['systemPrompt', 'message'], 'before_agent_start result');
+        if (result.message !== undefined) messages.push(customMessage(result.message));
+        if (result.systemPrompt !== undefined) effective = system(result.systemPrompt);
+      }
+      await runtime.flush(child);
     }
-    store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
-    if (result !== undefined) {
-      fields(result, ['systemPrompt', 'message'], 'before_agent_start result');
-      if (result.message !== undefined) messages.push(customMessage(result.message));
-      if (result.systemPrompt !== undefined) effective = system(result.systemPrompt);
-    }
-    await runtime.flush(child);
-  }
+  } finally { budget.finish(); }
   return { systemPrompt: effective, messages };
 }

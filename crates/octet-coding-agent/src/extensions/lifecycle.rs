@@ -182,6 +182,7 @@ impl ExecutableExtensions {
                 config.experimental_streamable_http_mcp,
             );
         }
+        let pi_mirror_directory = pi_mirror::prepare(&mut descriptors, config, &mut diagnostics);
         let mut needs_host_authority = false;
         // A surface that never starts extension processes gets no grant hints:
         // no grant could change the outcome there.
@@ -253,10 +254,20 @@ impl ExecutableExtensions {
             .collect::<Vec<_>>();
         // A tool-name clash turns the external extension off instead of
         // failing startup; the first-party extension keeps the name.
-        let (startable, tool_clashes) = turn_off_tool_clashes(startable);
+        let ToolClashes {
+            kept: startable,
+            turned_off: tool_clashes,
+            withheld: withheld_tools,
+        } = turn_off_tool_clashes(startable);
         for (name, reason) in &tool_clashes {
             diagnostics.push(format!(
                 "warning: extension {name:?} was turned off: {reason}"
+            ));
+        }
+        for (name, tools) in &withheld_tools {
+            diagnostics.push(format!(
+                "note: extension {name:?} does not expose its tools {}: octet provides them itself",
+                tools.iter().cloned().collect::<Vec<_>>().join(", ")
             ));
         }
 
@@ -404,6 +415,7 @@ impl ExecutableExtensions {
                     session_lifecycle: session_lifecycle_service.clone(),
                     event_bus: Some(event_bus.clone()),
                     provider_registry: Some(provider_runtime.registry()),
+                    withheld_tools: withheld_tools.clone(),
                 };
                 let startable_names = startable
                     .iter()
@@ -485,6 +497,7 @@ impl ExecutableExtensions {
         }
 
         let mut extensions = Self::default();
+        extensions.pi_mirror_directory = pi_mirror_directory;
         extensions.provider_runtime = provider_runtime;
         extensions.runtime_manager = managed_runtime;
         extensions.runtime_binding = runtime_binding;
@@ -1527,7 +1540,7 @@ impl ExecutableExtensions {
 
 /// The Pi bridge ships in the official catalog, but every tool it carries
 /// comes from a third-party Pi package.
-const PI_BRIDGE_EXTENSION_NAME: &str = "octet-pi-compat";
+pub(super) const PI_BRIDGE_EXTENSION_NAME: &str = "octet-pi-compat";
 
 /// First-party extensions keep a clashing tool name: their tools are the ones
 /// octet ships and documents.
@@ -1535,12 +1548,23 @@ fn first_party_tool_owner(name: &str) -> bool {
     name != PI_BRIDGE_EXTENSION_NAME && crate::extension_bundle::is_official_bundle(name)
 }
 
-/// Splits startable extensions into those kept and the external ones whose
-/// declared tools clash with a first-party extension's, keyed by name with the
-/// reason. Runs in O(n log n) over declared tool names.
-fn turn_off_tool_clashes(
-    startable: Vec<DiscoveredExtension>,
-) -> (Vec<DiscoveredExtension>, BTreeMap<String, String>) {
+/// The outcome of resolving tool-name clashes with first-party extensions.
+struct ToolClashes {
+    kept: Vec<DiscoveredExtension>,
+    /// Extensions turned off entirely, by name with the reason.
+    turned_off: BTreeMap<String, String>,
+    /// Tool names withheld from an extension that keeps running, by extension.
+    withheld: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Resolves tools an external extension declares that a first-party extension
+/// already provides: the first-party extension keeps the name.
+///
+/// An ordinary external extension is turned off, keyed by name with the reason.
+/// The Pi bridge is not: it mirrors many unrelated factories, so one factory's
+/// clashing tool must not take the others down. Only the clashing names are
+/// withheld from it. Runs in O(n log n) over declared tool names.
+fn turn_off_tool_clashes(startable: Vec<DiscoveredExtension>) -> ToolClashes {
     let owners = startable
         .iter()
         .filter(|descriptor| first_party_tool_owner(&descriptor.manifest.name))
@@ -1553,7 +1577,8 @@ fn turn_off_tool_clashes(
                 .map(|tool| (tool.clone(), descriptor.manifest.name.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let mut clashes = BTreeMap::new();
+    let mut turned_off = BTreeMap::new();
+    let mut withheld = BTreeMap::new();
     let kept = startable
         .into_iter()
         .filter(|descriptor| {
@@ -1565,26 +1590,37 @@ fn turn_off_tool_clashes(
                 .contributes
                 .tools
                 .iter()
-                .filter_map(|tool| {
-                    owners
-                        .get(tool)
-                        .map(|owner| format!("`{tool}` (provided by {owner:?})"))
-                })
+                .filter_map(|tool| owners.get(tool).map(|owner| (tool, owner)))
                 .collect::<Vec<_>>();
             if clashing.is_empty() {
                 return true;
             }
-            clashes.insert(
+            if descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME {
+                withheld.insert(
+                    descriptor.manifest.name.clone(),
+                    clashing.iter().map(|(tool, _)| (*tool).clone()).collect(),
+                );
+                return true;
+            }
+            turned_off.insert(
                 descriptor.manifest.name.clone(),
                 format!(
                     "its tool {} clashes with a first-party extension",
-                    clashing.join(", ")
+                    clashing
+                        .iter()
+                        .map(|(tool, owner)| format!("`{tool}` (provided by {owner:?})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             );
             false
         })
         .collect();
-    (kept, clashes)
+    ToolClashes {
+        kept,
+        turned_off,
+        withheld,
+    }
 }
 
 /// Plain wording for a classified startup failure without host detail.
@@ -1618,6 +1654,8 @@ struct ExtensionActivationPlan {
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
     event_bus: Option<Arc<ExtensionEventBus>>,
     provider_registry: Option<Arc<octet_agent::ExtensionProviderRegistry>>,
+    /// Tool names withheld from a still-running extension, by extension name.
+    withheld_tools: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ExtensionActivationPlan {
@@ -1639,6 +1677,11 @@ impl ExtensionActivationPlan {
         runtime.bulk_store = self.bulk_store.clone();
         runtime.flag_values = self
             .flag_values
+            .get(&descriptor.manifest.name)
+            .cloned()
+            .unwrap_or_default();
+        runtime.withheld_tools = self
+            .withheld_tools
             .get(&descriptor.manifest.name)
             .cloned()
             .unwrap_or_default();
@@ -1892,5 +1935,86 @@ fn extension_summary(
         // Live declarations are overlaid by `summaries()` from the shared
         // registry; discovery alone has no provider state.
         providers: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tool_clash_tests {
+    use super::*;
+
+    fn descriptor(name: &str, tools: &[&str]) -> DiscoveredExtension {
+        let manifest = octet_agent::ExtensionManifest::parse(&format!(
+            "name = {name:?}\nversion = \"0.1.0\"\napi_version = \"0.4\"\n\n[entrypoint]\ncommand = \"node\"\n\n[contributes]\ntools = {tools:?}\n"
+        ))
+        .unwrap();
+        DiscoveredExtension {
+            manifest,
+            manifest_path: PathBuf::from(format!("/{name}/extension.toml")),
+            source: ExtensionSource::Explicit,
+            activation: octet_agent::extension_process::ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        }
+    }
+
+    fn names(extensions: &[DiscoveredExtension]) -> Vec<&str> {
+        extensions
+            .iter()
+            .map(|extension| extension.manifest.name.as_str())
+            .collect()
+    }
+
+    /// The bridge mirrors many unrelated Pi factories. One factory's tool
+    /// sharing a name with a first-party tool must not turn the others off.
+    #[test]
+    fn the_pi_bridge_keeps_running_with_only_the_clashing_tools_withheld() {
+        let clashes = turn_off_tool_clashes(vec![
+            descriptor("octet-web-search", &["web_search"]),
+            descriptor("octet-subagents", &["subagent_wait"]),
+            descriptor(
+                PI_BRIDGE_EXTENSION_NAME,
+                &["web_search", "subagent_wait", "mirror_only"],
+            ),
+        ]);
+        assert_eq!(
+            names(&clashes.kept),
+            vec![
+                "octet-web-search",
+                "octet-subagents",
+                PI_BRIDGE_EXTENSION_NAME
+            ]
+        );
+        assert!(clashes.turned_off.is_empty(), "{:?}", clashes.turned_off);
+        assert_eq!(
+            clashes.withheld.get(PI_BRIDGE_EXTENSION_NAME),
+            Some(&BTreeSet::from([
+                "subagent_wait".to_owned(),
+                "web_search".to_owned()
+            ]))
+        );
+    }
+
+    #[test]
+    fn an_ordinary_external_extension_is_still_turned_off_whole() {
+        let clashes = turn_off_tool_clashes(vec![
+            descriptor("octet-web-search", &["web_search"]),
+            descriptor("external-search", &["web_search", "external_only"]),
+        ]);
+        assert_eq!(names(&clashes.kept), vec!["octet-web-search"]);
+        assert!(clashes.withheld.is_empty());
+        assert!(clashes.turned_off.get("external-search").is_some_and(
+            |reason| reason.contains("`web_search` (provided by \"octet-web-search\")")
+        ));
+    }
+
+    #[test]
+    fn a_bridge_without_a_clash_is_untouched() {
+        let clashes = turn_off_tool_clashes(vec![
+            descriptor("octet-web-search", &["web_search"]),
+            descriptor(PI_BRIDGE_EXTENSION_NAME, &["mirror_only"]),
+        ]);
+        assert_eq!(clashes.kept.len(), 2);
+        assert!(clashes.turned_off.is_empty() && clashes.withheld.is_empty());
     }
 }

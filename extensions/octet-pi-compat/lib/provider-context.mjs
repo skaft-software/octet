@@ -5,6 +5,7 @@ import { contextBytes, contextItems } from './context-limits.mjs';
 import { bounded, facade, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { prepareToolLoadout } from './tools.mjs';
+import { HookBudget } from './handler-budget.mjs';
 
 const apis = { open_ai_responses: 'openai-responses', open_ai_chat: 'openai-completions', anthropic_messages: 'anthropic-messages', bedrock_converse: 'bedrock-converse-stream', google_generative_ai: 'google-generative-ai', mistral_conversations: 'mistral-conversations', pi_messages: 'pi-messages' };
 const protocols = Object.fromEntries(Object.entries(apis).map(([key, value]) => [value, key]));
@@ -294,11 +295,16 @@ export async function projectContext(runtime, params, store) {
     const original = JSON.stringify(messages);
     // Snapshot handlers just once, retaining registration/factory order. Pi's
     // context event hides system messages, retaining the real native system.
+    const contextBudget = new HookBudget(runtime, store, 'context');
     for (const entry of [...runtime.events.get('context') || []]) {
       live(); const child = { ...store, factory: entry.factory }, visible = messages.slice();
       let result;
-      try { result = await runtime.scope.run(child, () => entry.handler(
-        facade({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))); }
+      try {
+        const run = await contextBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
+          facade({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))));
+        if (!run.ran) continue; // a stalled context callback leaves the messages as they are
+        result = run.value;
+      }
       catch (error) {
         live(); if (Number.isInteger(error?.code)) throw error;
         runtime.reportCallbackError('context', entry.factory, error);
@@ -310,6 +316,7 @@ export async function projectContext(runtime, params, store) {
       // Refuse unsupported mutations before exposing them to another callback.
       piToCanonical(messages);
     }
+    contextBudget.finish();
     if (runtime.events.has('context_with_system')) {
       const tools = array(request.tools || [], 'context tools').map(tool => {
         record(tool, ['name', 'description', 'parameters', 'async', 'constrained_sampling'], 'canonical context tool');
@@ -319,11 +326,16 @@ export async function projectContext(runtime, params, store) {
       });
       const originalTools = JSON.stringify(tools);
       let full = [strict({ role: 'system', content: system ?? '', toolsAdded: tools, sections: undefined, toolsRemoved: undefined }, 'system message'), ...messages];
+      const fullBudget = new HookBudget(runtime, store, 'context_with_system');
       for (const entry of [...runtime.events.get('context_with_system') || []]) {
         live(); const child = { ...store, factory: entry.factory };
         let result;
-        try { result = await runtime.scope.run(child, () => entry.handler(
-          facade({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))); }
+        try {
+          const run = await fullBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
+            facade({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))));
+          if (!run.ran) continue;
+          result = run.value;
+        }
         catch (error) {
           live(); if (Number.isInteger(error?.code)) throw error;
           runtime.reportCallbackError('context_with_system', entry.factory, error);

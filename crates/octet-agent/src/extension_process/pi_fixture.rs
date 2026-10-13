@@ -147,3 +147,105 @@ async fn raw_factory_resource_registration_still_requires_the_complete_consumer(
         if message == "unsupported_feature resource_paths_v1: feature was not negotiated")
     );
 }
+
+/// The host already provides some tool names; a mirror that also registers one
+/// of them keeps running and simply does not contribute that tool.
+#[tokio::test]
+async fn withheld_tool_names_are_dropped_while_the_rest_of_the_bridge_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("two-tools.mjs");
+    std::fs::write(
+        &factory,
+        r#"export default pi => {
+  for (const name of ['web_search', 'bridge_only']) {
+    pi.registerTool({ name, label: name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: false },
+      async execute() { return { content: [{ type: 'text', text: name }] }; } });
+  }
+};"#,
+    )
+    .unwrap();
+    let manifest_path = capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    config.request_timeout = Duration::from_secs(10);
+    config.withheld_tools = BTreeSet::from(["web_search".to_owned()]);
+    let process = ExtensionProcess::start(
+        DiscoveredExtension {
+            manifest,
+            manifest_path,
+            source: ExtensionSource::Explicit,
+            activation: ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        },
+        config,
+    )
+    .await
+    .expect("a mirror with one clashing tool still starts");
+    let names = process
+        .tool_definitions()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["bridge_only".to_owned()]);
+    assert!(process.shutdown().await);
+}
+
+/// A prompt hook must not queue behind a session start that is still running:
+/// `wait_until_idle` is the host's way to wait for it, bounded.
+#[tokio::test]
+async fn wait_until_idle_covers_a_session_start_still_in_flight() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("slow-start.mjs");
+    std::fs::write(
+        &factory,
+        "export default pi => pi.on('session_start', async () => { await new Promise(resolve => setTimeout(resolve, 1500)); });",
+    )
+    .unwrap();
+    let manifest_path = capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    config.request_timeout = Duration::from_secs(10);
+    let process = ExtensionProcess::start(
+        DiscoveredExtension {
+            manifest,
+            manifest_path,
+            source: ExtensionSource::Explicit,
+            activation: ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        },
+        config,
+    )
+    .await
+    .expect("the slow-start mirror starts");
+    assert!(
+        process.wait_until_idle(Duration::from_millis(50)).await,
+        "an idle process never makes a prompt wait"
+    );
+    let starting = {
+        let process = process.clone();
+        tokio::spawn(async move { process.start_session_hook_binding("owner-1").await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !process.wait_until_idle(Duration::from_millis(200)).await,
+        "the start is still running, so a short wait gives up"
+    );
+    let begun = Instant::now();
+    assert!(process.wait_until_idle(Duration::from_secs(10)).await);
+    assert!(
+        begun.elapsed() >= Duration::from_millis(500),
+        "the wait covered the rest of the start ({:?})",
+        begun.elapsed()
+    );
+    starting
+        .await
+        .unwrap()
+        .expect("the session start settled successfully");
+    assert!(process.shutdown().await);
+}

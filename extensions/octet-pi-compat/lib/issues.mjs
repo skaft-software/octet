@@ -29,6 +29,9 @@ export function loadIssue(failure) {
   } else if (code === 'ENOENT' || code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND') {
     reason = 'The extension file or one of its dependencies was not found; the extension was skipped.';
     next = 'Restore the file or install its reviewed dependencies, then reconfigure and restart octet.';
+  } else if (name === 'FactoryStalled') {
+    reason = `The extension's ${error}; octet stopped waiting and skipped it (it may still be running).`;
+    next = 'If it waits on the network or another service, check that it is reachable; otherwise update or disable this extension.';
   } else if (code === 'EACCES' || code === 'EPERM') {
     reason = 'The extension file or a dependency could not be read; the extension was skipped.';
     next = 'Check file permissions, then reconfigure and restart octet.';
@@ -52,6 +55,17 @@ export function loadIssue(failure) {
     next = 'Check its dependencies and settings; update or disable this extension, then reconfigure.';
   }
   return { path: entry, reason, next };
+}
+
+// A factory left out of the mirror when the setup was captured: said once at
+// start, with the one reason that is safe to show, never its raw error text.
+export function excludedIssue({ entry, reason = '' }) {
+  const stalled = /setup did not finish within [0-9.]+ s/.exec(reason)?.[0];
+  return { path: entry,
+    reason: stalled
+      ? `The extension's ${stalled}; it was left out of the mirror.`
+      : 'The extension could not be loaded by the adapter and was left out of the mirror (private error details redacted).',
+    next: 'Update or disable this extension. octet tries it again the next time it starts.' };
 }
 
 function formatIssue(issue) {
@@ -104,7 +118,7 @@ export class ExtensionIssues {
   startup() {
     if (this.started) return;
     this.started = true;
-    this.publish([...(this.runtime.loadFailures || []).map(loadIssue), ...this.inertRenderers()]);
+    this.publish([...(this.runtime.excludedFactories || []).map(excludedIssue), ...(this.runtime.loadFailures || []).map(loadIssue), ...this.inertRenderers()]);
   }
   // Called by the runtime after successful initialization or a late registration.
   reportInertRenderers() { if (this.started) this.publish(this.inertRenderers()); }
@@ -124,6 +138,14 @@ export class ExtensionIssues {
     this.publish([...paths].filter(path => this.firstEventIssue(event, path)).map(path => ({ path,
       reason: `${display(event, 128)}: octet could not convert the turn to Pi event data; some extension observations were skipped.`,
       next: 'Update octet or report this event with a sanitized reproduction. The committed turn has not been changed.' })));
+  }
+  // A handler outlived its budget and the hook stopped waiting for it. One
+  // notice per extension and event; the handler itself keeps running. Each item
+  // is [path, milliseconds the hook actually waited].
+  slow(event, items) {
+    this.publish(items.filter(([path]) => this.firstEventIssue(`slow:${event}`, path)).map(([path, milliseconds]) => ({ path,
+      reason: `${display(event, 128)} did not finish within ${Math.round(milliseconds / 100) / 10} s; octet stopped waiting and continued without it (the extension keeps running).`,
+      next: 'If its footer, status or prompt additions are missing, update or disable this extension.' })));
   }
   callback(event, factory, error) {
     const path = this.runtime.config.extensions[factory];

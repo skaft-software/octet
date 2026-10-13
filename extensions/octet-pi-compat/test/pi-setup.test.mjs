@@ -281,7 +281,7 @@ test('pi setup: a generated mirror bridge discovers the fixture items through th
   assert.equal(paths.default_thinking_level, 'high');
 });
 
-test('pi setup: an unsupported factory is excluded from the mirror only by explicit --skip-unsupported', async t => {
+test('pi setup: an unsupported factory is left out of the mirror and listed; --strict refuses instead', async t => {
   const root = temporary(t);
   const agent = join(root, 'home/.pi/agent');
   const good = join(agent, 'extensions/good.mjs'), broken = join(agent, 'extensions/broken.mjs');
@@ -292,15 +292,19 @@ test('pi setup: an unsupported factory is excluded from the mirror only by expli
   const env = { ...process.env, OCTET_PI_AGENT_DIR: agent };
   const review = preparePiMirror({ output, cwd: root, env });
   // A terminal user without a fingerprint gets the exact review and next command.
-  const prompt = mirrorReviewPrompt(review, { skipUnsupported: true });
+  // Leaving an unsupported factory out is the default, so the command needs no flag for it.
+  const prompt = mirrorReviewPrompt(review);
   assert.match(prompt, /factory +.*good\.mjs/);
   assert.match(prompt, /factory +.*broken\.mjs/);
-  assert.ok(prompt.includes(`--skip-unsupported --expected-fingerprint ${review.fingerprint}`));
-  await assert.rejects(configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, cwd: root, log: () => {}, env }),
-    /no partial import[\s\S]*broken\.mjs[\s\S]*--skip-unsupported/);
+  assert.ok(prompt.includes(`--expected-fingerprint ${review.fingerprint}`));
+  assert.ok(!prompt.includes('--strict') && !prompt.includes('--skip-unsupported'));
+  assert.ok(mirrorReviewPrompt(review, { strict: true }).includes(`--strict --expected-fingerprint ${review.fingerprint}`));
+  // --strict keeps the whole-or-nothing review for owners who want it.
+  await assert.rejects(configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, strict: true, cwd: root, log: () => {}, env }),
+    /no partial import[\s\S]*broken\.mjs[\s\S]*without --strict/);
   assert.equal(existsSync(join(output, 'bridge.json')), false);
   const lines = [];
-  const { registrations } = await configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, skipUnsupported: true, cwd: root, log: line => lines.push(line), env });
+  const { registrations } = await configureMirror({ output, reviewed: true, expectedFingerprint: review.fingerprint, cwd: root, log: line => lines.push(line), env });
   const bridge = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
   assert.deepEqual(bridge.extensions, [realpathSync(good)]);
   assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(broken)]);
@@ -313,6 +317,30 @@ test('pi setup: an unsupported factory is excluded from the mirror only by expli
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).result.commands.map(command => command.name), ['good']);
   assert.match(result.stderr, /mirror excluded at review: .*broken\.mjs/);
+});
+
+test('pi setup: a factory whose setup never settles is left out of the mirror, named at start, and the rest still runs', async t => {
+  const root = temporary(t);
+  const agent = join(root, 'home/.pi/agent');
+  const good = join(agent, 'extensions/good.mjs'), stalled = join(agent, 'extensions/stalled.mjs');
+  put(join(agent, 'settings.json'), JSON.stringify({ extensions: [good, stalled] }));
+  put(good, 'export default pi => pi.registerCommand("good", {handler(){}});');
+  put(stalled, 'export default async pi => { await new Promise(() => {}); };');
+  const output = join(root, 'extensions/octet-pi-compat');
+  const env = { ...process.env, OCTET_PI_AGENT_DIR: agent, OCTET_PI_HANDLER_BUDGET_MS: '300' };
+  // The whole capture must finish in a few budgets, not the minutes a hung probe cost.
+  const begun = Date.now();
+  const { registrations: metadata } = await configureMirror({ output, reviewed: true, cwd: root, log: () => {}, env });
+  assert.ok(Date.now() - begun < 20000, `capture took ${Date.now() - begun} ms`);
+  const bridge = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
+  assert.deepEqual(bridge.extensions, [realpathSync(good)]);
+  assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(stalled)]);
+  const peer = launch(t, [], { config: join(output, 'bridge.json'), env, cwd: root, metadata });
+  await peer.init(['resource_paths_v1', 'session_entries']);
+  const issue = await peer.wait(frame => frame.method === 'notification' && /stalled\.mjs/.test(frame.params?.message ?? ''));
+  assert.match(issue.params.message, /setup did not finish within/);
+  assert.match(issue.params.message, /left out of the mirror/);
+  await peer.close();
 });
 
 test('pi setup: mirror refuses changed factory sources before executing new hooks', async t => {

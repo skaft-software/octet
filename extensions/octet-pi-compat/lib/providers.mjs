@@ -63,8 +63,17 @@ export function modelRegistry(getHost, runtime) {
     getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').map(modelView),
     getAll: () => all().map(modelView),
     find: (provider, id) => modelView(all().find(model => model.provider === provider && model.id === id)),
-    isUsingOAuth() {
-      unsupported('ctx.modelRegistry.isUsingOAuth', 'provider-level OAuth status is not supplied by the host');
+    // Pi: whether the model's provider authenticates with a subscription login.
+    // The host states it, from the provider's own authentication resolver, for
+    // every model it describes. A model it did not describe, or one whose
+    // resolver does not classify itself, is refused rather than guessed.
+    isUsingOAuth(model) {
+      if (!model || typeof model !== 'object') invalid('modelRegistry model');
+      const host = getHost();
+      const views = [host.model_view, ...(host.pi_models?.available_models ?? []), ...(host.pi_models?.all_models ?? [])];
+      const stated = views.find(view => view && view.provider === model.provider && view.id === model.id && typeof view.oauth === 'boolean');
+      if (!stated) unsupported('ctx.modelRegistry.isUsingOAuth', 'the host did not state whether this provider uses OAuth');
+      return stated.oauth;
     },
     hasConfiguredAuth() {
       unsupported('ctx.modelRegistry.hasConfiguredAuth', 'provider-level configured-auth status is not supplied by the host');

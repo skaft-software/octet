@@ -705,6 +705,7 @@ fn wave3_model_view_results_are_bounded_and_deny_unknown_fields() {
         }),
         context_window: 200_000,
         max_tokens: 64_000,
+        oauth: None,
     };
     view.validate().expect("bounded view");
     let encoded = serde_json::to_value(&view).expect("encode");

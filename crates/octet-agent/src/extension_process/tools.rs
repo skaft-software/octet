@@ -32,6 +32,9 @@ pub(super) async fn run_catalog_updates(
                     match update.mutation {
                         CatalogMutation::Register(definitions) => {
                             for definition in definitions {
+                                if inner.config.withheld_tools.contains(&definition.name) {
+                                    continue;
+                                }
                                 if let Some(existing) = next
                                     .iter_mut()
                                     .find(|existing| existing.name == definition.name)

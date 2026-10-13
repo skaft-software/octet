@@ -3,6 +3,7 @@
 import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
+import { HookBudget } from './handler-budget.mjs';
 
 function fact(runtime, store, key, api) {
   runtime.assertSessionOwner(store);
@@ -56,33 +57,38 @@ export async function transformInput(runtime, payload, store) {
   let text = bounded(payload.text, 'input text', 262144, { controls: true });
   let images = visibleImages(payload.images);
   const originalText = text, originalImages = JSON.stringify(images), signal = store.controller.signal;
-  for (const entry of handlers) {
-    signal.throwIfAborted(); runtime.assertSessionOwner(store);
-    const child = { ...store, factory: entry.factory };
-    let result;
-    try {
-      result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({
-        type: 'input', text, images, source: payload.source, streamingBehavior: payload.streaming_behavior ?? undefined,
-      }, 'input event'), createContext(runtime, child))), signal);
-    } catch (error) {
+  const budget = new HookBudget(runtime, store, 'input');
+  try {
+    for (const entry of handlers) {
       signal.throwIfAborted(); runtime.assertSessionOwner(store);
-      if (Number.isInteger(error?.code)) throw error;
-      runtime.reportCallbackError('input', entry.factory, error);
-      continue;
+      const child = { ...store, factory: entry.factory };
+      let result;
+      try {
+        const run = await cancellable(budget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(facade({
+          type: 'input', text, images, source: payload.source, streamingBehavior: payload.streaming_behavior ?? undefined,
+        }, 'input event'), createContext(runtime, child)))), signal);
+        if (!run.ran) continue; // a stalled input handler must not swallow the prompt
+        result = run.value;
+      } catch (error) {
+        signal.throwIfAborted(); runtime.assertSessionOwner(store);
+        if (Number.isInteger(error?.code)) throw error;
+        runtime.reportCallbackError('input', entry.factory, error);
+        continue;
+      }
+      signal.throwIfAborted(); runtime.assertSessionOwner(store);
+      if (result === undefined) continue;
+      fields(result, ['action', 'text', 'images'], 'input result');
+      if (result.action === 'handled') {
+        await cancellable(runtime.flush(store), signal);
+        return { action: 'handled' };
+      }
+      if (result.action === 'continue') continue;
+      if (result.action !== 'transform') invalid('input action');
+      text = bounded(result.text, 'transformed input text', 262144, { controls: true });
+      // Pi's nullish fallback retains attachments; [] explicitly clears them.
+      if (result.images != null) { inputImages(result.images); images = result.images; }
     }
-    signal.throwIfAborted(); runtime.assertSessionOwner(store);
-    if (result === undefined) continue;
-    fields(result, ['action', 'text', 'images'], 'input result');
-    if (result.action === 'handled') {
-      await cancellable(runtime.flush(store), signal);
-      return { action: 'handled' };
-    }
-    if (result.action === 'continue') continue;
-    if (result.action !== 'transform') invalid('input action');
-    text = bounded(result.text, 'transformed input text', 262144, { controls: true });
-    // Pi's nullish fallback retains attachments; [] explicitly clears them.
-    if (result.images != null) { inputImages(result.images); images = result.images; }
-  }
+  } finally { budget.finish(); }
   await cancellable(runtime.flush(store), signal);
   signal.throwIfAborted(); runtime.assertSessionOwner(store);
   return text !== originalText || JSON.stringify(images) !== originalImages

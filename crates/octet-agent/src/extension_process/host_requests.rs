@@ -839,6 +839,11 @@ pub struct ExtensionModelView {
     pub context_window: u64,
     /// Maximum output tokens.
     pub max_tokens: u64,
+    /// Whether the model's provider authenticates with a subscription (OAuth)
+    /// login rather than an API key, when the host can say. Pi extensions read
+    /// this through `modelRegistry.isUsingOAuth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<bool>,
 }
 
 /// Pi-shaped per-million-token model rates.

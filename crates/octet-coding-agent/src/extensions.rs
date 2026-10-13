@@ -8,6 +8,7 @@
 //! context composition, semantic status collection, and reload.
 
 mod autocomplete;
+mod pi_mirror;
 mod mutation_resources;
 pub(crate) mod remote_ui;
 pub(crate) mod resource_paths;
@@ -165,6 +166,10 @@ const MAX_DIAGNOSTIC_ENTRY_BYTES: usize = 8 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 256 * 1024;
 const MAX_DIAGNOSTIC_ENTRIES: usize = 256;
 const PROMPT_RPC_DEADLINE: Duration = Duration::from_secs(5);
+/// How long a prompt waits for an extension still starting its session before
+/// continuing without it: long enough for a slow factory, short enough that a
+/// stalled one never holds the prompt.
+const SESSION_START_WAIT: Duration = Duration::from_secs(12);
 const AFTER_RESPONSE_RPC_DEADLINE: Duration = Duration::from_secs(2);
 const RENDERER_RPC_DEADLINE: Duration = Duration::from_millis(500);
 const LIFECYCLE_NOTIFY_DEADLINE: Duration = Duration::from_millis(250);
@@ -382,6 +387,8 @@ pub struct ExecutableExtensions {
     recent_notices: notice_dedup::RecentNotices,
     telemetry_error: Option<std::io::ErrorKind>,
     processes: Vec<ExtensionProcess>,
+    /// Per-fleet generated Pi catalog; never stored inside the installed bundle.
+    pi_mirror_directory: Option<tempfile::TempDir>,
     resource_paths_epoch: Arc<std::sync::atomic::AtomicU64>,
     resource_paths_live: Arc<std::sync::atomic::AtomicBool>,
     provider_runtime: ExtensionProviderRuntime,
@@ -421,6 +428,9 @@ pub struct ExecutableExtensions {
     dynamic_shortcuts: Vec<RegisteredDynamicShortcut>,
     shortcut_tasks: Vec<JoinHandle<()>>,
     event_drain_cursor: usize,
+    /// Notices drained while a prompt waited on an extension, returned by the
+    /// next drain so they still reach the transcript.
+    held_messages: Vec<String>,
     confirmation_denials: VecDeque<PendingConfirmationDenial>,
     confirmation_tasks: Vec<JoinHandle<()>>,
     input_cancellations: VecDeque<PendingInputCancellation>,
@@ -483,6 +493,7 @@ impl Default for ExecutableExtensions {
             recent_notices: notice_dedup::RecentNotices::default(),
             telemetry_error: None,
             processes: Vec::new(),
+            pi_mirror_directory: None,
             resource_paths_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resource_paths_live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provider_runtime: ExtensionProviderRuntime::default(),
@@ -517,6 +528,7 @@ impl Default for ExecutableExtensions {
             dynamic_shortcuts: Vec::new(),
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
+            held_messages: Vec::new(),
             confirmation_denials: VecDeque::new(),
             confirmation_tasks: Vec::new(),
             input_cancellations: VecDeque::new(),

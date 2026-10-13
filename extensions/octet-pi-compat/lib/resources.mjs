@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { bounded, facade, invalid, ownerKey, rpcError, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES_PER_PATH, MAX_RESOURCE_PATH_BYTES, resolveThemeFile, themeCandidates } from './pi-setup.mjs';
+import { HookBudget } from './handler-budget.mjs';
 
 const pathFields = { skillPaths: 'skill_paths', promptPaths: 'prompt_paths', themePaths: 'theme_paths' };
 function record(value, allowed, label) {
@@ -144,14 +145,17 @@ export async function discoverResources(runtime, params, store) {
     const paths = { skill_paths: [], prompt_paths: [], theme_paths: [] }, budget = { cwd, count: 0, bytes: 0 };
     appendPiSetupPaths(runtime, paths, budget);
     // Snapshot before the first callback, in factory/registration order, like Pi.
+    const hookBudget = new HookBudget(runtime, store, 'resources_discover');
     for (const entry of [...runtime.events.get('resources_discover') || []]) {
       live();
       const child = { ...store, factory: entry.factory };
       const provenance = `resources_discover factory ${runtime.entrypoint(entry.factory)}`;
       let contribution;
       try {
-        contribution = await cancellable(runtime.scope.run(child, () => entry.handler(
-          facade({ type: 'resources_discover', cwd, reason }, 'resources_discover event'), createContext(runtime, child))), signal);
+        const run = await cancellable(hookBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
+          facade({ type: 'resources_discover', cwd, reason }, 'resources_discover event'), createContext(runtime, child)))), signal);
+        if (!run.ran) continue; // a stalled discovery callback contributes no paths
+        contribution = run.value;
       } catch (error) {
         live();
         // Ordinary callback failures are diagnosed and later handlers still run,
@@ -164,6 +168,7 @@ export async function discoverResources(runtime, params, store) {
       try { appendPaths(paths, contribution, budget); }
       catch (error) { throw rpcError(error.code ?? -32602, `${provenance}: ${error.message}`); }
     }
+    hookBudget.finish();
     await cancellable(runtime.flush(store), signal);
     live();
     return { resource_paths: paths };

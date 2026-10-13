@@ -575,6 +575,7 @@ async fn d11_actual_agent_unchanged_pi_factory_coexists_with_lazy_operations() {
             }),
             context_window: spec.limits.context_window,
             max_tokens: spec.limits.max_output_tokens,
+            oauth: None,
         }),
         ..Default::default()
     });

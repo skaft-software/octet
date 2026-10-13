@@ -367,9 +367,11 @@ export function createContext(runtime, store, replaced = false) {
     modelRegistry: modelRegistry(() => current().host, runtime),
     getContextUsage() {
       const host = current().host;
-      if (Object.hasOwn(host, 'context_usage')) return host.context_usage === null ? undefined : structuredClone(host.context_usage);
+      if (Object.hasOwn(host, 'context_usage') && host.context_usage !== null) return structuredClone(host.context_usage);
       // Pi explicitly uses null for unavailable token/percentage estimates. The
-      // host's model capacity is a real fact; do not invent token usage.
+      // host's model capacity is a real fact even when it has not measured the
+      // conversation yet (a null measurement, or no measurement field at all):
+      // report the capacity with unknown usage; never invent token counts.
       if (host.model_view?.context_window) return { tokens: null, contextWindow: host.model_view.context_window, percent: null };
       return undefined;
     },

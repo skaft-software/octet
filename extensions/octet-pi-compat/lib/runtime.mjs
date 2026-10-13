@@ -14,6 +14,7 @@ import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
 import { checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
 import { transformInput } from './context-api.mjs';
+import { HookBudget, LoadBudget } from './handler-budget.mjs';
 import { forgetMcpRegistrations, hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
 import { sessionOperation, sessionOperationHooks, sessionReplacement, sessionReplacementHooks } from './session-operations.mjs';
@@ -292,6 +293,9 @@ export class Runtime {
   track(promise, store = this.scope.getStore()) {
     store = compactionCallbackStore(this, store);
     const p = Promise.resolve(promise);
+    // A detached handler (see handler-budget.mjs) no longer belongs to any hook:
+    // observe its work so nothing rejects unhandled, but never join it to a flush.
+    if (store?.detached) { p.catch(() => {}); return p; }
     // Observe even void setters: failures are returned at a live host boundary or
     // surfaced as bounded background diagnostics, never swallowed.
     p.catch(error => {
@@ -328,6 +332,7 @@ export class Runtime {
       // exclusion only narrows the reviewed grant and is reported each start.
       const excluded = new Map((Array.isArray(this.config.mirror_excluded) ? this.config.mirror_excluded : [])
         .filter(item => typeof item?.entry === 'string').map(item => [item.entry, String(item.reason ?? '')]));
+      this.excludedFactories = extensions.filter(entry => excluded.has(entry)).map(entry => ({ entry, reason: excluded.get(entry) }));
       for (const entry of extensions.filter(entry => excluded.has(entry))) this.diagnostic(`mirror excluded at review: ${entry} (${excluded.get(entry).slice(0, 256)}); configure again to retry`);
       extensions = extensions.filter(entry => !excluded.has(entry));
       if (extensions.some(entry => !this.config.extensions?.includes(entry) || !this.config.entrypoint_sources[entry])) invalid('mirror factory list changed; review the Pi setup and configure again');
@@ -372,6 +377,7 @@ export class Runtime {
     // still load, as in Pi. A single explicit entrypoint keeps the failure.
     this.loadFailures = [];
     const isolate = extensions.length > 1;
+    const setupBudget = new LoadBudget();
     // Every factory's read-only preparation (path identity, reviewed digest,
     // and the static import-gap gate) runs before anything registers. These
     // checks share no state, so they run concurrently; a factory's own failure
@@ -418,6 +424,12 @@ export class Runtime {
           if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
           const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };
           const api = this.mirrorPiSetup ? { ...createAPI(this, factory) } : createAPI(this, factory);
+          // A setup that was cut off (below) keeps running; whatever it adds
+          // after that point is refused, not registered behind the host's back.
+          for (const method of ['registerTool', 'registerProvider', 'registerCommand', 'registerShortcut', 'registerFlag', 'on']) {
+            const add = api[method];
+            if (typeof add === 'function') api[method] = (...args) => { this.assertFactory(factory); return add(...args); };
+          }
           // Mirror static surfaces cannot grow after review via retained APIs.
           // Resource callbacks remain dynamic and host-admitted.
           if (this.mirrorPiSetup) for (const method of ['registerTool', 'registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
@@ -427,7 +439,8 @@ export class Runtime {
               return register(...args);
             };
           }
-          await this.scope.run(s, () => fn(api));
+          try { await setupBudget.settle(() => this.scope.run(s, () => fn(api))); }
+          catch (error) { if (error?.name === 'FactoryStalled') s.controller.abort(error); throw error; }
           tracePhase(`adapter.factory.registered.${factory}`);
           // Mirror mode advertises one fixed hook set recorded at configure time.
           // A hook outside it would be silently inert at the host, so name it and
@@ -442,10 +455,14 @@ export class Runtime {
               throw rpcError(-32601, `unsupported_feature mirror hook ${unsupportedHooks.join(', ')}: not advertised by this mirror configuration; re-run configure.mjs --mirror after reviewing the Pi setup`);
             }
           }
-        } catch (error) { throw mode === 'installed' ? error : await classifyLoadFailure(error, entry, this.jiti); }
+        } catch (error) { throw mode === 'installed' || error?.name === 'FactoryStalled' ? error : await classifyLoadFailure(error, entry, this.jiti); }
       } catch (error) {
         this.forgetFactory(factory, entry);
-        if (!isolate) throw error;
+        // A single explicit entrypoint keeps its failure, which is how configure
+        // learns a factory cannot be used. A mirror of the whole Pi setup is
+        // different: one factory that only ran out of time is skipped and named,
+        // and the rest of the setup (resources, themes, keys) still starts.
+        if (!isolate && !(this.mirrorPiSetup && error?.name === 'FactoryStalled')) throw error;
         this.tools = previousTools;
         restoreProviders();
         const failure = { entry, route: mode, error: String(error?.message || error).slice(0, 1024), code: error?.code, name: error?.name };
@@ -727,34 +744,46 @@ export class Runtime {
   }
 
   async runEvent(event, value, store, { veto = false } = {}) {
-    for (const entry of [...this.events.get(event) || []]) {
-      store.controller.signal.throwIfAborted();
-      const childStore = { ...store, factory: entry.factory };
-      let result;
-      try { result = await this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))); }
-      catch (error) {
-        store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
-        // Pi's ExtensionRunner.emit reports a failing handler and runs the
-        // next one. Vetoes, cancellation, owner refusals and tracked host
-        // mutations still propagate; a skipped callback is never a host receipt.
-        if (veto || error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
-        this.reportCallbackError(event, entry.factory, error);
-        continue;
-      }
-      store.controller.signal.throwIfAborted();
-      if (result !== undefined) {
-        if (veto && result && typeof result === 'object' && Object.keys(result).every(k => ['block', 'reason', 'terminate'].includes(k))) {
-          if (result.block) {
-            if (result.terminate !== undefined && typeof result.terminate !== 'boolean') invalid('tool_call terminate');
-            store.toolTermination = result.terminate;
-            return { action: 'deny', reason: result.reason ?? 'Blocked by Pi extension' };
+    const budget = new HookBudget(this, store, event);
+    try {
+      for (const entry of [...this.events.get(event) || []]) {
+        store.controller.signal.throwIfAborted();
+        const childStore = { ...store, factory: entry.factory };
+        let result;
+        try {
+          const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))));
+          store.controller.signal.throwIfAborted();
+          // A guard that cannot answer in time blocks the call; an observer that
+          // cannot answer is skipped. Neither keeps the ordered queue held.
+          if (!run.ran) {
+            if (veto) return { action: 'deny', reason: `${this.extensionNames.get(entry.factory) ?? 'A Pi extension'} did not answer in time` };
+            continue;
           }
-        } else if (event.startsWith('session_before_')) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
-        // Pi ignores other handlers' return values.
-        else if (veto) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+          result = run.value;
+        } catch (error) {
+          store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
+          // Pi's ExtensionRunner.emit reports a failing handler and runs the
+          // next one. Vetoes, cancellation, owner refusals and tracked host
+          // mutations still propagate; a skipped callback is never a host receipt.
+          if (veto || error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+          this.reportCallbackError(event, entry.factory, error);
+          continue;
+        }
+        store.controller.signal.throwIfAborted();
+        if (result !== undefined) {
+          if (veto && result && typeof result === 'object' && Object.keys(result).every(k => ['block', 'reason', 'terminate'].includes(k))) {
+            if (result.block) {
+              if (result.terminate !== undefined && typeof result.terminate !== 'boolean') invalid('tool_call terminate');
+              store.toolTermination = result.terminate;
+              return { action: 'deny', reason: result.reason ?? 'Blocked by Pi extension' };
+            }
+          } else if (event.startsWith('session_before_')) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+          // Pi ignores other handlers' return values.
+          else if (veto) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+        }
       }
-    }
-    return { action: 'continue' };
+      return { action: 'continue' };
+    } finally { budget.finish(); }
   }
   // Pi's emitToolResult: handlers chain, a throwing handler is reported and
   // skipped, and content replaced without structuredContent drops the old one.
@@ -765,11 +794,16 @@ export class Runtime {
       details: payload.metadata?.pi_details, ...(payload.structured_content === undefined ? {} : { structuredContent: payload.structured_content }), isError: payload.is_error,
       ...(payload.metadata?.pi_usage !== undefined ? { usage: structuredClone(payload.metadata.pi_usage) } : payload.usage ? { usage: { input: payload.usage.input_tokens, output: payload.usage.output_tokens, cacheRead: payload.usage.cache_read_tokens, cacheWrite: payload.usage.cache_write_tokens, totalTokens: payload.usage.total_tokens } } : {}) };
     const changed = new Set();
+    const budget = new HookBudget(this, store, 'tool_result');
     for (const entry of [...this.events.get('tool_result') || []]) {
       store.controller.signal.throwIfAborted();
       const childStore = { ...store, factory: entry.factory };
       let result;
-      try { result = await this.scope.run(childStore, () => entry.handler(event, createContext(this, childStore))); }
+      try {
+        const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(event, createContext(this, childStore))));
+        if (!run.ran) continue; // a stalled result observer must not hold the tool result
+        result = run.value;
+      }
       catch (error) {
         store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
         if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
@@ -790,6 +824,7 @@ export class Runtime {
       if (result.structuredContent !== undefined) { event.structuredContent = result.structuredContent; changed.add('structuredContent'); }
       if (result.isError !== undefined) { event.isError = Boolean(result.isError); changed.add('isError'); }
     }
+    budget.finish();
     if (!changed.size) return undefined;
     return {
       ...(changed.has('content') ? { content: event.content.every(part => part.type === 'text') ? textOnly(event.content).map(part => part.text) : await toolContent(this, event.content, store) } : {}),
@@ -872,7 +907,13 @@ export class Runtime {
       let disposition = { action: 'continue' };
       const payload = p.payload || {};
       let systemPrompt, toolInput, customMessages = [];
-      if (p.hook === 'session_start') await startMcpSession(this, store);
+      if (p.hook === 'session_start') {
+        // Registered MCP servers connect before any handler runs; a server that
+        // never answers must not hold session_start (and with it the prompt).
+        const connect = new HookBudget(this, store, 'session_start'), startStore = { ...store };
+        await connect.run(this.mcpStartup ??= { label: 'MCP servers' }, startStore, () => startMcpSession(this, startStore));
+        connect.finish();
+      }
       if (p.hook === 'after_tool_call') {
         const toolResult = await this.runToolResult(payload, store);
         await this.flush(store);

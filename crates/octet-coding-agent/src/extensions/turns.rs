@@ -35,6 +35,18 @@ pub(crate) struct PreparedSessionSnapshot {
 
 const SESSION_SNAPSHOT_READY_DEADLINE: Duration = Duration::from_secs(5);
 
+/// A one-line explanation when a prompt had to wait for an extension that was
+/// still starting its session, so a visible pause is never unexplained.
+fn waited_note(process: &ExtensionProcess, elapsed: Duration) -> Option<String> {
+    (elapsed >= Duration::from_secs(1)).then(|| {
+        format!(
+            "note: extension {:?} was still starting; this prompt waited {:.1}s for it",
+            process.descriptor().manifest.name,
+            elapsed.as_secs_f32()
+        )
+    })
+}
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
@@ -58,7 +70,7 @@ impl ExecutableExtensions {
             images,
             transformed: false,
         };
-        for process in &self.processes {
+        for process in self.processes.clone() {
             if !process.supports_feature("input_transform_v1")
                 || !process
                     .contributions()
@@ -67,13 +79,33 @@ impl ExecutableExtensions {
             {
                 continue;
             }
+            let mut waited = Vec::new();
+            let started = std::time::Instant::now();
+            let idle = self
+                .await_prompt_work(process.wait_until_idle(SESSION_START_WAIT), &mut waited)
+                .await;
+            // Notices drained while waiting belong to the transcript: keep them
+            // for the next drain instead of dropping them with this prompt.
+            self.held_messages.append(&mut waited);
+            if idle {
+                if let Some(note) = waited_note(&process, started.elapsed()) {
+                    self.held_messages.push(note);
+                }
+            }
+            if !idle {
+                self.diagnostics.push(format!(
+                    "warning: extension {:?} is still starting; its input hook was skipped for this prompt",
+                    process.descriptor().manifest.name
+                ));
+                continue;
+            }
             let output = tokio::time::timeout(
                 PROMPT_RPC_DEADLINE,
                 process.run_hook(
                     ExtensionHook::BeforePrompt,
                     serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
                     "source":source, "streaming_behavior":streaming_behavior}),
-                    extension_execution_context(process, self.resource_owner.as_deref()),
+                    extension_execution_context(&process, self.resource_owner.as_deref()),
                 ),
             )
             .await
@@ -587,6 +619,33 @@ impl ExecutableExtensions {
         // bounded event consumer can answer requests made by these hooks.
         for process in self.processes.clone() {
             let execution = extension_execution_context(&process, self.resource_owner.as_deref());
+            // A session start still in flight owns the extension's ordered hook
+            // queue; wait for it instead of failing the prompt against a deadline
+            // that would include that wait.
+            if process
+                .contributions()
+                .hooks
+                .contains(&ExtensionHook::BeforePrompt)
+                || process.contributions().context
+            {
+                let started = std::time::Instant::now();
+                if self
+                    .await_prompt_work(
+                        process.wait_until_idle(SESSION_START_WAIT),
+                        &mut notifications,
+                    )
+                    .await
+                {
+                    notifications.extend(waited_note(&process, started.elapsed()));
+                } else {
+                    notifications.push(format!(
+                        "warning: extension {:?} is still starting; continuing without it for this prompt",
+                        process.descriptor().manifest.name
+                    ));
+                    continue;
+                }
+            }
+
             if process
                 .contributions()
                 .hooks

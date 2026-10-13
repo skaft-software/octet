@@ -20,6 +20,10 @@ pub struct ExtensionRuntimeConfig {
     /// Offer API `0.4` request-scoped tool composition. A model-tool parent
     /// must separately supply the host dispatcher through its progress sink.
     pub tool_composition: bool,
+    /// Tool names this process may not contribute, because the host already
+    /// provides them. The name is dropped from the catalog, initial and
+    /// dynamic, while the rest of the process keeps running.
+    pub withheld_tools: BTreeSet<String>,
     /// Offer resource_paths_v1 only when a product owns discovery ordering and
     /// consumes replies with real skill, prompt and theme loaders.
     pub resource_paths: bool,
@@ -137,6 +141,7 @@ impl ExtensionRuntimeConfig {
             flag_values: BTreeMap::new(),
             agent_sessions: false,
             tool_composition: false,
+            withheld_tools: BTreeSet::new(),
             resource_paths: false,
             provider_pipeline: false,
             bulk_store: None,

@@ -157,6 +157,52 @@ fn configure_mirror(root: &Path, pi: &PiHome, workspace: &Path) -> PathBuf {
     output
 }
 
+/// Install the shipped manifest, not a preconfigured import. The helper wrapper
+/// points at this checkout's adapter; the native activation must do all setup.
+fn install_automatic_mirror(root: &Path, pi: &PiHome) {
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/octet-pi-compat").canonicalize().unwrap();
+    let mut manifest = octet_agent::ExtensionManifest::parse(
+        &std::fs::read_to_string(adapter.join("extension.toml")).unwrap(),
+    ).unwrap();
+    manifest.entrypoint.env.insert("OCTET_PI_AGENT_DIR".into(), pi.agent.to_string_lossy().into());
+    manifest.entrypoint.env.insert("HOME".into(), pi.home.to_string_lossy().into());
+    let output = root.join("extensions/octet-pi-compat");
+    put(output.join("extension.toml"), toml::to_string(&manifest).unwrap());
+    let helper = url::Url::from_file_path(adapter.join("auto-configure.mjs")).unwrap();
+    put(output.join("auto-configure.mjs"), format!("import {};\n", serde_json::to_string(helper.as_str()).unwrap()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enabling_shipped_pi_compat_mirrors_from_any_workspace_without_configure() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("unrelated-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let pi = fixture_pi_home(&root);
+    install_automatic_mirror(&root, &pi);
+    let before = tree_contents(&pi.home);
+    let installed = tree_contents(&root.join("extensions"));
+    let off = app_state(&app_for(&root, &workspace, false));
+    let mut app = app_for(&root, &workspace, true);
+    assert_pi_setup_active(&app, &pi);
+    let generated = app.executable_extensions.pi_mirror_directory.as_ref().unwrap().path().to_owned();
+    assert!(generated.join("octet-pi-compat/bridge.json").is_file());
+    app.executable_extensions.shutdown().await;
+    drop(app);
+    assert!(!generated.exists(), "per-fleet mirror must be cleaned up");
+    assert_eq!(tree_contents(&pi.home), before);
+    assert_eq!(tree_contents(&root.join("extensions")), installed);
+    assert_eq!(app_state(&app_for(&root, &workspace, false)), off);
+    // A later activation sees a changed enabled factory without a manual
+    // fingerprint/configure step or a stale captured entrypoint list.
+    put(pi.agent.join("extensions/pi-setup-two.js"),
+        "export default pi => pi.registerCommand('changed-after-enable', {handler(){}});");
+    let mut app = app_for(&root, &workspace, true);
+    assert_eq!(extension_commands(&app), vec!["changed-after-enable", "pi-setup-one"]);
+    app.executable_extensions.shutdown().await;
+}
+
 fn app_for(root: &Path, workspace: &Path, enabled: bool) -> App {
     let mut config = crate::extensions::tests::executable_extension_config(
         workspace,

@@ -5,18 +5,21 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeEditorHost } from './native-editor-host.mjs';
 export const root = fileURLToPath(new URL('../', import.meta.url));
+// Tests never read the developer's real Pi setup: the agent directory defaults to
+// a path that does not exist, and a test that wants one passes its own.
+export const noPiAgent = join(root, 'test/fixtures/no-pi-agent');
 export const owner = { session_id: 'host-issued-owner', extension_instance_id: 'host-issued-instance', process_generation: 2 };
 import { TUI_KEYBINDINGS } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
 const keybindings = Object.fromEntries(Object.entries(TUI_KEYBINDINGS).map(([action, definition]) => [action, Array.isArray(definition.defaultKeys) ? definition.defaultKeys : [definition.defaultKeys]]));
 Object.assign(keybindings, { 'app.clipboard.pasteImage': ['ctrl+v'], 'app.interrupt': ['escape'], 'app.exit': ['ctrl+d'], 'app.clear': ['ctrl+c'], 'app.message.followUp': ['ctrl+s'] });
 export const host = { keybindings, session_id: 'actual-session', session_name: 'Synthetic', model: 'test-model', model_view: { id: 'test-model', name: 'Test Model', api: 'openai-responses', provider: 'test', reasoning: false, input: ['text'], context_window: 32768, max_tokens: 1024, cost: { input: 1000000, output: 2000000, cache_read: 100000, cache_write: 200000 } }, reasoning: null, active_skills: [] };
 export function inspect(extensions) {
-  const result = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--inspect', ...extensions], { encoding: 'utf8', timeout: 10000, maxBuffer: 1048576 });
+  const result = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--inspect', ...extensions], { encoding: 'utf8', timeout: 10000, maxBuffer: 1048576, env: { ...process.env, OCTET_PI_AGENT_DIR: noPiAgent } });
   assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout).result;
 }
 export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], options = {}) {
   const metadata = options.metadata ?? inspect(extensions);
-  const child = spawn(process.execPath, [options.runner || join(root, 'runner.mjs'), ...(options.config ? ['--config', options.config] : extensions)], { cwd: options.cwd || root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...options.env } });
+  const child = spawn(process.execPath, [options.runner || join(root, 'runner.mjs'), ...(options.config ? ['--config', options.config] : extensions)], { cwd: options.cwd || root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, OCTET_PI_AGENT_DIR: noPiAgent, ...options.env } });
   let stderr = '', next = 1;
   const queue = [], waiters = [], seen = [], editors = new Map();
   child.stderr.on('data', b => { stderr = (stderr + b).slice(-65536); });

@@ -36,6 +36,12 @@ export class Timers {
   all() { this.clearWhere(() => true); }
 }
 export const nativeDelay = milliseconds => new Promise(resolve => native.setTimeout(resolve, milliseconds));
+// A cancellable native delay: extension timers are revocable, budgets are not.
+export const nativeTimer = milliseconds => {
+  let handle;
+  const promise = new Promise(resolve => { handle = native.setTimeout(resolve, milliseconds); });
+  return { promise, cancel: () => native.clearTimeout(handle) };
+};
 export const deadline = (promise, milliseconds) => {
   let timer;
   return Promise.race([promise, new Promise((_, reject) => { timer = native.setTimeout(() => reject(new Error('shutdown drain deadline')), milliseconds); })]).finally(() => native.clearTimeout(timer));
