@@ -3696,9 +3696,9 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 50000,
+    "cache_read": 49200,
     "cache_write_5m": 0,
-    "input": 50000,
+    "input": 49200,
     "output": 1280000,
     "reasoning": null
   },
@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 5400,
+    "cache_read": 3000,
     "cache_write_5m": 0,
-    "input": 45000,
-    "output": 891000,
+    "input": 150000,
+    "output": 600000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -3927,10 +3927,10 @@
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
-    "cache_read": 42500,
+    "cache_read": 50000,
     "cache_write_5m": 0,
-    "input": 76500,
-    "output": 255000,
+    "input": 90000,
+    "output": 300000,
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it:free": {
@@ -5868,8 +5868,8 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 45000,
-    "output": 891000,
+    "input": 44100,
+    "output": 630000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
