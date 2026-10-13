@@ -123,6 +123,7 @@
   "google/gemini-3.6-flash": "Gemini 3.6 Flash",
   "google/gemini-3.7-flash": "Gemini 3.7 Flash",
   "google/gemini-3.8-flash": "Gemini 3.8 Flash",
+  "google/gemini-4-argon": "Gemini 4 Argon",
   "google/gemini-embedding-001": "Gemini Embedding 001",
   "google/gemini-embedding-2": "Gemini Embedding 2",
   "google/gemini-flash-latest": "Gemini Flash Latest",

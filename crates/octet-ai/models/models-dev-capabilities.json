@@ -8010,6 +8010,39 @@
     "reasoning": false,
     "tool_call": false
   },
+  "opencode-go/cat-jam-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Cat Jam Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode-go/claude-haiku-5-5": {
     "limit": {
       "context": 1000000,
@@ -10096,6 +10129,38 @@
       ]
     },
     "name": "Gemini 3.8 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "opencode/gemini-4-argon": {
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Gemini 4 Argon",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -13235,29 +13300,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/apodex/apodex-1.1-mini:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Apodex 1.1 Mini (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/arcee-ai/trinity-large-thinking": {
     "limit": {
       "context": 262144,
@@ -14636,6 +14678,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/google/gemini-4-argon": {
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Gemini 4 Argon",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/google/gemini-nano-banana-2.1": {
     "limit": {
       "context": 65536,
@@ -15028,55 +15102,9 @@
     "structured_output": false,
     "tool_call": true
   },
-  "openrouter/inclusionai/ling-3.0-flash-fin": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Ling 3.0 Flash Fin",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/inclusionai/ling-3.0-flash-sante": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Ling 3.0 Flash Sante",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/inclusionai/ling-3.0-flash-vl": {
     "limit": {
-      "context": 262144,
+      "context": 131072,
       "output": 32768
     },
     "modalities": {
@@ -15172,6 +15200,25 @@
       ]
     },
     "name": "LFM2.5-2.6B (free)",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/liquid/lfm-2.5-24b-a2b": {
+    "limit": {
+      "context": 128000,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "LFM2.5-24B-A2B",
     "reasoning": true,
     "reasoning_options": [],
     "structured_output": true,
@@ -19426,7 +19473,7 @@
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -21460,7 +21507,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
