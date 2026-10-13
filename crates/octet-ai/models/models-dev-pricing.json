@@ -3710,10 +3710,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 14000,
+    "cache_read": 16000,
     "cache_write_5m": 0,
-    "input": 70000,
-    "output": 140000,
+    "input": 16000,
+    "output": 640000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
@@ -3724,10 +3724,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 35206,
+    "cache_read": 34365,
     "cache_write_5m": 0,
-    "input": 422472,
-    "output": 844944,
+    "input": 412380,
+    "output": 824760,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3741,7 +3741,7 @@
     "cache_read": 5400,
     "cache_write_5m": 0,
     "input": 44100,
-    "output": 630000,
+    "output": 765000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -4060,10 +4060,10 @@
     "reasoning": null
   },
   "openrouter/liquid/lfm-2.5-24b-a2b": {
-    "cache_read": 50000,
+    "cache_read": 25000,
     "cache_write_5m": 0,
-    "input": 100000,
-    "output": 1000000,
+    "input": 50000,
+    "output": 700000,
     "reasoning": null
   },
   "openrouter/mancer/weaver": {
@@ -5820,7 +5820,7 @@
     "cache_read": 59000,
     "cache_write_5m": 0,
     "input": 60000,
-    "output": 5600000,
+    "output": 7000000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3": {
@@ -5831,10 +5831,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 30000,
+    "cache_read": 10800,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 500000,
+    "input": 26100,
+    "output": 900000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5890,7 +5890,7 @@
     "cache_read": 5400,
     "cache_write_5m": 0,
     "input": 44100,
-    "output": 630000,
+    "output": 765000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
@@ -5922,10 +5922,10 @@
     "reasoning": 12000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 550000,
+    "cache_read": 300000,
     "cache_write_5m": 0,
-    "input": 730000,
-    "output": 10000000,
+    "input": 720000,
+    "output": 24000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
