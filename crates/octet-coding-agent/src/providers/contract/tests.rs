@@ -1142,6 +1142,41 @@ fn generated_declarations_are_valid_and_route_only_by_data() {
             .protocol,
         Protocol::OpenAiResponses
     );
+    // OpenCode Go serves the same families over the same three wire protocols
+    // as Zen; its live inventory routes every discovered model by data alone.
+    for (model, protocol, endpoint) in [
+        ("kimi-k3", Protocol::OpenAiChat, "opencode-go"),
+        ("glm-5.3", Protocol::OpenAiChat, "opencode-go"),
+        ("minimax-m3", Protocol::OpenAiChat, "opencode-go"),
+        (
+            "claude-haiku-5-5",
+            Protocol::AnthropicMessages,
+            "opencode-go-anthropic",
+        ),
+        (
+            "qwen3.8-max",
+            Protocol::AnthropicMessages,
+            "opencode-go-anthropic",
+        ),
+        (
+            "qwen3.7-plus",
+            Protocol::AnthropicMessages,
+            "opencode-go-anthropic",
+        ),
+        ("gpt-6-luna", Protocol::OpenAiResponses, "opencode-go"),
+    ] {
+        let route = OPENCODE_GO
+            .route_for_model(model)
+            .unwrap_or_else(|| panic!("{model} has no OpenCode Go route"));
+        assert_eq!(route.protocol, protocol, "{model}");
+        assert_eq!(route.endpoint_id, endpoint, "{model}");
+    }
+    // Qwen over Chat needs its distinct thinking format (#252): not offered.
+    assert_eq!(OPENCODE_GO.route_for_model("qwen3.7-max"), None);
+    assert!(matches!(
+        OPENCODE_GO.model_discovery,
+        ModelDiscovery::OpenAiModels { .. }
+    ));
     let codex = CODEX.inventory_route().expect("Codex route");
     assert_eq!(codex.transport, EndpointTransport::WebSocketPreferred);
     assert_eq!(codex.runtime.body_encoding, RequestBodyEncoding::Zstd);

@@ -1340,7 +1340,10 @@
         ]
       },
       "model_discovery": {
-        "kind": "static"
+        "kind": "openai_models",
+        "filter": {
+          "kind": "all"
+        }
       },
       "static_models": "opencode_go",
       "inventory_cache": "supplemental",
@@ -1352,9 +1355,49 @@
           "body_encoding": "identity",
           "auth_presentation": "bearer",
           "responses_profile": "default"
+        },
+        {
+          "endpoint_id": "opencode-go-anthropic",
+          "protocol": "anthropic_messages",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "api_key_header",
+          "responses_profile": "default"
+        },
+        {
+          "endpoint_id": "opencode-go",
+          "protocol": "openai_responses",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
         }
       ],
       "route_rules": [
+        {
+          "kind": "exclude_exact",
+          "value": "qwen3.7-max"
+        },
+        {
+          "kind": "select_prefix",
+          "prefix": "claude-",
+          "route": 1
+        },
+        {
+          "kind": "select_prefix",
+          "prefix": "qwen3.",
+          "route": 1
+        },
+        {
+          "kind": "select_prefix",
+          "prefix": "gpt-",
+          "route": 2
+        },
+        {
+          "kind": "select_prefix",
+          "prefix": "codex-",
+          "route": 2
+        },
         {
           "kind": "default",
           "route": 0

@@ -95,6 +95,7 @@ PROVIDER_SOURCES = {
     "openai": "openai",
     "openrouter": "openrouter",
     "opencode": "opencode",
+    "opencode-go": "opencode-go",
     # The Alibaba Token Plan and Zhipu coding-plan sources feed octet's renamed
     # token-plan/coding routes (`scripts/generate-models.ts` 2388, 1265). The
     # Individual subscription is the same international source, narrowed to the

@@ -226,9 +226,9 @@ not a provider-name timing heuristic, select their codec:
 
 | Codec | Declared endpoint IDs | Server timing |
 | --- | --- | --- |
-| Responses | `openai`, `xai`, `opencode`, `openai-codex`, `xai-subscription`, `meta-subscription`, `cloudflare-ai-gateway-openai`, `azure-openai`, `meta` | Optional recognized `timings` only; ordinary public schemas do not promise it |
+| Responses | `openai`, `xai`, `opencode`, `opencode-go`, `openai-codex`, `xai-subscription`, `meta-subscription`, `cloudflare-ai-gateway-openai`, `azure-openai`, `meta` | Optional recognized `timings` only; ordinary public schemas do not promise it |
 | Chat | `deepseek`, `openrouter`, `groq`, `cerebras`, `together`, `fireworks`, `nvidia`, `huggingface`, `moonshotai`, `xiaomi`, `opencode`, `openrouter-oauth`, `mistral`, `cloudflare-workers-ai`, `cloudflare-ai-gateway-compat`, `moonshotai-cn`, `opencode-go`, `baseten`, `qwen-token-plan`, `qwen-token-plan-cn`, `qwen-token-plan-individual`, `zai-coding-cn` | Recognized envelopes only when supplied |
-| Anthropic Messages | `anthropic`, `fireworks`, `minimax`, `opencode-anthropic`, `kimi-coding-subscription`, `cloudflare-ai-gateway-anthropic`, `kimi-coding`, `minimax-cn`, `vercel-ai-gateway`, `xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp` | Explicitly unavailable without a recognized native count/duration contract |
+| Anthropic Messages | `anthropic`, `fireworks`, `minimax`, `opencode-anthropic`, `opencode-go-anthropic`, `kimi-coding-subscription`, `cloudflare-ai-gateway-anthropic`, `kimi-coding`, `minimax-cn`, `vercel-ai-gateway`, `xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp` | Explicitly unavailable without a recognized native count/duration contract |
 | Google generateContent | `gemini`, `vertex`, `opencode-google` | Explicitly unavailable; usage/timestamps do not establish decode timing |
 | Bedrock Converse | `bedrock` | Explicitly unavailable; invocation latency is not a generation interval |
 | Native Mistral Conversations; Pi Messages | Explicitly configured experimental routes | Client observations; no recognized server generation contract |

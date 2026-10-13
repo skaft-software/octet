@@ -25,7 +25,11 @@ pub(crate) fn is_opencode_session_route(model: &crate::catalog::Model) -> bool {
     model.spec.cache.send_session_affinity_headers
         && matches!(
             model.endpoint.id.0.as_str(),
-            "opencode" | "opencode-go" | "opencode-anthropic" | "opencode-google"
+            "opencode"
+                | "opencode-go"
+                | "opencode-go-anthropic"
+                | "opencode-anthropic"
+                | "opencode-google"
         )
 }
 

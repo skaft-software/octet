@@ -220,11 +220,13 @@ pub const VERCEL_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
     .with_reasoning_mode(StaticReasoningMode::Budget),
 ];
 
-/// OpenCode Zen Go models that use the existing standard or DeepSeek Chat
-/// compatibility profiles. DeepSeek's Pi map only accepts `high`, so its
-/// presets clamp the portable effort range accordingly. Qwen-thinking routes
-/// deliberately stay absent until their distinct thinking format has a codec
-/// primitive.
+/// OpenCode Zen Go models that are always visible, before and without live
+/// discovery. They use the existing standard or DeepSeek Chat compatibility
+/// profiles; the live `/models` inventory supplies the rest of the catalog
+/// (including Messages and Responses routes). DeepSeek's Pi map only accepts
+/// `high`, so its presets clamp the portable effort range accordingly.
+/// Qwen-thinking routes over Chat deliberately stay absent until their distinct
+/// thinking format has a codec primitive.
 pub const OPENCODE_GO_MODELS: &[StaticModelPreset] = &[
     StaticModelPreset::new(
         "deepseek-v4-flash",
@@ -251,32 +253,12 @@ pub const OPENCODE_GO_MODELS: &[StaticModelPreset] = &[
     .with_min_reasoning_effort(ReasoningEffort::High)
     .with_deepseek_thinking(),
     StaticModelPreset::new(
-        "glm-5",
-        "GLM-5",
-        Protocol::OpenAiChat,
-        202_752,
-        32_768,
-        false,
-        true,
-        ReasoningEffort::High,
-    ),
-    StaticModelPreset::new(
         "glm-5.1",
         "GLM-5.1",
         Protocol::OpenAiChat,
         202_752,
         32_768,
         false,
-        true,
-        ReasoningEffort::High,
-    ),
-    StaticModelPreset::new(
-        "kimi-k2.5",
-        "Kimi K2.5",
-        Protocol::OpenAiChat,
-        262_144,
-        65_536,
-        true,
         true,
         ReasoningEffort::High,
     ),
