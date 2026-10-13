@@ -178,7 +178,7 @@ and known limitations.
   its factory and duration, which names the slow one.
 - Enabling `octet-pi-compat` is the whole Pi setup: it mirrors this machine's Pi
   setup at every start with nothing to configure and no folder to be in. A
-  factory whose own setup never finishes is cut off after 8 s, left out of the
+  factory whose own setup never finishes is cut off after 10 s, left out of the
   mirror and named in `[Extension issues]` (it used to stall the whole start),
   and an extension left out of the mirror is now named at start instead of only
   in quiet diagnostics.

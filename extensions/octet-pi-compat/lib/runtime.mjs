@@ -419,7 +419,7 @@ export class Runtime {
           // same classification path as a load failure, exactly as they did
           // when the scan ran inline here.
           if (preparationError) throw preparationError;
-          const fn = await jiti.import(entry, { default: true });
+          const fn = await setupBudget.settle(() => jiti.import(entry, { default: true }));
           tracePhase(`adapter.factory.import.${factory}`);
           if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
           const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };

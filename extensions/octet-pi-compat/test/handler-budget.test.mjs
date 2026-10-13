@@ -99,3 +99,13 @@ test('a lone explicit entrypoint that never settles still fails, so configure ca
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /setup did not finish within/);
 });
+
+test('a module whose top-level await never settles is skipped like a stalled factory', async t => {
+  const stalledImport = join(root, 'test/fixtures/stalled-import.mjs');
+  const begun = Date.now();
+  const result = inspectWith([stalledImport, healthy], { OCTET_PI_HANDLER_BUDGET_MS: '300' });
+  assert.equal(result.status, 0, `${result.error ?? ''}${result.stderr}`);
+  assert.ok(Date.now() - begun < 5000);
+  assert.ok(JSON.parse(result.stdout).result.hooks.includes('before_prompt'), 'the healthy factory still loads');
+  assert.match(result.stderr, /stalled-import\.mjs: .*did not finish within/);
+});

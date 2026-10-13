@@ -198,7 +198,7 @@ while it is still busy instead of waiting on it again. A tool-call guard that
 cannot answer in time blocks the call rather than letting it through. A prompt
 sent while an extension is still starting waits up to 12 s for it, then
 continues without it. A factory's own setup (the work its default export does
-before it returns) gets 8 s, and 16 s across all factories; one that is still
+before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts.
 

@@ -47,8 +47,8 @@ export function budgetFor(event) {
 // hook, and the host waits 30 s for the whole load (Node start, adapter and
 // every factory). One setup that never settles would cost all of it and take
 // the mirror down, so each gets a share and the rest of the setup carries on.
-const FACTORY_SETUP_MS = 8000;
-const FACTORY_SETUP_TOTAL_MS = 16000;
+const FACTORY_SETUP_MS = 10000;
+const FACTORY_SETUP_TOTAL_MS = 20000;
 
 export class LoadBudget {
   constructor() {
@@ -58,9 +58,11 @@ export class LoadBudget {
     this.started = performance.now();
   }
 
-  // Resolves when the setup settles and rethrows its own failure. A setup that
+  // Resolves with the setup's value and rethrows its own failure. A setup that
   // outlives its share rejects with a `FactoryStalled` error; it keeps running,
   // but the caller drops everything it registered and refuses what it adds later.
+  // The share covers the module import as well as the factory body: a top-level
+  // await that never settles stalls the load just the same.
   async settle(call) {
     const left = this.total - (performance.now() - this.started);
     const waited = Math.max(Math.min(MIN_WAIT_MS, this.perFactory), Math.min(this.perFactory, left));
@@ -68,9 +70,9 @@ export class LoadBudget {
     const setup = Promise.resolve().then(call);
     setup.catch(() => {}); // a setup left running may still fail; nobody waits for it
     try {
-      if (await Promise.race([setup.then(() => undefined), timer.promise.then(() => TIMED_OUT)]) === TIMED_OUT) {
-        throw Object.assign(new Error(`setup did not finish within ${Math.round(waited / 100) / 10} s`), { name: 'FactoryStalled' });
-      }
+      const outcome = await Promise.race([setup.then(value => ({ value })), timer.promise.then(() => TIMED_OUT)]);
+      if (outcome === TIMED_OUT) throw Object.assign(new Error(`setup did not finish within ${Math.round(waited / 100) / 10} s`), { name: 'FactoryStalled' });
+      return outcome.value;
     } finally { timer.cancel(); }
   }
 }

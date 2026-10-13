@@ -8,8 +8,8 @@
 //! context composition, semantic status collection, and reload.
 
 mod autocomplete;
-mod pi_mirror;
 mod mutation_resources;
+mod pi_mirror;
 pub(crate) mod remote_ui;
 pub(crate) mod resource_paths;
 
