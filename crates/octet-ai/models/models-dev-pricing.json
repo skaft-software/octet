@@ -3696,9 +3696,9 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash": {
-    "cache_read": 49200,
+    "cache_read": 50000,
     "cache_write_5m": 0,
-    "input": 49200,
+    "input": 50000,
     "output": 1280000,
     "reasoning": null
   },
@@ -3717,10 +3717,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 79605,
+    "cache_read": 37178,
     "cache_write_5m": 0,
-    "input": 955260,
-    "output": 1910520,
+    "input": 446136,
+    "output": 892272,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 3000,
+    "cache_read": 876,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 600000,
+    "input": 43800,
+    "output": 175200,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -4434,7 +4434,7 @@
     "cache_read": 550000,
     "cache_write_5m": 0,
     "input": 730000,
-    "output": 13500000,
+    "output": 10000000,
     "reasoning": null
   },
   "openrouter/morph/morph-v3-fast": {
@@ -5473,6 +5473,20 @@
     "output": 750000,
     "reasoning": null
   },
+  "openrouter/scaledown/extract": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 40000,
+    "output": 0,
+    "reasoning": null
+  },
+  "openrouter/scaledown/summarize": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 40000,
+    "output": 0,
+    "reasoning": null
+  },
   "openrouter/stepfun/step-3.5-flash": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -5866,17 +5880,17 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 5400,
+    "cache_read": 876,
     "cache_write_5m": 0,
-    "input": 44100,
-    "output": 630000,
+    "input": 43800,
+    "output": 175200,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 200000,
+    "cache_read": 8232,
     "cache_write_5m": 0,
-    "input": 250000,
-    "output": 5000000,
+    "input": 258720,
+    "output": 776160,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
@@ -5904,7 +5918,7 @@
     "cache_read": 550000,
     "cache_write_5m": 0,
     "input": 730000,
-    "output": 13500000,
+    "output": 10000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {

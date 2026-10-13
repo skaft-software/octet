@@ -20178,6 +20178,46 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/scaledown/extract": {
+    "limit": {
+      "context": 1000000,
+      "output": 900000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Extract",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": false
+  },
+  "openrouter/scaledown/summarize": {
+    "limit": {
+      "context": 1000000,
+      "output": 4000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Summarize",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": false
+  },
   "openrouter/stepfun/step-3.5-flash": {
     "limit": {
       "context": 262144,
@@ -21664,7 +21704,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -21696,7 +21736,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
