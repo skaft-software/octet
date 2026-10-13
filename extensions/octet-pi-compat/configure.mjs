@@ -47,7 +47,7 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint, mirrorExcluded = [], capturedRegistrations }) {
+export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint, mirrorExcluded = [], capturedRegistrations, captureCacheDir }) {
   if (!reviewed) throw new Error('Factory execution requires --reviewed (review every entrypoint and its imports first)');
   output = resolve(output);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
@@ -67,7 +67,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   }
   let registrations = capturedRegistrations && structuredClone(capturedRegistrations);
   if (!registrations) {
-    const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: join(output, '.cache') });
+    const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: captureCacheDir ?? join(output, '.cache') });
     if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
     const skippedAtCapture = captured.stderr.split('\n').filter(line => line.startsWith('[pi-compat] skipped '));
     if (skippedAtCapture.length) throw new Error(`registration capture skipped extensions:\n${skippedAtCapture.join('\n').slice(0, 4096)}`);
@@ -211,8 +211,39 @@ function adapterIdentity() {
   walk(root, true);
   return (adapterIdentityCache = hash.digest('hex'));
 }
+// One process captures every factory on octet's own path. With several
+// factories each failure is isolated and named on stderr, so this one run
+// settles the common case that probing each factory separately took seconds
+// for. `undefined` when the capture itself failed: probe as before.
+function captureCombined(extensions, options) {
+  if (extensions.length < 2) return undefined;
+  let entries;
+  try { entries = extensions.map(entry => realpathSync(entry)); } catch { return undefined; }
+  const captured = capture(entries, Object.fromEntries(entries.map(entry => [entry, 'shims'])), options);
+  if (captured.error || captured.status !== 0) return undefined;
+  const skipped = new Map();
+  for (const line of captured.stderr.split('\n')) {
+    if (!line.startsWith('[pi-compat] skipped ')) continue;
+    const rest = line.slice('[pi-compat] skipped '.length);
+    const index = entries.findIndex(entry => rest.startsWith(`${entry}: `));
+    if (index < 0) return undefined;
+    skipped.set(extensions[index], rest.slice(entries[index].length + 2));
+  }
+  try {
+    const frames = captured.stdout.trim().split('\n').map(line => JSON.parse(line));
+    if (frames.length !== 1 || !frames[0].result) return undefined;
+    return { registrations: frames[0].result, skipped };
+  } catch { return undefined; }
+}
+
+// The startup cache of the environment the mirror runs for: an explicit
+// OCTET_PI_COMPAT_CACHE there wins, as it does for the runtime.
+function mirrorCacheDirectory(env) {
+  if (!env.OCTET_PI_COMPAT_CACHE) return startupCacheDirectory();
+  try { mkdirSync(env.OCTET_PI_COMPAT_CACHE, { recursive: true, mode: 0o700 }); return env.OCTET_PI_COMPAT_CACHE; } catch { return undefined; }
+}
 function mirrorCache(prepared, { env, activeNativeTools, strict, providerCredentials }) {
-  const directory = startupCacheDirectory();
+  const directory = mirrorCacheDirectory(env);
   if (!directory) return undefined;
   const { output, overwriteRequired, fingerprint, ...review } = prepared.review;
   let piVersion = null;
@@ -267,7 +298,21 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: agentDir }, piAgentDir: agentDir, piTheme, activeNativeTools };
   const cached = cache ? mirrorCache(prepared, { env: options.env, activeNativeTools, strict, providerCredentials }) : undefined;
   const reused = cached?.read();
-  const routed = reused?.routed ?? await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
+  // The automatic mirror's output is a fresh per-launch directory, so its
+  // .cache would transform every factory cold at each capture. Its captures use
+  // the adapter's persistent startup cache instead.
+  const captureCacheDir = cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache');
+  const combined = reused || !cache || activeNativeTools.size ? undefined : captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir });
+  let routed = reused?.routed;
+  if (!routed && combined) {
+    // Only what the combined capture skipped is probed on its own, for the
+    // installed-Pi route; a factory that ran out of time is not tried twice.
+    const retry = setup.extensions.filter(entry => combined.skipped.has(entry) && !/^setup did not finish within /.test(combined.skipped.get(entry)));
+    const probed = new Map((retry.length ? await routeExtensions(retry, { ...options, expectedSourceHashes: prepared.sourceHashes }) : []).map(result => [result.entry, result]));
+    routed = setup.extensions.map(entry => probed.get(entry)
+      ?? (combined.skipped.has(entry) ? { entry, route: null, error: combined.skipped.get(entry) } : { entry, route: 'shims' }));
+  }
+  routed ??= await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
   const refused = routed.filter(result => !result.route);
   // A factory octet cannot run (for example one that needs a terminal it does
   // not own) is left out and listed, so one unsupported extension never blocks
@@ -285,7 +330,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,
     expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint, mirrorExcluded,
     extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])),
-    capturedRegistrations: reused?.registrations });
+    capturedRegistrations: reused?.registrations ?? (combined && !combined.skipped.size ? combined.registrations : undefined), captureCacheDir });
   const { config } = result;
   // A factory that ran out of time may be waiting on something transient;
   // never pin its exclusion, so the next start tries it again.

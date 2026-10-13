@@ -298,3 +298,14 @@ test('automatic mirror reuses its capture for an unchanged setup and recaptures 
   await configureMirror({ ...options, cache: false });
   assert.ok(count() > before);
 });
+
+test('automatic mirror settles a mixed setup in one capture and names the factory it left out', async t => {
+  const f = fixture(t);
+  put(join(f.agent, 'extensions/broken.js'), 'export default () => { throw new Error("broken factory"); };');
+  const options = { ...f.options, env: { ...f.env, OCTET_PI_COMPAT_CACHE: join(f.dir, 'mirror-cache') }, cache: true };
+  const mirrored = await configureMirror(options);
+  assert.deepEqual(mirrored.config.extensions, [f.entry]);
+  assert.deepEqual(mirrored.config.extension_runtimes, { [f.entry]: 'shims' });
+  assert.deepEqual(mirrored.config.mirror_excluded.map(item => item.entry), [realpathSync(join(f.agent, 'extensions/broken.js'))]);
+  assert.deepEqual(mirrored.registrations.commands.map(command => command.name), ['kept']);
+});
