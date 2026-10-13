@@ -163,6 +163,30 @@ and known limitations.
 
 ### Fixed
 
+- Starting with `octet-pi-compat` enabled no longer keeps the screen blank for
+  seconds. The Pi mirror loaded every factory up to three times before the first
+  frame (about 7-11 s for a 20-extension setup) on every start. It now reuses its
+  captured catalog while your Pi setup, its factories, the adapter, Node and the
+  installed Pi are unchanged, and otherwise captures them in one warm process:
+  the same setup draws its first frame in about half a second.
+- The Pi mirror applies its skills, prompts and theme again when the interactive
+  shell attaches it after the first frame. Its `session_start` arrived before the
+  session it belongs to was shared with it, so an extension that read
+  `ctx.sessionManager` there (for example `pi-background-tasks`) failed it, and
+  startup ended with `reload failed: … requires successful settled session_start`
+  while the Pi footer still drew over octet's theme. A Pi default model served by
+  one of your extensions' providers is also selected now.
+- Prompts no longer fail with `extension input hook timed out` or `before_prompt
+  hook exceeded 5s` when a Pi extension supplies the editor. Its editor calls are
+  answered by the terminal, which did not serve them while waiting for those
+  hooks, so both sides waited out the deadline; Enter pressed meanwhile showed
+  `operation in progress`.
+- The model picker and `--list-models` show the current OpenCode and OpenCode Go
+  model lists instead of only the built-in ones; the live list used to arrive
+  only on a later launch, and a failed fetch is now reported.
+- `[Extension issues]` names the error code an extension stopped with (for
+  example `pi_anthropic_attribution_host_adapter_missing`) instead of only
+  saying its details were redacted; the message itself is still never shown.
 - A stalled Pi extension no longer takes the mirror down with it. Every Pi hook
   runs on one ordered queue, so one factory whose handler never settled (a network
   call, a child process, an MCP connection) held it forever: startup failed with
