@@ -690,6 +690,12 @@ impl Agent {
         &mut self.extensions
     }
 
+    /// [`Self::extension_host_mut`] with the session it serves, for a frontend
+    /// that must hand that session's view to an extension it attaches late.
+    pub fn extension_host_and_session(&mut self) -> (&mut ExtensionHost, &Session) {
+        (&mut self.extensions, &self.session)
+    }
+
     /// Installs the explicit span observer used by runs of this agent.
     ///
     /// The context is inert by default. Spans observe boundaries only: they

@@ -47,6 +47,28 @@ fn waited_note(process: &ExtensionProcess, elapsed: Duration) -> Option<String> 
     })
 }
 
+/// Isolated processes receive the host facts with the native session view;
+/// shared workspace services never hold one session's history.
+fn publish_host_state<'a>(
+    processes: impl IntoIterator<Item = &'a ExtensionProcess>,
+    state: &ExtensionHostState,
+    session: &Session,
+    diagnostics: &mut BoundedDiagnostics,
+) {
+    for process in processes {
+        if process.descriptor().manifest.runtime.sharing
+            == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
+        {
+            if let Err(error) = process.set_host_state_with_session(state.clone(), session) {
+                diagnostics.push(format!(
+                    "warning: extension {:?} session mirror unavailable: {error}",
+                    process.descriptor().manifest.name,
+                ));
+            }
+        }
+    }
+}
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
@@ -520,24 +542,30 @@ impl ExecutableExtensions {
             state.mode = previous.mode.clone();
         }
         self.session_id = state.session_id.clone();
-        for process in &self.processes {
-            if process.descriptor().manifest.runtime.sharing
-                == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
-            {
-                if let Err(error) = process.set_host_state_with_session(state.clone(), session) {
-                    self.diagnostics.push(format!(
-                        "warning: extension {:?} session mirror unavailable: {error}",
-                        process.descriptor().manifest.name,
-                    ));
-                }
-            }
-        }
+        publish_host_state(&self.processes, &state, session, &mut self.diagnostics);
         // Every session or model boundary refreshes this cache, so a read-only
         // context snapshot never answers from the process-startup projection.
         *self
             .host_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+
+    /// Publish the current host facts and native session view to an activation
+    /// batch before it is installed. Installing starts each process's session
+    /// lifecycle, and a Pi session_start handler may read the session there.
+    pub(super) fn publish_host_state_to_starts(
+        &mut self,
+        starts: &[(String, Result<ExtensionProcess, String>)],
+        session: &Session,
+    ) {
+        let state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let processes = starts.iter().filter_map(|(_, start)| start.as_ref().ok());
+        publish_host_state(processes, &state, session, &mut self.diagnostics);
     }
 
     pub(super) fn enqueue_context(

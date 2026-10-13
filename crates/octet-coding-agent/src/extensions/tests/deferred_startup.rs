@@ -126,7 +126,7 @@ async fn deferred_startup_blocks_prompts_only_on_their_hook_owners() {
 
     let started = Instant::now();
     extensions
-        .await_pending_prompt_hooks(&mut host)
+        .await_pending_prompt_hooks(&mut host, &session)
         .await
         .expect("the hook owner answers its handshake");
     assert!(
@@ -168,7 +168,7 @@ async fn deferred_startup_blocks_prompts_only_on_their_hook_owners() {
 
     // And its attach is still observable through the ordinary pump: the pump
     // reports what it installed, and `startup_pending` stays the settled test.
-    let progress = extensions.pump_deferred_startup(&mut host).await;
+    let progress = extensions.pump_deferred_startup(&mut host, &session).await;
     assert!(progress.changed || progress.attached.is_empty());
 }
 

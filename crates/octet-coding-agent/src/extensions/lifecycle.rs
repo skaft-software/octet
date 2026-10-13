@@ -514,6 +514,13 @@ impl ExecutableExtensions {
         extensions.rescan_config = Some(config.clone());
         extensions.rescan_global_config = crate::cli::global_config_path();
         extensions.effect_policy = config.effect_policy;
+        // Compute the host facts before installing: each installed process
+        // receives them with the actual native history before either immediate
+        // or deferred session_start callbacks. Initialize's coarse model/skill
+        // projection deliberately does not expose a namespace-independent
+        // session mirror.
+        extensions.refresh_host_state(session, model, reasoning, sessions);
+        extensions.publish_host_state_to_starts(&starts, session);
         // One install path for boot and late attach. A deferred fleet installs
         // an empty batch here (every extension keeps its discovered summary)
         // and installs each settled handshake through the same method.
@@ -529,14 +536,15 @@ impl ExecutableExtensions {
         }
         extensions.deferred_startup = deferred_startup;
         extensions.start_policy_supervisors();
-        // Install actual native history before either immediate or deferred
-        // session_start callbacks. Initialize's coarse model/skill projection
-        // deliberately does not expose a namespace-independent session mirror.
-        extensions.refresh_host_state(session, model, reasoning, sessions);
         extensions.start_session_lifecycle();
         extensions.bind_tool_host(host);
         crate::app::bootstrap::startup_phase("extensions.installed");
         extensions
+    }
+
+    /// How many extension processes are attached to the live host.
+    pub(crate) fn attached_count(&self) -> usize {
+        self.processes.len()
     }
 
     /// Whether any process handshake is still owed after the first frame.
@@ -583,6 +591,7 @@ impl ExecutableExtensions {
     pub(crate) async fn pump_deferred_startup(
         &mut self,
         host: &mut octet_agent::ExtensionHost,
+        session: &Session,
     ) -> DeferredStartupProgress {
         let Some(mut deferred) = self.deferred_startup.take() else {
             return DeferredStartupProgress::default();
@@ -590,6 +599,7 @@ impl ExecutableExtensions {
         let starts = drain_deferred_activations(&mut deferred);
         let mut progress = DeferredStartupProgress::default();
         if !starts.is_empty() {
+            self.publish_host_state_to_starts(&starts, session);
             let installed = self
                 .install_activations(host, &deferred.descriptors, starts, &deferred.tool_clashes)
                 .await;
@@ -625,6 +635,7 @@ impl ExecutableExtensions {
     pub(crate) async fn await_pending_prompt_hooks(
         &mut self,
         host: &mut octet_agent::ExtensionHost,
+        session: &Session,
     ) -> anyhow::Result<()> {
         const PROMPT_HOOK_WAIT: Duration = Duration::from_secs(30);
         let deadline = tokio::time::Instant::now() + PROMPT_HOOK_WAIT;
@@ -634,6 +645,7 @@ impl ExecutableExtensions {
             };
             let starts = drain_deferred_activations(&mut deferred);
             if !starts.is_empty() {
+                self.publish_host_state_to_starts(&starts, session);
                 self.install_activations(
                     host,
                     &deferred.descriptors,

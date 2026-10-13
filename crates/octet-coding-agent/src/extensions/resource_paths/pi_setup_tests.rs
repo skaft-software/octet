@@ -252,7 +252,72 @@ async fn enabling_shipped_pi_compat_mirrors_from_any_workspace_without_configure
     app.executable_extensions.shutdown().await;
 }
 
+/// The interactive frontend attaches the mirror after its first frame. Pi lets a
+/// `session_start` handler read the session manager, so the late-attached
+/// process must already hold the native session view; a start that fails on it
+/// refuses resource discovery and the mirror's skills, prompts and theme never
+/// apply while its footer and composer still draw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_attached_mirror_reads_the_session_in_session_start_and_admits_resources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("unrelated-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let pi = fixture_pi_home(&root);
+    let seen = root.join("session-start-seen.json");
+    put(
+        pi.agent.join("extensions/pi-setup-two.js"),
+        format!(
+            r#"import {{ appendFileSync }} from 'node:fs';
+export default function (pi) {{
+  pi.registerCommand('pi-setup-two', {{ description: 'Pi setup two', handler() {{}} }});
+  pi.on('session_start', (event, ctx) => {{
+    appendFileSync({seen}, JSON.stringify({{ reason: event.reason, id: ctx.sessionManager.getSessionId(), branch: ctx.sessionManager.getBranch().map(entry => entry.type) }}) + '\n');
+  }});
+}}
+"#,
+            seen = serde_json::to_string(&seen.to_string_lossy()).unwrap()
+        ),
+    );
+    install_automatic_mirror(&root, &pi);
+    let mut app = app_with_timing(&root, &workspace, true, true);
+    assert!(
+        app.executable_extensions.processes.is_empty(),
+        "the mirror attaches after the first frame"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while app.executable_extensions.startup_pending() {
+            app.pump_extension_startup().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the mirror attaches");
+    app.refresh_resource_paths_headless().await.unwrap();
+    assert_pi_setup_active(&app, &pi);
+    let seen = std::fs::read_to_string(&seen).expect("session_start ran to completion");
+    let starts = seen
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1, "one session start: {seen}");
+    assert_eq!(starts[0]["reason"], "startup");
+    assert_eq!(
+        starts[0]["id"].as_str(),
+        app.executable_extensions.session_id.as_deref()
+    );
+    // getBranch answered from the native history as it stood at attach.
+    assert!(starts[0]["branch"].is_array(), "{seen}");
+    app.executable_extensions.shutdown().await;
+}
+
 fn app_for(root: &Path, workspace: &Path, enabled: bool) -> App {
+    app_with_timing(root, workspace, enabled, false)
+}
+
+/// `deferred` builds the App the interactive frontend does: extensions attach
+/// after the first frame instead of inside the constructor.
+fn app_with_timing(root: &Path, workspace: &Path, enabled: bool, deferred: bool) -> App {
     let mut config = crate::extensions::tests::executable_extension_config(
         workspace,
         &root.join("extensions"),
@@ -269,12 +334,17 @@ fn app_for(root: &Path, workspace: &Path, enabled: bool) -> App {
     let boot = crate::app::bootstrap::bootstrap(config).unwrap();
     let launch =
         crate::app::bootstrap::resolve_launch_print(&boot, "pi-mirror-acceptance").unwrap();
-    crate::app::bootstrap::build_app_with_resource_consumer(
-        boot,
-        launch,
-        "BASE INSTRUCTIONS".into(),
-    )
-    .unwrap()
+    if deferred {
+        crate::app::bootstrap::build_app_first_frame_first(boot, launch, "BASE INSTRUCTIONS".into())
+            .unwrap()
+    } else {
+        crate::app::bootstrap::build_app_with_resource_consumer(
+            boot,
+            launch,
+            "BASE INSTRUCTIONS".into(),
+        )
+        .unwrap()
+    }
 }
 
 fn render(app: &App, name: &str) -> String {

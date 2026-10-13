@@ -561,10 +561,18 @@ impl App {
         &mut self,
     ) -> anyhow::Result<crate::extensions::DeferredStartupProgress> {
         let service_available = self.executable_extensions.has_agent_session_service();
-        let progress = self
+        let (host, session) = self.agent.extension_host_and_session();
+        let mut progress = self
             .executable_extensions
-            .pump_deferred_startup(self.agent.extension_host_mut())
+            .pump_deferred_startup(host, session)
             .await;
+        // Providers the new processes registered join the catalog before the
+        // caller re-resolves resources: a mirrored Pi default model names one.
+        if !progress.attached.is_empty() {
+            progress
+                .notices
+                .extend(self.synchronize_extension_provider_catalog());
+        }
         self.activate_resource_paths_consumer();
         if !service_available && self.executable_extensions.has_agent_session_service() {
             self.executable_extensions
@@ -578,13 +586,21 @@ impl App {
     ///
     /// A prompt submitted before the host is ready must still run the hooks
     /// that own it; it must never wait for an unrelated extension. Extensions
-    /// that already attached are never waited for again.
-    pub(crate) async fn await_extension_prompt_hooks(&mut self) -> anyhow::Result<()> {
+    /// that already attached are never waited for again. Returns the notices
+    /// from projecting the providers of what attached.
+    pub(crate) async fn await_extension_prompt_hooks(&mut self) -> anyhow::Result<Vec<String>> {
         let service_available = self.executable_extensions.has_agent_session_service();
+        let attached = self.executable_extensions.attached_count();
+        let (host, session) = self.agent.extension_host_and_session();
         let result = self
             .executable_extensions
-            .await_pending_prompt_hooks(self.agent.extension_host_mut())
+            .await_pending_prompt_hooks(host, session)
             .await;
+        let notices = if self.executable_extensions.attached_count() > attached {
+            self.synchronize_extension_provider_catalog()
+        } else {
+            Vec::new()
+        };
         self.activate_resource_paths_consumer();
         // This wait also installs completed non-hook activations. Bind even
         // when another prompt-hook owner times out after subagents attached.
@@ -592,7 +608,7 @@ impl App {
             self.executable_extensions
                 .bind_agent_sessions(&self.agent)?;
         }
-        result
+        result.map(|()| notices)
     }
 
     /// Resolve an invocation's ordered patterns against this effective catalog.

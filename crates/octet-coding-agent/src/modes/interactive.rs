@@ -13068,7 +13068,11 @@ async fn run_interactive_once(
                         shell.set_run_label("idle");
                     }
                     match waited {
-                        Some(Ok(())) => {}
+                        Some(Ok(notices)) => {
+                            for notice in notices {
+                                shell.notice(notice);
+                            }
+                        }
                         Some(Err(error)) => {
                             shell.error(format!("extension startup failed: {error}"));
                         }
