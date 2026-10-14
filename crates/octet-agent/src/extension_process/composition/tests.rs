@@ -827,9 +827,9 @@ async fn codemode_bundle_runs_vendored_vm_through_host_transport() {
     std::fs::write(
         standalone.join(EXTENSION_MANIFEST_FILENAME),
         r#"name = "octet-codemode"
-version = "0.9.0"
+version = "0.9.1"
 api_version = "0.4"
-requires_octet = "=0.9.0"
+requires_octet = "=0.9.1"
 [entrypoint]
 command = "octet-codemode"
 args = ["serve", "--engine", "wasi"]

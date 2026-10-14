@@ -31,8 +31,8 @@ class RcExtensionBundleTests(unittest.TestCase):
             directory = self.source / "extensions" / extension
             (directory / "bin").mkdir(parents=True)
             (directory / "extension.toml").write_text(
-                f'name = "{extension}"\nversion = "0.9.0"\napi_version = "0.4"\n'
-                'requires_octet = "=0.9.0"\n[entrypoint]\ncommand = "bin/codemode"\nargs = ["serve"]\n',
+                f'name = "{extension}"\nversion = "0.9.1"\napi_version = "0.4"\n'
+                'requires_octet = "=0.9.1"\n[entrypoint]\ncommand = "bin/codemode"\nargs = ["serve"]\n',
                 encoding="utf-8",
             )
             entry = directory / "bin" / "codemode"
@@ -59,7 +59,7 @@ class RcExtensionBundleTests(unittest.TestCase):
     def package(self, target, output="output"):
         return subprocess.run(
             ["bash", str(self.source / "scripts/package-octet-rc-extensions.sh"),
-             target, str(self.root / output), "v0.9.0", str(self.source)],
+             target, str(self.root / output), "v0.9.1", str(self.source)],
             env={**os.environ, "SOURCE_DATE_EPOCH": "1700000000"},
             capture_output=True, text=True, timeout=30,
         )
@@ -72,7 +72,7 @@ class RcExtensionBundleTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         first, second = self.root / "first", self.root / "second"
         self.assertEqual(sorted(path.name for path in first.glob("*.tar.gz")),
-                         [f"{extension}-0.9.0.tar.gz" for extension in IDS])
+                         [f"{extension}-0.9.1.tar.gz" for extension in IDS])
         for path in first.iterdir():
             self.assertEqual(path.read_bytes(), (second / path.name).read_bytes())
         info = json.loads((first / "BUILD-INFO.json").read_text())
@@ -84,24 +84,24 @@ class RcExtensionBundleTests(unittest.TestCase):
         for line in (first / "SHA256SUMS").read_text().splitlines():
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((first / name).read_bytes()).hexdigest())
-        with tarfile.open(first / "octet-codemode-0.9.0.tar.gz") as archive:
+        with tarfile.open(first / "octet-codemode-0.9.1.tar.gz") as archive:
             executable = archive.getmember("octet-codemode/bin/codemode")
             self.assertEqual(executable.mode, 0o755)
             self.assertEqual(archive.extractfile(executable).read(), self.native(LINUX).read_bytes())
-        with tarfile.open(first / "octet-computer-use-0.9.0.tar.gz") as archive:
+        with tarfile.open(first / "octet-computer-use-0.9.1.tar.gz") as archive:
             self.assertNotIn("octet-computer-use/local-canary", archive.getnames())
         self.assertEqual(self.git("diff", "--name-only", "HEAD"), "")
 
     def test_windows_bundle_uses_native_exe_and_retains_serve_argument(self):
         result = self.package(WINDOWS)
         self.assertEqual(result.returncode, 0, result.stderr)
-        with tarfile.open(self.root / "output/octet-codemode-0.9.0.tar.gz") as archive:
+        with tarfile.open(self.root / "output/octet-codemode-0.9.1.tar.gz") as archive:
             self.assertNotIn("octet-codemode/bin/codemode", archive.getnames())
             self.assertEqual(archive.extractfile("octet-codemode/bin/codemode.exe").read(),
                              self.native(WINDOWS).read_bytes())
             manifest = tomllib.loads(archive.extractfile("octet-codemode/extension.toml").read().decode())
             self.assertEqual(manifest["entrypoint"], {"command": "bin/codemode.exe", "args": ["serve"]})
-            self.assertEqual(manifest["requires_octet"], "=0.9.0")
+            self.assertEqual(manifest["requires_octet"], "=0.9.1")
         # Platform staging must not change source, even for Windows.
         self.assertEqual(self.git("diff", "--name-only", "HEAD"), "")
 

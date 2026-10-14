@@ -8206,6 +8206,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode-go/gemini-4-argon-contributor": {
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Gemini 4 Argon Contributor",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode-go/glm-5.2": {
     "interleaved": {
       "field": "reasoning_content"
@@ -15731,7 +15763,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 176947
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -18349,7 +18381,7 @@
   "openrouter/openai/gpt-oss-120b": {
     "limit": {
       "context": 131072,
-      "output": 65536
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -20694,25 +20726,6 @@
     "structured_output": false,
     "tool_call": true
   },
-  "openrouter/unbiased/pareto": {
-    "limit": {
-      "context": 262144,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Pareto",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/unbiased/pareto-26.10-preview": {
     "limit": {
       "context": 1048576,
@@ -21442,7 +21455,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 128000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -22118,6 +22131,25 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/~unbiased/pareto-latest": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pareto Latest",
+    "reasoning": false,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/~x-ai/grok-latest": {

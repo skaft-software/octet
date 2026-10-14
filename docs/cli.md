@@ -276,13 +276,11 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The six executable bundles are pinned exactly to the
-running host. This checkout's source manifests require `=0.9.0`, and the
-published 0.8.0 bundles require `=0.8.0`. The [0.9.0
-candidate notes](releases/v0.9.0.md) record planned distribution and remaining
-qualification, not publication. The 0.9.0 release assets are unavailable; use
-reviewed source extensions or local archives until approved publication.
-Catalog installs need verified published assets that match the running host version:
+The five executable bundles are pinned exactly to the
+running host: the published 0.9.1 bundles require `=0.9.1`. See the
+[0.9.1 release notes](releases/v0.9.1.md) and the version-pinned GitHub release
+for published assets. Catalog installs need verified published assets that
+match the running host version:
 
 ```text
 octet extension install NAME
@@ -291,7 +289,8 @@ octet extension remove NAME
 ```
 
 The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
-`octet-pi-compat`, `octet-subagents` and `octet-web-search`. Checksummed bundles install atomically
+`octet-subagents` and `octet-web-search`. The experimental `octet-pi-compat`
+adapter does not ship in the catalog. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
 package ID. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See

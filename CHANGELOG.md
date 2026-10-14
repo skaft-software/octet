@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.9.1] - 2026-10-14
+
+The [release notes](docs/releases/v0.9.1.md) record shipped scope, qualification
+boundaries and known limitations. 0.9.1 is the first 0.9 release with published
+native binaries; 0.9.0 published only its source archive and extension bundles.
+
+### Security
+
+- Update rustls from 0.23.45 to 0.23.46 for RUSTSEC-2026-0346 (`Debug` output
+  for client session values could expose TLS secrets), RUSTSEC-2026-0349 (an
+  unauthenticated ServerHello could downgrade later connections to classical key
+  exchange), RUSTSEC-2026-0348 (Brotli certificate decompression could allocate
+  up to 1 GiB before authentication) and RUSTSEC-2026-0347 (buffered data could
+  reach the outer server after an ECH rejection).
+
+### Fixed
+
+- `install-octet.sh` accepts the signed `OCTET_SHA256SUMS` that also lists the
+  Windows archive and `install-octet.ps1`. The 0.9.0 installer rejected it as an
+  unexpected asset set on Linux and macOS.
+- The release workflow skips one Windows file-publication test
+  (`windows_publication_stays_bound_to_original_parent`) in the MSVC release
+  qualification while it is investigated (#588); Windows CI still runs it.
+- The CLI reference lists the five published extension bundles instead of six.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.0 known limitations below still apply.
+
 ## [0.9.0] - 2026-10-13
 
 The [release notes](docs/releases/v0.9.0.md) record shipped scope, qualification
@@ -176,6 +208,17 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
 
 ### Fixed
 
+- Starting octet from your home directory no longer reports your global
+  `~/.octet` prompts, skills and themes as untrusted project resources, which made
+  every reload end in `reload failed`. Reload notes also show prompt diagnostics
+  as `path: message` instead of a raw `PromptDiagnostic { … }` dump.
+- Removing your last custom provider in `/setup` now deletes the registry only if
+  it is unchanged since it was read, and cleans up only that provider's model
+  cache, so another octet process's newer providers and caches are kept.
+- Experimental Pi compatibility: stalled Pi factory setups now share one
+  absolute load deadline (22 s) instead of each getting a minimum wait after the
+  20 s budget runs out, so many stalled factories can no longer push the load past
+  the host's 30 s limit.
 - Starting with `octet-pi-compat` enabled no longer keeps the screen blank for
   seconds. The Pi mirror loaded every factory up to three times before the first
   frame (about 7-11 s for a 20-extension setup) on every start. It now reuses its
