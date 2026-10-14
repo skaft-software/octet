@@ -37,6 +37,81 @@ fn opencode_discovery_infers_supported_protocols_and_routes_gemini() {
 }
 
 #[test]
+fn opencode_go_discovery_routes_gemini_to_the_google_endpoint() {
+    let binding = |model_id| {
+        discovered_preset_binding(&crate::providers::OPENCODE_GO, model_id)
+            .map(|route| (route.endpoint_id, route.protocol))
+    };
+    assert_eq!(
+        binding("gemini-4-argon-contributor"),
+        Some(("opencode-go-google", Protocol::GoogleGenerativeAi))
+    );
+    assert_eq!(
+        binding("gemini-future"),
+        Some(("opencode-go-google", Protocol::GoogleGenerativeAi))
+    );
+}
+
+#[test]
+fn every_opencode_go_catalog_model_routes_by_family_and_keeps_its_declared_efforts() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../octet-ai/models/models-dev-capabilities.json");
+    let catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut checked = 0;
+    for (key, entry) in catalog.as_object().unwrap() {
+        let Some(model) = key.strip_prefix("opencode-go/") else {
+            continue;
+        };
+        checked += 1;
+        if model == "qwen3.7-max" {
+            // Excluded by design: Qwen over Chat needs a distinct thinking format.
+            assert!(discovered_preset_binding(&crate::providers::OPENCODE_GO, model).is_none());
+            continue;
+        }
+        let route = discovered_preset_binding(&crate::providers::OPENCODE_GO, model)
+            .unwrap_or_else(|| panic!("{model} has no OpenCode Go route"));
+        let expected = if model.starts_with("gemini-") {
+            Protocol::GoogleGenerativeAi
+        } else if model.starts_with("claude-") || model.starts_with("qwen3.") {
+            Protocol::AnthropicMessages
+        } else if model.starts_with("gpt-") || model.starts_with("codex-") {
+            Protocol::OpenAiResponses
+        } else {
+            Protocol::OpenAiChat
+        };
+        assert_eq!(route.protocol, expected, "{model}");
+        let decoded = decode_reasoning_metadata(entry)
+            .unwrap_or_else(|error| panic!("{model} reasoning metadata: {error}"));
+        let declared = entry
+            .get("reasoning_options")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option["type"] == "effort")
+                    .map(|option| option["values"].clone())
+            });
+        if let Some(values) = declared {
+            let values: Vec<String> = serde_json::from_value(values).unwrap();
+            assert_eq!(
+                decoded
+                    .options
+                    .as_ref()
+                    .map(|options| options.values.clone()),
+                Some(values),
+                "{model} must keep every declared thinking level"
+            );
+            assert_eq!(decoded.control, Some(ReasoningControl::Effort), "{model}");
+        }
+    }
+    assert!(
+        checked >= 10,
+        "expected OpenCode Go models in the catalog, found {checked}"
+    );
+}
+
+#[test]
 fn openai_discovery_skips_the_rejected_gpt_5_6_alias() {
     let preset = &crate::providers::OPENAI;
     assert_eq!(discovered_preset_binding(preset, "gpt-5.6"), None);

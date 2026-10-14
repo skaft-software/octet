@@ -96,6 +96,16 @@ fn maps_structured_output_to_native_json_schema() {
     request.session_id = None;
     let parts = build_request(&zen, &request).unwrap();
     assert!(parts.headers.get("x-opencode-session").is_none());
+
+    // OpenCode Go serves Gemini through the same Google route and also
+    // requires the session header.
+    let mut go = zen.clone();
+    std::sync::Arc::make_mut(&mut go.endpoint).id = EndpointId("opencode-go-google".into());
+    request.session_id = Some("go-session".into());
+    assert_eq!(
+        build_request(&go, &request).unwrap().headers["x-opencode-session"],
+        "go-session"
+    );
 }
 
 #[test]

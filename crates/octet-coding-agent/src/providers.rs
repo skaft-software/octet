@@ -56,6 +56,6 @@ pub(crate) use contract::{
     KIMI_CODING_SUBSCRIPTION, META_SUBSCRIPTION, OPENROUTER_OAUTH, XAI_SUBSCRIPTION,
 };
 #[cfg(test)]
-pub(crate) use contract::{OPENAI, OPENCODE, OPENROUTER};
+pub(crate) use contract::{OPENAI, OPENCODE, OPENCODE_GO, OPENROUTER};
 pub(crate) use pricing::pricing_for;
 pub(crate) use vertex::resolve_vertex_configuration;
