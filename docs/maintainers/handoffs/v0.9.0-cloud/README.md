@@ -37,8 +37,9 @@ uncommitted experimental Pi repairs are not needed or uploaded.
 - [PR CodeQL 38467773944](https://github.com/skaft-software/octet/actions/runs/38467773944):
   completed **success**.
 - [Exact-main CI 38477515288](https://github.com/skaft-software/octet/actions/runs/38477515288):
-  **in progress at handoff**. Reconcile this exact run; never substitute a newer
-  unrelated main run or predecessor success.
+  completed **failure** during handoff preparation. Both blockers below must be
+  investigated and fixed/requalified before tagging. Do not publish this source
+  because its earlier PR passed.
 - Remote main was still the merged source at handoff. No canonical `v0.9.0`,
   `octet-binaries-v0.9.0` or `octet-serve-v0.9.0` tag existed. Canonical release
   lookup returned HTTP 404. **Nothing has been tagged or publicly released.**
@@ -122,6 +123,53 @@ strings round-tripped in both generated-code shapes without injection. Both
 threads are resolved; CodeQL and its rules remain enabled, and alerts were not
 dismissed. The assessment is posted in the PR review threads.
 
+## Current release blockers — exact-main CI failed
+
+Source `d2425ccfa70b1da6293dac7e786816e328b22370` is **not MAIN_GREEN**.
+[Run 38477515288](https://github.com/skaft-software/octet/actions/runs/38477515288)
+finished with two failed jobs:
+
+1. **Quality / live metadata freshness**, job
+   [115571758505](https://github.com/skaft-software/octet/actions/runs/38477515288/job/115571758505):
+   `stale models.dev snapshot: crates/octet-ai/models/models-dev-pricing.json`.
+   The existing 60-second freshness gate failed; it did not update source.
+   Regenerate through `scripts/refresh-models-dev-pricing.py`, review names,
+   pricing, capabilities and source receipt together, and preserve strict price
+   goldens. Earlier local/PR freshness success does not qualify the new main run.
+2. **Windows GNU / Python SDK**, job
+   [115571758972](https://github.com/skaft-software/octet/actions/runs/38477515288/job/115571758972):
+   `test_A07_unnegotiated_progress_is_refused` failed **during initialization**,
+   before its unnegotiated-progress assertions. At
+   `sdk/python/tests/test_typed_process.py:167`, `self.initialize(progress=False)`
+   calls line 71 `self.receive()["result"]`; line 61
+   `self.messages.get(timeout=4)` raises `_queue.Empty`; line 64 reports
+   `AssertionError: process did not respond:` with empty stderr. Run summary:
+   **202 tests, 1 failure, 18 existing Windows skips**. No causal diagnosis or
+   fix is established. Investigate process startup/handshake/read synchronization;
+   do not label it harmless flakiness, change the four-second deadline, suppress
+   the test or add skips.
+
+Other main lanes succeeded: dependencies, smoke-install, first-party extensions,
+msrv, extension-api-v03, macOS and Ubuntu. Dependency review is PR-only and
+skipped on main; release candidates were skipped after the upstream failure.
+These partial successes do not qualify publication.
+
+Create a narrowly scoped repair PR, qualify its exact head, merge normally and
+qualify its **new exact merged SHA** before proceeding. Update source/tree/run
+identities throughout this handoff; the original source archive and predecessor
+receipts do not qualify that replacement. Do not merely retry the old stale
+source or reuse its previously green PR.
+
+Push also reported an open default-branch Dependabot alert:
+[alert #4](https://github.com/skaft-software/octet/security/dependabot/4),
+`GHSA-59cr-6r3x-644w` (medium), GitPython submodule-update path traversal.
+`docs/benchmarks/swe-bench-live-lite-v0.6.3/requirements.txt:9` pins
+`GitPython==3.1.61`; first patched version is 3.1.62. This is separate from the
+CodeQL test-literal findings; do not dismiss it as the same false positive. The
+main dependencies lane succeeded. Record it honestly, and avoid unrelated
+benchmark cleanup unless release policy makes it a blocker or the user expands
+scope.
+
 ## Remaining execution
 
 Advance only **MERGED → MAIN_GREEN → PUBLISHED → PUBLIC_SMOKE**.
@@ -133,10 +181,12 @@ gh api repos/skaft-software/octet/actions/runs/38477515288 \
   --jq '{id,head_sha,status,conclusion,html_url}'
 ```
 
-Await terminal success. A portable read-only fallback is included:
+The recorded run is now failed; first repair/requalify it as described above.
+For subsequent recorded runs, a portable read-only fallback is included. From
+the handoff branch root, substitute the new run ID and exact source SHA:
 
 ```sh
-bash read-only-ci-watch.sh 38477515288 \
+bash docs/maintainers/handoffs/v0.9.0-cloud/read-only-ci-watch.sh 38477515288 \
   d2425ccfa70b1da6293dac7e786816e328b22370 /tmp/octet-main-watch 240
 ```
 
@@ -158,9 +208,11 @@ just because the PR passed. Recorded model integer goldens are
 
 ### 2. Create the canonical source release only after MAIN_GREEN
 
-Use source `d2425ccfa70b1da6293dac7e786816e328b22370`, **not this handoff branch**.
-Reconcile tags/releases again immediately before mutation. Stop on uncertainty
-or unexpected existing state; never replay a possibly-completed mutation.
+Use the **new exact MAIN_GREEN merged source after both repairs**, not the failed
+`d2425ccfa70b1da6293dac7e786816e328b22370` or this handoff branch. Set `SOURCE` to
+that validated SHA and record its tree and CI identity. Reconcile tags/releases
+again immediately before mutation. Stop on uncertainty or unexpected existing
+state; never replay a possibly-completed mutation.
 
 Read `scripts/create-source-archive.py` before executing it. It requires Python
 3.11+, creates only the requested commit, checks version, bounds unsafe archive
@@ -170,15 +222,17 @@ release-source worktree:
 ```sh
 mkdir -p /tmp/octet-v0.9.0-source-assets
 python3 scripts/create-source-archive.py --version 0.9.0 \
-  --ref d2425ccfa70b1da6293dac7e786816e328b22370 \
+  --ref "$SOURCE" \
   --out /tmp/octet-v0.9.0-source-assets/octet-source-v0.9.0.tar.gz
 ```
 
 A local archive was prepared (2835 tracked entries, correct five-bundle catalog),
 SHA-256 `4a9d28411fd089ee772a163298cde9fb816a7fd84cc722f980e841a908bf23c8`.
-It was **not uploaded or signed**. Regenerate in the cloud and verify its actual
-bytes, tar commit header and catalog; record the produced digest rather than
-pretending the local receipt qualifies a public object. Upload its checksum too.
+It was **not uploaded or signed** and belongs to the now-failing original source.
+Do not reuse it for the repaired source. Regenerate in the cloud and verify its
+actual bytes, tar commit header and catalog; record the produced digest rather
+than pretending the local receipt qualifies a public object. Upload its checksum
+too.
 
 Create/push an annotated `v0.9.0` tag at the qualified source using full refs and
 normal non-force push. Create one stable, non-draft canonical GitHub release

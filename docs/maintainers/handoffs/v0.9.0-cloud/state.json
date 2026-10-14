@@ -8,7 +8,9 @@
   "pr_head": "b0266bbf616dc2ad18e6d2fd0c02f8ad277cb778",
   "pr_ci": {"id": 38467780009, "status": "completed", "conclusion": "success"},
   "pr_codeql": {"id": 38467773944, "status": "completed", "conclusion": "success"},
-  "main_ci": {"id": 38477515288, "head_sha": "d2425ccfa70b1da6293dac7e786816e328b22370", "status_at_handoff": "in_progress", "conclusion_at_handoff": null},
+  "main_ci": {"id": 38477515288, "head_sha": "d2425ccfa70b1da6293dac7e786816e328b22370", "status_at_handoff": "completed", "conclusion_at_handoff": "failure"},
+  "main_failure_jobs": [{"id": 115571758505, "name": "quality", "cause": "stale models.dev pricing snapshot; existing 60-second freshness gate failed"}, {"id": 115571758972, "name": "windows (x86_64-pc-windows-gnu)", "test": "test_A07_unnegotiated_progress_is_refused", "cause": "initialize(progress=False) received no message within existing four seconds; empty stderr; root cause not diagnosed", "sdk_summary": "202 tests, 1 failure, 18 existing Windows skips"}],
+  "publication_blocked_until_repaired_source_pr_and_main_green": true,
   "canonical_tag": "v0.9.0",
   "tooling_tags": ["octet-binaries-v0.9.0", "octet-serve-v0.9.0"],
   "tags_created": false,
@@ -30,5 +32,6 @@
   "preserved_local_work": {"worktree": "octet-l18", "branch": "release-stack/0.9.0/18-pi-full-setup", "dirty_paths": 14, "uploaded": false},
   "unrun_acceptance": ["live providers/subscriptions", "audio", "attended physical-display UI", "granted Cua Driver journeys", "experimental Pi workflows/cold start"],
   "independent_channels_not_qualified": ["npm", "Homebrew", "crates.io", "SDK registries", "container registries"],
+  "open_dependabot_alert": {"id": 4, "ghsa": "GHSA-59cr-6r3x-644w", "severity": "medium", "package": "GitPython", "manifest": "docs/benchmarks/swe-bench-live-lite-v0.6.3/requirements.txt", "pinned": "3.1.61", "first_patched": "3.1.62", "main_dependencies_job": "success", "dismissed": false},
   "unresolved_issue": "https://github.com/skaft-software/octet/issues/572"
 }
