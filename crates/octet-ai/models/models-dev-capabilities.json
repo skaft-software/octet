@@ -15179,7 +15179,7 @@
         "type": "toggle"
       }
     ],
-    "structured_output": false,
+    "structured_output": true,
     "tool_call": true
   },
   "openrouter/inference-net/schematron-v2-small": {
@@ -21539,7 +21539,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
