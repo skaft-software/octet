@@ -3724,10 +3724,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 34365,
+    "cache_read": 31958,
     "cache_write_5m": 0,
-    "input": 412380,
-    "output": 824760,
+    "input": 383496,
+    "output": 766992,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3740,7 +3740,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 44100,
+    "input": 40500,
     "output": 765000,
     "reasoning": null
   },
@@ -5627,6 +5627,13 @@
     "output": 3200000,
     "reasoning": null
   },
+  "openrouter/unbiased/pareto-26.9": {
+    "cache_read": 250000,
+    "cache_write_5m": 0,
+    "input": 2500000,
+    "output": 7500000,
+    "reasoning": null
+  },
   "openrouter/undi95/remm-slerp-l2-13b": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -5817,9 +5824,9 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.2": {
-    "cache_read": 59000,
+    "cache_read": 70000,
     "cache_write_5m": 0,
-    "input": 60000,
+    "input": 80000,
     "output": 7000000,
     "reasoning": null
   },
@@ -5833,7 +5840,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "cache_read": 10800,
     "cache_write_5m": 0,
-    "input": 26100,
+    "input": 33300,
     "output": 900000,
     "reasoning": null
   },
@@ -5889,15 +5896,15 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 44100,
+    "input": 40500,
     "output": 765000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 7938,
+    "cache_read": 4620,
     "cache_write_5m": 0,
-    "input": 249480,
-    "output": 748440,
+    "input": 145200,
+    "output": 435600,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
@@ -5973,15 +5980,15 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "cache_read": 10800,
     "cache_write_5m": 0,
-    "input": 26100,
+    "input": 33300,
     "output": 900000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 59000,
+    "cache_read": 58600,
     "cache_write_5m": 0,
-    "input": 79000,
-    "output": 4800000,
+    "input": 63000,
+    "output": 4400000,
     "reasoning": null
   },
   "qwen-token-plan-cn/deepseek-v3.2": {

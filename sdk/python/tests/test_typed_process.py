@@ -12,6 +12,10 @@ import unittest
 
 TOOLS = ["typed_roundtrip", "invalid_output", "typed_wait", "typed_progress", "typed_diagnostics", "malformed_diagnostics"]
 VALID = {"name": "λ😀", "enabled": True, "samples": [1.0]}
+# Spawning a fresh interpreter and importing the SDK is not protocol latency.
+# Cold Windows runners can exceed the per-reply deadline before the fixture
+# reads stdin, so startup is synchronized separately and bounded on its own.
+STARTUP_SECONDS = 30
 
 
 class ProcessHarness:
@@ -38,6 +42,7 @@ class ProcessHarness:
         self.reader = threading.Thread(target=read, daemon=True)
         self.reader.start()
         self.sequence = 0
+        self.wait_started()
 
     def cleanup_process(self):
         if self.process.poll() is None:
@@ -46,6 +51,25 @@ class ProcessHarness:
         self.process.stdin.close()
         self.reader.join(timeout=3)
         self.process.stdout.close()
+
+    def wait_started(self):
+        deadline = time.monotonic() + STARTUP_SECONDS
+        while True:
+            text = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+            # Only complete records: the child may be mid-write.
+            lines = text.splitlines() if text.endswith("\n") else text.splitlines()[:-1]
+            if "started" in [json.loads(line)["event"] for line in lines]:
+                return
+            if self.process.poll() is not None:
+                self.fail(f"fixture exited with {self.process.returncode} before starting: {self.stderr_text()}")
+            if time.monotonic() > deadline:
+                self.fail(f"fixture did not start within {STARTUP_SECONDS}s: {self.stderr_text()}")
+            time.sleep(0.01)
+
+    def stderr_text(self):
+        self.stderr.flush()
+        self.stderr.seek(0)
+        return self.stderr.read()
 
     def send(self, method, params=None, *, notification=False):
         self.sequence += 1
@@ -60,8 +84,8 @@ class ProcessHarness:
         try:
             return self.messages.get(timeout=4)
         except queue.Empty:
-            self.stderr.seek(0)
-            self.fail("process did not respond: " + self.stderr.read())
+            self.fail(f"process did not respond (exit status {self.process.poll()}, "
+                      f"events {[r['event'] for r in self.events()]}): {self.stderr_text()}")
 
     def initialize(self, *, progress=True):
         self.send("initialize", {"api_version": "0.4", "contributes": {"tools": self.tools}, "protocol": {
