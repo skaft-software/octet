@@ -1637,13 +1637,6 @@
     "output": 0,
     "reasoning": null
   },
-  "nvidia/nvidia/nemotron-3-super-120b-a12b": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 200000,
-    "output": 800000,
-    "reasoning": null
-  },
   "nvidia/nvidia/nemotron-3-ultra-550b-a55b": {
     "cache_read": 150000,
     "cache_write_5m": 0,
@@ -1659,6 +1652,13 @@
     "reasoning": null
   },
   "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
+  "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b": {
     "cache_read": 0,
     "cache_write_5m": 0,
     "input": 0,
@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 33930,
+    "cache_read": 30276,
     "cache_write_5m": 0,
-    "input": 407160,
-    "output": 814320,
+    "input": 363312,
+    "output": 726624,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3747,7 +3747,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 20160,
+    "input": 15840,
     "output": 891000,
     "reasoning": null
   },
@@ -3948,10 +3948,10 @@
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
-    "cache_read": 50000,
+    "cache_read": 42500,
     "cache_write_5m": 0,
-    "input": 90000,
-    "output": 300000,
+    "input": 76500,
+    "output": 255000,
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it:free": {
@@ -3962,10 +3962,10 @@
     "reasoning": null
   },
   "openrouter/google/gemma-4-31b-it": {
-    "cache_read": 50000,
+    "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 90000,
-    "output": 340000,
+    "input": 200000,
+    "output": 400000,
     "reasoning": null
   },
   "openrouter/google/gemma-4-31b-it:free": {
@@ -4384,8 +4384,8 @@
   "openrouter/mistralai/mistral-small-3.2-24b-instruct": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 93750,
-    "output": 250000,
+    "input": 75000,
+    "output": 200000,
     "reasoning": null
   },
   "openrouter/mistralai/mixtral-8x22b-instruct": {
@@ -4447,7 +4447,7 @@
   "openrouter/moonshotai/kimi-k3": {
     "cache_read": 280000,
     "cache_write_5m": 0,
-    "input": 500000,
+    "input": 580000,
     "output": 15000000,
     "reasoning": null
   },
@@ -4844,17 +4844,17 @@
     "reasoning": null
   },
   "openrouter/openai/gpt-5.6-sol": {
-    "cache_read": 200000,
-    "cache_write_5m": 2500000,
-    "input": 2000000,
-    "output": 10000000,
+    "cache_read": 400000,
+    "cache_write_5m": 5000000,
+    "input": 4000000,
+    "output": 20000000,
     "reasoning": null
   },
   "openrouter/openai/gpt-5.6-sol-pro": {
-    "cache_read": 200000,
-    "cache_write_5m": 2500000,
-    "input": 2000000,
-    "output": 10000000,
+    "cache_read": 400000,
+    "cache_write_5m": 5000000,
+    "input": 4000000,
+    "output": 20000000,
     "reasoning": null
   },
   "openrouter/openai/gpt-5.6-terra": {
@@ -5327,10 +5327,10 @@
     "reasoning": null
   },
   "openrouter/qwen/qwen3.6-35b-a3b": {
-    "cache_read": 100000,
+    "cache_read": 50000,
     "cache_write_5m": 0,
-    "input": 100000,
-    "output": 950000,
+    "input": 150000,
+    "output": 1000000,
     "reasoning": null
   },
   "openrouter/qwen/qwen3.6-flash": {
@@ -5824,9 +5824,9 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.2": {
-    "cache_read": 49000,
+    "cache_read": 39000,
     "cache_write_5m": 0,
-    "input": 50000,
+    "input": 40000,
     "output": 7000000,
     "reasoning": null
   },
@@ -5896,7 +5896,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 20160,
+    "input": 15840,
     "output": 891000,
     "reasoning": null
   },
@@ -5929,10 +5929,10 @@
     "reasoning": 12000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 300000,
+    "cache_read": 280000,
     "cache_write_5m": 0,
-    "input": 400000,
-    "output": 14000000,
+    "input": 580000,
+    "output": 15000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
@@ -5985,16 +5985,16 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 10800,
+    "cache_read": 11250,
     "cache_write_5m": 0,
     "input": 36000,
     "output": 900000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 58600,
+    "cache_read": 56500,
     "cache_write_5m": 0,
-    "input": 63000,
+    "input": 60800,
     "output": 4400000,
     "reasoning": null
   },

@@ -1,9 +1,9 @@
 # octet computer-use
 
-**Source candidate distribution: 0.9.1.** This bundle requires exactly octet 0.9.1.
+**Source candidate distribution: 0.9.2.** This bundle requires exactly octet 0.9.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.1 candidate record](../../docs/releases/v0.9.1.md) for availability and
-remaining qualification. 0.9.1 assets are not published; use a reviewed source
+[0.9.2 candidate record](../../docs/releases/v0.9.2.md) for availability and
+remaining qualification. 0.9.2 assets are not published; use a reviewed source
 checkout with `--extension-dir ./extensions` until publication is approved.
 Windows and Linux desktop parity remain unqualified.
 
@@ -229,7 +229,7 @@ An explicit `--extension-dir` grants that reviewed source host authority even
 under `--safe-mode`; granted extension code runs with your OS permissions.
 Set `OCTET_CUA_CONFIRM=1` to approve each effectful computer-use action.
 
-**Current candidate limits.** Official 0.9.1 extension assets are unpublished.
+**Current candidate limits.** Official 0.9.2 extension assets are unpublished.
 Replacing an installed extension (`extension update` or `install --replace`)
 is unsupported on Windows: atomic directory exchange is unavailable, and the
 previous installation stays active. Test a reviewed candidate with the explicit

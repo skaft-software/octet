@@ -1,10 +1,10 @@
 # Pi extension compatibility: release status and merge notes
 
-> **Excluded from v0.9.1.** This ledger remains a development record, not a
+> **Excluded from v0.9.2.** This ledger remains a development record, not a
 > qualification requirement or shipped capability of the native release.
 > The experimental adapter stays source-only and is not in the release catalog.
 
-Dated evidence for the Pi 1.0.2 compatibility work targeted at octet 0.9.1.
+Dated evidence for the Pi 1.0.2 compatibility work targeted at octet 0.9.2.
 It records observed behaviour; it is not a frozen release or a publication approval. Row-level detail is in the [extension API
 ledger](pi-extension-api.md), and the user-facing scope is in
 [compatibility](pi-compatibility.md).

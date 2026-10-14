@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.2] - 2026-10-14
+
+The [release notes](docs/releases/v0.9.2.md) record shipped scope, qualification
+boundaries and known limitations.
+
+### Added
+
+- `/extensions install` downloads and installs every missing first-party
+  extension bundle concurrently, with a live progress row per bundle, and
+  `octet extension install --all` does the same from the shell. Installed
+  bundles are left untouched, and installing never enables or trusts a bundle.
+
+### Fixed
+
+- OpenCode Go `gemini-*` models, including Gemini Argon, use OpenCode Go's
+  Google endpoint and protocol with their declared thinking levels instead of
+  the OpenAI-compatible chat endpoint (#592).
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.1 and 0.9.0 known limitations below still apply.
+
 ## [0.9.1] - 2026-10-14
 
 The [release notes](docs/releases/v0.9.1.md) record shipped scope, qualification

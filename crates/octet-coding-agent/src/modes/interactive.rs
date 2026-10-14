@@ -80,8 +80,9 @@ mod session_tree_menu;
 mod settings_menu;
 
 use extension_menu::{
-    authority_label, extension_options_menu, python_runtime_setup_available, set_extension_enabled,
-    set_extension_host_authority, setup_python_runtime, ExtensionMenuOutcome,
+    authority_label, extension_options_menu, install_official_extensions,
+    python_runtime_setup_available, set_extension_enabled, set_extension_host_authority,
+    setup_python_runtime, ExtensionMenuOutcome,
 };
 
 /// Ordered controls sent to the frozen Agent during an active run.
@@ -6394,7 +6395,7 @@ async fn extension_management_menu(
                 shell,
                 input,
                 "Extensions",
-                "No executable extension bundles are installed.\n\nInstall one with `octet extension install <name>`.".into(),
+                "No executable extension bundles are installed.\n\nInstall all five first-party extensions with `/extensions install`, or one with `octet extension install <name>`.".into(),
             )
             .await?;
             return Ok(app);
@@ -10408,6 +10409,9 @@ async fn run_idle_command_inner(
         Command::Extensions(commands::ExtensionsSubcommand::Status) => {
             request_extension_ui(shell, &mut app);
             shell.show_overlay_text(app.executable_extensions.inspect_text());
+        }
+        Command::Extensions(commands::ExtensionsSubcommand::Install) => {
+            install_official_extensions(&mut app, shell, input).await?;
         }
         Command::Extensions(commands::ExtensionsSubcommand::Setup { extension }) => {
             setup_python_runtime(&mut app, shell, input, &extension).await?;

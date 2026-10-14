@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::extension_package::{
     acquire_lock, checksum_for_asset, download_bytes, download_file, open_archive_snapshot,
-    publish_staging, sha256_open_file_bounded, sync_directory, validate_sha256, MAX_ARCHIVE_BYTES,
-    MAX_CHECKSUM_BYTES, RELEASE_REPOSITORY,
+    publish_staging, sha256_open_file_bounded, sync_directory, validate_sha256, DownloadProgress,
+    MAX_ARCHIVE_BYTES, MAX_CHECKSUM_BYTES, RELEASE_REPOSITORY,
 };
 
 pub(super) const BUNDLE_MANIFEST: &str = "extension.toml";
@@ -80,6 +80,7 @@ pub(super) async fn install_official(
     root: &Path,
     id: &str,
     replace: bool,
+    progress: DownloadProgress<'_>,
 ) -> anyhow::Result<InstalledBundleManifest> {
     validate_bundle_id(id)?;
     if !is_official_bundle(id) {
@@ -105,7 +106,7 @@ pub(super) async fn install_official(
         .tempdir()
         .context("cannot create temporary extension download directory")?;
     let archive = temporary.path().join(&asset);
-    let actual = download_file(&archive_url, &archive, MAX_ARCHIVE_BYTES).await?;
+    let actual = download_file(&archive_url, &archive, MAX_ARCHIVE_BYTES, progress).await?;
     if actual != expected {
         anyhow::bail!("checksum mismatch for {asset}: expected {expected}, downloaded {actual}");
     }
@@ -119,6 +120,44 @@ pub(super) async fn install_official(
         replace,
         Some(id),
     )
+}
+
+/// Where one official bundle stands while [`install_missing_official`] runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OfficialInstallState {
+    Waiting,
+    Downloading { received: u64, total: Option<u64> },
+    Installed { version: String },
+    AlreadyInstalled,
+    Failed(String),
+}
+
+/// Install every official bundle that is not installed yet, downloading them
+/// concurrently. Installed bundles are left untouched, and installing never
+/// enables or trusts a bundle. `report` observes each state change; the
+/// returned states are final and follow the release catalog order.
+pub(crate) async fn install_missing_official(
+    root: &Path,
+    report: &(dyn Fn(&str, &OfficialInstallState) + Send + Sync),
+) -> Vec<(String, OfficialInstallState)> {
+    let installs = official_bundle_ids().map(|id| async move {
+        let state = if ensure_installed(root, id).is_ok() {
+            OfficialInstallState::AlreadyInstalled
+        } else {
+            let progress = |received, total| {
+                report(id, &OfficialInstallState::Downloading { received, total });
+            };
+            match install_official(root, id, false, &progress).await {
+                Ok(manifest) => OfficialInstallState::Installed {
+                    version: manifest.version,
+                },
+                Err(error) => OfficialInstallState::Failed(format!("{error:#}")),
+            }
+        };
+        report(id, &state);
+        (id.to_owned(), state)
+    });
+    futures_util::future::join_all(installs).await
 }
 
 pub(super) fn install_local(

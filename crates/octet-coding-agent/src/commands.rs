@@ -100,6 +100,8 @@ pub enum ExtensionsSubcommand {
     Menu,
     Status,
     Reload,
+    /// Download and install every first-party bundle that is not installed.
+    Install,
     /// Explicit host-owned bootstrap of a selected trusted Python runtime.
     Setup {
         extension: String,
@@ -440,8 +442,8 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "extensions",
-        "/extensions [status|reload|inspect <agent-session:…>|action <extension> <action-id>]",
-        "enable, disable, inspect, or reload executable extensions",
+        "/extensions [install|status|reload|inspect <agent-session:…>|action <extension> <action-id>]",
+        "install, enable, disable, inspect, or reload executable extensions",
         true
     ),
     slash!(
@@ -1008,6 +1010,7 @@ pub fn parse(input: &str) -> Command {
             [] | ["list"] => Command::Extensions(ExtensionsSubcommand::Menu),
             ["status"] => Command::Extensions(ExtensionsSubcommand::Status),
             ["reload"] => Command::Extensions(ExtensionsSubcommand::Reload),
+            ["install"] => Command::Extensions(ExtensionsSubcommand::Install),
             ["setup", extension] => Command::Extensions(ExtensionsSubcommand::Setup {
                 extension: (*extension).to_owned(),
             }),

@@ -277,13 +277,14 @@ octet extension list
 ```
 
 The five executable bundles are pinned exactly to the
-running host: the published 0.9.1 bundles require `=0.9.1`. See the
-[0.9.1 release notes](releases/v0.9.1.md) and the version-pinned GitHub release
+running host: the published 0.9.2 bundles require `=0.9.2`. See the
+[0.9.2 release notes](releases/v0.9.2.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
 match the running host version:
 
 ```text
 octet extension install NAME
+octet extension install --all
 octet extension update NAME
 octet extension remove NAME
 ```
@@ -292,7 +293,8 @@ The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
 `octet-subagents` and `octet-web-search`. The experimental `octet-pi-compat`
 adapter does not ship in the catalog. Checksummed bundles install atomically
 under `~/.octet/extensions/<id>`, and a local update must match the managed
-package ID. Nothing runs at install: no hook, dependency setup, activation,
+package ID. `--all` (or `/extensions install` in the TUI) installs every catalog
+bundle that is not installed yet and leaves installed ones untouched. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See
 [Extensions](extensions.md).
 

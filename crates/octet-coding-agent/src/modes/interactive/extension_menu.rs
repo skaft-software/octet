@@ -1608,6 +1608,169 @@ async fn setup_python_runtime_fenced(
     }
 }
 
+/// `/extensions install`: download and install every first-party bundle that
+/// is missing, with one live progress row per bundle. Installing never enables
+/// or trusts a bundle; activation stays an explicit choice in `/extensions`.
+pub(super) async fn install_official_extensions(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    input: &mut EventStream,
+) -> anyhow::Result<()> {
+    use crate::extension_bundle::OfficialInstallState;
+    let root = match crate::extension_package::extensions_root() {
+        Ok(root) => root,
+        Err(error) => {
+            shell.error(format!("extension install failed: {error:#}"));
+            return Ok(());
+        }
+    };
+    let rows = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::extension_bundle::official_bundle_ids()
+            .map(|id| (id.to_owned(), OfficialInstallState::Waiting))
+            .collect::<Vec<_>>(),
+    ));
+    let observed = rows.clone();
+    let report = move |id: &str, state: &OfficialInstallState| {
+        let mut rows = observed.lock().expect("official install progress");
+        if let Some(row) = rows.iter_mut().find(|(candidate, _)| candidate == id) {
+            row.1 = state.clone();
+        }
+    };
+    let unicode = shell.theme().unicode();
+    let dialogs = app.executable_extensions.lifecycle_snapshot();
+    let title = format!(
+        "Extensions · first-party · {}",
+        rows.lock().expect("official install progress").len()
+    );
+    let finished = {
+        let work = crate::extension_bundle::install_missing_official(&root, &report);
+        tokio::pin!(work);
+        let mut console = ExtensionActionConsole::new(shell, input, &dialogs, title.clone());
+        console.show();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let finished = loop {
+            tokio::select! {
+                biased;
+                _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                    console.shell.request_close();
+                    break None;
+                }
+                event = console.input.next() => match event {
+                    Some(Ok(Event::Key(key))) if keymap::is_close_key(&key) => {
+                        console.shell.request_close();
+                        break None;
+                    }
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press && (key.code == KeyCode::Esc || is_ctrl_c(&key)) => break None,
+                    Some(Ok(Event::Resize(columns, rows))) => { console.shell.set_size(columns, rows); console.show(); }
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => break Some(Err(error.into())),
+                    None => break None,
+                },
+                results = &mut work => break Some(Ok(results)),
+                _ = tick.tick() => {
+                    let snapshot = rows.lock().expect("official install progress").clone();
+                    console.lines = official_install_rows(&snapshot, unicode);
+                    console.frame = console.frame.wrapping_add(1);
+                    console.show();
+                }
+            }
+        };
+        console.close();
+        finished
+    };
+    match finished {
+        None => {
+            let snapshot = rows.lock().expect("official install progress").clone();
+            let kept = snapshot
+                .iter()
+                .filter(|(_, state)| matches!(state, OfficialInstallState::Installed { .. }))
+                .count();
+            shell.notice(format!(
+                "extension install cancelled; {kept} newly installed bundle(s) were kept"
+            ));
+        }
+        Some(Err(error)) => return Err(error),
+        Some(Ok(results)) => {
+            let mut text = format!("{title}\n\n");
+            text.push_str(&official_install_rows(&results, unicode).join("\n"));
+            for (id, state) in &results {
+                if let OfficialInstallState::Failed(error) = state {
+                    text.push_str(&format!("\n\n{id}: {error}"));
+                }
+            }
+            text.push_str(
+                "\n\nInstalled bundles stay off until you turn them on: select one in /extensions. \
+                 Full access trusts enabled extensions by default; safe mode keeps them stopped.",
+            );
+            shell.show_overlay_text(text);
+        }
+    }
+    request_extension_ui(shell, app);
+    Ok(())
+}
+
+fn official_extension_label(id: &str) -> &str {
+    match id {
+        "octet-mcp" => "MCP",
+        "octet-web-search" => "Web search",
+        "octet-subagents" => "Subagents",
+        "octet-codemode" => "Codemode",
+        "octet-computer-use" => "Computer use",
+        other => other,
+    }
+}
+
+/// One aligned `label  bar  status` row per official bundle.
+fn official_install_rows(
+    rows: &[(String, crate::extension_bundle::OfficialInstallState)],
+    unicode: bool,
+) -> Vec<String> {
+    use crate::extension_bundle::OfficialInstallState;
+    const BAR: usize = 20;
+    let (full, empty, done, failed) = if unicode {
+        ('█', '░', "✓", "✗")
+    } else {
+        ('#', '-', "ok", "x")
+    };
+    let width = rows
+        .iter()
+        .map(|(id, _)| official_extension_label(id).chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|(id, state)| {
+            let (filled, status) = match state {
+                OfficialInstallState::Waiting => (0, "waiting".to_owned()),
+                OfficialInstallState::Downloading {
+                    received,
+                    total: Some(total),
+                } if *total > 0 => {
+                    let percent = (received.saturating_mul(100) / total).min(100) as usize;
+                    (percent * BAR / 100, format!("installing {percent}%"))
+                }
+                OfficialInstallState::Downloading { received, .. } => {
+                    (0, format!("installing {} KB", received / 1024))
+                }
+                OfficialInstallState::Installed { version } => {
+                    (BAR, format!("{done} installed {version}"))
+                }
+                OfficialInstallState::AlreadyInstalled => {
+                    (BAR, format!("{done} already installed"))
+                }
+                OfficialInstallState::Failed(_) => (0, format!("{failed} failed")),
+            };
+            let bar = std::iter::repeat_n(full, filled)
+                .chain(std::iter::repeat_n(empty, BAR - filled))
+                .collect::<String>();
+            format!(
+                "{label:<width$}  {bar}  {status}",
+                label = official_extension_label(id)
+            )
+        })
+        .collect()
+}
+
 /// Status first, then the first line of any detail, for the picker subtitle.
 fn menu_purpose(menu: &octet_agent::ExtensionMenu, detail: Option<&str>) -> Option<String> {
     let status = menu.status.as_ref().map(|status| status.label.clone());
@@ -2357,5 +2520,51 @@ mod tests {
         assert!(options.generated);
         assert!(options.menu.items.is_empty());
         assert_eq!(options.menu.status.unwrap().label, "Not running");
+    }
+
+    #[test]
+    fn official_install_rows_align_labels_and_show_each_state() {
+        use crate::extension_bundle::OfficialInstallState as State;
+        let rows = vec![
+            ("octet-mcp".to_owned(), State::AlreadyInstalled),
+            (
+                "octet-web-search".to_owned(),
+                State::Installed {
+                    version: "0.9.2".into(),
+                },
+            ),
+            (
+                "octet-subagents".to_owned(),
+                State::Downloading {
+                    received: 50,
+                    total: Some(200),
+                },
+            ),
+            ("octet-codemode".to_owned(), State::Waiting),
+            (
+                "octet-computer-use".to_owned(),
+                State::Failed("offline".into()),
+            ),
+        ];
+        let lines = official_install_rows(&rows, true);
+        assert_eq!(
+            lines,
+            [
+                format!("MCP           {}  ✓ already installed", "█".repeat(20)),
+                format!("Web search    {}  ✓ installed 0.9.2", "█".repeat(20)),
+                format!(
+                    "Subagents     {}{}  installing 25%",
+                    "█".repeat(5),
+                    "░".repeat(15)
+                ),
+                format!("Codemode      {}  waiting", "░".repeat(20)),
+                format!("Computer use  {}  ✗ failed", "░".repeat(20)),
+            ]
+        );
+        let ascii = official_install_rows(&rows[..1], false);
+        assert_eq!(
+            ascii,
+            [format!("MCP  {}  ok already installed", "#".repeat(20))]
+        );
     }
 }

@@ -7,11 +7,11 @@ defines version policy and the distinct canonical API `0.3` models. Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
-**Identity boundary:** octet 0.9.1 candidate source uses only octet first-party names,
+**Identity boundary:** octet 0.9.2 candidate source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The source SDK distributions and six official executable bundles are version
-`0.9.1`; independent examples keep their own versions. 0.9.1 assets are not
+`0.9.2`; independent examples keep their own versions. 0.9.2 assets are not
 published; use reviewed source or matching local archives. Native publication
 does not publish SDK registries; see
 [installation and availability](../installation.md).
@@ -768,9 +768,9 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.9.1 candidate availability and remaining qualification, consult the
-[candidate record](../releases/v0.9.1.md) and [installation](../installation.md).
-0.9.1 assets are not published. Use reviewed source or a matching local archive
+octet 0.9.2 candidate availability and remaining qualification, consult the
+[candidate record](../releases/v0.9.2.md) and [installation](../installation.md).
+0.9.2 assets are not published. Use reviewed source or a matching local archive
 until publication is approved and version-matched assets are verified.
 
 Executable bundles use runtime `extension.toml`. An archive has exactly one root
@@ -794,9 +794,9 @@ unpackaged for legacy runtime compatibility. The current source bundle declares:
 
 ```toml
 name = "octet-web-search"
-version = "0.9.1"
+version = "0.9.2"
 api_version = "0.4"
-requires_octet = "=0.9.1"
+requires_octet = "=0.9.2"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when
@@ -804,7 +804,7 @@ present. Installed bundles require an exact match to the running octet version.
 The first-party catalog is `octet-codemode`,
 `octet-computer-use`, `octet-mcp`, `octet-subagents`, and `octet-web-search`.
 The five working-tree manifests declare API `0.4`; their exact host pins still
-apply. This source metadata is not evidence of a published 0.9.1 bundle.
+apply. This source metadata is not evidence of a published 0.9.2 bundle.
 
 After matching publication is verified:
 
