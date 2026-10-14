@@ -176,6 +176,17 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
 
 ### Fixed
 
+- Starting octet from your home directory no longer reports your global
+  `~/.octet` prompts, skills and themes as untrusted project resources, which made
+  every reload end in `reload failed`. Reload notes also show prompt diagnostics
+  as `path: message` instead of a raw `PromptDiagnostic { … }` dump.
+- Removing your last custom provider in `/setup` now deletes the registry only if
+  it is unchanged since it was read, and cleans up only that provider's model
+  cache, so another octet process's newer providers and caches are kept.
+- Experimental Pi compatibility: stalled Pi factory setups now share one
+  absolute load deadline (22 s) instead of each getting a minimum wait after the
+  20 s budget runs out, so many stalled factories can no longer push the load past
+  the host's 30 s limit.
 - Starting with `octet-pi-compat` enabled no longer keeps the screen blank for
   seconds. The Pi mirror loaded every factory up to three times before the first
   frame (about 7-11 s for a 20-extension setup) on every start. It now reuses its
