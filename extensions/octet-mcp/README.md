@@ -1,9 +1,9 @@
 # octet-mcp
 
-**Source candidate distribution: 0.9.1.** This bundle needs exactly octet 0.9.1.
+**Source candidate distribution: 0.9.2.** This bundle needs exactly octet 0.9.2.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.1 candidate record](../../docs/releases/v0.9.1.md) for availability and
-remaining qualification. 0.9.1 assets are not published; use the reviewed
+[0.9.2 candidate record](../../docs/releases/v0.9.2.md) for availability and
+remaining qualification. 0.9.2 assets are not published; use the reviewed
 source-checkout route below until publication is approved.
 
 Connect explicitly configured [MCP](https://modelcontextprotocol.io/) tool
@@ -47,7 +47,7 @@ your reviewed local paths, and protect it with `chmod 600`:
 }
 ```
 
-With [octet 0.9.1](../../docs/installation.md), Python 3.9+ on `PATH`, and
+With [octet 0.9.2](../../docs/installation.md), Python 3.9+ on `PATH`, and
 verified matching published assets, the catalog path is:
 
 ```console
@@ -166,7 +166,7 @@ elicitation and ambient discovery are unsupported.
 
 ## Reference
 
-The bundle needs exactly octet `0.9.1` and uses API `0.4`. What follows is a
+The bundle needs exactly octet `0.9.2` and uses API `0.4`. What follows is a
 retained bundled-runtime contract, not a general SDK authoring guide.
 
 - <a id="security-and-authority"></a>[Security and

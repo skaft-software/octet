@@ -5,7 +5,7 @@ One author source file, [`extension.ts`](extension.ts), registers a useful local
 Unicode characters, words, lines and UTF-8 bytes. The SDK owns the process wire,
 progress, cancellation and shutdown; authors do not write JSON-RPC.
 
-Requires Node **>=22.19.0** and the reviewed **0.9.1 source SDK**. No provider,
+Requires Node **>=22.19.0** and the reviewed **0.9.2 source SDK**. No provider,
 credentials, network, global install or registry package is needed. From the
 repository root:
 

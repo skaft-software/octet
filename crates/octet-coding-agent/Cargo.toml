@@ -32,10 +32,10 @@ name = "octet-host"
 path = "src/bin/octet-host.rs"
 
 [dependencies]
-octet-tern = { version = "=0.9.1", path = "../octet-tern" }
-octet-ai = { version = "=0.9.1", path = "../octet-ai" }
-octet-agent = { version = "=0.9.1", path = "../octet-agent" }
-octet-migrate-types = { version = "=0.9.1", path = "../octet-migrate-types" }
+octet-tern = { version = "=0.9.2", path = "../octet-tern" }
+octet-ai = { version = "=0.9.2", path = "../octet-ai" }
+octet-agent = { version = "=0.9.2", path = "../octet-agent" }
+octet-migrate-types = { version = "=0.9.2", path = "../octet-migrate-types" }
 # Vendored semantic rich-rendering integration. Keeping it in this workspace
 # makes fresh clones build the exact implementation reviewed with octet.
 sexy-tui-rs = { version = "=0.3.1", path = "../sexy-tui-rs" }

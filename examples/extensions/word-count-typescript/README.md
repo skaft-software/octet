@@ -7,7 +7,7 @@ tool and the `wordcount` slash command, both of which return
 schema; the [process SDK](../../../sdk/typescript/process/README.md) owns the
 JSON-RPC process loop, cancellation and shutdown.
 
-Requires Node **>=22.19.0** and the reviewed **0.9.1 source SDK**. No provider,
+Requires Node **>=22.19.0** and the reviewed **0.9.2 source SDK**. No provider,
 credentials, network, global install or registry package is needed. From the
 repository root:
 

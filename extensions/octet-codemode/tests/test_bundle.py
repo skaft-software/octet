@@ -84,12 +84,12 @@ class BundleTests(unittest.TestCase):
                 str(REPOSITORY / "scripts/package-octet-extension-release.sh"),
                 "octet-codemode",
                 str(directory / "out"),
-                "v0.9.1",
+                "v0.9.2",
                 str(staging),
             ]
             environment = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
             run_checked(command, env=environment)
-            archive = directory / "out/octet-codemode-0.9.1.tar.gz"
+            archive = directory / "out/octet-codemode-0.9.2.tar.gz"
             first = archive.read_bytes()
             run_checked(command, env=environment)
             self.assertEqual(archive.read_bytes(), first, "archive is not reproducible")
