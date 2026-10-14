@@ -2426,6 +2426,7 @@ fn extension_package_commands_parse_without_a_prompt() {
             command: ExtensionCommand::Install {
                 name: Some(ref name),
                 path: None,
+                all: false,
             }
         }) if name == "octet-subagents"
     ));
@@ -2438,9 +2439,35 @@ fn extension_package_commands_parse_without_a_prompt() {
             command: ExtensionCommand::Install {
                 name: None,
                 path: Some(_),
+                all: false,
             }
         })
     ));
+
+    let cli = Cli::try_parse_from(["octet", "extension", "install", "--all"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(TopLevelCommand::Extension {
+            command: ExtensionCommand::Install {
+                name: None,
+                path: None,
+                all: true,
+            }
+        })
+    ));
+    for conflicting in [
+        &["octet", "extension", "install", "--all", "octet-mcp"][..],
+        &[
+            "octet",
+            "extension",
+            "install",
+            "--all",
+            "--path",
+            "./bundle.tar.gz",
+        ][..],
+    ] {
+        assert!(Cli::try_parse_from(conflicting).is_err());
+    }
 
     let cli = Cli::try_parse_from(["octet", "extension", "update", "octet-web-search"]).unwrap();
     assert!(matches!(

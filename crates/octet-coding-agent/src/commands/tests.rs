@@ -661,6 +661,10 @@ fn parses_the_complete_v1_command_grammar() {
         Command::Extensions(ExtensionsSubcommand::Status)
     );
     assert_eq!(
+        parse("/extensions install"),
+        Command::Extensions(ExtensionsSubcommand::Install)
+    );
+    assert_eq!(
         parse("/extensions inspect agent-session:abc"),
         Command::Extensions(ExtensionsSubcommand::Inspect {
             reference: "agent-session:abc".into(),

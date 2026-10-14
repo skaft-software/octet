@@ -31,13 +31,16 @@ pub enum ExtensionCommand {
         /// Official extension bundle name.
         #[arg(
             value_name = "NAME",
-            required_unless_present = "path",
-            conflicts_with = "path"
+            required_unless_present_any = ["path", "all"],
+            conflicts_with_all = ["path", "all"]
         )]
         name: Option<String>,
         /// Install a local release archive instead of downloading one.
-        #[arg(long, value_name = "ARCHIVE")]
+        #[arg(long, value_name = "ARCHIVE", conflicts_with = "all")]
         path: Option<PathBuf>,
+        /// Install every official bundle that is not installed yet.
+        #[arg(long)]
+        all: bool,
     },
     /// List installed extension bundles.
     List,
@@ -68,8 +71,11 @@ impl Drop for PackageLock {
 
 pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
     match command {
-        ExtensionCommand::Install { name, path } => {
+        ExtensionCommand::Install { name, path, all } => {
             let root = extensions_root()?;
+            if all {
+                return install_all_official(&root).await;
+            }
             if let Some(path) = path {
                 let path = resolve_local_archive_path(&path)?;
                 let manifest = crate::extension_bundle::install_local(&root, &path, false)?;
@@ -77,7 +83,8 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
             } else {
                 let name = name.expect("clap requires a name unless --path is present");
                 let manifest =
-                    crate::extension_bundle::install_official(&root, &name, false).await?;
+                    crate::extension_bundle::install_official(&root, &name, false, &|_, _| {})
+                        .await?;
                 print_bundle_installed("Installed", &manifest);
             }
             Ok(())
@@ -100,7 +107,8 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
                     format!("{name} is not installed; run 'octet extension install {name}'")
                 })?;
                 let manifest =
-                    crate::extension_bundle::install_official(&root, &name, true).await?;
+                    crate::extension_bundle::install_official(&root, &name, true, &|_, _| {})
+                        .await?;
                 print_bundle_installed("Updated", &manifest);
             }
             Ok(())
@@ -114,6 +122,37 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn install_all_official(root: &Path) -> anyhow::Result<()> {
+    use crate::extension_bundle::OfficialInstallState;
+    let results = crate::extension_bundle::install_missing_official(root, &|_, _| {}).await;
+    let mut failed = 0usize;
+    for (id, state) in &results {
+        match state {
+            OfficialInstallState::Installed { version } => {
+                crate::output::stdout_line(format!("Installed {id} {version}."));
+            }
+            OfficialInstallState::AlreadyInstalled => {
+                crate::output::stdout_line(format!("{id} is already installed."));
+            }
+            OfficialInstallState::Failed(error) => {
+                failed += 1;
+                crate::output::stderr_line(format!("Could not install {id}: {error}"));
+            }
+            OfficialInstallState::Waiting | OfficialInstallState::Downloading { .. } => {}
+        }
+    }
+    crate::output::stdout_line(
+        "Installation does not enable extensions. Enable them from /extensions; full access trusts enabled extensions by default and safe mode keeps them stopped.",
+    );
+    if failed > 0 {
+        anyhow::bail!(
+            "{failed} of {} official extension bundles failed to install",
+            results.len()
+        );
+    }
+    Ok(())
 }
 
 fn print_bundle_installed(
@@ -370,7 +409,16 @@ async fn download_bytes_with_client(
     unreachable!("release download retry loop always has at least one attempt")
 }
 
-pub(super) async fn download_file(url: &str, path: &Path, maximum: u64) -> anyhow::Result<String> {
+/// Observes a download as `(received bytes, expected total)`. A retry restarts
+/// the count from zero.
+pub(crate) type DownloadProgress<'a> = &'a (dyn Fn(u64, Option<u64>) + Send + Sync);
+
+pub(super) async fn download_file(
+    url: &str,
+    path: &Path,
+    maximum: u64,
+    progress: DownloadProgress<'_>,
+) -> anyhow::Result<String> {
     let url = reqwest::Url::parse(url).context("invalid release download URL")?;
     let client = download_client(is_trusted_release_url)?;
     download_file_with_client(
@@ -380,6 +428,7 @@ pub(super) async fn download_file(url: &str, path: &Path, maximum: u64) -> anyho
         maximum,
         is_trusted_release_url,
         DOWNLOAD_RETRY_POLICY,
+        progress,
     )
     .await
 }
@@ -391,6 +440,7 @@ async fn download_file_with_client(
     maximum: u64,
     is_trusted: ReleaseUrlTrust,
     retry_policy: DownloadRetryPolicy,
+    progress: DownloadProgress<'_>,
 ) -> anyhow::Result<String> {
     let mut destination: Option<File> = None;
     let max_attempts = retry_policy.attempts();
@@ -420,8 +470,10 @@ async fn download_file_with_client(
                         })?,
                 ),
             };
+            let total = response.content_length();
             let mut hasher = Sha256::new();
             let mut downloaded = 0u64;
+            progress(0, total);
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.with_context(|| format!("cannot download {url}"))?;
@@ -433,6 +485,7 @@ async fn download_file_with_client(
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk)?;
+                progress(downloaded, total);
             }
             file.sync_all()?;
             Ok(digest_hex(hasher.finalize().as_slice()))

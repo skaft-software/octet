@@ -51,6 +51,7 @@ async fn test_download_to(
 ) -> anyhow::Result<Vec<u8>> {
     let url = reqwest::Url::parse(url).unwrap();
     if let Some(destination) = destination {
+        let received = std::sync::atomic::AtomicU64::new(u64::MAX);
         let digest = download_file_with_client(
             client,
             url,
@@ -58,10 +59,16 @@ async fn test_download_to(
             maximum as u64,
             is_trusted_test_release_url,
             TEST_RETRY_POLICY,
+            &|done, _| received.store(done, std::sync::atomic::Ordering::Relaxed),
         )
         .await?;
         let bytes = fs::read(destination)?;
         assert_eq!(digest, digest_hex(Sha256::digest(&bytes).as_slice()));
+        // Progress ends at exactly the bytes written by the final attempt.
+        assert_eq!(
+            received.load(std::sync::atomic::Ordering::Relaxed),
+            bytes.len() as u64
+        );
         Ok(bytes)
     } else {
         download_bytes_with_client(
@@ -614,7 +621,7 @@ async fn release_download_rejects_untrusted_initial_urls_before_sending() {
     let destination = directory.path().join("archive");
     for error in [
         download_bytes(&server.uri(), 16).await.unwrap_err(),
-        download_file(&server.uri(), &destination, 16)
+        download_file(&server.uri(), &destination, 16, &|_, _| {})
             .await
             .unwrap_err(),
     ] {
