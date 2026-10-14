@@ -1,6 +1,6 @@
 # Optional Pi factory compatibility
 
-> **Experimental source-only work; excluded from v0.9.0.** No Pi compatibility
+> **Experimental and unstable source-only work; excluded from v0.9.0.** No Pi compatibility
 > bundle is shipped or offered in this release's catalog. Instructions below
 > describe development setup, not a qualified release integration.
 

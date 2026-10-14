@@ -1,6 +1,8 @@
 # Optional Pi extension compatibility
 
-> **Not shipped in v0.9.0.** This page documents experimental source-only work.
+> **Experimental and unstable; not shipped in v0.9.0.** This page documents
+> experimental source-only work. Loading real Pi setups can be slow, and
+> individual extensions can fail to load or render.
 > `octet-pi-compat` is excluded from the official release catalog and assets;
 > these development receipts do not qualify installed-Pi lifecycle or workflow parity.
 

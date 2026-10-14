@@ -185,7 +185,10 @@ impl ResourceResolver {
         }
 
         let project_root = self.workspace.join(".octet").join(kind.directory_name());
-        if self.workspace_trusted {
+        if self.project_dir_is_global() {
+            // Started from the home directory: the project `.octet` is the global
+            // one, already scanned above with user trust.
+        } else if self.workspace_trusted {
             self.scan_root(
                 kind,
                 &project_root,
@@ -218,6 +221,20 @@ impl ResourceResolver {
             kind,
             resources: selected.into_values().collect::<Vec<_>>().into(),
             diagnostics: diagnostics.into(),
+        }
+    }
+
+    fn project_dir_is_global(&self) -> bool {
+        let Some(global_octet_dir) = &self.global_octet_dir else {
+            return false;
+        };
+        let project_octet_dir = self.workspace.join(".octet");
+        match (
+            project_octet_dir.canonicalize(),
+            global_octet_dir.canonicalize(),
+        ) {
+            (Ok(project), Ok(global)) => project == global,
+            _ => project_octet_dir == *global_octet_dir,
         }
     }
 
@@ -635,6 +652,30 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.message.contains("workspace is not trusted")));
+    }
+
+    #[test]
+    fn home_workspace_loads_global_resources_without_an_untrusted_project_diagnostic() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let global = home.join(".octet");
+        std::fs::create_dir_all(global.join("prompts")).unwrap();
+        std::fs::write(global.join("prompts/review.md"), "global").unwrap();
+        for trusted in [false, true] {
+            let resolver =
+                ResourceResolver::with_global_octet_dir(home.clone(), trusted, global.clone());
+
+            let snapshot = resolver.discover(ResourceKind::Prompt, &[]);
+
+            let review = snapshot.get("review").unwrap();
+            assert_eq!(review.scope, ResourceScope::Global);
+            assert_eq!(resolver.read_text(review).unwrap(), "global");
+            assert!(
+                snapshot.diagnostics().is_empty(),
+                "trusted={trusted}: {:?}",
+                snapshot.diagnostics()
+            );
+        }
     }
 
     #[test]

@@ -6,10 +6,18 @@ The [release notes](docs/releases/v0.9.0.md) record shipped scope, qualification
 boundaries and known limitations. The version-pinned release page records actual
 artifact and channel publication.
 
-**Pi compatibility is excluded from this release.** Entries below about
-`octet-pi-compat`, imported Pi factories and Pi editors describe source-only
-experimental development, not shipped features. The release catalog contains
-five bundles: codemode, computer use, MCP, subagents and web search.
+**Pi compatibility is experimental and unstable.** Full Pi backwards
+compatibility is not yet qualified, and the Pi adapter does not ship in this
+release. Entries below about `octet-pi-compat`, imported Pi
+factories and Pi editors describe source-only experimental development, not
+shipped features. Many extensions already work: the release catalog ships five
+first-party bundles (codemode, computer use, MCP, subagents and web search), and
+in the source preview unchanged Pi extensions such as Doom, drawing, the
+powerline footer and the rainbow editor run through the adapter.
+
+**Windows support is a preview.** The native Windows x86-64 (MSVC) build is
+published and release-tested, but it has not had attended desktop acceptance and
+has open issues such as [#572](https://github.com/skaft-software/octet/issues/572).
 
 ### Added
 

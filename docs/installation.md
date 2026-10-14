@@ -7,14 +7,14 @@
 ## Install native binaries
 
 Native v0.9.0 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
-and Windows x86-64 (MSVC). Use the version-pinned
+and Windows x86-64 (MSVC, preview). Use the version-pinned
 [GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.9.0)
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
 The [v0.9.0 notes](releases/v0.9.0.md) separate shipped scope from unqualified
 acceptance. The experimental Pi compatibility extension is not shipped.
 
-On Windows x86-64, download the version-matched `install-octet.ps1` from that
+Windows support is a preview. On Windows x86-64, download the version-matched `install-octet.ps1` from that
 release and run it in PowerShell. It checks the ZIP against the checksum manifest,
 but does not independently verify its Sigstore signature. Native MSVC artifact
 qualification is separate from GNU test builds.

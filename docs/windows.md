@@ -2,6 +2,11 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
+> **Preview platform in v0.9.0.** The native MSVC archive is published and passes
+> automated release checks, but attended desktop use is unqualified and known
+> issues such as [#572](https://github.com/skaft-software/octet/issues/572)
+> remain open.
+
 octet builds and runs as a native Windows x64 program (`octet.exe` and
 `octet-host.exe`); WSL is not used or required. The
 [v0.9.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.0)
