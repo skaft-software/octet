@@ -6,8 +6,9 @@ The [release notes](docs/releases/v0.9.0.md) record shipped scope, qualification
 boundaries and known limitations. The version-pinned release page records actual
 artifact and channel publication.
 
-**Full Pi backwards compatibility is not yet qualified, and the Pi adapter does
-not ship in this release.** Entries below about `octet-pi-compat`, imported Pi
+**Pi compatibility is experimental and unstable.** Full Pi backwards
+compatibility is not yet qualified, and the Pi adapter does not ship in this
+release. Entries below about `octet-pi-compat`, imported Pi
 factories and Pi editors describe source-only experimental development, not
 shipped features. Many extensions already work: the release catalog ships five
 first-party bundles (codemode, computer use, MCP, subagents and web search), and

@@ -109,3 +109,27 @@ test('a module whose top-level await never settles is skipped like a stalled fac
   assert.ok(JSON.parse(result.stdout).result.hooks.includes('before_prompt'), 'the healthy factory still loads');
   assert.match(result.stderr, /stalled-import\.mjs: .*did not finish within/);
 });
+
+test('many stalled factory setups end the load by one absolute deadline, not one floor each', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '50';
+  try {
+    const { LoadBudget } = await import('../lib/handler-budget.mjs');
+    const budget = new LoadBudget(); // 50 ms each, 200 ms total, 250 ms deadline
+    const begun = Date.now();
+    let stalledCount = 0;
+    for (let index = 0; index < 20; index += 1) {
+      try { await budget.settle(() => new Promise(() => {})); }
+      catch (error) { assert.equal(error.name, 'FactoryStalled'); stalledCount += 1; }
+    }
+    assert.equal(stalledCount, 20);
+    // Without the shared deadline each setup past the total still waited its
+    // 50 ms floor: 20 stalls took about 1000 ms.
+    assert.ok(Date.now() - begun < 600, `stalls are bounded by the absolute deadline (${Date.now() - begun} ms)`);
+    assert.equal(budget.wait(), 0, 'nothing is left to wait once the deadline has passed');
+    assert.equal(await budget.settle(() => 'healthy'), 'healthy', 'a synchronous setup still registers');
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});

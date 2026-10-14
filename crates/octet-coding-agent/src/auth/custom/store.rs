@@ -823,11 +823,20 @@ impl CredentialStore {
     }
 
     /// Remove one provider from the registry and its cached model inventory,
-    /// leaving every other provider untouched. The registry is rewritten only if
-    /// it is unchanged since it was read; removing the last provider deletes the
-    /// registry and all of its caches. Returns whether the provider existed.
+    /// leaving every other provider untouched. The registry is rewritten, or
+    /// deleted when this was its last provider, only if it is unchanged since it
+    /// was read, so a concurrent writer's registry and caches are never
+    /// discarded. Returns whether the provider existed.
     pub(crate) fn remove_provider(&self, provider_id: &str) -> Result<bool> {
         let snapshot = self.load_registry_snapshot()?;
+        self.remove_provider_from_snapshot(&snapshot, provider_id)
+    }
+
+    fn remove_provider_from_snapshot(
+        &self,
+        snapshot: &RegistrySnapshot,
+        provider_id: &str,
+    ) -> Result<bool> {
         let Some(mut registry) = snapshot.registry.clone() else {
             return Ok(false);
         };
@@ -835,11 +844,24 @@ impl CredentialStore {
             return Ok(false);
         }
         if registry.providers.is_empty() {
-            self.delete()?;
-            return Ok(true);
+            let expected = snapshot
+                .expected_bytes()
+                .ok_or(RegistryCommitError::Storage)?;
+            match octet_agent::secure_fs::remove_private_file_if_unchanged(
+                &self.path,
+                expected,
+                MAX_CREDENTIAL_BYTES,
+            ) {
+                Ok(()) => {}
+                Err(octet_agent::secure_fs::SecureFileError::Changed) => {
+                    return Err(anyhow::anyhow!("{}", RegistryCommitError::Changed));
+                }
+                Err(_) => return Err(anyhow::anyhow!("{}", RegistryCommitError::Storage)),
+            }
+        } else {
+            self.save_registry_if_unchanged(snapshot, &registry)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
         }
-        self.save_registry_if_unchanged(&snapshot, &registry)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
         remove_if_present(&self.model_cache_path_for(provider_id))?;
         Ok(true)
     }
@@ -1262,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_last_provider_deletes_the_registry_and_every_cache() {
+    fn removing_the_last_provider_deletes_the_registry_and_its_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials/custom.json");
         let store = CredentialStore::new(&path);
@@ -1278,6 +1300,40 @@ mod tests {
         assert!(!path.exists());
         assert!(store.load_registry().unwrap().is_none());
         assert!(store.load_model_cache_for("only").unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_the_last_provider_preserves_a_concurrently_replaced_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/custom.json");
+        let store = CredentialStore::new(&path);
+        store
+            .save_registry(&CustomRegistry::single(
+                "only",
+                provider_at("Only", "http://o/v1/"),
+            ))
+            .unwrap();
+        let snapshot = store.load_registry_snapshot().unwrap();
+
+        // Another process publishes a newer registry and cache after the read.
+        store
+            .save_registry(&CustomRegistry::single(
+                "newer",
+                provider_at("Newer", "http://n/v1/"),
+            ))
+            .unwrap();
+        store.save_model_cache_for("newer", b"newer-cache").unwrap();
+        let newer = std::fs::read(&path).unwrap();
+
+        let error = store
+            .remove_provider_from_snapshot(&snapshot, "only")
+            .unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), newer);
+        assert_eq!(
+            store.load_model_cache_for("newer").unwrap().as_deref(),
+            Some(b"newer-cache".as_slice())
+        );
     }
 
     #[test]

@@ -47,15 +47,28 @@ export function budgetFor(event) {
 // hook, and the host waits 30 s for the whole load (Node start, adapter and
 // every factory). One setup that never settles would cost all of it and take
 // the mirror down, so each gets a share and the rest of the setup carries on.
+// The minimum wait keeps a healthy setup reached late from being starved, but
+// all of those floors together draw on one fixed reserve, so any number of
+// stalled factories ends the load by total + reserve, inside the host's 30 s.
 const FACTORY_SETUP_MS = 10000;
 const FACTORY_SETUP_TOTAL_MS = 20000;
+const FACTORY_SETUP_FLOOR_RESERVE_MS = 2000;
 
 export class LoadBudget {
   constructor() {
     const forced = forcedBudget();
     this.perFactory = forced ?? FACTORY_SETUP_MS;
     this.total = forced ? forced * 4 : FACTORY_SETUP_TOTAL_MS;
+    this.deadline = this.total + (forced ?? FACTORY_SETUP_FLOOR_RESERVE_MS);
     this.started = performance.now();
+  }
+
+  // This setup's share: its own budget, capped by what is left of the total,
+  // floored for a late healthy setup, and never past the absolute deadline.
+  wait() {
+    const elapsed = performance.now() - this.started;
+    const share = Math.max(Math.min(MIN_WAIT_MS, this.perFactory), Math.min(this.perFactory, this.total - elapsed));
+    return Math.max(0, Math.min(share, this.deadline - elapsed));
   }
 
   // Resolves with the setup's value and rethrows its own failure. A setup that
@@ -64,8 +77,7 @@ export class LoadBudget {
   // The share covers the module import as well as the factory body: a top-level
   // await that never settles stalls the load just the same.
   async settle(call) {
-    const left = this.total - (performance.now() - this.started);
-    const waited = Math.max(Math.min(MIN_WAIT_MS, this.perFactory), Math.min(this.perFactory, left));
+    const waited = this.wait();
     const timer = nativeTimer(waited);
     const setup = Promise.resolve().then(call);
     setup.catch(() => {}); // a setup left running may still fail; nobody waits for it

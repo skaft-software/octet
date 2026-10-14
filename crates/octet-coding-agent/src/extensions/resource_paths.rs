@@ -376,7 +376,7 @@ impl ResourceLoader {
             prompts
                 .diagnostics()
                 .iter()
-                .map(|d| format!("warning: {d:?}")),
+                .map(|d| format!("warning: {}: {}", d.path.display(), d.message)),
         );
         // Run the actual bounded parsers, not available_themes (names only).
         let file_themes = crate::tui::theme::selectable_file_themes(&config, background);

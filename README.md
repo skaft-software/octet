@@ -17,8 +17,8 @@ in any language.
 MCP, web search, subagents, codemode and computer use are optional first-party
 integrations. Pi is Mario Zechner's coding agent and informs some design choices;
 the optional [octet-pi-compat](extensions/octet-pi-compat/README.md) adapter is
-experimental source-only work and **does not ship in v0.9.0**: full Pi
-backwards compatibility is not yet qualified. Several unchanged Pi extensions
+**experimental and unstable** source-only work and **does not ship in v0.9.0**:
+full Pi backwards compatibility is not yet qualified. Several unchanged Pi extensions
 already run through it in the source preview, but no Pi extension parity or
 installed-Pi workflow acceptance is claimed.
 
