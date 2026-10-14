@@ -5855,28 +5855,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "nvidia/nvidia/nemotron-3-super-120b-a12b": {
-    "limit": {
-      "context": 262144,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nemotron 3 Super",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
   "nvidia/nvidia/nemotron-3-ultra-550b-a55b": {
     "limit": {
       "context": 1000000,
@@ -5947,6 +5925,33 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Super VL 120B A12B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
     "tool_call": true
   },
   "nvidia/nvidia/nemotron-content-safety-reasoning-4b": {
@@ -19680,7 +19685,7 @@
   "openrouter/qwen/qwen3.6-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 235929
     },
     "modalities": {
       "input": [
