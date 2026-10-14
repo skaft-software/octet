@@ -1,9 +1,9 @@
 # octet-web-search
 
-**Source candidate distribution: 0.9.0.** This bundle needs exactly octet 0.9.0.
+**Source candidate distribution: 0.9.1.** This bundle needs exactly octet 0.9.1.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.0 candidate record](../../docs/releases/v0.9.0.md) for availability and
-remaining qualification. 0.9.0 assets are not published; use the reviewed
+[0.9.1 candidate record](../../docs/releases/v0.9.1.md) for availability and
+remaining qualification. 0.9.1 assets are not published; use the reviewed
 source-checkout route below until publication is approved.
 
 Search the public web and retrieve pages with stable citations. Pick [Brave
@@ -13,8 +13,8 @@ tabs, sign in, run JavaScript or submit forms.
 
 ## Start a search
 
-After approved 0.9.0 publication and verification of matching assets, the catalog
-path needs [octet 0.9.0](../../docs/installation.md) and Python 3.9+ as `python3`:
+After approved 0.9.1 publication and verification of matching assets, the catalog
+path needs [octet 0.9.1](../../docs/installation.md) and Python 3.9+ as `python3`:
 
 ```console
 octet extension install octet-web-search
@@ -96,7 +96,7 @@ and integrity checks still apply. Granted code runs with your OS authority
 outside the tool-effect broker; safe mode governs brokered effects, not OS
 isolation. Manifest consent metadata isn't a sandbox. Skill loading is independent.
 
-The source bundle `0.9.0` needs exactly octet `0.9.0`. For a reviewed source
+The source bundle `0.9.1` needs exactly octet `0.9.1`. For a reviewed source
 checkout, select it with `--extension-dir ./extensions`. What follows is a
 bundled-runtime reference, not a general SDK authoring tutorial.
 

@@ -1218,8 +1218,8 @@ mod tests {
     fn test_runtime(root: &Path) -> (Rc<Runtime>, transport::TestWriter) {
         let (writer, gate) = Writer::gated_for_test();
         let config = negotiate(&json!({
-            "api_version":"0.4", "octet_version":"0.9.0",
-            "extension":{"name":"octet-codemode", "version":"0.9.0"},
+            "api_version":"0.4", "octet_version":"0.9.1",
+            "extension":{"name":"octet-codemode", "version":"0.9.1"},
             "protocol":{"version":"0.4", "required_features":["request_cancellation","content_parts"],
                 "optional_features":["tool_composition_v1","artifacts"], "limits":{"max_concurrent_requests":8}},
             "flag_values":[]

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.9.1] - 2026-10-14
+
+The [release notes](docs/releases/v0.9.1.md) record shipped scope, qualification
+boundaries and known limitations. 0.9.1 is the first 0.9 release with published
+native binaries; 0.9.0 published only its source archive and extension bundles.
+
+### Security
+
+- Update rustls from 0.23.45 to 0.23.46 for RUSTSEC-2026-0346 (`Debug` output
+  for client session values could expose TLS secrets), RUSTSEC-2026-0349 (an
+  unauthenticated ServerHello could downgrade later connections to classical key
+  exchange), RUSTSEC-2026-0348 (Brotli certificate decompression could allocate
+  up to 1 GiB before authentication) and RUSTSEC-2026-0347 (buffered data could
+  reach the outer server after an ECH rejection).
+
+### Fixed
+
+- `install-octet.sh` accepts the signed `OCTET_SHA256SUMS` that also lists the
+  Windows archive and `install-octet.ps1`. The 0.9.0 installer rejected it as an
+  unexpected asset set on Linux and macOS.
+- The release workflow skips one Windows file-publication test
+  (`windows_publication_stays_bound_to_original_parent`) in the MSVC release
+  qualification while it is investigated (#588); Windows CI still runs it.
+- The CLI reference lists the five published extension bundles instead of six.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.0 known limitations below still apply.
+
 ## [0.9.0] - 2026-10-13
 
 The [release notes](docs/releases/v0.9.0.md) record shipped scope, qualification
