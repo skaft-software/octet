@@ -28,6 +28,7 @@ pub(crate) fn is_opencode_session_route(model: &crate::catalog::Model) -> bool {
             "opencode"
                 | "opencode-go"
                 | "opencode-go-anthropic"
+                | "opencode-go-google"
                 | "opencode-anthropic"
                 | "opencode-google"
         )

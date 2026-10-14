@@ -1371,12 +1371,25 @@
           "body_encoding": "identity",
           "auth_presentation": "bearer",
           "responses_profile": "default"
+        },
+        {
+          "endpoint_id": "opencode-go-google",
+          "protocol": "google_generative_ai",
+          "transport": "http",
+          "body_encoding": "identity",
+          "auth_presentation": "bearer",
+          "responses_profile": "default"
         }
       ],
       "route_rules": [
         {
           "kind": "exclude_exact",
           "value": "qwen3.7-max"
+        },
+        {
+          "kind": "select_prefix",
+          "prefix": "gemini-",
+          "route": 3
         },
         {
           "kind": "select_prefix",
