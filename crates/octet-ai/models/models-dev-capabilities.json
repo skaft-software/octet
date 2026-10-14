@@ -20732,6 +20732,25 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/unbiased/pareto-26.9": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pareto 26.9",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/undi95/remm-slerp-l2-13b": {
     "limit": {
       "context": 6144,
@@ -22165,7 +22184,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
