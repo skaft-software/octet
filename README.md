@@ -17,8 +17,10 @@ in any language.
 MCP, web search, subagents, codemode and computer use are optional first-party
 integrations. Pi is Mario Zechner's coding agent and informs some design choices;
 the optional [octet-pi-compat](extensions/octet-pi-compat/README.md) adapter is
-experimental source-only work and **does not ship in v0.9.0**. No Pi extension
-parity or installed-Pi workflow acceptance is claimed.
+experimental source-only work and **does not ship in v0.9.0**: full Pi
+backwards compatibility is not yet qualified. Several unchanged Pi extensions
+already run through it in the source preview, but no Pi extension parity or
+installed-Pi workflow acceptance is claimed.
 
 **By default octet has full access and no sandbox.** Commands, file edits, and
 enabled extensions run with your operating-system permissions, and nothing asks
@@ -46,7 +48,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 octet --version   # octet 0.9.0
 ```
 
-Windows x86-64 uses the version-matched `install-octet.ps1` and MSVC archive on
+**Windows support is a preview.** Windows x86-64 uses the version-matched `install-octet.ps1` and MSVC archive on
 that release. npm, Homebrew and SDK registries are separate publication channels;
 see [distribution](docs/distribution.md) for their actual availability.
 
