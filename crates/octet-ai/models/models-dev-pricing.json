@@ -3745,7 +3745,7 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 5400,
+    "cache_read": 3600,
     "cache_write_5m": 0,
     "input": 13680,
     "output": 891000,
@@ -5894,17 +5894,17 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 5400,
+    "cache_read": 3600,
     "cache_write_5m": 0,
     "input": 13680,
     "output": 891000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 249000,
+    "cache_read": 230000,
     "cache_write_5m": 0,
-    "input": 260000,
-    "output": 5000000,
+    "input": 225000,
+    "output": 8000000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
@@ -5931,7 +5931,7 @@
   "openrouter/~moonshotai/kimi-latest": {
     "cache_read": 300000,
     "cache_write_5m": 0,
-    "input": 320000,
+    "input": 360000,
     "output": 14000000,
     "reasoning": null
   },

@@ -20354,7 +20354,7 @@
   },
   "openrouter/stepfun/step-5-preview": {
     "limit": {
-      "context": 1000000,
+      "context": 1048576,
       "input": 1000000,
       "output": 64000
     },
@@ -21820,7 +21820,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
