@@ -2348,6 +2348,9 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    /// Captured compaction policy so mid-run `/context` derives the same
+    /// free-space/buffer slices as the idle report without borrowing the app.
+    compaction: crate::config::CompactionPolicy,
     extension_menu: extension_menu::Snapshot,
     cache_warming_status: octet_agent::CacheWarmingStatus,
     cache_warming_control: Option<RunControl>,
@@ -2390,6 +2393,7 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            compaction: app.config.compaction.clone(),
             extension_menu: extension_menu::Snapshot::capture(app),
             cache_warming_status: app.agent.cache_warming_status(),
             cache_warming_control: None,
@@ -2423,40 +2427,6 @@ impl ActiveRunInspection {
     fn goal_access(&self) -> Result<&GoalAccess, &ActiveGoalError> {
         self.goal.as_ref()
     }
-}
-
-/// Immediate `/context` body for an active run.
-///
-/// The styled idle report (`tui::context::ContextReport`) can only be built
-/// from `&App`, which the run holds. The run's own live context snapshot is the
-/// authoritative alternative for the same quantities.
-fn active_context_text(snapshot: &octet_agent::ContextSnapshot, model: &Model) -> String {
-    let breakdown = &snapshot.context;
-    let mut text = format!(
-        "Model: {}\nContext window: {} tokens\nEstimated next request: {} tokens\n\n",
-        model
-            .spec
-            .display_name
-            .as_deref()
-            .unwrap_or(&model.spec.api_name),
-        breakdown.context_limit,
-        breakdown.total_tokens,
-    );
-    for (label, tokens) in [
-        ("Runtime framing and tools", breakdown.system_tokens),
-        ("System instructions", breakdown.instruction_tokens),
-        ("Conversation", breakdown.conversation_tokens),
-        ("Tool results", breakdown.tool_result_tokens),
-        ("Attachments", breakdown.attachment_tokens),
-        ("Compaction summaries", breakdown.compaction_summary_tokens),
-        ("Other", breakdown.other_tokens),
-    ] {
-        text.push_str(&format!("{label}: {tokens} tokens\n"));
-    }
-    if let Some(measured) = breakdown.provider_tokens {
-        text.push_str(&format!("Provider measurement: {measured} tokens\n"));
-    }
-    text
 }
 
 /// Install a panel, but leave input and the caller-driven Run with the main loop.
@@ -2924,11 +2894,13 @@ where
             shell.queue_follow_up(ComposedInput::from_text(format!("/{invocation}")));
             shell.notice("prompt template queued for expansion at the next idle boundary");
         }
-        Command::Context => shell.show_report_facts(
-            "Context",
-            "Review the estimated request context before the next turn",
-            active_context_text(context, &inspection.model),
-        ),
+        Command::Context => {
+            shell.show_context_report(crate::tui::context::ContextReport::from_live_breakdown(
+                &context.context,
+                &inspection.model,
+                &inspection.compaction,
+            ))
+        }
         Command::Update => {
             // The check is a bounded local request. Run events buffer until it
             // settles, exactly like the live `/subagents` panel, and the next
