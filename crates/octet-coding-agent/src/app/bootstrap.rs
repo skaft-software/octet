@@ -2978,9 +2978,8 @@ pub(crate) fn register_openai_compatible_models_from_response(
         } else {
             ModalitySet::none()
         };
-        // Audio inventory metadata is only actionable on the Chat codec; the
-        // Responses and Anthropic codecs intentionally have no audio mapping.
-        if model.audio && protocol == Protocol::OpenAiChat {
+        // Inventory audio requires an implemented input mapping on this route.
+        if model.audio && !protocol.audio_input_formats().is_empty() {
             input_modalities = input_modalities.with(octet_ai::Modality::Audio);
         }
         crate::providers::register_discovered_model(

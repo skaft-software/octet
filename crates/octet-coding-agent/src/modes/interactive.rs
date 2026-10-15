@@ -5098,7 +5098,8 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
         context_estimate,
         &cache_stats,
     ));
-    shell.set_input_modalities(app.model.spec.capabilities.input_modalities);
+    shell.set_input_modalities(app.model.spec.effective_input_modalities());
+    shell.set_audio_input_formats(app.model.spec.protocol.audio_input_formats());
     shell.set_workspace(app.config.workspace.clone());
     shell.set_prompt_templates(app.prompts.descriptors());
     shell.set_skill_commands(Arc::from(

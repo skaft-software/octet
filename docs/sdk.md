@@ -252,8 +252,10 @@ characters except newline/tab; it is durable presentation metadata only, while
 
 PNG/JPEG/GIF/WebP images cap at 5 MiB each and 20 MiB total. WAV/MP3/FLAC/Opus/AAC/
 PCM16 inputs are recognized, with 20 MiB per clip and 40 MiB total. The selected
-route must natively support the exact format; currently OpenAI Chat accepts WAV
-and MP3. Media uses descriptor-bound, symlink-resistant reads, is retained as
+route must natively support the exact format: OpenAI Chat accepts WAV/MP3;
+catalog-backed Google `generateContent` routes accept WAV/MP3/AAC/FLAC/Ogg Opus.
+Raw PCM16 and provider-hosted audio references are not supported on Google.
+Media uses descriptor-bound, symlink-resistant reads, is retained as
 typed session input in request order, and is sent from original bytes. Media
 bytes never cross the NDJSON frame.
 

@@ -59,7 +59,11 @@ fn owner_handoffs_preserve_path_to_ledger_to_composition() {
 
     let mut ledger = AttachmentLedger::default();
     let chip = ledger
-        .attach_media(&dropped.path, all_modalities())
+        .attach_media(
+            &dropped.path,
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
         .expect("ledger admission");
     let composed = compose(format!("see {chip}"), &mut ledger);
     // compose() inserts a model-bound filename annotation immediately before

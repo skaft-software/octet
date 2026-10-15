@@ -530,6 +530,23 @@ fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads(
 }
 
 #[test]
+fn google_audio_paste_uses_route_formats_and_preserves_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clip.flac");
+    std::fs::write(&path, b"original flac").unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_input_modalities(octet_ai::ModalitySet::none().with(octet_ai::Modality::Audio));
+    shell.set_audio_input_formats(octet_ai::Protocol::GoogleGenerativeAi.audio_input_formats());
+    shell.apply_edit(EditAction::Paste(path.display().to_string()));
+    assert_eq!(shell.pending(), "[Audio #1]");
+    let composed = shell.drain_composed();
+    assert!(composed.parts.iter().any(|part| matches!(part,
+        octet_agent::InputPart::Media(octet_ai::Media::Audio(audio))
+        if audio.format == octet_ai::AudioFormat::Flac && matches!(&audio.payload,
+            octet_ai::AudioPayload::Inline(data) if data.as_ref() == b"original flac"))));
+}
+
+#[test]
 fn explicit_paste_batch_failure_keeps_original_text_without_partial_masks() {
     let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("good.png");

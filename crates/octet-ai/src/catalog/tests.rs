@@ -471,6 +471,32 @@ fn builtin_audio_capabilities_are_route_effective_and_format_specific() {
 }
 
 #[test]
+fn google_audio_input_registers_without_advertising_audio_output() {
+    use crate::types::{AudioFormat, ModalitySet};
+    let catalog = ModelCatalog::builtin().unwrap();
+    let mut spec = (*catalog
+        .resolve(&ModelId("gpt-audio-1.5".into()))
+        .unwrap()
+        .spec)
+        .clone();
+    spec.protocol = Protocol::GoogleGenerativeAi;
+    spec.api_name = "gemini-4-argon".into();
+    spec.capabilities.output_modalities = ModalitySet::none();
+    validate_model_spec(&spec).unwrap();
+    assert!(spec.supports_audio_input(AudioFormat::Wav));
+    assert!(spec.supports_audio_input(AudioFormat::Mp3));
+    assert!(spec.supports_audio_input(AudioFormat::Flac));
+    assert!(!spec.supports_audio_input(AudioFormat::Pcm16));
+    assert!(spec.effective_input_modalities().contains(Modality::Audio));
+    assert!(spec.audio_capabilities().unwrap().output_formats.is_empty());
+    assert_eq!(spec.audio_capabilities().unwrap().output_delivery, None);
+    spec.capabilities.output_modalities = ModalitySet::none().with(Modality::Audio);
+    assert!(validate_model_spec(&spec).is_err());
+    assert!(!spec.supports_audio_output(AudioFormat::Wav));
+    assert!(!spec.effective_output_modalities().contains(Modality::Audio));
+}
+
+#[test]
 fn catalog_rejects_audio_bits_on_protocols_without_audio_codecs() {
     let catalog = ModelCatalog::builtin().unwrap();
     let mut spec = (*catalog
