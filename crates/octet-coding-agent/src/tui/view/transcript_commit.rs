@@ -117,7 +117,7 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
     let disclosure_sensitive = match panel.name.as_str() {
         // Both the source preview and the output preview can expand.
         "codemode" => true,
-        "bash" | "exec" => {
+        name if crate::presentation::tool_display::is_shell_tool(name) => {
             panel.display.shell_command.is_some() && bash_output_changes_when_expanded(panel)
         }
         // Rendering determines diff truncation after width-dependent wrap.

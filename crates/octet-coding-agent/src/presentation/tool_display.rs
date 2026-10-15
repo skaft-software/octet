@@ -24,6 +24,15 @@ pub(crate) fn is_subagent_tool(name: &str) -> bool {
     SUBAGENT_TOOL_NAMES.contains(&name)
 }
 
+/// First-party shell tools share one presentation contract: the full command
+/// is retained for the header, wrapped across rows, and expandable. The
+/// Windows `powershell` tool shares the bash envelope (`exit=`/`duration=`)
+/// and the `command` argument, so it belongs here rather than in the generic
+/// extension summary (which collapses to one 72-character line).
+pub(crate) fn is_shell_tool(name: &str) -> bool {
+    matches!(name, "bash" | "exec" | "powershell")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDisplay {
     pub active: String,
@@ -113,7 +122,7 @@ pub fn summarize_tool_with_workspace(
         "edit" => path_tool(args, "updating", "updated", "updating", "edit", workspace),
         "write" => path_tool(args, "writing", "wrote", "writing", "write", workspace),
         // `exec` is retained only as a renderer for pre-rename sessions.
-        "bash" | "exec" => summarize_bash(args, workspace),
+        name if is_shell_tool(name) => summarize_bash(name, args, workspace),
         name if is_subagent_tool(name) => ToolDisplay {
             active: "delegating to workers".to_owned(),
             success: "delegation updated".to_owned(),
@@ -214,7 +223,7 @@ fn summarize_read(args: &serde_json::Value, workspace: Option<&Path>) -> ToolDis
     }
 }
 
-fn summarize_bash(args: &serde_json::Value, workspace: Option<&Path>) -> ToolDisplay {
+fn summarize_bash(name: &str, args: &serde_json::Value, workspace: Option<&Path>) -> ToolDisplay {
     let command =
         normalize_shell_command(string_arg(args, "command").unwrap_or("command"), workspace);
     let program = command
@@ -223,6 +232,12 @@ fn summarize_bash(args: &serde_json::Value, workspace: Option<&Path>) -> ToolDis
         .and_then(|value| std::path::Path::new(value).file_name())
         .and_then(|value| value.to_str())
         .unwrap_or("command");
+    // `exec` keeps the legacy bash identity so pre-rename sessions render
+    // unchanged; `powershell` keeps its own identity for plain output.
+    let (plain_tag, label) = match name {
+        "powershell" => ("powershell", "powershell".to_owned()),
+        _ => ("bash", "bash".to_owned()),
+    };
 
     ToolDisplay {
         active: format!("running {command}"),
@@ -231,8 +246,8 @@ fn summarize_bash(args: &serde_json::Value, workspace: Option<&Path>) -> ToolDis
         compact_active: format!("running {program}"),
         compact_success: format!("ran {program}"),
         compact_failure: format!("{program} failed"),
-        plain_tag: "bash",
-        label: "bash".to_owned(),
+        plain_tag,
+        label,
         shell_command: Some(command),
         changed_path: None,
         value: None,
@@ -336,7 +351,7 @@ pub fn tool_result_is_failure(name: &str, result: &Result<ToolOutput, ToolError>
     match result {
         Err(_) => true,
         Ok(output) if output.is_error() => true,
-        Ok(output) if matches!(name, "bash" | "exec") => bash_exit_reason(&output.text).is_some(),
+        Ok(output) if is_shell_tool(name) => bash_exit_reason(&output.text).is_some(),
         Ok(_) => false,
     }
 }
@@ -345,7 +360,7 @@ pub fn tool_failure_reason(name: &str, result: &Result<ToolOutput, ToolError>) -
     match result {
         Err(error) => Some(error_reason(&error.message)),
         Ok(output) if output.is_error() => Some(error_reason(&output.text)),
-        Ok(output) if matches!(name, "bash" | "exec") => bash_exit_reason(&output.text),
+        Ok(output) if is_shell_tool(name) => bash_exit_reason(&output.text),
         Ok(_) => None,
     }
 }
@@ -409,4 +424,67 @@ pub fn concise_line(value: &str) -> String {
         .collect::<String>();
     result.push('…');
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_tools_share_the_full_command_presentation() {
+        let args = serde_json::json!({
+            "command": "git grep -n -I \"public_ai_error_diagnostic|public_error_diagnostic\" | Select-String foo-bar-baz-qux",
+        });
+        let command = args["command"].as_str().unwrap();
+        assert!(command.chars().count() > 72);
+
+        for name in ["bash", "exec", "powershell"] {
+            assert!(
+                is_shell_tool(name),
+                "{name} must use the shell presentation"
+            );
+            let display = summarize_tool(name, &args);
+            assert_eq!(
+                display.shell_command.as_deref(),
+                Some(command),
+                "{name} must retain the full command"
+            );
+            assert_eq!(display.active, format!("running {command}"));
+            assert!(!display.active.contains('…'), "{name} must not truncate");
+        }
+
+        assert!(!is_shell_tool("read"));
+        assert!(!is_shell_tool("mcp__server__tool"));
+    }
+
+    #[test]
+    fn shell_tool_identities_stay_stable_for_plain_output() {
+        let args = serde_json::json!({"command": "git status"});
+        let powershell = summarize_tool("powershell", &args);
+        assert_eq!(powershell.plain_tag, "powershell");
+        assert_eq!(powershell.label, "powershell");
+        // `exec` keeps the legacy bash identity for pre-rename sessions.
+        let exec = summarize_tool("exec", &args);
+        assert_eq!(exec.plain_tag, "bash");
+        assert_eq!(exec.label, "bash");
+    }
+
+    #[test]
+    fn shell_exit_envelope_marks_powershell_failures() {
+        use octet_agent::{ToolError, ToolOutput};
+
+        let failed: Result<ToolOutput, ToolError> =
+            Ok(ToolOutput::new("exit=1 duration=0.22s\n(no output)"));
+        assert!(tool_result_is_failure("powershell", &failed));
+        assert_eq!(
+            tool_failure_reason("powershell", &failed).as_deref(),
+            Some("command exited 1")
+        );
+        let ok: Result<ToolOutput, ToolError> =
+            Ok(ToolOutput::new("exit=0 duration=0.22s\n(no output)"));
+        assert!(!tool_result_is_failure("powershell", &ok));
+        assert!(tool_failure_reason("powershell", &ok).is_none());
+        let errored: Result<ToolOutput, ToolError> = Err(ToolError::new("boom"));
+        assert!(tool_result_is_failure("powershell", &errored));
+    }
 }

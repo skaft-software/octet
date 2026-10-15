@@ -203,8 +203,8 @@ pub(super) fn bash_output_changes_when_expanded(panel: &ToolPanel) -> bool {
     compact.panel_elided || !compact.capture_truncations.is_empty() || !compact.lines.is_empty()
 }
 
-fn bash_content_gutter() -> usize {
-    tool_value_indent_width("Bash")
+fn bash_content_gutter(action: &str) -> usize {
+    tool_value_indent_width(action)
 }
 
 fn capture_loss_details(compact: &CompactBashOutput) -> Vec<String> {
@@ -301,19 +301,19 @@ pub(super) fn render_compact_bash_output(
 
 pub(super) fn render_bash_row(
     command: &str,
+    action: &str,
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
     _expanded: bool,
 ) -> Vec<String> {
-    let action = "Bash";
     let action_gap = tool_value_indent_width(action).saturating_sub(visible_width(action));
     let prefix = format!(
         "{}{}",
         theme.bold(&theme.fg("foreground", action)),
         " ".repeat(action_gap)
     );
-    let continuation = " ".repeat(bash_content_gutter());
+    let continuation = " ".repeat(bash_content_gutter(action));
     let content_width = width
         .saturating_sub(u16::try_from(visible_width(&prefix)).unwrap_or(u16::MAX))
         .max(1);
@@ -381,12 +381,13 @@ mod tests {
 
     fn assert_input_window(
         command: &str,
+        action: &str,
         theme: &OctetTheme,
         width: u16,
     ) -> (Vec<String>, Vec<String>) {
         let renderer = theme.rich_renderer();
-        let collapsed = render_bash_row(command, &renderer, theme, width, false);
-        let expanded = render_bash_row(command, &renderer, theme, width, true);
+        let collapsed = render_bash_row(command, action, &renderer, theme, width, false);
+        let expanded = render_bash_row(command, action, &renderer, theme, width, true);
         assert_eq!(
             collapsed, expanded,
             "commands must remain complete in terse mode"
@@ -398,14 +399,14 @@ mod tests {
             assert!(plain_rows(rows)
                 .iter()
                 .skip(1)
-                .all(|row| row.starts_with(&" ".repeat(bash_content_gutter()))));
+                .all(|row| row.starts_with(&" ".repeat(bash_content_gutter(action)))));
             if theme.capabilities().color == ColorDepth::None {
                 assert!(rows.iter().all(|row| !row.contains('\x1b')));
             }
         }
         assert_eq!(
             collapsed,
-            render_bash_row(command, &renderer, theme, width, false),
+            render_bash_row(command, action, &renderer, theme, width, false),
             "collapsing again must restore the same preview"
         );
         (collapsed, expanded)
@@ -430,7 +431,7 @@ mod tests {
     fn bash_input_short_commands_do_not_reserve_a_hint_row() {
         let theme = test_theme();
         for command in ["", "printf one", "one\ntwo"] {
-            let (collapsed, expanded) = assert_input_window(command, &theme, 80);
+            let (collapsed, expanded) = assert_input_window(command, "Bash", &theme, 80);
             assert!(collapsed.len() <= 2);
             assert_eq!(collapsed, expanded);
             assert!(strip_terminal_sequences(&collapsed[0]).starts_with("Bash  "));
@@ -441,7 +442,7 @@ mod tests {
     fn bash_input_multiline_preview_preserves_blank_lines_and_hidden_suffix() {
         let theme = test_theme();
         let command = "cat <<'EOF'\nfirst\n\n    fourth\nEOF\nprintf done";
-        let (collapsed, expanded) = assert_input_window(command, &theme, 100);
+        let (collapsed, expanded) = assert_input_window(command, "Bash", &theme, 100);
         assert_eq!(expanded.len(), 6);
         assert_eq!(collapsed.len(), 6);
         assert_eq!(
@@ -450,12 +451,12 @@ mod tests {
         );
         let full_command = plain_rows(&expanded)
             .iter()
-            .map(|row| &row[bash_content_gutter()..])
+            .map(|row| &row[bash_content_gutter("Bash")..])
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(full_command, command);
         assert!(collapsed.join("\n").contains("fourth"));
-        let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", &theme, 100);
+        let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", "Bash", &theme, 100);
         assert_eq!(multiline.len(), 4);
     }
 
@@ -464,13 +465,13 @@ mod tests {
         let theme = test_theme();
         let command = format!("printf {}", "x".repeat(250));
         for width in [18, 42, 80, 120] {
-            let (collapsed, expanded) = assert_input_window(&command, &theme, width);
-            let content_width = usize::from(width) - bash_content_gutter();
+            let (collapsed, expanded) = assert_input_window(&command, "Bash", &theme, width);
+            let content_width = usize::from(width) - bash_content_gutter("Bash");
             assert!(expanded.len() >= command.len().div_ceil(content_width));
             assert_eq!(
                 plain_rows(&expanded)
                     .iter()
-                    .map(|row| &row[bash_content_gutter()..])
+                    .map(|row| &row[bash_content_gutter("Bash")..])
                     .collect::<String>(),
                 command.replace(' ', "")
             );
@@ -499,9 +500,9 @@ mod tests {
             for unicode in [false, true] {
                 let theme = test_theme_with(TerminalCapabilities::test(true, unicode, color));
                 for width in [18, 42, 80] {
-                    let (_, expanded) = assert_input_window(&command, &theme, width);
+                    let (_, expanded) = assert_input_window(&command, "Bash", &theme, width);
                     let plain = plain_rows(&expanded);
-                    let mut content = plain.iter().map(|row| &row[bash_content_gutter()..]);
+                    let mut content = plain.iter().map(|row| &row[bash_content_gutter("Bash")..]);
                     assert_eq!(
                         content.clone().collect::<String>(),
                         command.replace(' ', "")
@@ -523,7 +524,7 @@ mod tests {
             for color in [ColorDepth::None, ColorDepth::TrueColor] {
                 let theme = test_theme_with(TerminalCapabilities::test(true, unicode, color));
                 for width in [18, 80] {
-                    let (collapsed, expanded) = assert_input_window(command, &theme, width);
+                    let (collapsed, expanded) = assert_input_window(command, "Bash", &theme, width);
                     for row in plain_rows(&collapsed)
                         .into_iter()
                         .chain(plain_rows(&expanded))
@@ -550,6 +551,7 @@ mod tests {
         for expanded in [false, true, false] {
             let input = render_bash_row(
                 panel.display.shell_command.as_deref().unwrap(),
+                "Bash",
                 &theme.rich_renderer(),
                 &theme,
                 100,
@@ -578,6 +580,42 @@ mod tests {
             let panel = panel(&command, "exit=0 duration=0.1s\n(no output)");
             assert!(compact_bash_output(&panel).lines.is_empty());
             assert!(bash_output_changes_when_expanded(&panel));
+        }
+    }
+
+    #[test]
+    fn powershell_input_renders_full_command_under_its_own_label() {
+        use super::super::tool_render::shell_row_label;
+
+        let args = serde_json::json!({
+            "command": "git grep -n -I \"public_ai_error_diagnostic|public_error_diagnostic\" | Select-String foo-bar-baz-qux",
+        });
+        let display = summarize_tool("powershell", &args);
+        let command = display
+            .shell_command
+            .as_deref()
+            .expect("powershell keeps the full command for the shell renderer");
+        assert!(
+            command.chars().count() > 72,
+            "regression input must exceed the old generic cap"
+        );
+        assert_eq!(display.active, format!("running {command}"));
+        assert!(!display.active.contains('…'));
+        assert_eq!(display.plain_tag, "powershell");
+        assert_eq!(shell_row_label("powershell"), "Powershell");
+        assert_eq!(shell_row_label("exec"), "Bash");
+
+        let theme = test_theme();
+        let (collapsed, _) = assert_input_window(command, "Powershell", &theme, 80);
+        let plain = plain_rows(&collapsed).join("\n");
+        assert!(plain.starts_with("Powershell  "), "{plain:?}");
+        for fragment in [
+            "git",
+            "public_ai_error_diagnostic",
+            "Select-String",
+            "foo-bar-baz-qux",
+        ] {
+            assert!(plain.contains(fragment), "missing {fragment}: {plain:?}");
         }
     }
 }
