@@ -9867,6 +9867,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode/deepseek-v4.1-flash-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 200000,
+      "output": 32000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/exo-free": {
     "limit": {
       "context": 1048576,
@@ -13186,31 +13218,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/anthropic/claude-sonnet-4": {
-    "limit": {
-      "context": 200000,
-      "output": 64000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Claude Sonnet 4",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/anthropic/claude-sonnet-4.5": {
     "limit": {
       "context": 1000000,
@@ -15362,7 +15369,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 72000
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -19660,7 +19667,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 81920
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -21544,7 +21551,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
