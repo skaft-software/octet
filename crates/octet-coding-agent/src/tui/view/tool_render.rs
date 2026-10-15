@@ -134,6 +134,16 @@ pub(crate) fn tool_display_label(name: &str) -> String {
     }
 }
 
+/// Header label for shell command rows. `exec` keeps the legacy Bash
+/// identity so pre-rename sessions render unchanged.
+pub(super) fn shell_row_label(name: &str) -> &'static str {
+    if name == "powershell" {
+        "Powershell"
+    } else {
+        "Bash"
+    }
+}
+
 pub(super) fn tool_grid_label(label: &str) -> String {
     truncate_to_width(label, TOOL_LABEL_MAX_WIDTH, Some("…"))
 }
@@ -294,10 +304,10 @@ pub(super) fn without_redundant_tool_lead(tool: &str, text: &str) -> String {
     };
     let redundant = match tool {
         "read" => matches!(first, "read" | "reading"),
-        "bash" | "exec" => {
+        "bash" | "exec" | "powershell" => {
             matches!(
                 first,
-                "bash" | "exec" | "run" | "ran" | "running" | "failed:"
+                "bash" | "exec" | "powershell" | "run" | "ran" | "running" | "failed:"
             )
         }
         "edit" => matches!(first, "edit" | "edited" | "updating" | "updated"),
