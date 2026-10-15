@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Same-mode idle thinking changes preserve the active session and executable
+  extensions instead of rebuilding them. Verified, already-applied thinking
+  preference writes no longer trigger a second resource reload; external edits
+  and extension configuration notifications retain their normal handling.
+- Enter during a thinking-change wait retains one complete prompt for exactly-once
+  idle submission under its intended session and thinking selection. Cancellation
+  or a changed selection explicitly restores the draft, including attachments.
+
 ## [0.9.2] - 2026-10-14
 
 The [release notes](docs/releases/v0.9.2.md) record shipped scope, qualification

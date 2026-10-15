@@ -397,14 +397,7 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
         acquire_terminal, assert_revoked_before_shutdown, fixture,
     };
 
-    for operation in [
-        "resources",
-        "model",
-        "reasoning",
-        "new",
-        "resume",
-        "extensions",
-    ] {
+    for operation in ["resources", "model", "new", "resume", "extensions"] {
         let (directory, mut app) = crate::compaction::tests::app_for_estimate();
         let (extensions, process, wire) = fixture(directory.path(), None).await;
         app.executable_extensions = extensions;
@@ -430,7 +423,6 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
             _ => {
                 let reconfig = match operation {
                     "model" => Reconfig::Model(app.model.spec.id.clone()),
-                    "reasoning" => Reconfig::Thinking(ReasoningConfig::Off),
                     "new" => Reconfig::NewSession,
                     "resume" => Reconfig::Resume(app.agent.session().path().to_owned()),
                     _ => unreachable!(),
@@ -461,4 +453,41 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
         );
         app.executable_extensions.shutdown().await;
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_mode_idle_thinking_preserves_the_existing_terminal_grant_and_process() {
+    use crate::extensions::reload_lifecycle_test_support::{
+        acquire_terminal, assert_revoked_before_shutdown, fixture,
+    };
+    let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    let (extensions, process, wire) = fixture(directory.path(), None).await;
+    app.executable_extensions = extensions;
+    let mut shell = InteractiveShell::test_shell();
+    acquire_terminal(&mut app.executable_extensions, &mut shell, &process);
+    let parking = shell.terminal_input_parking();
+    let mut input =
+        EventStream::from_stream(futures_util::stream::pending()).with_cede_flag(parking.clone());
+    let mut app = transition(
+        app,
+        &mut shell,
+        &mut input,
+        Reconfig::Thinking(ReasoningConfig::Off),
+    )
+    .await
+    .unwrap();
+    assert!(parking.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(app.executable_extensions.terminal_grant_is_active());
+    assert!(
+        process.is_running(),
+        "the same executable instance must survive"
+    );
+    assert!(!std::fs::read_to_string(&wire)
+        .unwrap_or_default()
+        .contains("shutdown"));
+    app.executable_extensions
+        .revoke_terminal_grant_for_shell(&mut shell, "test shutdown");
+    app.executable_extensions.shutdown().await;
+    assert_revoked_before_shutdown(&wire);
 }

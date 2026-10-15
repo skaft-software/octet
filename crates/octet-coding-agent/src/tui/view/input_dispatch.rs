@@ -15,6 +15,16 @@ pub(super) struct InputDispatch {
     cycle_target: Option<String>,
     generated_command: bool,
     thinking_cycle: Option<ThinkingCycle>,
+    thinking_wait: bool,
+    thinking_submission: Option<ThinkingSubmission>,
+}
+
+/// One explicit Enter, bound to the session/route and thinking seen at capture.
+/// It is not a run, and never bypasses the ordinary idle prompt admission path.
+struct ThinkingSubmission {
+    owner: String,
+    reasoning: octet_ai::ReasoningConfig,
+    composed: ComposedInput,
 }
 
 /// Local keyboard selection survives waits that temporarily borrow the App.
@@ -35,11 +45,89 @@ impl InputDispatch {
             cycle_target: None,
             generated_command: false,
             thinking_cycle: None,
+            thinking_wait: false,
+            thinking_submission: None,
         }
     }
 }
 
 impl InteractiveShell {
+    pub(crate) fn begin_thinking_wait(&mut self) {
+        self.input_dispatch.thinking_wait = true;
+    }
+
+    pub(crate) fn end_thinking_wait(&mut self, failed: bool) {
+        self.input_dispatch.thinking_wait = false;
+        if failed {
+            self.cancel_thinking_submission("thinking change failed");
+        }
+    }
+
+    /// Capture at most one ordinary submission. Later typing stays a new draft;
+    /// duplicate Enter cannot create a second request or grow an unbounded queue.
+    pub(crate) fn queue_thinking_submission(&mut self) -> bool {
+        if !self.input_dispatch.thinking_wait
+            || self.input_dispatch.thinking_submission.is_some()
+            || self.pending().trim_start().starts_with(['/', '!'])
+        {
+            return false;
+        }
+        let Some(cycle) = self.input_dispatch.thinking_cycle.as_ref() else {
+            return false;
+        };
+        let owner = cycle.owner.clone();
+        let reasoning = cycle.selected.clone();
+        let composed = self.drain_composed();
+        if !composed.is_empty() {
+            self.input_dispatch.thinking_submission = Some(ThinkingSubmission {
+                owner,
+                reasoning,
+                composed,
+            });
+            self.notice("prompt queued until thinking change completes");
+        }
+        true
+    }
+
+    pub(crate) fn cancel_thinking_submission(&mut self, reason: &str) {
+        if let Some(pending) = self.input_dispatch.thinking_submission.take() {
+            self.restore_composed(pending.composed);
+            self.error(format!("{reason} · prompt not sent; draft restored"));
+        }
+    }
+
+    /// Called only by the idle owner, after deferred thinking has settled and
+    /// status has been reconciled with App. A changed owner/choice cancels rather
+    /// than silently sending the prompt under a different configuration.
+    pub(crate) fn take_thinking_submission(
+        &mut self,
+        owner: &str,
+        reasoning: &octet_ai::ReasoningConfig,
+    ) -> Option<ComposedInput> {
+        let matches = self
+            .input_dispatch
+            .thinking_cycle
+            .as_ref()
+            .is_some_and(|cycle| {
+                cycle.pending.is_none()
+                    && self
+                        .input_dispatch
+                        .thinking_submission
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.owner == owner && &pending.reasoning == reasoning
+                        })
+            });
+        if !matches {
+            self.cancel_thinking_submission("thinking selection or session changed");
+            return None;
+        }
+        self.input_dispatch
+            .thinking_submission
+            .take()
+            .map(|pending| pending.composed)
+    }
+
     pub(crate) fn set_thinking_cycle(
         &mut self,
         owner: String,
@@ -734,6 +822,111 @@ mod tests {
         std::fs::write(directory.path().join("keybindings.json"), json).unwrap();
         shell.test_set_keybindings(KeybindingsManager::create(directory.path(), "linux", false));
         directory
+    }
+
+    fn thinking_shell() -> InteractiveShell {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_thinking_cycle(
+            "session:route:model".into(),
+            vec![octet_ai::ReasoningConfig::Off],
+            &octet_ai::ReasoningConfig::Off,
+        );
+        shell.begin_thinking_wait();
+        shell
+    }
+
+    #[test]
+    fn thinking_submission_is_bounded_exactly_once_and_keeps_attachments_and_later_draft() {
+        let mut shell = thinking_shell();
+        let payload = "large pasted payload\n".repeat(100);
+        shell.apply_edit(EditAction::Paste(payload.clone()));
+        let display = shell.pending().to_owned();
+        assert_ne!(display, payload, "fixture must contain an attachment chip");
+        assert!(shell.queue_thinking_submission());
+        assert!(shell.pending().is_empty());
+        assert!(
+            !shell.queue_thinking_submission(),
+            "duplicate Enter cannot enqueue twice"
+        );
+        shell.prefill_editor("later draft".into());
+        assert!(
+            !shell.queue_thinking_submission(),
+            "the single slot is already owned"
+        );
+        shell.end_thinking_wait(false);
+        let composed = shell
+            .take_thinking_submission("session:route:model", &octet_ai::ReasoningConfig::Off)
+            .unwrap();
+        assert_eq!(composed.display_text, display);
+        assert_eq!(composed.transcript_text, payload);
+        assert_eq!(composed.attachments.len(), 1);
+        assert!(shell
+            .take_thinking_submission("session:route:model", &octet_ai::ReasoningConfig::Off)
+            .is_none());
+        assert_eq!(shell.pending(), "later draft");
+    }
+
+    #[test]
+    fn thinking_submission_cancellation_and_stale_owners_restore_full_draft() {
+        for failure in ["cancel", "session", "reasoning", "operation"] {
+            let mut shell = thinking_shell();
+            let payload = "private pasted text\n".repeat(100);
+            shell.apply_edit(EditAction::Paste(payload.clone()));
+            assert!(shell.queue_thinking_submission());
+            shell.prefill_editor("later draft".into());
+            match failure {
+                "cancel" => shell.cancel_thinking_submission("cancelled"),
+                "operation" => shell.end_thinking_wait(true),
+                "session" => assert!(shell
+                    .take_thinking_submission("another-session", &octet_ai::ReasoningConfig::Off)
+                    .is_none()),
+                _ => assert!(shell
+                    .take_thinking_submission(
+                        "session:route:model",
+                        &octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::High)
+                    )
+                    .is_none()),
+            }
+            assert!(shell.debug_error().unwrap().contains("prompt not sent"));
+            assert!(shell
+                .take_thinking_submission("session:route:model", &octet_ai::ReasoningConfig::Off)
+                .is_none());
+            let restored = shell.drain_composed();
+            assert_eq!(
+                restored.transcript_text,
+                format!("{payload}\n\nlater draft")
+            );
+            assert_eq!(restored.attachments.len(), 1);
+        }
+    }
+
+    #[test]
+    fn thinking_submission_is_cancelled_by_branch_rehydration_even_on_the_same_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        let mut shell = thinking_shell();
+        shell.prefill_editor("bound to the previous branch".into());
+        assert!(shell.queue_thinking_submission());
+        shell.hydrate(&session).unwrap();
+        assert!(shell
+            .take_thinking_submission("session:route:model", &octet_ai::ReasoningConfig::Off)
+            .is_none());
+        assert_eq!(shell.pending(), "bound to the previous branch");
+        assert!(shell.debug_error().unwrap().contains("prompt not sent"));
+    }
+
+    #[test]
+    fn thinking_submission_never_admits_commands_shell_escapes_or_unowned_waits() {
+        let mut shell = thinking_shell();
+        for command in ["/new", "!rm -rf example"] {
+            shell.prefill_editor(command.into());
+            assert!(!shell.queue_thinking_submission());
+            assert_eq!(shell.pending(), command);
+        }
+        shell.end_thinking_wait(false);
+        shell.prefill_editor("ordinary draft".into());
+        assert!(!shell.queue_thinking_submission());
+        assert_eq!(shell.pending(), "ordinary draft");
     }
 
     #[test]
