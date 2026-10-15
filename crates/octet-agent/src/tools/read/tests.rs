@@ -155,6 +155,78 @@ async fn local_media_extension_must_match_magic_bytes() {
 }
 
 #[tokio::test]
+async fn reported_large_wavs_get_the_audio_limit_and_actionable_recovery() {
+    let f = fixture();
+    for size in [22_542_626, 73_608_392] {
+        let path = f.workspace.join("large.wav");
+        std::fs::write(&path, WAV_BYTES).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(size)
+            .unwrap();
+        let error = ReadTool
+            .execute(json!({"path": "large.wav"}), &f.ctx())
+            .await
+            .unwrap_err();
+        assert!(error.message.contains(&format!("{size} bytes")), "{error}");
+        assert!(error.message.contains("20 MiB"), "{error}");
+        assert!(error.message.contains("20971520"), "{error}");
+        assert!(
+            error.message.contains("MP3") && error.message.contains("split"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn extensionless_audio_gets_the_same_recovery_guidance() {
+    let f = fixture();
+    let path = f.workspace.join("recording");
+    std::fs::write(&path, WAV_BYTES).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_AUDIO_BYTES as u64 + 1)
+        .unwrap();
+    let error = ReadTool
+        .execute(json!({"path": "recording"}), &f.ctx())
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.contains("20 MiB") && error.message.contains("MP3"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn audio_at_the_raw_byte_cap_is_returned_unchanged() {
+    let f = fixture();
+    let path = f.workspace.join("bounded.wav");
+    std::fs::write(&path, WAV_BYTES).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_AUDIO_BYTES as u64)
+        .unwrap();
+    let output = ReadTool
+        .execute(json!({"path": "bounded.wav"}), &f.ctx())
+        .await
+        .unwrap();
+    let Media::Audio(audio) = &output.media()[0] else {
+        panic!("expected audio");
+    };
+    let octet_ai::AudioPayload::Inline(bytes) = &audio.payload else {
+        panic!("expected inline bytes");
+    };
+    assert_eq!(bytes.len(), MAX_AUDIO_BYTES);
+    assert_eq!(&bytes[..WAV_BYTES.len()], WAV_BYTES);
+}
+
+#[tokio::test]
 async fn local_media_size_is_rejected_before_buffering() {
     let f = fixture();
     let path = f.workspace.join("oversized.png");
@@ -338,6 +410,36 @@ async fn remote_link_requires_matching_mime_and_magic_and_redacts_query() {
     assert_eq!(output.media_kinds(), &[crate::ToolOutputMediaKind::Image]);
     assert!(output.text.contains("?…"), "{}", output.text);
     assert!(!output.text.contains("secret"), "{}", output.text);
+}
+
+#[tokio::test]
+async fn remote_audio_size_error_is_actionable_and_redacts_query() {
+    let server = MockServer::start().await;
+    let mut bytes = vec![0; 22_542_626];
+    bytes[..WAV_BYTES.len()].copy_from_slice(WAV_BYTES);
+    Mock::given(method("GET"))
+        .and(path("/capture"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/wav")
+                .set_body_bytes(bytes),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = remote_fixture();
+    let error = ReadTool
+        .execute(
+            json!({"path": format!("{}/capture?token=secret", server.uri())}),
+            &f.ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("22542626 bytes"), "{error}");
+    assert!(error.message.contains("20971520 bytes (20 MiB)"), "{error}");
+    assert!(error.message.contains("MP3"), "{error}");
+    assert!(error.message.contains("?…"), "{error}");
+    assert!(!error.message.contains("secret"), "{error}");
 }
 
 #[tokio::test]

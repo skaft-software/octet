@@ -25,7 +25,8 @@ const MAX_LINE_CHARS: usize = 2000;
 const DEFAULT_LIMIT: usize = 500;
 /// Conservative inline-image cap shared across supported provider paths.
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-/// Conservative inline-audio cap. Gemini's inline request limit is 20 MB.
+/// Local cap on raw inline-audio bytes, not a provider request allowance.
+/// Provider limits can be lower and include base64 expansion and other content.
 const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -329,8 +330,13 @@ async fn read_local(
     let hinted_kind = media_kind_for_name(requested_path);
     let sniff_hint = hinted_kind.clone();
     let read_path = target.clone();
+    // Apply a known media cap at the outer metadata guard too, so a large WAV
+    // does not misleadingly report the more permissive text-file ceiling.
+    let upper_limit = hinted_kind
+        .as_ref()
+        .map_or(MAX_FILE_BYTES, MediaKind::byte_limit);
     let bytes = tokio::task::spawn_blocking(move || {
-        read_regular_file_bounded_by(&read_path, MAX_FILE_BYTES, |prefix| {
+        read_regular_file_bounded_by(&read_path, upper_limit, |prefix| {
             let detected = sniff_media_kind(prefix, sniff_hint.as_ref());
             detected
                 .iter()
@@ -346,6 +352,9 @@ async fn read_local(
         SecureFileError::NotRegular => ToolError::new(format!(
             "{display_path}: is not a regular file (a directory or special file is rejected)"
         )),
+        SecureFileError::TooLarge { actual, limit } if limit == MAX_AUDIO_BYTES => {
+            media_too_large_error(&display_path, limit, Some(actual))
+        }
         other => ToolError::new(format!("{display_path}: {other}")),
     })?;
     match validated_media_kind(&bytes, hinted_kind.as_ref(), &display_path)? {
@@ -864,6 +873,14 @@ fn display_remote_url(url: &reqwest::Url) -> String {
 
 fn media_too_large_error(display: &str, byte_limit: usize, actual: Option<u64>) -> ToolError {
     let actual = actual.map_or_else(String::new, |actual| format!(" ({actual} bytes)"));
+    if byte_limit == MAX_AUDIO_BYTES {
+        return ToolError::new(format!(
+            "{display}: inline audio is too large{actual}; limit {byte_limit} bytes (20 MiB). \
+             Export a compressed copy (for example, MP3) or split the audio into smaller clips \
+             before reading. Audio is not automatically transcoded; provider request limits \
+             may be lower after base64 encoding."
+        ));
+    }
     ToolError::new(format!(
         "{display}: media exceeds the {} MB limit{actual}",
         byte_limit / (1024 * 1024)
