@@ -128,6 +128,11 @@ fn google_pricing(model_id: &str) -> Option<Pricing> {
             (2_000_000, 12_000_000, 200_000, 0)
         }
         "gemini-3.5-flash" | "gemini-flash-latest" => (1_500_000, 9_000_000, 150_000, 0),
+        "gemini-3.5-flash-lite" => (300_000, 2_500_000, 30_000, 0),
+        "gemini-3.6-flash" | "gemini-3.7-flash" | "gemini-3.8-flash" => {
+            (750_000, 3_750_000, 75_000, 0)
+        }
+        "gemini-4-argon" => (2_000_000, 10_000_000, 100_000, 0),
         _ => return None,
     };
     Some(flat_pricing(rates.0, rates.1, rates.2, rates.3))

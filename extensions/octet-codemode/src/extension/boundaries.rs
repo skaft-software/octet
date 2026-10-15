@@ -360,10 +360,10 @@ pub(super) struct Negotiated {
 pub(super) fn negotiate(init: &Value) -> Result<Negotiated> {
     params(
         init["api_version"] == "0.4"
-            && init["octet_version"] == "0.9.3"
+            && init["octet_version"] == "0.9.4"
             && init["extension"]["name"] == "octet-codemode"
-            && init["extension"]["version"] == "0.9.3",
-        "requires API 0.4, octet 0.9.3 and octet-codemode 0.9.3",
+            && init["extension"]["version"] == "0.9.4",
+        "requires API 0.4, octet 0.9.4 and octet-codemode 0.9.4",
     )?;
     let offer = &init["protocol"];
     params(
@@ -713,7 +713,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     fn offer() -> Value {
-        json!({"api_version":"0.4","octet_version":"0.9.3","extension":{"name":"octet-codemode","version":"0.9.3"},"protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["tool_composition_v1","request_progress","artifacts"],"limits":{"max_concurrent_requests":8,"resource_refs_v1":{"max_records":128,"max_registrations_per_parent":16}},"bulk_objects_v1":{"profile":"local-file.v1"}},"flag_values":[]})
+        json!({"api_version":"0.4","octet_version":"0.9.4","extension":{"name":"octet-codemode","version":"0.9.4"},"protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["tool_composition_v1","request_progress","artifacts"],"limits":{"max_concurrent_requests":8,"resource_refs_v1":{"max_records":128,"max_registrations_per_parent":16}},"bulk_objects_v1":{"profile":"local-file.v1"}},"flag_values":[]})
     }
     fn context() -> Value {
         json!({"tools":[{"name":"first","description":"Read numbers","parameters":{"type":"object"},"output_schema":{"type":"object"}}],"store":{"previous":5},"limits":{"timeout_ms":30000,"max_calls":256}})

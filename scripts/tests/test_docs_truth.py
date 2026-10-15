@@ -173,7 +173,7 @@ class DocsTruthTests(unittest.TestCase):
         table = re.findall(r"(?m)^\| `(octet-[a-z-]+)` \|", _read("docs/installation.md"))
         self.assertEqual(sorted(table), sorted(catalog))
         self.assertNotIn("octet-pi-compat", catalog)
-        for name in ("README.md", "docs/releases/v0.9.3.md", "docs/pi-compatibility.md"):
+        for name in ("README.md", "docs/releases/v0.9.4.md", "docs/pi-compatibility.md"):
             self.assertRegex(_read(name), r"(?i)does not ship|not shipped")
 
     def test_removed_products_are_not_advertised(self):

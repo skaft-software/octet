@@ -443,10 +443,10 @@ jobs:
         run: |
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
           if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
-          # Windows is a preview platform in 0.9.3. This rename-race test hit
+          # Windows is a preview platform in 0.9.4. This rename-race test hit
           # ERROR_SHARING_VIOLATION on the MSVC release runner (it passes in
           # Windows CI); skipped here at the maintainer's direction, tracked
-          # for repair after 0.9.3.
+          # for repair after 0.9.4.
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter --skip secure_fs::tests::windows_publication_stays_bound_to_original_parent
           if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
