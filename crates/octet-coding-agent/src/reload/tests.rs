@@ -1474,3 +1474,81 @@ fn the_real_scanner_reads_metadata_and_never_follows_a_final_symlink() {
 fn summary_mentions(report: &ReloadReport, needle: &str) -> bool {
     report.summary().contains(needle)
 }
+
+#[test]
+fn applied_config_write_acknowledges_only_its_exact_sampled_revision() {
+    let path = PathBuf::from("/config.toml");
+    let now = base();
+    let scan = |config, other| {
+        Scan::from_parts(
+            vec![
+                WatchedFingerprint::new(
+                    path.clone(),
+                    ReloadLayer::Resources,
+                    file_fingerprint(config),
+                ),
+                WatchedFingerprint::new(
+                    PathBuf::from("/theme.toml"),
+                    ReloadLayer::Resources,
+                    file_fingerprint(other),
+                ),
+            ],
+            None,
+            ScanMeta::default(),
+        )
+    };
+    let mut reload = ReloadSupervisor::new(ReloadSettings::default());
+    reload.observe(now, &scan(1, 1));
+    let write = AppliedConfigWrite {
+        path: path.clone(),
+        before: file_fingerprint(1),
+        after: file_fingerprint(2),
+    };
+    assert!(reload.acknowledge_applied_write(&write));
+    assert!(!reload
+        .observe(now + Duration::from_secs(1), &scan(2, 1))
+        .anything_changed());
+    // No time-window exemption: the very next external edit still reloads.
+    assert!(reload
+        .observe(now + Duration::from_secs(2), &scan(3, 2))
+        .anything_changed());
+    assert!(
+        !reload.acknowledge_applied_write(&AppliedConfigWrite {
+            path,
+            before: file_fingerprint(3),
+            after: file_fingerprint(4),
+        }),
+        "queued external evidence cannot be erased"
+    );
+    let plan = reload
+        .begin(now + Duration::from_secs(3), ReloadBoundary::Idle)
+        .unwrap();
+    assert!(plan.contains(ReloadLayer::Resources));
+}
+
+#[test]
+fn applied_config_write_cannot_absorb_an_unseen_prior_edit_or_unknown_baseline() {
+    let path = PathBuf::from("/config.toml");
+    let mut reload = ReloadSupervisor::new(ReloadSettings::default());
+    let write = AppliedConfigWrite {
+        path: path.clone(),
+        before: file_fingerprint(2),
+        after: file_fingerprint(3),
+    };
+    assert!(!reload.acknowledge_applied_write(&write));
+    let scan = Scan::from_parts(
+        vec![WatchedFingerprint::new(
+            path,
+            ReloadLayer::Resources,
+            file_fingerprint(1),
+        )],
+        None,
+        ScanMeta::default(),
+    );
+    reload.observe(base(), &scan);
+    assert!(!reload.acknowledge_applied_write(&write));
+    assert_eq!(
+        reload.baseline.values().next().unwrap().fingerprint,
+        file_fingerprint(1)
+    );
+}

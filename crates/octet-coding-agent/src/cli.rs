@@ -918,6 +918,28 @@ pub fn persist_show_images(enabled: bool) -> anyhow::Result<()> {
     persist_bool_key_to_path("show_images", enabled, &path)
 }
 
+/// Persist an already-applied idle selection in one atomic transaction. A
+/// receipt is optional: uncertain observations must retain normal reload work.
+pub(crate) fn persist_thinking_selection(
+    reasoning: &str,
+    mode: Option<octet_ai::ReasoningMode>,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist reasoning: user home directory is unavailable")
+    })?;
+    let mut keys = vec![("reasoning", reasoning)];
+    if let Some(mode) = mode {
+        keys.push((
+            "reasoning_mode",
+            match mode {
+                octet_ai::ReasoningMode::Standard => "standard",
+                octet_ai::ReasoningMode::Pro => "pro",
+            },
+        ));
+    }
+    persist_keys_to_path(&keys, &path, true)
+}
+
 pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist reasoning: user home directory is unavailable")
@@ -990,17 +1012,6 @@ fn terminal_appearance_environment_is_configured_value(value: Option<&str>) -> b
             "auto" | "dark" | "light" | "unknown" | "universal"
         )
     })
-}
-
-pub fn persist_reasoning_mode(mode: octet_ai::ReasoningMode) -> anyhow::Result<()> {
-    let path = global_config_path().ok_or_else(|| {
-        anyhow::anyhow!("cannot persist reasoning mode: user home directory is unavailable")
-    })?;
-    let value = match mode {
-        octet_ai::ReasoningMode::Standard => "standard",
-        octet_ai::ReasoningMode::Pro => "pro",
-    };
-    persist_key_to_path("reasoning_mode", value, &path)
 }
 
 /// Persist one executable extension's activation without copying merged
@@ -1274,6 +1285,26 @@ pub(crate) fn render_model_persistence_update(
 }
 
 fn persist_key_to_path(key: &str, value: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    persist_keys_to_path(&[(key, value)], path, false).map(|_| ())
+}
+
+fn config_fingerprint(path: &std::path::Path) -> Option<crate::reload::FileFingerprint> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Some(crate::reload::FileFingerprint::from_metadata(&metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(crate::reload::FileFingerprint::ABSENT)
+        }
+        _ => None,
+    }
+}
+
+fn persist_keys_to_path(
+    keys: &[(&str, &str)],
+    path: &std::path::Path,
+    record_applied: bool,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1284,12 +1315,51 @@ fn persist_key_to_path(key: &str, value: &str, path: &std::path::Path) -> anyhow
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let new_content = render_persisted_key_update(key, value, original.as_deref(), path)?;
+    // Only stable metadata plus the exact CAS input/output may acknowledge a
+    // write. An external edit before or after this transaction stays visible.
+    let before = if record_applied {
+        let before = config_fingerprint(path);
+        let original_matches =
+            match octet_agent::secure_fs::read_regular_file_bounded(path, 1024 * 1024) {
+                Ok(bytes) => original.as_deref().map(str::as_bytes) == Some(bytes.as_slice()),
+                Err(octet_agent::secure_fs::SecureFileError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    original.is_none()
+                }
+                Err(_) => false,
+            };
+        before.filter(|_| original_matches && config_fingerprint(path) == before)
+    } else {
+        None
+    };
+    let mut new_content = original.clone();
+    for (key, value) in keys {
+        new_content = Some(render_persisted_key_update(
+            key,
+            value,
+            new_content.as_deref(),
+            path,
+        )?);
+    }
+    let new_content = new_content.expect("at least one configuration key");
 
-    // Atomic write: write to a unique sibling temp file then rename over the
-    // real path so a crash or concurrent config writer cannot leave a partial
-    // or collide with this writer's staging file.
-    write_config_atomically(path, &new_content, original.as_deref())
+    // Keep the existing lock, compare-and-swap publication and fsync contract.
+    write_config_atomically(path, &new_content, original.as_deref())?;
+    if !record_applied {
+        return Ok(None);
+    }
+    let after = config_fingerprint(path);
+    let published_matches = octet_agent::secure_fs::read_regular_file_bounded(path, 1024 * 1024)
+        .is_ok_and(|bytes| bytes == new_content.as_bytes());
+    Ok(before
+        .zip(after)
+        .filter(|_| published_matches && config_fingerprint(path) == after)
+        .map(|(before, after)| crate::reload::AppliedConfigWrite {
+            path: path.to_path_buf(),
+            before,
+            after,
+        }))
 }
 
 /// Persist one structural user-config boolean. `toml_edit::value(&str)` would

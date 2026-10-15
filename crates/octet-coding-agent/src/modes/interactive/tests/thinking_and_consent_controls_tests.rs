@@ -218,18 +218,16 @@ async fn deferred_thinking_revalidates_availability_at_the_safe_boundary() {
     let head = app.agent.session().head_ref().cloned();
     let mut shell = InteractiveShell::test_shell();
     shell.set_thinking_cycle(
-        format!(
-            "{}:{}:{}",
-            app.agent.session().resource_owner_key(),
-            app.model.endpoint.id.0,
-            app.model.spec.id.0
-        ),
+        thinking_selection_owner(&app),
         vec![
             original.clone(),
             ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra),
         ],
         &original,
     );
+    shell.prefill_editor("must not send after a failed selection".into());
+    shell.begin_thinking_wait();
+    assert!(shell.queue_thinking_submission());
     handle_cancellable_wait_input(
         &mut shell,
         Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
@@ -240,7 +238,7 @@ async fn deferred_thinking_revalidates_availability_at_the_safe_boundary() {
     );
     let mut input = futures_util::stream::empty::<std::io::Result<Event>>();
 
-    let app = apply_deferred_thinking(app, &mut shell, &mut input)
+    let app = apply_deferred_thinking(app, &mut shell, &mut input, &mut test_reload().1)
         .await
         .unwrap();
 
@@ -248,10 +246,14 @@ async fn deferred_thinking_revalidates_availability_at_the_safe_boundary() {
     assert_eq!(app.agent.session().head_ref(), head.as_ref());
     assert!(shell.take_deferred_thinking().is_none());
     assert_eq!(shell.selected_identity().1, reasoning_label(&app.reasoning));
-    assert_eq!(
-        shell.debug_error().as_deref(),
-        Some("thinking unchanged: selected level is no longer available")
-    );
+    assert!(shell
+        .debug_error()
+        .unwrap()
+        .contains("selected thinking level is no longer available · prompt not sent"));
+    assert_eq!(shell.pending(), "must not send after a failed selection");
+    assert!(shell
+        .take_thinking_submission(&thinking_selection_owner(&app), &original)
+        .is_none());
     assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
@@ -298,9 +300,8 @@ mod thinking_rebuild_regressions {
         Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
     }
 
-    // An API 0.4 peer negotiates the actual lifecycle channel and holds one
-    // session_end request. select_thinking therefore really enters rebuild_app's
-    // release_binding wait; the test does not substitute a bare wait helper.
+    // Hold the real post-commit configuration observer, not a fake wait. Idle
+    // thinking must keep this peer alive without replaying its lifecycle.
     const LIFECYCLE_PROBE: &str = r#"import json, os, sys, time
 log, gate = sys.argv[1:]
 
@@ -311,6 +312,8 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
     if method == 'initialize':
+        with open(log + '.lifecycle', 'a') as trace:
+            trace.write('initialize\n')
         offer = request['params']['protocol']
         assert 'lifecycle_events_v2' in offer['optional_features']
         reply(request, {'api_version': '0.4', 'tools': [], 'commands': [],
@@ -318,13 +321,15 @@ for line in sys.stdin:
                 'features': offer['required_features'] + ['lifecycle_events_v2'],
                 'limits': {'max_concurrent_requests': 1}}})
     elif method == 'hook/run':
-        if request['params']['hook'] == 'session_end' and os.path.exists(gate):
+        with open(log + '.lifecycle', 'a') as trace:
+            trace.write(request['params']['hook'] + '\n')
+        if request['params']['hook'] == 'post_mutation' and os.path.exists(gate):
             os.unlink(gate)
             with open(gate + '.entered', 'w') as marker:
-                marker.write('session_end entered')
+                marker.write('configuration observer entered')
             deadline = time.monotonic() + 5
             while not os.path.exists(gate + '.release'):
-                assert time.monotonic() < deadline, 'held lifecycle was not released'
+                assert time.monotonic() < deadline, 'held configuration observer was not released'
                 time.sleep(0.005)
         reply(request, {})
     elif method == 'reasoning/selected':
@@ -347,7 +352,7 @@ for line in sys.stdin:
         std::fs::create_dir_all(&extension).unwrap();
         let script = extension.join("probe.py");
         let log = directory.path().join("reasoning-selected.jsonl");
-        let gate = directory.path().join("hold-session-end");
+        let gate = directory.path().join("hold-configuration-observer");
         std::fs::write(&script, LIFECYCLE_PROBE).unwrap();
         std::fs::write(
             extension.join("extension.toml"),
@@ -359,7 +364,7 @@ api_version = "0.4"
 command = "python3"
 args = [{script}, {log}, {gate}]
 [contributes]
-hooks = ["session_start", "session_end"]
+hooks = ["session_start", "session_end", "post_mutation"]
 "#,
                 script = serde_json::to_string(&script).unwrap(),
                 log = serde_json::to_string(&log).unwrap(),
@@ -403,10 +408,8 @@ hooks = ["session_start", "session_end"]
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn second_shift_tab_during_real_thinking_rebuild_advances_from_low_to_high() {
-        if !isolated_child(
-            "second_shift_tab_during_real_thinking_rebuild_advances_from_low_to_high",
-        ) {
+    async fn second_shift_tab_and_enter_during_thinking_commit_preserve_intent() {
+        if !isolated_child("second_shift_tab_and_enter_during_thinking_commit_preserve_intent") {
             return;
         }
         let (_directory, app, log, gate) = lifecycle_app(false);
@@ -426,14 +429,14 @@ hooks = ["session_start", "session_end"]
         assert_eq!(first, ThinkingLevel::Low);
         let low =
             requested_thinking_to_reasoning(first, &app.model, app.subagents_available()).unwrap();
-        std::fs::write(&gate, "hold the next session_end").unwrap();
+        std::fs::write(&gate, "hold the next configuration observer").unwrap();
         let entered = gate.with_extension("entered");
         let release = gate.with_extension("release");
         let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let (handled_tx, handled) = tokio::sync::oneshot::channel();
         let mut input = ProbedInput {
             input: tokio_stream::wrappers::ReceiverStream::new(receiver),
-            remaining: 1,
+            remaining: 2,
             handled: Some(handled_tx),
         };
         let stimulus = async move {
@@ -441,20 +444,29 @@ hooks = ["session_start", "session_end"]
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             sender.send(Ok(shift_tab())).await.unwrap();
+            sender
+                .send(Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))))
+                .await
+                .unwrap();
             let processed = tokio::time::timeout(Duration::from_millis(250), handled).await;
             // Release even if the input-liveness assertion failed.
             std::fs::write(release, "release").unwrap();
             processed
-                .expect("Shift+Tab must be handled while session_end is held")
+                .expect("Shift+Tab and Enter must be handled while the observer is held")
                 .unwrap();
             std::future::pending::<()>().await;
         };
+        let mut reload = test_reload().1;
         let driver = Box::pin(select_thinking(
             app,
             &mut shell,
             &mut input,
             low.clone(),
             None,
+            &mut reload,
         ));
         let mut app = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::select! {
@@ -463,20 +475,49 @@ hooks = ["session_start", "session_end"]
             }
         })
         .await
-        .expect("held thinking rebuild must settle");
+        .expect("held thinking commit must settle");
         let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
         assert_eq!(app.reasoning, low);
         assert_eq!(shell.deferred_thinking(), Some(&high), "not Low again");
         assert_eq!(shell.selected_identity().1, "high (queued)");
-        assert_eq!(shell.pending(), "draft survives the rebuild");
+        assert!(
+            shell.pending().is_empty(),
+            "Enter transfers the full composer to its owner"
+        );
+        shell.prefill_editor("a later independent draft".into());
         let mut idle_input = futures_util::stream::pending::<std::io::Result<Event>>();
-        app = Box::pin(apply_deferred_thinking(app, &mut shell, &mut idle_input))
-            .await
-            .unwrap();
+        app = Box::pin(apply_deferred_thinking(
+            app,
+            &mut shell,
+            &mut idle_input,
+            &mut test_reload().1,
+        ))
+        .await
+        .unwrap();
         assert_eq!(app.reasoning, high);
         assert_eq!(app.agent.reasoning(), &high);
         assert!(shell.deferred_thinking().is_none());
         assert_eq!(shell.selected_identity().1, "high");
+        let submitted = shell
+            .take_thinking_submission(&thinking_selection_owner(&app), &app.reasoning)
+            .expect("one Enter must submit at idle");
+        assert_eq!(submitted.transcript_text, "draft survives the rebuild");
+        assert!(
+            shell
+                .take_thinking_submission(&thinking_selection_owner(&app), &app.reasoning)
+                .is_none(),
+            "exactly once"
+        );
+        assert_eq!(shell.pending(), "a later independent draft");
+        let lifecycle = std::fs::read_to_string(format!("{}.lifecycle", log.display())).unwrap();
+        assert_eq!(
+            lifecycle
+                .lines()
+                .filter(|line| *line == "initialize")
+                .count(),
+            1
+        );
+        assert!(!lifecycle.contains("session_end"), "{lifecycle}");
         app.executable_extensions.shutdown().await;
         assert_eq!(
             selected_notifications(&log),
@@ -484,7 +525,7 @@ hooks = ["session_start", "session_end"]
                 serde_json::json!({"reasoning":"low"}),
                 serde_json::json!({"reasoning":"high"})
             ],
-            "each rebuild-backed selection must notify exactly once"
+            "each in-place selection must notify exactly once"
         );
     }
 
@@ -498,9 +539,16 @@ hooks = ["session_start", "session_end"]
         update_status(&mut shell, &app);
         let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
         let low = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
-        let mut app = select_thinking(app, &mut shell, &mut input, low.clone(), None)
-            .await
-            .unwrap();
+        let mut app = select_thinking(
+            app,
+            &mut shell,
+            &mut input,
+            low.clone(),
+            None,
+            &mut test_reload().1,
+        )
+        .await
+        .unwrap();
         assert_eq!(app.reasoning, low);
         assert_eq!(shell.selected_identity().1, "low");
         app.executable_extensions.shutdown().await;
@@ -1017,6 +1065,7 @@ async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
         &mut input,
         ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
         None,
+        &mut test_reload().1,
     )
     .await
     .unwrap();
@@ -1029,9 +1078,16 @@ async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
     // None is the slash/shortcut path; Some(Standard) is picker selection.
     for mode in [None, Some((ReasoningMode::Standard, ThinkingLevel::Ultra))] {
         shell.clear_error();
-        app = select_thinking(app, &mut shell, &mut input, ultra.clone(), mode)
-            .await
-            .unwrap();
+        app = select_thinking(
+            app,
+            &mut shell,
+            &mut input,
+            ultra.clone(),
+            mode,
+            &mut test_reload().1,
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(&preference).unwrap(), config_before);
         assert_eq!(std::fs::read(&session).unwrap(), session_before);
         assert_eq!(shell.selected_identity(), identity);
@@ -1063,9 +1119,16 @@ async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
     ] {
         let reasoning = requested_thinking_to_reasoning(level, &app.model, true).unwrap();
         shell.clear_error();
-        app = select_thinking(app, &mut shell, &mut input, reasoning.clone(), None)
-            .await
-            .unwrap();
+        app = select_thinking(
+            app,
+            &mut shell,
+            &mut input,
+            reasoning.clone(),
+            None,
+            &mut test_reload().1,
+        )
+        .await
+        .unwrap();
         assert!(shell.debug_error().is_none(), "{:?}", shell.debug_error());
         assert_eq!(app.reasoning, reasoning);
         assert_eq!(app.agent.reasoning(), &reasoning);
@@ -1412,5 +1475,82 @@ async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
         agent.session().context().unwrap().len(),
         1,
         "undelivered input is not durable or replayed"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_chat_idle_thinking_is_durable_and_controls_the_next_request() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(
+        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"idle\",\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+                "data: {\"id\":\"idle\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ))
+    ).expect(1).mount(&server).await;
+    let mut model = reasoning_control_model(&server.uri());
+    Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiChat;
+    Arc::make_mut(&mut model.spec)
+        .capabilities
+        .responses_features = Default::default();
+    Arc::make_mut(&mut model.endpoint)
+        .runtime
+        .responses_features = Default::default();
+    let (_workspace, mut app) = fast_test_app(model);
+    let session = app.agent.session().path().to_path_buf();
+    let owner = app.agent.session().resource_owner_key();
+    let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
+    select_idle_thinking(&mut app, high.clone()).unwrap();
+    assert_eq!(app.agent.session().path(), session);
+    assert_eq!(app.agent.session().resource_owner_key(), owner);
+    assert_eq!(app.agent.reasoning(), &high);
+    assert!(!app.model.responses_features().reasoning_effort_updates);
+    let before = std::fs::read(&session).unwrap();
+    assert!(select_idle_thinking(
+        &mut app,
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&session).unwrap(), before);
+    let saved = Session::open_read_only(&session).unwrap();
+    assert!(saved.entries().iter().rev().any(|entry| matches!(
+        &entry.value, EntryValue::Config { reasoning: Some(level), .. } if level == "high"
+    )));
+    assert!(!saved
+        .entries()
+        .iter()
+        .any(|entry| matches!(&entry.value, EntryValue::ResponsesReasoning { .. })));
+    drop(saved);
+    // Exercise the independent resume reader, not just the in-memory producer.
+    let (_resume_workspace, mut resumed) = crate::compaction::tests::app_for_estimate();
+    resumed.catalog = app.catalog.clone();
+    drop(app);
+    let mut resumed = rebuild_app(
+        resumed,
+        None,
+        None,
+        None,
+        Some(SessionSelection::OpenExisting(session)),
+    )
+    .unwrap();
+    assert_eq!(resumed.reasoning, high);
+    let mut run = resumed.agent.prompt("one explicit Enter").await.unwrap();
+    let mut completed = false;
+    while let Some(event) = run.next().await {
+        if let octet_agent::AgentEvent::RunFinished { reason, .. } = event {
+            completed = matches!(reason, octet_agent::FinishReason::Completed);
+        }
+    }
+    assert!(completed);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["reasoning_effort"], "high");
+    assert!(
+        body.get("input").is_none(),
+        "no Responses update wire contract"
     );
 }

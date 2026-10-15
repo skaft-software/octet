@@ -2584,3 +2584,27 @@ fn debug_prompt_is_an_explicit_prompt_template_diagnostic() {
     assert_eq!(cli.prompt_template.as_deref(), Some("review"));
     assert!(cli.debug_prompt);
 }
+
+#[test]
+fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "# retained\nreasoning = 'off'\nreload = true\n").unwrap();
+    let before = config_fingerprint(&path).unwrap();
+    let receipt = persist_keys_to_path(
+        &[("reasoning", "high"), ("reasoning_mode", "standard")],
+        &path,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(receipt.path, path);
+    assert_eq!(receipt.before, before);
+    assert_eq!(Some(receipt.after), config_fingerprint(&path));
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.starts_with("# retained"));
+    let value: toml::Value = toml::from_str(&content).unwrap();
+    assert_eq!(value["reasoning"].as_str(), Some("high"));
+    assert_eq!(value["reasoning_mode"].as_str(), Some("standard"));
+    assert_eq!(value["reload"].as_bool(), Some(true));
+}
