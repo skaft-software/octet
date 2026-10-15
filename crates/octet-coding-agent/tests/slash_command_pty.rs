@@ -507,14 +507,14 @@ fn real_octet_slash_cost_renders_while_a_response_is_streaming() {
     octet.shutdown();
 }
 
-/// `/context` takes the other live-inspection route: the report is built from
-/// the run's own `ContextSnapshot` rather than from the session store, so a
-/// queued-to-idle implementation would not render it either.
+/// `/context` renders the same rich usage-grid report mid-run as idle: the
+/// report is built from the run's own live `ContextSnapshot` through the
+/// shared `ContextReport`, so it never waits for the idle boundary either.
 #[test]
 fn real_octet_slash_context_renders_while_a_response_is_streaming() {
     let (api, mut octet) = streaming_octet();
     octet.pty.write_input(b"/context\r");
-    octet.pty.wait_for(b"Estimated next request");
+    octet.pty.wait_for(b"Estimated usage by category");
 
     assert!(
         !contains_bytes(&octet.pty.output, TAIL_MARKER),

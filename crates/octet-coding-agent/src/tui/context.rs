@@ -1,6 +1,6 @@
 use octet_agent::InputPart;
 
-use crate::app::bootstrap::effective_compaction_threshold_fraction;
+use crate::app::bootstrap::effective_policy_threshold_fraction;
 use crate::app::App;
 use crate::presentation::ModelDisplayMetadata;
 use crate::tui::theme::OctetTheme;
@@ -91,10 +91,41 @@ impl ContextReport {
             .agent
             .request_context_breakdown()
             .expect("an active application has a valid context branch");
+        Self::from_breakdown(
+            &breakdown,
+            ModelDisplayMetadata::resolve(&app.model.spec).name,
+            &app.config.compaction,
+            &app.model,
+        )
+    }
+
+    /// The same rich report from a live run's snapshot, so mid-run `/context`
+    /// renders the usage grid instead of a flat facts fallback. The run's own
+    /// snapshot is the authoritative live quantity; the captured compaction
+    /// policy supplies the same free-space/buffer derivation as idle capture.
+    pub(crate) fn from_live_breakdown(
+        breakdown: &octet_agent::ContextBreakdown,
+        model: &octet_ai::Model,
+        compaction: &crate::config::CompactionPolicy,
+    ) -> Self {
+        Self::from_breakdown(
+            breakdown,
+            ModelDisplayMetadata::resolve(&model.spec).name,
+            compaction,
+            model,
+        )
+    }
+
+    fn from_breakdown(
+        breakdown: &octet_agent::ContextBreakdown,
+        model_display: String,
+        compaction: &crate::config::CompactionPolicy,
+        model: &octet_ai::Model,
+    ) -> Self {
         let context_window = breakdown.context_limit;
         let estimated_input = breakdown.total_tokens;
-        let auto_compact_enabled = app.config.compaction.mode.enabled();
-        let threshold_fraction = effective_compaction_threshold_fraction(&app.config, &app.model);
+        let auto_compact_enabled = compaction.mode.enabled();
+        let threshold_fraction = effective_policy_threshold_fraction(compaction, model);
         let auto_compact_threshold = if auto_compact_enabled {
             ((context_window as f64) * threshold_fraction).floor() as u64
         } else {
@@ -160,7 +191,6 @@ impl ContextReport {
             });
         }
 
-        let model_display = ModelDisplayMetadata::resolve(&app.model.spec).name;
         Self {
             model_display,
             context_window,

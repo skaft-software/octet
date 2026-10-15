@@ -120,6 +120,72 @@ async fn active_session_commands_report_through_the_read_only_session() {
 }
 
 #[tokio::test]
+async fn active_context_renders_the_rich_usage_grid_like_idle() {
+    let session_dir = tempfile::tempdir().expect("inspection fixture");
+    let inspection = test_run_inspection_with_session(session_dir.path());
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 24);
+    shell.begin_run("test");
+
+    let mut snapshot = octet_agent::ContextSnapshot::default();
+    snapshot.context.context_limit = 128_000;
+    snapshot.context.total_tokens = 3_800;
+    snapshot.context.system_tokens = 1_100;
+    snapshot.context.instruction_tokens = 2_700;
+    let mut queue = VecDeque::new();
+    let mut quit_requested = false;
+    let mut goal_deadline = None;
+    let mut extensions = crate::extensions::ExecutableExtensions::default();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    handle_active_command(
+        &mut shell,
+        Command::Context,
+        &inspection,
+        &mut extensions,
+        &snapshot,
+        &mut goal_deadline,
+        |_, _| Ok(None),
+        &mut input,
+        &mut queue,
+        &mut quit_requested,
+        &mut extension_menu::State::default(),
+    )
+    .await
+    .expect("active context");
+    assert!(shell.has_overlay());
+    assert!(queue.is_empty());
+    assert!(!quit_requested);
+    shell.render();
+    let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+    assert!(
+        frame.contains("Estimated usage by category"),
+        "mid-run context lost the usage grid: {frame}"
+    );
+    assert!(
+        frame.contains("Runtime framing and tools"),
+        "mid-run context lost its categories: {frame}"
+    );
+    assert!(
+        frame.contains("System instructions"),
+        "mid-run context lost its categories: {frame}"
+    );
+    assert!(
+        !frame.contains("Estimated next request"),
+        "flat fallback leaked into the mid-run report: {frame}"
+    );
+    assert!(
+        !frame.contains("Context window:"),
+        "flat fallback leaked into the mid-run report: {frame}"
+    );
+    let model_display =
+        crate::presentation::ModelDisplayMetadata::resolve(&inspection.model.spec).name;
+    assert!(
+        frame.contains(&model_display),
+        "mid-run context lost the model display: {frame}"
+    );
+}
+
+#[tokio::test]
 async fn active_name_updates_the_foreground_title_without_waiting_for_run_settlement() {
     let session_dir = tempfile::tempdir().unwrap();
     let inspection = test_run_inspection_with_session(session_dir.path());
