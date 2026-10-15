@@ -50,6 +50,22 @@ fn opencode_go_discovery_routes_gemini_to_the_google_endpoint() {
         binding("gemini-future"),
         Some(("opencode-go-google", Protocol::GoogleGenerativeAi))
     );
+    // OpenCode Go serves Gemini only under its inference base; the zen/go base
+    // answers that path with a 404 page while serving the other protocols.
+    let route = discovered_preset_binding(&crate::providers::OPENCODE_GO, "gemini-future").unwrap();
+    let base = crate::providers::OPENCODE_GO
+        .resolved_route_base_url(route)
+        .unwrap();
+    assert_eq!(base.as_str(), "https://opencode.ai/inference/go/v1/");
+    assert_eq!(
+        crate::providers::OPENCODE_GO
+            .resolved_route_base_url(
+                discovered_preset_binding(&crate::providers::OPENCODE_GO, "glm-5.2").unwrap()
+            )
+            .unwrap()
+            .as_str(),
+        crate::providers::OPENCODE_GO.base_url
+    );
 }
 
 #[test]
