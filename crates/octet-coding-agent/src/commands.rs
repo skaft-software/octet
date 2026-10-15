@@ -79,6 +79,8 @@ pub enum Command {
     Goal(GoalCommand),
     /// Inspect or change user-level display and default preferences.
     Settings(SettingsCommand),
+    /// Inspect or change persistent workspace-resource trust.
+    WorkspaceTrust(WorkspaceTrustCommand),
     /// Inspect or change the ordered model cycling scope.
     ScopedModels(ScopedModelsCommand),
     /// Manage Pi compatibility setup and its executable resource owner.
@@ -149,6 +151,21 @@ pub enum SkillsSubcommand {
     Reload,
     /// Explicitly deactivate a skill.
     Off(String),
+}
+
+/// Subcommands for the `/trust` slash command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceTrustCommand {
+    /// Show the active and nearest saved workspace decision.
+    Status,
+    /// Persist trust for this workspace; the current session is not reloaded.
+    Allow,
+    /// Persist an explicit denial for this workspace.
+    Deny,
+    /// Remove this workspace's exact decision and inherit from its parent/default.
+    Revoke,
+    /// Set or report the user-only fallback for workspaces without a saved decision.
+    Default(Option<crate::workspace_trust::DefaultWorkspaceTrust>),
 }
 
 /// Subcommands for the `/settings` slash command.
@@ -450,6 +467,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         "goal",
         "/goal [objective|status|pause|resume|clear]",
         "inspect or manage the durable session goal",
+        true
+    ),
+    slash!(
+        "trust",
+        "/trust [status|allow|deny|revoke|default ask/always/never]",
+        "inspect or change persistent workspace-resource trust",
         true
     ),
     slash!(
@@ -1037,6 +1060,23 @@ pub fn parse(input: &str) -> Command {
             ["on"] => Command::Pi(PiSubcommand::On),
             ["off"] => Command::Pi(PiSubcommand::Off),
             ["setup"] => Command::Pi(PiSubcommand::Setup),
+            _ => Command::Unknown(input.to_owned()),
+        };
+    }
+
+    if full_name == "trust" {
+        let args = parts.collect::<Vec<_>>();
+        return match args.as_slice() {
+            [] | ["status"] => Command::WorkspaceTrust(WorkspaceTrustCommand::Status),
+            ["allow"] => Command::WorkspaceTrust(WorkspaceTrustCommand::Allow),
+            ["deny"] => Command::WorkspaceTrust(WorkspaceTrustCommand::Deny),
+            ["revoke"] => Command::WorkspaceTrust(WorkspaceTrustCommand::Revoke),
+            ["default"] => Command::WorkspaceTrust(WorkspaceTrustCommand::Default(None)),
+            ["default", value] => match crate::workspace_trust::DefaultWorkspaceTrust::parse(value)
+            {
+                Ok(policy) => Command::WorkspaceTrust(WorkspaceTrustCommand::Default(Some(policy))),
+                Err(_) => Command::Unknown(input.to_owned()),
+            },
             _ => Command::Unknown(input.to_owned()),
         };
     }

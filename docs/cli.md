@@ -34,10 +34,17 @@ defaults that aren't listed here aren't guessed.
 | `--cache-warming off\|streaming\|idle` | Billable prompt-cache refresh policy; default `streaming`. Overrides `OCTET_CACHE_WARMING` and user configuration. [Details](cache-warming.md). |
 | `--max-turns N` | Limit model turns. |
 | `--workspace PATH` | Workspace root for relative tool paths and the default bash directory. |
-| `--workspace-trusted`, `--trust-workspace` | Load project config, instructions and resources. Can't relax global safety limits or grant extension trust. |
+| `--workspace-trusted`, `--trust-workspace` | Trust this workspace for this launch, overriding a saved denial; loads project config, instructions and resources. Doesn't relax global safety limits or by itself grant extension host authority. |
+| `--no-workspace-trusted`, `--no-trust-workspace` | Keep this launch untrusted, overriding a saved allow. |
 | `--no-context-files` | Don't compose context files. |
 | `--offline` | Skip optional discovery and the background models.dev metadata refresh, and turn off remote media reads. Inference can still use the network. |
 | `--strict-config` | Unknown config keys are errors, not warnings. Same as `strict_config = true`. |
+
+An interactive launch asks whether to trust a workspace when project resources
+are present and no saved decision applies. Print, RPC and other non-interactive
+launches never prompt and remain untrusted unless explicitly allowed by the user
+policy or `--workspace-trusted`. Decisions and the default policy are managed by
+`/trust`; see [workspace trust](resources.md#workspace-trust).
 
 See also [Terminal](terminal.md), [Models](providers.md) and
 [Settings](configuration.md#settings).

@@ -53,6 +53,7 @@ mod session_store;
 mod session_tree;
 mod tui;
 mod update;
+mod workspace_trust;
 
 use clap::Parser;
 

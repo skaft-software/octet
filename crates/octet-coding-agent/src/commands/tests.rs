@@ -120,6 +120,56 @@ fn unknown_slash_fallback_reserves_builtin_names_and_prefixes() {
 }
 
 #[test]
+fn workspace_trust_commands_parse_persistence_and_default_policy_choices() {
+    use super::WorkspaceTrustCommand as TrustCommand;
+
+    assert_eq!(
+        parse("/trust"),
+        Command::WorkspaceTrust(TrustCommand::Status)
+    );
+    assert_eq!(
+        parse("/trust status"),
+        Command::WorkspaceTrust(TrustCommand::Status)
+    );
+    assert_eq!(
+        parse("/trust allow"),
+        Command::WorkspaceTrust(TrustCommand::Allow)
+    );
+    assert_eq!(
+        parse("/trust deny"),
+        Command::WorkspaceTrust(TrustCommand::Deny)
+    );
+    assert_eq!(
+        parse("/trust revoke"),
+        Command::WorkspaceTrust(TrustCommand::Revoke)
+    );
+    for (value, expected) in [
+        ("ask", crate::workspace_trust::DefaultWorkspaceTrust::Ask),
+        (
+            "always",
+            crate::workspace_trust::DefaultWorkspaceTrust::Always,
+        ),
+        (
+            "never",
+            crate::workspace_trust::DefaultWorkspaceTrust::Never,
+        ),
+    ] {
+        assert_eq!(
+            parse(&format!("/trust default {value}")),
+            Command::WorkspaceTrust(TrustCommand::Default(Some(expected)))
+        );
+    }
+    assert!(matches!(
+        parse("/trust default sometimes"),
+        Command::Unknown(_)
+    ));
+    assert!(matches!(parse("/trust allow extra"), Command::Unknown(_)));
+    assert!(slash_commands()
+        .iter()
+        .any(|command| command.name == "trust"));
+}
+
+#[test]
 fn pi_compatibility_commands_parse_exactly_and_reject_malformed_forms() {
     use super::PiSubcommand;
 

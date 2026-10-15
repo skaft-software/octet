@@ -24,8 +24,32 @@ A valid package-manager `install.json` admits an installed bundle's nested
 rank below `~/.octet/skills`, stay inactive until loaded, and disappear from
 discovery once the package is removed.
 
-Workspace resources are ignored without `--workspace-trusted`. Explicit paths
-are your choice for that run.
+## Workspace trust
+
+Project resources are not read until the workspace is trusted. With the default
+`ask` policy, an interactive terminal asks before parsing or loading project
+config, `AGENTS.md`, project skills, prompts, themes or extensions when no saved
+decision applies. The prompt can remember trust, trust only this launch, remember
+a denial, or continue without trust. Headless, print and RPC launches never
+prompt; with the default `ask` policy they stay untrusted.
+
+Remembered decisions live in the owner-private `~/.octet/trust.json`, not in the
+project. A decision for a canonical path applies to that path and descendants;
+the closest matching path wins. `/trust status` reports the active state and
+matching saved decision. `/trust allow` and `/trust deny` save a decision for the
+current workspace; `/trust revoke` removes only its exact entry and inherits
+from a parent or the user default. These commands take effect on the next
+launch, so restart Octet after changing a decision. `/trust default ask|always|never`
+sets the user-only fallback for paths without a matching entry. An unreadable
+or malformed store fails closed, even with `always`. CLI `--workspace-trusted`
+and `--no-workspace-trusted` are one-launch overrides.
+
+Workspace trust admits project-provided configuration and resources only. It
+does not relax global safety limits or by itself grant tool permissions or
+extension host authority. Trusted project configuration can select enabled
+extensions; whether their host processes may start remains governed by the
+separate extension authority policy below. Explicit resource paths are the user's
+choice for that launch and don't persist workspace trust.
 
 Extensions add a second boundary. Discovery and workspace trust never launch
 code. Installed executable extensions are **disabled by default**. Full access
@@ -59,7 +83,7 @@ Skill discovery goes from **lowest to highest precedence**:
    extension skills, then `~/.octet/skills`.
 2. **Trusted project:** `.agents/skills` roots from the workspace through the
    invocation directory, then the invocation directory's `.pi/skills`, then the
-   workspace's `.octet/skills`. These need `--workspace-trusted`.
+   workspace's `.octet/skills`. These require workspace trust.
 3. **Explicit:** `--skill-dir` sources, in command-line order.
 
 A project root that's also a user skill root is scanned only in the user tier.

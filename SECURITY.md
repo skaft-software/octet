@@ -31,9 +31,13 @@ for availability and qualification status.
   the built-in file tools reach outside the workspace. Set it to `false` for
   workspace-local file access. `--safe-mode` forces `false`. File-path limits
   don't contain shell commands or extension processes.
-- Project configuration, `AGENTS.md` and project skills load only with
-  `--workspace-trusted`. Trusted project settings can't weaken global safety
-  limits.
+- Project configuration and resources load only for a trusted workspace. With
+  the default `ask` policy, interactive startup asks before loading them;
+  remembered path decisions live in the owner-private `~/.octet/trust.json`.
+  `--workspace-trusted` and `--no-workspace-trusted` override saved decisions
+  for one launch. Workspace trust does not itself grant tool permissions or
+  extension host authority, and trusted project settings can't weaken global
+  safety limits.
 - `--no-edit` disables both editing and writing. `--tools read` allows only the
   read tool. `--no-tools` disables all tools.
 

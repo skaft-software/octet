@@ -53,6 +53,7 @@ fn base() -> Cli {
         trust_extensions: vec![],
         experimental_streamable_http_mcp: false,
         workspace_trusted: false,
+        no_workspace_trusted: false,
         safe_mode: false,
         effect_policy: None,
         tools: None,
@@ -77,6 +78,35 @@ fn base() -> Cli {
 
 fn config_with_empty_global(cli: Cli, directory: &Path) -> anyhow::Result<Config> {
     build_config_with_global_path(cli, directory, Some(&directory.join("missing-global.toml")))
+}
+
+#[test]
+fn workspace_trust_cli_switches_are_explicit_and_mutually_exclusive() {
+    let trusted = Cli::try_parse_from(["octet", "--trust-workspace"]).unwrap();
+    assert!(trusted.workspace_trusted);
+    assert!(!trusted.no_workspace_trusted);
+    let untrusted = Cli::try_parse_from(["octet", "--no-trust-workspace"]).unwrap();
+    assert!(untrusted.no_workspace_trusted);
+    assert!(!untrusted.workspace_trusted);
+    assert!(
+        Cli::try_parse_from(["octet", "--workspace-trusted", "--no-workspace-trusted"]).is_err()
+    );
+}
+
+#[test]
+fn workspace_trust_prompt_is_disabled_for_noninteractive_launches() {
+    let global = ConfigLayer::default();
+    let mut headless = base();
+    headless.headless = true;
+    let print = Cli::try_parse_from(["octet", "--print", "prompt"]).unwrap();
+    let json = Cli::try_parse_from(["octet", "--mode", "json"]).unwrap();
+    let rpc = Cli::try_parse_from(["octet", "--mode", "rpc"]).unwrap();
+    let command = Cli::try_parse_from(["octet", "doctor"]).unwrap();
+
+    for cli in [headless, print, json, rpc, command] {
+        assert!(!should_prompt_for_workspace_trust(&cli, &global, true).unwrap());
+    }
+    assert!(!should_prompt_for_workspace_trust(&base(), &global, false).unwrap());
 }
 
 #[test]
@@ -177,6 +207,16 @@ fn extension_flag_bootstrap_preserves_authority_options_after_dynamic_flags() {
     let bootstrap = extension_flag_bootstrap(&args).unwrap();
     assert!(!bootstrap.safe_mode);
     assert!(bootstrap.effect_policy.is_none());
+
+    for spelling in ["--no-workspace-trusted", "--no-trust-workspace"] {
+        let args = ["octet", "--fixture-option", spelling].map(OsString::from);
+        let bootstrap = extension_flag_bootstrap(&args).unwrap();
+        assert!(bootstrap.no_workspace_trusted);
+        assert!(!bootstrap.workspace_trusted);
+    }
+    let conflicting =
+        ["octet", "--workspace-trusted", "--no-workspace-trusted"].map(OsString::from);
+    assert!(extension_flag_bootstrap(&conflicting).is_none());
 }
 
 #[test]
@@ -698,6 +738,137 @@ fn experimental_streamable_http_mcp_is_cli_only() {
             .unwrap()
             .experimental_streamable_http_mcp
     );
+}
+
+#[test]
+fn project_config_cannot_self_authorize_workspace_trust() {
+    let root = cwd();
+    let home = root.path().join("home");
+    let workspace = root.path().join("project");
+    std::fs::create_dir_all(home.join(".octet")).unwrap();
+    std::fs::create_dir_all(workspace.join(".octet")).unwrap();
+    let global = home.join(".octet/config.toml");
+    std::fs::write(&global, "default_workspace_trust = 'never'\n").unwrap();
+    std::fs::write(
+        workspace.join(".octet/config.toml"),
+        "default_workspace_trust = 'always'\nsystem_prompt = 'project sentinel'\n",
+    )
+    .unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(!config.workspace_trusted);
+    assert!(config.system_prompt.is_none());
+}
+
+#[test]
+fn saved_workspace_decisions_override_defaults_and_cli_can_revoke_for_one_launch() {
+    let root = cwd();
+    let home = root.path().join("home");
+    let workspace = root.path().join("project");
+    std::fs::create_dir_all(home.join(".octet")).unwrap();
+    std::fs::create_dir_all(workspace.join(".octet")).unwrap();
+    let global = home.join(".octet/config.toml");
+    std::fs::write(&global, "default_workspace_trust = 'never'\n").unwrap();
+    std::fs::write(
+        workspace.join(".octet/config.toml"),
+        "system_prompt = 'loaded project config'\n",
+    )
+    .unwrap();
+    let store = WorkspaceTrustStore::new(WorkspaceTrustStore::path_for_config(&global));
+    store.update(&[(workspace.clone(), Some(true))]).unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(config.workspace_trusted);
+    assert_eq!(
+        config.system_prompt.as_deref(),
+        Some("loaded project config")
+    );
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    cli.no_workspace_trusted = true;
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(!config.workspace_trusted);
+    assert!(config.system_prompt.is_none());
+
+    store.update(&[(workspace.clone(), Some(false))]).unwrap();
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    cli.workspace_trusted = true;
+    assert!(
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false,)
+            .unwrap()
+            .workspace_trusted
+    );
+}
+
+#[test]
+fn unreadable_trust_store_fails_closed_even_with_an_always_default() {
+    let root = cwd();
+    let home = root.path().join("home");
+    let workspace = root.path().join("project");
+    std::fs::create_dir_all(home.join(".octet")).unwrap();
+    std::fs::create_dir_all(workspace.join(".octet")).unwrap();
+    let global = home.join(".octet/config.toml");
+    std::fs::write(&global, "default_workspace_trust = 'always'\n").unwrap();
+    std::fs::write(
+        workspace.join(".octet/config.toml"),
+        "system_prompt = 'not loaded'\n",
+    )
+    .unwrap();
+    let store_path = WorkspaceTrustStore::path_for_config(&global);
+    octet_agent::secure_fs::write_private_atomic(&store_path, b"not json", 1024).unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(!config.workspace_trusted);
+    assert!(config.system_prompt.is_none());
+}
+
+#[test]
+fn default_workspace_trust_is_user_only_and_ask_fails_closed_without_a_prompt() {
+    let root = cwd();
+    let home = root.path().join("home");
+    let workspace = root.path().join("project");
+    std::fs::create_dir_all(home.join(".octet")).unwrap();
+    std::fs::create_dir_all(workspace.join(".octet")).unwrap();
+    let global = home.join(".octet/config.toml");
+    std::fs::write(&global, "default_workspace_trust = 'always'\n").unwrap();
+    std::fs::write(
+        workspace.join(".octet/config.toml"),
+        "default_workspace_trust = 'never'\nsystem_prompt = 'project sentinel'\n",
+    )
+    .unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(config.workspace_trusted);
+    assert_eq!(config.system_prompt.as_deref(), Some("project sentinel"));
+
+    std::fs::write(&global, "default_workspace_trust = 'ask'\n").unwrap();
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    let config =
+        build_config_with_global_path_and_diagnostics(cli, &workspace, Some(&global), false)
+            .unwrap();
+    assert!(!config.workspace_trusted);
+    assert!(config.system_prompt.is_none());
 }
 
 #[test]

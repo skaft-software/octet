@@ -43,6 +43,7 @@ pub(super) struct ExtensionFlagBootstrap {
     pub(super) enable_extensions: Vec<String>,
     pub(super) trust_extensions: Vec<String>,
     pub(super) workspace_trusted: bool,
+    pub(super) no_workspace_trusted: bool,
     pub(super) safe_mode: bool,
     pub(super) effect_policy: Option<String>,
 }
@@ -86,6 +87,11 @@ pub(super) fn extension_flag_bootstrap(args: &[OsString]) -> Option<ExtensionFla
         }
         if value == "--workspace-trusted" || value == "--trust-workspace" {
             result.workspace_trusted = true;
+            index += 1;
+            continue;
+        }
+        if value == "--no-workspace-trusted" || value == "--no-trust-workspace" {
+            result.no_workspace_trusted = true;
             index += 1;
             continue;
         }
@@ -146,6 +152,9 @@ pub(super) fn extension_flag_bootstrap(args: &[OsString]) -> Option<ExtensionFla
             _ => index += 1,
         }
     }
+    if result.workspace_trusted && result.no_workspace_trusted {
+        return None;
+    }
     Some(result)
 }
 
@@ -157,6 +166,7 @@ fn bootstrap_extension_config(args: &[OsString], cwd: &Path) -> Option<Config> {
         enable_extensions: bootstrap.enable_extensions,
         trust_extensions: bootstrap.trust_extensions,
         workspace_trusted: bootstrap.workspace_trusted,
+        no_workspace_trusted: bootstrap.no_workspace_trusted,
         safe_mode: bootstrap.safe_mode,
         effect_policy: bootstrap.effect_policy,
         ..Cli::default()

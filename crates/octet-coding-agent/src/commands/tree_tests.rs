@@ -3,7 +3,12 @@ use super::*;
 #[test]
 fn tree_is_a_discoverable_exact_and_unique_prefix_command() {
     assert_eq!(parse("/tree"), Command::Tree);
-    assert_eq!(parse("/tr"), Command::Tree);
+    assert!(matches!(parse("/tr"), Command::Unknown(_)));
+    assert_eq!(parse("/tre"), Command::Tree);
+    assert_eq!(
+        parse("/tru"),
+        Command::WorkspaceTrust(WorkspaceTrustCommand::Status)
+    );
     assert!(matches!(parse("/tree extra"), Command::Unknown(_)));
     assert_eq!(slash_suggestions("/tr")[0].name, "tree");
     let help = help_text(Path::new("."), Some("tree"));

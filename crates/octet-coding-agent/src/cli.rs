@@ -18,6 +18,7 @@ use crate::config::{
 use crate::extension_package::ExtensionCommand;
 use crate::migrate::MigrationCommand;
 use crate::session_commands::SessionCommand;
+use crate::workspace_trust::{self, DefaultWorkspaceTrust, StartupChoice, WorkspaceTrustStore};
 
 pub(crate) mod catalog_publish;
 mod config_diagnostics;
@@ -35,6 +36,7 @@ use config_diagnostics::{
 /// update it only after the saved preference was written successfully.
 static TUI_MODE: AtomicU8 = AtomicU8::new(0);
 static TUI_MODE_EXPLICIT: AtomicBool = AtomicBool::new(false);
+static DEFAULT_WORKSPACE_TRUST: AtomicU8 = AtomicU8::new(0);
 
 fn store_tui_mode(mode: config::TuiMode) {
     TUI_MODE.store(
@@ -55,6 +57,56 @@ pub fn tui_mode() -> config::TuiMode {
 
 pub fn tui_mode_is_explicit() -> bool {
     TUI_MODE_EXPLICIT.load(Ordering::Relaxed)
+}
+
+/// The saved fallback policy for workspaces without a path-specific decision.
+pub fn default_workspace_trust() -> DefaultWorkspaceTrust {
+    match DEFAULT_WORKSPACE_TRUST.load(Ordering::Relaxed) {
+        1 => DefaultWorkspaceTrust::Always,
+        2 => DefaultWorkspaceTrust::Never,
+        _ => DefaultWorkspaceTrust::Ask,
+    }
+}
+
+fn store_default_workspace_trust(policy: DefaultWorkspaceTrust) {
+    DEFAULT_WORKSPACE_TRUST.store(
+        match policy {
+            DefaultWorkspaceTrust::Ask => 0,
+            DefaultWorkspaceTrust::Always => 1,
+            DefaultWorkspaceTrust::Never => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Persist the user-level fallback policy for unlisted workspaces.
+pub fn persist_default_workspace_trust(policy: DefaultWorkspaceTrust) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist workspace trust policy: user home directory is unavailable")
+    })?;
+    persist_key_to_path("default_workspace_trust", policy.as_str(), &path)?;
+    store_default_workspace_trust(policy);
+    Ok(())
+}
+
+/// Update the path-specific workspace trust decision for the current workspace.
+pub fn persist_workspace_trust(workspace: &Path, decision: Option<bool>) -> anyhow::Result<()> {
+    let config_path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist workspace trust: user home directory is unavailable")
+    })?;
+    WorkspaceTrustStore::new(WorkspaceTrustStore::path_for_config(&config_path))
+        .update(&[(workspace.to_owned(), decision)])
+}
+
+/// Read the nearest saved workspace decision, if any.
+pub fn saved_workspace_trust(
+    workspace: &Path,
+) -> anyhow::Result<Option<workspace_trust::TrustRecord>> {
+    let Some(config_path) = global_config_path() else {
+        return Ok(None);
+    };
+    WorkspaceTrustStore::new(WorkspaceTrustStore::path_for_config(&config_path))
+        .decision_for(workspace)
 }
 
 pub fn persist_tui_mode(mode: config::TuiMode) -> anyhow::Result<()> {
@@ -451,8 +503,19 @@ pub struct Cli {
     #[arg(long = "experimental-streamable-http-mcp")]
     pub experimental_streamable_http_mcp: bool,
     /// Trust this workspace and load its project config, AGENTS.md, and skills.
-    #[arg(long = "workspace-trusted", alias = "trust-workspace")]
+    #[arg(
+        long = "workspace-trusted",
+        alias = "trust-workspace",
+        conflicts_with = "no_workspace_trusted"
+    )]
     pub workspace_trusted: bool,
+    /// Do not load project config or resources for this invocation, even if saved as trusted.
+    #[arg(
+        long = "no-workspace-trusted",
+        alias = "no-trust-workspace",
+        conflicts_with = "workspace_trusted"
+    )]
+    pub no_workspace_trusted: bool,
     /// Ask before every bash call and workspace change, and keep executable
     /// extensions stopped unless they have host authority. Not a sandbox.
     #[arg(long = "safe-mode", alias = "safe", conflicts_with = "effect_policy")]
@@ -591,6 +654,8 @@ struct ConfigLayer {
     enabled_extensions: Option<Vec<String>>,
     trusted_extensions: Option<Vec<String>>,
     system_prompt: Option<String>,
+    /// User-only fallback when no path-specific workspace decision exists.
+    default_workspace_trust: Option<String>,
     compaction: Option<CompactionLayer>,
 }
 
@@ -645,6 +710,7 @@ impl ConfigLayer {
         override_some!(enabled_extensions);
         override_some!(trusted_extensions);
         override_some!(system_prompt);
+        override_some!(default_workspace_trust);
         match (self.compaction.as_mut(), newer.compaction) {
             (Some(current), Some(newer)) => {
                 if newer.mode.is_some() {
@@ -761,6 +827,8 @@ impl ConfigLayer {
         // interactive cycling scope is likewise a user-level preference.
         let trusted_extensions = self.trusted_extensions.clone();
         project.trusted_extensions = None;
+        // A project must not authorize itself or change the user's fallback.
+        project.default_workspace_trust = None;
         let scoped_models = self.models.clone();
         project.models = None;
         project.tui_mode = None;
@@ -1495,6 +1563,7 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         enabled_extensions: env_value("OCTET_EXTENSIONS").map(split_names),
         trusted_extensions: env_value("OCTET_TRUSTED_EXTENSIONS").map(split_names),
         system_prompt: env_value("OCTET_SYSTEM_PROMPT"),
+        default_workspace_trust: None,
         compaction: (compaction_mode.is_some()
             || compaction_enabled.is_some()
             || threshold_fraction.is_some()
@@ -1539,6 +1608,96 @@ fn build_config_with_global_path(
     build_config_with_global_path_and_diagnostics(cli, cwd, global_path, true)
 }
 
+fn should_prompt_for_workspace_trust(
+    cli: &Cli,
+    global: &ConfigLayer,
+    report_diagnostics: bool,
+) -> anyhow::Result<bool> {
+    if !report_diagnostics
+        || cli.headless
+        || cli.command.is_some()
+        || cli.parity.list_models.is_some()
+        || cli.print
+        || matches!(cli.mode.as_deref(), Some("json" | "rpc"))
+    {
+        return Ok(false);
+    }
+    let color = cli
+        .color
+        .as_deref()
+        .or(global.color.as_deref())
+        .map(ColorMode::parse)
+        .transpose()?
+        .unwrap_or_default();
+    let plain = cli.plain || global.plain.unwrap_or(false);
+    Ok(crate::tui::terminal::TerminalCapabilities::detect(color, plain).interactive)
+}
+
+fn resolve_workspace_trust(
+    cli: &Cli,
+    workspace: &Path,
+    invocation_cwd: &Path,
+    global_path: Option<&Path>,
+    global: &ConfigLayer,
+    policy: DefaultWorkspaceTrust,
+    report_diagnostics: bool,
+) -> anyhow::Result<bool> {
+    if cli.workspace_trusted {
+        return Ok(true);
+    }
+    if cli.no_workspace_trusted {
+        return Ok(false);
+    }
+
+    let store = global_path
+        .map(|path| WorkspaceTrustStore::new(WorkspaceTrustStore::path_for_config(path)));
+    if let Some(store) = store.as_ref() {
+        match store.decision_for(workspace) {
+            Ok(Some(record)) => return Ok(record.trusted),
+            Ok(None) => {}
+            Err(error) => {
+                if report_diagnostics {
+                    crate::output::stderr_line(format!(
+                        "warning: workspace trust store could not be read; keeping {} untrusted: {error}",
+                        workspace.display()
+                    ));
+                }
+                // An unreadable store might contain an explicit denial. Fail
+                // closed even when the user fallback says `always`.
+                return Ok(false);
+            }
+        }
+    }
+
+    if policy == DefaultWorkspaceTrust::Always {
+        return Ok(true);
+    }
+    if policy == DefaultWorkspaceTrust::Never
+        || !workspace_trust::has_project_resources(workspace, invocation_cwd, global_path)
+        || !should_prompt_for_workspace_trust(cli, global, report_diagnostics)?
+    {
+        return Ok(false);
+    }
+
+    let choice = workspace_trust::prompt_for_workspace(workspace)?;
+    let (trusted, remember) = match choice {
+        StartupChoice::Remember(trusted) => (trusted, true),
+        StartupChoice::Session(trusted) => (trusted, false),
+    };
+    if remember {
+        let persisted = store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("user home directory is unavailable"))
+            .and_then(|store| store.update(&[(workspace.to_owned(), Some(trusted))]));
+        if let Err(error) = persisted {
+            crate::output::stderr_line(format!(
+                "warning: workspace trust applies to this launch only; could not save the decision: {error}"
+            ));
+        }
+    }
+    Ok(trusted)
+}
+
 fn build_config_with_global_path_and_diagnostics(
     cli: Cli,
     cwd: &Path,
@@ -1577,7 +1736,30 @@ fn build_config_with_global_path_and_diagnostics(
     let reasoning_explicit = cli.reasoning.is_some();
     let reasoning_mode_explicit = cli.reasoning_mode.is_some();
 
-    let project = if cli.workspace_trusted {
+    // Load user trust policy before deciding whether any project-controlled file
+    // is eligible to be parsed. Project configuration cannot override this value.
+    let global = match global_path {
+        Some(path) => read_layer(path, ConfigSourceKind::Global)?,
+        None => LoadedConfigLayer::default(),
+    };
+    let trust_policy = global
+        .values
+        .default_workspace_trust
+        .as_deref()
+        .map(DefaultWorkspaceTrust::parse)
+        .transpose()?
+        .unwrap_or_default();
+    store_default_workspace_trust(trust_policy);
+    let workspace_trusted = resolve_workspace_trust(
+        &cli,
+        &workspace,
+        &invocation_cwd,
+        global_path,
+        &global.values,
+        trust_policy,
+        report_diagnostics,
+    )?;
+    let project = if workspace_trusted {
         read_layer(&project_config_path(&workspace), ConfigSourceKind::Project)?
     } else {
         LoadedConfigLayer::default()
@@ -1610,10 +1792,6 @@ fn build_config_with_global_path_and_diagnostics(
     // A missing home directory disables global config. Never reinterpret the
     // invocation directory as user scope: that would let an untrusted project
     // smuggle executable trust through `./.octet/config.toml`.
-    let global = match global_path {
-        Some(path) => read_layer(path, ConfigSourceKind::Global)?,
-        None => LoadedConfigLayer::default(),
-    };
     let theme_explicit = cli.theme.is_some() || environment.theme.is_some();
     let policy_environment = environment.clone();
     let extension_activation_overridden = activation_layered || cli_activation_unpersisted;
@@ -2038,7 +2216,7 @@ fn build_config_with_global_path_and_diagnostics(
         }),
         context_files: !cli.no_context_files && values.context_files.unwrap_or(true),
         offline,
-        workspace_trusted: cli.workspace_trusted,
+        workspace_trusted,
     })
 }
 

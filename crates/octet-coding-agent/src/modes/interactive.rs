@@ -2580,7 +2580,8 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
         | Command::Exit
         | Command::Debug
         | Command::Prompt(_)
-        | Command::Goal(_) => false,
+        | Command::Goal(_)
+        | Command::WorkspaceTrust(_) => false,
     }
 }
 
@@ -2778,6 +2779,81 @@ fn apply_active_theme_snapshot(
     Ok(())
 }
 
+fn handle_workspace_trust(
+    shell: &mut InteractiveShell,
+    workspace: &Path,
+    command: commands::WorkspaceTrustCommand,
+) {
+    use commands::WorkspaceTrustCommand as TrustCommand;
+
+    match command {
+        TrustCommand::Status => {
+            let active = shell
+                .runtime_config()
+                .is_some_and(|config| config.workspace_trusted);
+            let policy = crate::cli::default_workspace_trust();
+            let saved = crate::cli::saved_workspace_trust(workspace);
+            let saved_text = match saved {
+                Ok(Some(record)) => format!(
+                    "Nearest saved decision: {} at {}",
+                    if record.trusted { "trust" } else { "deny" },
+                    record.path.display()
+                ),
+                Ok(None) => format!(
+                    "No saved path decision; default policy is {}.",
+                    policy.as_str()
+                ),
+                Err(error) => format!("Saved decision unavailable: {error}"),
+            };
+            shell.show_report_facts(
+                "Workspace trust",
+                "Project resources and current launch state",
+                format!(
+                    "Workspace: {}\nCurrently loaded as trusted: {}\n{}\nTrust admits project resources only; it does not itself grant tool permissions or extension host authority.",
+                    workspace.display(),
+                    if active { "yes" } else { "no" },
+                    saved_text
+                ),
+            );
+        }
+        TrustCommand::Allow | TrustCommand::Deny => {
+            let trusted = matches!(command, TrustCommand::Allow);
+            match crate::cli::persist_workspace_trust(workspace, Some(trusted)) {
+                Ok(()) => shell.notice(format!(
+                    "{} saved for {}; restart Octet to apply the project-resource decision.",
+                    if trusted {
+                        "Workspace trust"
+                    } else {
+                        "Workspace denial"
+                    },
+                    workspace.display()
+                )),
+                Err(error) => shell.error(format!("could not save workspace trust: {error}")),
+            }
+        }
+        TrustCommand::Revoke => match crate::cli::persist_workspace_trust(workspace, None) {
+            Ok(()) => shell.notice(format!(
+                "Saved decision removed for {}; the parent/default policy applies next launch.",
+                workspace.display()
+            )),
+            Err(error) => shell.error(format!("could not revoke workspace trust: {error}")),
+        },
+        TrustCommand::Default(None) => shell.notice(format!(
+            "Default workspace trust: {}",
+            crate::cli::default_workspace_trust().as_str()
+        )),
+        TrustCommand::Default(Some(policy)) => {
+            match crate::cli::persist_default_workspace_trust(policy) {
+                Ok(()) => shell.notice(format!(
+                    "Default workspace trust saved as {}; it applies when no path decision matches.",
+                    policy.as_str()
+                )),
+                Err(error) => shell.error(format!("could not save workspace trust policy: {error}")),
+            }
+        }
+    }
+}
+
 /// Handle a slash command while the model is running.
 ///
 /// Anything observable through [`ActiveRunInspection`] or the run's own context
@@ -2869,6 +2945,9 @@ where
             "Browse commands and keyboard shortcuts",
             commands::help_text(&inspection.workspace, topic.as_deref()),
         ),
+        Command::WorkspaceTrust(subcommand) => {
+            handle_workspace_trust(shell, &inspection.workspace, subcommand)
+        }
         Command::Cost => match inspection.read_only_session() {
             Ok(session) => shell.show_report_facts(
                 "Cost",
@@ -10256,6 +10335,9 @@ async fn run_idle_command_inner(
                 "Browse commands and keyboard shortcuts",
                 commands::help_text(&app.config.workspace, topic.as_deref()),
             );
+        }
+        Command::WorkspaceTrust(subcommand) => {
+            handle_workspace_trust(shell, &app.config.workspace, subcommand);
         }
         Command::Status => {
             shell.show_status_text_with_telemetry(commands::status_text(&app, None));

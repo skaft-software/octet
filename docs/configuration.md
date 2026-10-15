@@ -14,13 +14,36 @@ allow_external_paths = false
 These are examples, not defaults. Provider credentials don't go in this file:
 see [provider setup](providers.md).
 
+## Workspace trust
+
+Octet stores path-specific workspace trust decisions in the user-owned
+`~/.octet/trust.json`; projects cannot write or override this store. Saved
+canonical paths also match descendants, with the nearest (most-specific)
+decision winning. `/trust allow` and `/trust deny` save a decision for the current
+workspace, `/trust revoke` removes that workspace's decision, and `/trust status`
+shows the active state and matching saved path. Changes made by these commands
+affect the next launch; restart to load or stop loading project resources.
+
+The user-only `default_workspace_trust` setting is `"ask"` by default. In an
+interactive terminal, `ask` prompts before loading project resources. The prompt
+offers a remembered trust, launch-only trust, remembered denial, or denial for
+this launch (the default). Non-interactive modes never prompt and treat `ask` as
+untrusted. `"always"` trusts paths without a saved denial, and `"never"` leaves
+paths untrusted unless a saved allow applies. Path-specific decisions take
+precedence over the default. Set or inspect the policy with `/trust default
+always|never|ask` or `/trust default`. Neither workspace trust nor this policy
+by itself grants tool permissions or extension host authority. `--workspace-trusted` and
+`--no-workspace-trusted` override saved path decisions for the current launch.
+If the trust store is unreadable or malformed, Octet keeps the workspace
+untrusted, even when the fallback is `always`.
+
 ## Precedence
 
 Layers, from least to most explicit:
 
 1. Built-in defaults.
 2. `~/.octet/config.toml`.
-3. A trusted project's `.octet/config.toml`, only with `--workspace-trusted`.
+3. A trusted project's `.octet/config.toml`, only for a trusted workspace.
 4. Environment variables.
 5. CLI flags.
 6. The resumed session's model and reasoning. An explicit CLI value still wins.
@@ -60,6 +83,7 @@ Defaults are marked. Other values are examples.
 | `bash_timeout_secs` | `120` | Command timeout in seconds. |
 | `max_output_bytes` | `1048576` | Command output capture limit. |
 | `context_files` | `true` | Include instruction and context files. Project files still need trust. |
+| `default_workspace_trust` | `"ask"` | User-only fallback for paths without a saved decision: `ask`, `always`, or `never`. Project config cannot set or override it. |
 | `offline` | `false` | `true` skips optional model discovery and remote reads, not inference. |
 | `strict_config` | default: warn | `true` makes unknown keys errors, like `--strict-config`. |
 | `reload` | default `true` | The interactive prompt quietly starts the live-reload supervisor and applies reloads only at the idle prompt. `/reload --dry-run` shows watch counts, timing and the host re-exec policy, and incomplete watch coverage still warns. `false` turns sampling off for good. User level only: a trusted project layer can't turn it on. |
