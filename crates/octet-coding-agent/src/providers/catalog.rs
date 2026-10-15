@@ -426,6 +426,11 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
                 Some("HIGH"),
             )
         }
+        Mode::GoogleLevelsLowToHigh => {
+            cap.min_effort = E::Low;
+            cap.max_effort = E::High;
+            (vec!["LOW", "MEDIUM", "HIGH"], Some("HIGH"))
+        }
     };
     cap.options = Some(octet_ai::types::ReasoningOptions {
         values: values.into_iter().map(str::to_owned).collect(),

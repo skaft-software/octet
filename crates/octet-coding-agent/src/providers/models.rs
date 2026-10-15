@@ -31,9 +31,18 @@ impl StaticOpenAiChatReasoningProfile {
 pub(crate) enum StaticReasoningMode {
     Effort,
     Budget,
-    Adaptive { off: bool, xhigh: bool },
-    GoogleBudget { off: bool },
-    GoogleLevels { pro: bool },
+    Adaptive {
+        off: bool,
+        xhigh: bool,
+    },
+    GoogleBudget {
+        off: bool,
+    },
+    GoogleLevels {
+        pro: bool,
+    },
+    /// Gemini `thinkingLevel` LOW, MEDIUM and HIGH, with no MINIMAL level.
+    GoogleLevelsLowToHigh,
     MistralEffort,
     MistralPrompt,
 }
@@ -222,12 +231,24 @@ pub const VERCEL_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
 
 /// OpenCode Zen Go models that are always visible, before and without live
 /// discovery. They use the existing standard or DeepSeek Chat compatibility
-/// profiles; the live `/models` inventory supplies the rest of the catalog
+/// profiles, or Gemini thinking levels where the ID-only inventory cannot say
+/// which levels a Gemini model accepts; the live `/models` inventory supplies the rest of the catalog
 /// (including Messages and Responses routes). DeepSeek's Pi map only accepts
 /// `high`, so its presets clamp the portable effort range accordingly.
 /// Qwen-thinking routes over Chat deliberately stay absent until their distinct
 /// thinking format has a codec primitive.
 pub const OPENCODE_GO_MODELS: &[StaticModelPreset] = &[
+    StaticModelPreset::new(
+        "gemini-4-argon-contributor",
+        "Gemini 4 Argon Contributor",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevelsLowToHigh),
     StaticModelPreset::new(
         "deepseek-v4-flash",
         "DeepSeek V4 Flash",
@@ -490,6 +511,17 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
 
 // Ported from @earendil-works/pi-ai 0.80.10.
 pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
+    StaticModelPreset::new(
+        "gemini-4-argon",
+        "Gemini 4 Argon",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevelsLowToHigh),
     StaticModelPreset::new(
         "big-pickle",
         "Big Pickle",
