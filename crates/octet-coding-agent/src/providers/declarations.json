@@ -1374,6 +1374,7 @@
         },
         {
           "endpoint_id": "opencode-go-google",
+          "base_path": "../../../inference/go/v1/",
           "protocol": "google_generative_ai",
           "transport": "http",
           "body_encoding": "identity",

@@ -34,7 +34,7 @@ mod tests {
         let manifest =
             ExtensionManifest::load(&manifest_path).expect("real local example manifest");
         assert_eq!(manifest.api_version, "0.4");
-        assert_eq!(manifest.requires_octet.as_deref(), Some("=0.9.2"));
+        assert_eq!(manifest.requires_octet.as_deref(), Some("=0.9.3"));
         let descriptor = DiscoveredExtension {
             manifest,
             manifest_path,
@@ -272,7 +272,7 @@ mod tests {
         // Private candidate qualification only: never retag canonical 0.3 or
         // alter the retained example's checked-in release pin/source bytes.
         let staged_manifest =
-            source_manifest.replace("requires_octet = \"=0.8.0\"", "requires_octet = \"=0.9.2\"");
+            source_manifest.replace("requires_octet = \"=0.8.0\"", "requires_octet = \"=0.9.3\"");
         let manifest_path = staging.path().join("extension.toml");
         std::fs::write(&manifest_path, staged_manifest).unwrap();
         let manifest = ExtensionManifest::load(&manifest_path).unwrap();

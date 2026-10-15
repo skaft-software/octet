@@ -15362,7 +15362,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 72000
     },
     "modalities": {
       "input": [
@@ -15830,7 +15830,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 128000
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -18386,7 +18386,7 @@
   "openrouter/openai/gpt-oss-120b": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -21408,7 +21408,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 128000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -21460,7 +21460,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -21544,7 +21544,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943717
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -21820,7 +21820,7 @@
   "openrouter/~deepseek/deepseek-pro-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
