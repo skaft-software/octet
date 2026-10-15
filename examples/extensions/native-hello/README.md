@@ -1,6 +1,6 @@
 # One-source native hello tools (Rust / C / C++)
 
-Local **octet 0.9.2 / feature-negotiated API 0.4** recipes. Three small author
+Local **octet 0.9.3 / feature-negotiated API 0.4** recipes. Three small author
 sources, one transport/lifecycle implementation in [`sdk/rust`](../../../sdk/rust/README.md).
 The [C ABI](../../../sdk/c/README.md) and [C++17 wrapper](../../../sdk/cpp/README.md)
 use that runtime, not C plugins loaded into octet. This is **static-tool authoring**,
@@ -34,7 +34,7 @@ probes and **runnable local manifests** under
 `build/extensions/native-hello-{rust,c,cpp}/extension.toml`. Absolute native
 entrypoint paths are generated, because the child cwd is the workspace, not its
 package. Moving a built checkout requires rebuilding/regenerating those manifests.
-Each declares API 0.4, its own version 0.1.0 and exact host pin `=0.9.2`; the pin
+Each declares API 0.4, its own version 0.1.0 and exact host pin `=0.9.3`; the pin
 is local compatibility metadata, not evidence of release publication or a wire
 translation. It is deliberately not changed to match a different host silently.
 
@@ -105,7 +105,7 @@ and untrusted global-source descriptors are rejected, then an exact source grant
 allows its relative Rust entrypoint and tool/shutdown. This is library-level host
 qualification, not a test of every frontend policy. A
 separate compatibility check runs the retained canonical 0.3 process with its
-source bytes/API/version unchanged and only a **private temporary** `=0.9.2`
+source bytes/API/version unchanged and only a **private temporary** `=0.9.3`
 host pin; its checked-in `=0.8.0` release pin is not changed. Raw
 process tests additionally exercise bad/oversized/exact-bound frames, bounded
 initialization, input rejection, unsupported contributions, text/error results,

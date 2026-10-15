@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.3] - 2026-10-15
+
+The [release notes](docs/releases/v0.9.3.md) record shipped scope, qualification
+boundaries and known limitations.
+
+### Fixed
+
+- OpenCode Go `gemini-*` models, including Gemini 4 Argon Contributor, are sent
+  to `https://opencode.ai/inference/go/v1/`, the only OpenCode Go base that
+  serves them. 0.9.2 used the `zen/go` base and every request failed with
+  `404 (route or model not found)`.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.2, 0.9.1 and 0.9.0 known limitations below still apply.
+
 ## [0.9.2] - 2026-10-14
 
 The [release notes](docs/releases/v0.9.2.md) record shipped scope, qualification

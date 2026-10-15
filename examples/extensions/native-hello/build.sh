@@ -44,7 +44,7 @@ for language in ('rust', 'c', 'cpp'):
     (package / 'extension.toml').write_text(f'''name = "{name}"
 version = "0.1.0"
 api_version = "0.4"
-requires_octet = "=0.9.2"
+requires_octet = "=0.9.3"
 [entrypoint]
 command = {binary}
 [capabilities]

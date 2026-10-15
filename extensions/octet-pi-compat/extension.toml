@@ -1,7 +1,7 @@
 name = "octet-pi-compat"
-version = "0.9.2"
+version = "0.9.3"
 api_version = "0.4"
-requires_octet = "=0.9.2"
+requires_octet = "=0.9.3"
 description = "Mirror this machine's Pi setup automatically when enabled; runs its enabled factories"
 
 [entrypoint]

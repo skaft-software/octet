@@ -50,11 +50,11 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
     def test_npm_launcher_resolves_windows_x64_platform_package(self):
         launcher = json.loads(
             (ROOT / "packages/npm/launcher/package.json.in").read_text()
-            .replace("__VERSION__", "0.9.2")
+            .replace("__VERSION__", "0.9.3")
         )
         self.assertEqual(
             launcher["optionalDependencies"].get("@skaft/octet-win32-x64"),
-            "0.9.2",
+            "0.9.3",
         )
         resolver = (ROOT / "packages/npm/launcher/lib/launch.js").read_text()
         self.assertIn("'win32-x64': '@skaft/octet-win32-x64'", resolver)
@@ -70,10 +70,10 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
             binaries.mkdir()
             for name in ("octet.exe", "octet-host.exe"):
                 (binaries / name).write_bytes(b"MZ" + name.encode())
-            archive_a = PACKAGER.package(binaries, output_a, "0.9.2", ROOT)
-            archive_b = PACKAGER.package(binaries, output_b, "0.9.2", ROOT)
+            archive_a = PACKAGER.package(binaries, output_a, "0.9.3", ROOT)
+            archive_b = PACKAGER.package(binaries, output_b, "0.9.3", ROOT)
             self.assertEqual(archive_a.read_bytes(), archive_b.read_bytes())
-            root = f"octet-0.9.2-{TARGET}/"
+            root = f"octet-0.9.3-{TARGET}/"
             with zipfile.ZipFile(archive_a) as archive:
                 names = set(archive.namelist())
                 self.assertIn(root + "octet.exe", names)
@@ -103,9 +103,9 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("install-octet.ps1", docs)
         self.assertIn("Windows x86-64", docs)
         self.assertIn("not yet published", docs)
-        self.assertIn("v0.9.2 is not yet published to npm", docs)
+        self.assertIn("v0.9.3 is not yet published to npm", docs)
         windows = (ROOT / "docs/windows.md").read_text()
-        self.assertIn("/releases/tag/v0.9.2", windows)
+        self.assertIn("/releases/tag/v0.9.3", windows)
         self.assertIn("these do not qualify the\nMSVC release archive", windows)
 
 

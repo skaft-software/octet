@@ -1,7 +1,7 @@
 name = "octet-subagents"
-version = "0.9.2"
+version = "0.9.3"
 api_version = "0.4"
-requires_octet = "=0.9.2"
+requires_octet = "=0.9.3"
 description = "Run and resume background Octet assistants with explicit tool permissions"
 
 [entrypoint]

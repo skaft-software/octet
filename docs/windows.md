@@ -2,14 +2,14 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
-> **Preview platform in v0.9.2.** The native MSVC archive is published and passes
+> **Preview platform in v0.9.3.** The native MSVC archive is published and passes
 > automated release checks, but attended desktop use is unqualified and known
 > issues such as [#572](https://github.com/skaft-software/octet/issues/572)
 > remain open.
 
 octet builds and runs as a native Windows x64 program (`octet.exe` and
 `octet-host.exe`); WSL is not used or required. The
-[v0.9.2 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.2)
+[v0.9.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.3)
 records actual MSVC artifact availability and qualification. Pull requests
 produce unsigned GNU test builds, described below; these do not qualify the
 MSVC release archive. Automated terminal checks are not physical-display or
@@ -107,7 +107,7 @@ The artifact contains:
 
 Manually dispatched [dogfood candidates](distribution.md#unsigned-dogfood-candidates)
 also include all five official extension bundles and extracted payloads.
-The experimental Pi compatibility adapter is not shipped in v0.9.2. Their
+The experimental Pi compatibility adapter is not shipped in v0.9.3. Their
 root checksum manifest covers those extracted files as well as the binaries,
 metadata and archives; verify it before running the extracted extensions.
 
@@ -237,7 +237,7 @@ Windows Terminal. Use a disposable workspace and `--safe-mode`.
 12. **conhost**: repeat items 1, 3, 6 and 10 in a classic console window
     (`conhost.exe powershell`); expect the ASCII profile.
 
-The following v0.9.2 release-blocker checks also require the exact candidate on
+The following v0.9.3 release-blocker checks also require the exact candidate on
 an attended Windows desktop; source changes and deterministic CI fixtures do
 not qualify them:
 
