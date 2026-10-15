@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 37178,
+    "cache_read": 36613,
     "cache_write_5m": 0,
-    "input": 446136,
-    "output": 892272,
+    "input": 439350,
+    "output": 878700,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -4384,8 +4384,8 @@
   "openrouter/mistralai/mistral-small-3.2-24b-instruct": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 75000,
-    "output": 200000,
+    "input": 93750,
+    "output": 250000,
     "reasoning": null
   },
   "openrouter/mistralai/mixtral-8x22b-instruct": {
@@ -5824,17 +5824,17 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.2": {
-    "cache_read": 19000,
+    "cache_read": 59000,
     "cache_write_5m": 0,
-    "input": 20000,
+    "input": 60000,
     "output": 7000000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3": {
-    "cache_read": 78000,
+    "cache_read": 399000,
     "cache_write_5m": 0,
-    "input": 79000,
-    "output": 4800000,
+    "input": 400000,
+    "output": 8000000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
@@ -5901,9 +5901,9 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
-    "cache_read": 160000,
+    "cache_read": 130000,
     "cache_write_5m": 0,
-    "input": 162700,
+    "input": 130700,
     "output": 8000000,
     "reasoning": null
   },
@@ -5929,10 +5929,10 @@
     "reasoning": 10000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 300000,
+    "cache_read": 280000,
     "cache_write_5m": 0,
-    "input": 300000,
-    "output": 14000000,
+    "input": 290000,
+    "output": 24000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
