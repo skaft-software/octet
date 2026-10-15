@@ -962,3 +962,56 @@ fn catalog_context_applies_only_to_the_exact_declared_endpoint() {
         );
     }
 }
+
+#[test]
+fn opencode_gemini_4_argon_offers_its_thinking_levels_from_an_id_only_inventory() {
+    // OpenCode publishes model identifiers only, so without a declared contract
+    // Argon registered with no reasoning and /thinking offered only "off".
+    for (provider, id) in [
+        ("opencode-go", "gemini-4-argon-contributor"),
+        ("opencode", "gemini-4-argon"),
+    ] {
+        let declaration = BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|declaration| declaration.id == provider)
+            .unwrap();
+        let mut catalog = ModelCatalog::default();
+        crate::providers::register_private_endpoints_at_base_url(
+            &mut catalog,
+            declaration,
+            Auth::bearer("fixture-key"),
+            &url::Url::parse(declaration.base_url).unwrap(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        register_openai_compatible_models_from_response(
+            &mut catalog,
+            declaration,
+            ModelFilter::All,
+            &serde_json::json!({"data": [{"id": id}]}),
+        )
+        .unwrap();
+        crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+        let model = catalog
+            .resolve(&ModelId(format!("{provider}/{id}")))
+            .unwrap();
+        assert_eq!(model.spec.protocol, Protocol::GoogleGenerativeAi, "{id}");
+        assert_eq!(
+            crate::app::supported_levels_with_subagents(&model, false),
+            [
+                crate::config::ThinkingLevel::Low,
+                crate::config::ThinkingLevel::Medium,
+                crate::config::ThinkingLevel::High,
+            ],
+            "{id}"
+        );
+        let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+        assert_eq!(
+            reasoning
+                .wire_value(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium))
+                .as_deref(),
+            Some("MEDIUM"),
+            "{id}"
+        );
+    }
+}

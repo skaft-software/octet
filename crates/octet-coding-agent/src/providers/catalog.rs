@@ -414,17 +414,17 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
             values.push("max");
             (values, Some("high"))
         }
-        Mode::GoogleLevels { pro } => {
-            cap.min_effort = if pro { E::Low } else { E::Minimal };
+        Mode::GoogleLevels { minimal, medium } => {
+            cap.min_effort = if minimal { E::Minimal } else { E::Low };
             cap.max_effort = E::High;
-            (
-                if pro {
-                    vec!["LOW", "HIGH"]
-                } else {
-                    vec!["MINIMAL", "LOW", "MEDIUM", "HIGH"]
-                },
-                Some("HIGH"),
-            )
+            let mut values = vec!["LOW", "HIGH"];
+            if medium {
+                values.insert(1, "MEDIUM");
+            }
+            if minimal {
+                values.insert(0, "MINIMAL");
+            }
+            (values, Some("HIGH"))
         }
     };
     cap.options = Some(octet_ai::types::ReasoningOptions {
@@ -456,6 +456,58 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn static_gemini_thinking_levels_match_the_pinned_provider_metadata() {
+        use super::super::models::{GOOGLE_MODELS, OPENCODE_GO_MODELS, OPENCODE_MODELS};
+        // Native Gemini and Vertex have no models.dev entry of their own;
+        // OpenRouter's Google entries carry the same model-owned levels.
+        let mut checked = 0;
+        for (provider, prefix, models) in [
+            ("openrouter", "google/", GOOGLE_MODELS),
+            ("opencode", "", OPENCODE_MODELS),
+            ("opencode-go", "", OPENCODE_GO_MODELS),
+        ] {
+            for model in models {
+                if !matches!(
+                    model.reasoning_mode,
+                    super::super::models::StaticReasoningMode::GoogleLevels { .. }
+                ) {
+                    continue;
+                }
+                let key = format!("{prefix}{}", model.id);
+                let Some(metadata) =
+                    octet_ai::model_metadata::model_capability_metadata(provider, &key)
+                else {
+                    continue;
+                };
+                let pinned = metadata["reasoning_options"]
+                    .as_array()
+                    .and_then(|options| options.iter().find(|option| option["type"] == "effort"))
+                    .map(|option| {
+                        option["values"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.as_str().unwrap().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| panic!("{provider}/{key} has no pinned effort levels"));
+                let declared = static_reasoning_capability(model)
+                    .and_then(|capability| capability.options)
+                    .map(|options| {
+                        options
+                            .values
+                            .iter()
+                            .map(|value| value.to_ascii_lowercase())
+                            .collect::<Vec<_>>()
+                    });
+                assert_eq!(declared, Some(pinned), "{provider}/{key}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 15, "checked only {checked} Gemini presets");
+    }
 
     #[test]
     fn discovered_anthropic_cache_lifetimes_are_direct_only_and_preserve_configured_models() {

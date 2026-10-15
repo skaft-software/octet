@@ -6,7 +6,7 @@
 
 **A fast, native coding agent.**
 
-[![Release: 0.9.3](https://img.shields.io/badge/release-0.9.3-536dfe?style=flat-square)](docs/releases/v0.9.3.md)
+[![Release: 0.9.4](https://img.shields.io/badge/release-0.9.4-536dfe?style=flat-square)](docs/releases/v0.9.4.md)
 
 octet reads code, edits files, and runs commands from your terminal. The core is
 native Rust: one process owns the agent loop, sessions, policy, persistence, the
@@ -17,7 +17,7 @@ in any language.
 MCP, web search, subagents, codemode and computer use are optional first-party
 integrations. Pi is Mario Zechner's coding agent and informs some design choices;
 the optional [octet-pi-compat](extensions/octet-pi-compat/README.md) adapter is
-**experimental and unstable** source-only work and **does not ship in v0.9.3**:
+**experimental and unstable** source-only work and **does not ship in v0.9.4**:
 full Pi backwards compatibility is not yet qualified. Several unchanged Pi extensions
 already run through it in the source preview, but no Pi extension parity or
 installed-Pi workflow acceptance is claimed.
@@ -30,7 +30,7 @@ the implicit authority that would start an enabled extension; an explicit
 tool-effect broker. Safe mode is an approval policy, not a sandbox. See
 [Security](SECURITY.md#permissions).
 
-See the [v0.9.3 release notes](docs/releases/v0.9.3.md) for scope, qualification
+See the [v0.9.4 release notes](docs/releases/v0.9.4.md) for scope, qualification
 boundaries and known limitations.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
@@ -38,14 +38,14 @@ boundaries and known limitations.
 ## Install
 
 **Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js
-required. Use the [v0.9.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.3)
+required. Use the [v0.9.4 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.4)
 for signed assets and completed public-install receipts; do not substitute an
 unsigned candidate artifact.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.9.3/install-octet.sh | sh
-octet --version   # octet 0.9.3
+  https://github.com/skaft-software/octet/releases/download/v0.9.4/install-octet.sh | sh
+octet --version   # octet 0.9.4
 ```
 
 **Windows support is a preview.** Windows x86-64 uses the version-matched `install-octet.ps1` and MSVC archive on

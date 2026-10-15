@@ -31,9 +31,19 @@ impl StaticOpenAiChatReasoningProfile {
 pub(crate) enum StaticReasoningMode {
     Effort,
     Budget,
-    Adaptive { off: bool, xhigh: bool },
-    GoogleBudget { off: bool },
-    GoogleLevels { pro: bool },
+    Adaptive {
+        off: bool,
+        xhigh: bool,
+    },
+    GoogleBudget {
+        off: bool,
+    },
+    /// Gemini `thinkingLevel` LOW and HIGH, plus MINIMAL and MEDIUM where the
+    /// model accepts them.
+    GoogleLevels {
+        minimal: bool,
+        medium: bool,
+    },
     MistralEffort,
     MistralPrompt,
 }
@@ -222,12 +232,27 @@ pub const VERCEL_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
 
 /// OpenCode Zen Go models that are always visible, before and without live
 /// discovery. They use the existing standard or DeepSeek Chat compatibility
-/// profiles; the live `/models` inventory supplies the rest of the catalog
+/// profiles, or Gemini thinking levels where the ID-only inventory cannot say
+/// which levels a Gemini model accepts; the live `/models` inventory supplies the rest of the catalog
 /// (including Messages and Responses routes). DeepSeek's Pi map only accepts
 /// `high`, so its presets clamp the portable effort range accordingly.
 /// Qwen-thinking routes over Chat deliberately stay absent until their distinct
 /// thinking format has a codec primitive.
 pub const OPENCODE_GO_MODELS: &[StaticModelPreset] = &[
+    StaticModelPreset::new(
+        "gemini-4-argon-contributor",
+        "Gemini 4 Argon Contributor",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "deepseek-v4-flash",
         "DeepSeek V4 Flash",
@@ -419,7 +444,10 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.1-flash-lite",
         "Gemini 3.1 Flash Lite",
@@ -430,7 +458,10 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.1-pro-preview",
         "Gemini 3.1 Pro Preview",
@@ -441,7 +472,10 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.1-pro-preview-customtools",
         "Gemini 3.1 Pro Preview Custom Tools",
@@ -452,7 +486,10 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.5-flash",
         "Gemini 3.5 Flash",
@@ -463,7 +500,80 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.5-flash-lite",
+        "Gemini 3.5 Flash Lite",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.6-flash",
+        "Gemini 3.6 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.7-flash",
+        "Gemini 3.7 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.8-flash",
+        "Gemini 3.8 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-4-argon",
+        "Gemini 4 Argon",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-flash-latest",
         "Gemini Flash Latest",
@@ -474,7 +584,10 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-flash-lite-latest",
         "Gemini Flash-Lite Latest",
@@ -485,11 +598,28 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
 ];
 
 // Ported from @earendil-works/pi-ai 0.80.10.
 pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
+    StaticModelPreset::new(
+        "gemini-4-argon",
+        "Gemini 4 Argon",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "big-pickle",
         "Big Pickle",
@@ -682,7 +812,10 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.1-pro",
         "Gemini 3.1 Pro Preview",
@@ -693,7 +826,10 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: true }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "gemini-3.5-flash",
         "Gemini 3.5 Flash",
@@ -704,7 +840,80 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
-    .with_reasoning_mode(StaticReasoningMode::GoogleLevels { pro: false }),
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3-pro",
+        "Gemini 3 Pro",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: false,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.5-flash-lite",
+        "Gemini 3.5 Flash Lite",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.6-flash",
+        "Gemini 3.6 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: true,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.7-flash",
+        "Gemini 3.7 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
+    StaticModelPreset::new(
+        "gemini-3.8-flash",
+        "Gemini 3.8 Flash",
+        Protocol::GoogleGenerativeAi,
+        1_048_576,
+        65_536,
+        true,
+        true,
+        ReasoningEffort::High,
+    )
+    .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
+        minimal: false,
+        medium: true,
+    }),
     StaticModelPreset::new(
         "glm-5",
         "GLM-5",

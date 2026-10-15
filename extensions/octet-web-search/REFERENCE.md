@@ -1,13 +1,13 @@
 # octet-web-search reference
 
-**Source candidate distribution: 0.9.3.** This bundle requires exactly octet 0.9.3.
+**Source candidate distribution: 0.9.4.** This bundle requires exactly octet 0.9.4.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.3 candidate record](../../docs/releases/v0.9.3.md) for availability and
-remaining qualification. 0.9.3 assets are not published; use a reviewed source
+[0.9.4 candidate record](../../docs/releases/v0.9.4.md) for availability and
+remaining qualification. 0.9.4 assets are not published; use a reviewed source
 checkout or matching local archive until publication is approved.
 
 [Usage guide](README.md). This describes the bundled API `0.4` implementation,
-not a general extension-authoring tutorial. Bundle `0.9.3` requires exactly octet `0.9.3`.
+not a general extension-authoring tutorial. Bundle `0.9.4` requires exactly octet `0.9.4`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -27,8 +27,8 @@ declarations are visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-After 0.9.3 publication is approved and matching assets are verified, the
-catalog path with [octet 0.9.3](../../docs/installation.md) is:
+After 0.9.4 publication is approved and matching assets are verified, the
+catalog path with [octet 0.9.4](../../docs/installation.md) is:
 
 ```console
 octet extension install octet-web-search
@@ -67,8 +67,8 @@ safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.9.3`, extension
-API `0.4`, exact octet `0.9.3`.
+Release compatibility is recorded in `extension.toml`: bundle `0.9.4`, extension
+API `0.4`, exact octet `0.9.4`.
 
 ## Choose a provider
 

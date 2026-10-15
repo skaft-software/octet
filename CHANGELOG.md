@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.9.4] - 2026-10-15
+
+The [release notes](docs/releases/v0.9.4.md) record shipped scope, qualification
+boundaries and known limitations.
+
+### Fixed
+
+- Gemini 4 Argon Contributor on OpenCode Go and Gemini 4 Argon on OpenCode Zen
+  offer low, medium and high thinking. OpenCode's model list carries no
+  reasoning information, so `/thinking` offered only `off`.
+- Gemini 3.1 Pro offers low, medium and high thinking on the Gemini API, Vertex
+  AI and OpenCode Zen; it offered only low and high.
+- Gemini 3 Pro, 3.5 Flash Lite, 3.6 Flash, 3.7 Flash and 3.8 Flash on OpenCode
+  Zen offer their thinking levels instead of only `off`.
+
+### Added
+
+- Gemini 3.5 Flash Lite, 3.6 Flash, 3.7 Flash, 3.8 Flash and 4 Argon on the
+  Gemini API and Vertex AI, with their thinking levels and prices.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.3, 0.9.2, 0.9.1 and 0.9.0 known limitations below still apply.
+
 ## [0.9.3] - 2026-10-15
 
 The [release notes](docs/releases/v0.9.3.md) record shipped scope, qualification
