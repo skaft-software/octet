@@ -8083,72 +8083,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "opencode-go/deepseek-v4-flash": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "opencode-go/deepseek-v4-flash-vision-exp": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash Vision Exp",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "opencode-go/deepseek-v4-pro": {
     "interleaved": {
       "field": "reasoning_content"
@@ -8406,65 +8340,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "opencode-go/grok-4.5": {
-    "limit": {
-      "context": 500000,
-      "output": 500000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Grok 4.5",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "opencode-go/grok-4.6": {
-    "limit": {
-      "context": 500000,
-      "output": 500000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Grok 4.6",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "opencode-go/grok-4.7": {
     "limit": {
       "context": 500000,
@@ -8548,29 +8423,6 @@
         ]
       }
     ],
-    "tool_call": true
-  },
-  "opencode-go/kimi-k2.6": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Kimi K2.6",
-    "reasoning": true,
-    "reasoning_options": [],
     "tool_call": true
   },
   "opencode-go/kimi-k2.7-code": {
@@ -8882,60 +8734,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "opencode-go/qwen3.6-plus": {
-    "limit": {
-      "context": 1000000,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.6 Plus",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "max": 81920,
-        "type": "budget_tokens"
-      }
-    ],
-    "tool_call": true
-  },
-  "opencode-go/qwen3.7-max": {
-    "limit": {
-      "context": 1000000,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.7 Max",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      },
-      {
-        "max": 262144,
-        "type": "budget_tokens"
-      }
-    ],
-    "tool_call": true
-  },
   "opencode-go/qwen3.7-plus": {
     "limit": {
       "context": 1000000,
@@ -9057,41 +8855,6 @@
       ]
     },
     "name": "Space Bunny",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    ],
-    "tool_call": true
-  },
-  "opencode-go/space-bunny-free": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048576,
-      "input": 524288,
-      "output": 524288
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Space Bunny Free",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -12288,6 +12051,41 @@
     "reasoning": true,
     "reasoning_options": [],
     "structured_output": true,
+    "tool_call": true
+  },
+  "opencode/nemotron-3.5-super-vl-free": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "input": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Super VL Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "opencode/north-mini-code-free": {
@@ -16903,6 +16701,31 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/nvidia/nemotron-3.5-super-vl:free": {
+    "limit": {
+      "context": 1000000,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Super VL (free)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/openai/gpt-3.5-turbo": {
     "limit": {
       "context": 16385,
@@ -19667,7 +19490,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [

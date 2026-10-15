@@ -30,13 +30,13 @@ fn generated_pricing_is_provider_scoped_and_integer_based() {
     assert_eq!(direct.output, TokenRate(10_000_000));
 
     // Golden values track the checked-in models.dev snapshot. OpenRouter
-    // quotes deepseek-v4-pro at 0.439350/0.878700 per million tokens; the
+    // quotes deepseek-v4-pro at 0.430824/0.861648 per million tokens; the
     // generator scales those to integer micro-units.
     let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
         .expect("provider-specific snapshot price");
-    assert_eq!(routed.input, TokenRate(439_350));
-    assert_eq!(routed.output, TokenRate(878_700));
-    assert_eq!(routed.cache_read, TokenRate(36_613));
+    assert_eq!(routed.input, TokenRate(430_824));
+    assert_eq!(routed.output, TokenRate(861_648));
+    assert_eq!(routed.cache_read, TokenRate(35_902));
     assert_eq!(routed.reasoning, None);
     assert!(model_pricing("openai", "gpt-5.6").is_none());
     assert!(model_pricing("openai", "gpt-5.6-sol").is_some());
