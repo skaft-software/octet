@@ -1,0 +1,23 @@
+name: tmp refresh models.dev
+on:
+  push:
+    branches: [claude/dazzling-brahmagupta-70msv8]
+    paths: [.github/workflows/tmp-refresh-models-dev.yml]
+permissions:
+  contents: write
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: claude/dazzling-brahmagupta-70msv8
+      - run: python3 scripts/refresh-models-dev-pricing.py
+      - run: python3 scripts/refresh-models-dev-pricing.py --check
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q .github/workflows/tmp-refresh-models-dev.yml
+          git add crates/octet-ai/models
+          git commit -m "Refresh models.dev snapshots for the 0.9.3 release source"
+          git push origin HEAD:claude/dazzling-brahmagupta-70msv8
