@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Audio-capable Gemini, Vertex AI and Google-compatible OpenCode models retain
+  audio in discovery, attachments and `read` results, and send inline
+  WAV/MP3/AAC/FLAC/Ogg Opus bytes through native Google `generateContent`.
+  Google audio output, raw PCM16 and provider file references remain unsupported;
+  inline media safety limits are unchanged.
+
 ## [0.9.4] - 2026-10-15
 
 The [release notes](docs/releases/v0.9.4.md) record shipped scope, qualification

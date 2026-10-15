@@ -65,8 +65,13 @@ Google's opaque `thoughtSignature` is retained as position-bound
 It is replayed only to the same Google model; transformations to any other model
 or protocol drop it.
 
-The codec accepts only inline image bytes, never fetches a user-provided image
-URL, and rejects unsupported tool-result media. Cumulative function-call argument
+The codec accepts inline image bytes and model-advertised inline audio
+(WAV/MP3/AAC/FLAC/Ogg Opus) as `inlineData`. It never fetches user-provided
+media URLs or forwards audio provider references. Raw PCM16 lacks sample-rate
+metadata and remains unsupported, as does Google audio output. Route-effective
+input format support comes from `Protocol::audio_input_formats` plus the model's
+audio modality. Tool audio follows its paired function response as adjacent
+user media; embedded tool-result media remains unsupported. Cumulative function-call argument
 snapshots are merged before terminal assembly rather than concatenated as invalid
 JSON. Google thought text is canonical reasoning; a thought signature alone does
 not make visible content reasoning.

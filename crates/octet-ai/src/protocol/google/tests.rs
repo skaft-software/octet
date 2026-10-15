@@ -16,6 +16,114 @@ use crate::types::{
     ModelSpec, ToolCall, ToolCallId, ToolResult, ToolResultPart, UserMessage,
 };
 
+#[test]
+fn inline_audio_preserves_bytes_mime_and_part_order() {
+    use crate::types::{AudioFormat, Modality};
+    for (format, mime) in [
+        (AudioFormat::Wav, "audio/wav"),
+        (AudioFormat::Mp3, "audio/mp3"),
+        (AudioFormat::Aac, "audio/aac"),
+        (AudioFormat::Flac, "audio/flac"),
+        (AudioFormat::Opus, "audio/ogg"),
+    ] {
+        let mut model = model();
+        std::sync::Arc::make_mut(&mut model.spec)
+            .capabilities
+            .input_modalities = ModalitySet::none().with(Modality::Audio);
+        let request = Request {
+            messages: vec![Message::User(UserMessage {
+                content: vec![
+                    UserPart::Text("before".into()),
+                    UserPart::Media(Media::audio_bytes(
+                        bytes::Bytes::from_static(b"sound"),
+                        format,
+                    )),
+                    UserPart::Text("after".into()),
+                ],
+            })],
+            ..base_request()
+        };
+        let parts = build_request(&model, &request).unwrap();
+        assert!(parts.diagnostics.is_empty());
+        let body: Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(
+            body["contents"][0]["parts"],
+            serde_json::json!([
+                {"text": "before"},
+                {"inlineData": {"mimeType": mime, "data": "c291bmQ="}},
+                {"text": "after"},
+            ])
+        );
+    }
+}
+
+#[test]
+fn unsupported_google_audio_is_rejected_or_diagnosed_and_omitted() {
+    use crate::types::{AudioFormat, AudioMedia, AudioPayload, Modality, ProviderMediaRef};
+    for (has_capability, payload, format) in [
+        (
+            false,
+            AudioPayload::Inline(bytes::Bytes::from_static(b"sound")),
+            AudioFormat::Mp3,
+        ),
+        (
+            true,
+            AudioPayload::Inline(bytes::Bytes::from_static(b"sound")),
+            AudioFormat::Pcm16,
+        ),
+        (
+            true,
+            AudioPayload::ProviderRef(ProviderMediaRef {
+                protocol: Protocol::GoogleGenerativeAi,
+                id: "not-a-fetch-url".into(),
+                expires_at: None,
+            }),
+            AudioFormat::Wav,
+        ),
+        (
+            true,
+            AudioPayload::InlineWithProviderRef {
+                data: bytes::Bytes::from_static(b"sound"),
+                reference: ProviderMediaRef {
+                    protocol: Protocol::OpenAiChat,
+                    id: "chat-only".into(),
+                    expires_at: None,
+                },
+            },
+            AudioFormat::Wav,
+        ),
+    ] {
+        let mut model = model();
+        if has_capability {
+            std::sync::Arc::make_mut(&mut model.spec)
+                .capabilities
+                .input_modalities = ModalitySet::none().with(Modality::Audio);
+        }
+        let mut request = Request {
+            messages: vec![Message::User(UserMessage {
+                content: vec![
+                    UserPart::Text("listen".into()),
+                    UserPart::Media(Media::Audio(AudioMedia {
+                        payload,
+                        format,
+                        transcript: None,
+                    })),
+                ],
+            })],
+            ..base_request()
+        };
+        assert!(build_request(&model, &request).is_err());
+        request.compatibility = crate::CompatibilityMode::Lossy;
+        let parts = build_request(&model, &request).unwrap();
+        assert!(!parts.diagnostics.is_empty());
+        let body: Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(
+            body["contents"][0]["parts"],
+            serde_json::json!([{"text": "listen"}])
+        );
+    }
+}
+
 fn model() -> Model {
     model_with_api_name("gemini-2.5-flash")
 }

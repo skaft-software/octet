@@ -381,9 +381,9 @@ fn validate_inline_media_route(request: &RunRequest, protocol: Protocol) -> anyh
         .media
         .iter()
         .any(|input| matches!(input, MediaInput::Audio { .. }));
-    if protocol != Protocol::OpenAiChat && (requested_audio || has_audio_attachment) {
+    if protocol.audio_input_formats().is_empty() && (requested_audio || has_audio_attachment) {
         anyhow::bail!(
-            "native audio input is unsupported through {protocol:?}; use an OpenAI Chat Completions route with an audio-capable model (WAV or MP3 only)"
+            "native audio input is unsupported through {protocol:?}; use an audio-capable OpenAI Chat Completions route (WAV or MP3) or a GoogleGenerativeAi route"
         );
     }
     if has_audio_attachment && !requested_audio {
@@ -391,25 +391,29 @@ fn validate_inline_media_route(request: &RunRequest, protocol: Protocol) -> anyh
             "inline native audio attachments require input_modalities to include \"audio\""
         );
     }
-    if protocol == Protocol::OpenAiChat {
+    if !protocol.audio_input_formats().is_empty() {
         for input in &request.media {
             let MediaInput::Audio { path } = input else {
                 continue;
             };
             let format = audio_format(path).with_context(|| {
                 format!(
-                    "native audio attachment {} must use WAV or MP3",
-                    path.display()
+                    "native audio attachment {} has an unrecognized format; {protocol:?} accepts {:?}",
+                    path.display(),
+                    protocol.audio_input_formats(),
                 )
             })?;
-            if !matches!(
-                format,
-                octet_ai::AudioFormat::Wav | octet_ai::AudioFormat::Mp3
-            ) {
+            if !protocol.audio_input_formats().contains(&format) {
                 anyhow::bail!(
-                    "native audio attachment {} uses {}; OpenAI Chat Completions accepts only WAV or MP3",
+                    "native audio attachment {} uses {}; {protocol:?} accepts {:?}{}",
                     path.display(),
                     audio_format_name(format),
+                    protocol.audio_input_formats(),
+                    if protocol == Protocol::OpenAiChat {
+                        " (only WAV or MP3)"
+                    } else {
+                        ""
+                    },
                 );
             }
         }

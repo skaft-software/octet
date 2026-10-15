@@ -74,14 +74,22 @@ fn media_batch_is_atomic_and_ordered() {
 
     let mut ledger = AttachmentLedger::default();
     let chips = ledger
-        .attach_media_batch(&[first.clone(), second.clone()], all_modalities())
+        .attach_media_batch(
+            &[first.clone(), second.clone()],
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
         .expect("batch attaches");
     assert_eq!(chips, ["[Image #1]", "[Image #2]"]);
     assert_eq!(ledger.entries.len(), 2);
 
     let missing = temp.path().join("missing.png");
     assert!(ledger
-        .attach_media_batch(&[first, missing], all_modalities())
+        .attach_media_batch(
+            &[first, missing],
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats()
+        )
         .is_err());
     assert_eq!(
         ledger.entries.len(),
@@ -101,7 +109,11 @@ fn explicit_paths_replace_supported_tokens_without_partial_mutation() {
     let input = format!("{} {}", image.display(), pdf.display());
     let mut ledger = AttachmentLedger::default();
     let replaced = ledger
-        .attach_explicit_paths(&input, all_modalities())
+        .attach_explicit_paths(
+            &input,
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
         .expect("path admission")
         .expect("supported path payload");
     assert!(replaced.contains("[Image #1]"));
@@ -120,7 +132,11 @@ fn composition_keeps_text_and_media_in_display_order() {
 
     let mut ledger = AttachmentLedger::default();
     let media_chip = ledger
-        .attach_media(&image, all_modalities())
+        .attach_media(
+            &image,
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
         .expect("attach image");
     let pasted_chip = ledger.attach_pasted_text("expanded paste".into());
     let display = format!("before {media_chip} middle {pasted_chip} after");
@@ -164,7 +180,11 @@ fn model_text_replacement_keeps_the_media_filename_annotation() {
 
     let mut ledger = AttachmentLedger::default();
     let chip = ledger
-        .attach_media(&image, all_modalities())
+        .attach_media(
+            &image,
+            all_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
         .expect("attach image");
     let mut composed = compose(format!("look at {chip}"), &mut ledger);
 

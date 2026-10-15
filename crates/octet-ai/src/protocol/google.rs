@@ -119,7 +119,13 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 }
                             }
                         }
-                        UserPart::Media(Media::Audio(_)) => {}
+                        UserPart::Media(Media::Audio(audio)) => {
+                            if model.spec.supports_audio_input(audio.format) {
+                                if let Some(part) = google_inline_audio_part(audio) {
+                                    parts.push(part);
+                                }
+                            }
+                        }
                         UserPart::ToolResult(result) => {
                             let id =
                                 crate::protocol::normalize_tool_call_id(&result.tool_call_id.0);
@@ -255,6 +261,28 @@ fn google_inline_image_part(image: &crate::types::ImageMedia) -> Option<Value> {
     let mut part = Map::new();
     part.insert("inlineData".to_owned(), Value::Object(inline_data));
     Some(Value::Object(part))
+}
+
+fn google_inline_audio_part(audio: &crate::types::AudioMedia) -> Option<Value> {
+    use crate::types::{AudioFormat, AudioPayload};
+    let AudioPayload::Inline(data) = &audio.payload else {
+        return None;
+    };
+    let mime_type = match audio.format {
+        AudioFormat::Wav => "audio/wav",
+        AudioFormat::Mp3 => "audio/mp3",
+        AudioFormat::Aac => "audio/aac",
+        AudioFormat::Flac => "audio/flac",
+        AudioFormat::Opus => "audio/ogg",
+        // Raw PCM needs sample-rate metadata absent from the canonical format.
+        AudioFormat::Pcm16 => return None,
+    };
+    Some(serde_json::json!({
+        "inlineData": {
+            "mimeType": mime_type,
+            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data),
+        }
+    }))
 }
 
 fn text_part(text: String, signature: Option<String>, thought: bool) -> Value {

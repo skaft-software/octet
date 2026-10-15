@@ -2,9 +2,9 @@
 
 use crate::error::{AiError, Diagnostic, UnsupportedError, ValidationError};
 use crate::types::{
-    AssistantPart, AudioFormat, AudioPayload, AudioVoice, Capabilities, ImageSource, Media,
-    Message, ModelId, ModelLimits, OutputFormat, OutputModalities, Protocol, ReasoningConfig,
-    ReasoningMode, Request, ToolCallId, ToolChoice, ToolResultPart, UserPart,
+    AssistantPart, AudioPayload, AudioVoice, Capabilities, ImageSource, Media, Message, ModelId,
+    ModelLimits, OutputFormat, OutputModalities, Protocol, ReasoningConfig, ReasoningMode, Request,
+    ToolCallId, ToolChoice, ToolResultPart, UserPart,
 };
 use crate::CompatibilityMode;
 use std::borrow::Cow;
@@ -447,19 +447,20 @@ pub(crate) fn validate_request(
                             }
                         }
                         UserPart::Media(Media::Audio(ref audio)) => {
-                            if protocol != Protocol::OpenAiChat {
+                            if protocol.audio_input_formats().is_empty() {
                                 if mode == CompatibilityMode::Strict {
                                     return Err(AiError::Unsupported(UnsupportedError::Audio));
                                 }
                                 diagnostics.push(Diagnostic {
                                     code: "dropped_audio".to_string(),
-                                    message: "Audio input is Chat-only in v0.1".to_string(),
+                                    message: format!(
+                                        "Audio input is unsupported through {protocol:?}"
+                                    ),
                                 });
                             }
-                            if protocol == Protocol::OpenAiChat
-                                && !caps
-                                    .input_modalities
-                                    .contains(crate::types::Modality::Audio)
+                            if !caps
+                                .input_modalities
+                                .contains(crate::types::Modality::Audio)
                             {
                                 if mode == CompatibilityMode::Strict {
                                     return Err(AiError::Unsupported(UnsupportedError::Audio));
@@ -487,23 +488,32 @@ pub(crate) fn validate_request(
                                 });
                             }
 
-                            // Chat format gate (only Wav or Mp3 for inline input)
-                            if protocol == Protocol::OpenAiChat {
-                                match audio.format {
-                                    AudioFormat::Wav | AudioFormat::Mp3 => {}
-                                    _ => {
-                                        if mode == CompatibilityMode::Strict {
-                                            return Err(AiError::Unsupported(
-                                                UnsupportedError::Audio,
-                                            ));
-                                        } else {
-                                            diagnostics.push(Diagnostic {
-                                                code: "dropped_audio_format".to_string(),
-                                                message: format!("OpenAI Chat only supports Wav/Mp3 audio input. Got {:?}", audio.format),
-                                            });
-                                        }
-                                    }
+                            if protocol == Protocol::GoogleGenerativeAi
+                                && !matches!(audio.payload, AudioPayload::Inline(_))
+                            {
+                                if mode == CompatibilityMode::Strict {
+                                    return Err(AiError::Unsupported(
+                                        UnsupportedError::ProviderMediaRef,
+                                    ));
                                 }
+                                diagnostics.push(Diagnostic {
+                                    code: "dropped_provider_media_ref".to_string(),
+                                    message: "Google audio input requires inline bytes; provider references are not forwarded".to_string(),
+                                });
+                            }
+                            if !protocol.audio_input_formats().is_empty()
+                                && !protocol.audio_input_formats().contains(&audio.format)
+                            {
+                                if mode == CompatibilityMode::Strict {
+                                    return Err(AiError::Unsupported(UnsupportedError::Audio));
+                                }
+                                diagnostics.push(Diagnostic {
+                                    code: "dropped_audio_format".to_string(),
+                                    message: format!(
+                                        "{protocol:?} does not support {:?} audio input",
+                                        audio.format
+                                    ),
+                                });
                             }
 
                             // Check provider ref protocol and expiration
