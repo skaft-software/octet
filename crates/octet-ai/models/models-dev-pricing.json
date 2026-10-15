@@ -3731,10 +3731,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 30276,
+    "cache_read": 29566,
     "cache_write_5m": 0,
-    "input": 363312,
-    "output": 726624,
+    "input": 354786,
+    "output": 709572,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -5376,7 +5376,7 @@
     "reasoning": null
   },
   "openrouter/qwen/qwen3.8-27b": {
-    "cache_read": 19800,
+    "cache_read": 39000,
     "cache_write_5m": 0,
     "input": 40000,
     "output": 2300000,
@@ -5929,10 +5929,10 @@
     "reasoning": 12000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 280000,
+    "cache_read": 450000,
     "cache_write_5m": 0,
-    "input": 580000,
-    "output": 15000000,
+    "input": 490000,
+    "output": 14900000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
