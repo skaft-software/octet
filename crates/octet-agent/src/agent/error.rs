@@ -289,23 +289,9 @@ pub(super) fn public_ai_error_diagnostic(error: &AiError, endpoint: &str, model:
             truncate_public_diagnostic(&mut diagnostic);
             diagnostic
         }
-        // A mid-stream failure is annotated with the wire progress that
-        // distinguishes "died after 400 frames" from "never started": raw
-        // provider frames, decoded events, retained content bytes, and
-        // elapsed time. The inner diagnostic is first bounded to leave room
-        // for this compact field, so a verbose inner detail can never push
-        // the progress out of the truncation window.
-        AiError::StreamFailure { inner, progress } => {
-            let progress = format_stream_progress(progress);
-            let mut diagnostic = public_ai_error_diagnostic(inner, endpoint, model);
-            let budget = MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES
-                .saturating_sub(progress.len())
-                .saturating_sub("stream_progress=".len() + 1);
-            truncate_public_diagnostic_to(&mut diagnostic, budget);
-            append_provider_field(&mut diagnostic, "stream_progress", Some(&progress));
-            truncate_public_diagnostic(&mut diagnostic);
-            diagnostic
-        }
+        // A stream failure uses its inner error for the public diagnostic;
+        // wire progress counters are not user-facing.
+        AiError::StreamFailure { inner, .. } => public_ai_error_diagnostic(inner, endpoint, model),
         // The remaining variants previously surfaced as a bare phase label
         // with their message discarded. Their text is already
         // credential-redacted at the request boundary, so a bounded
@@ -339,28 +325,6 @@ pub(super) fn detail_diagnostic(prefix: &str, error: &impl std::fmt::Display) ->
     append_provider_field(&mut diagnostic, "detail", Some(&error.to_string()));
     truncate_public_diagnostic(&mut diagnostic);
     diagnostic
-}
-
-/// Compact, greppable rendering of mid-stream progress counters.
-pub(super) fn format_stream_progress(progress: &octet_ai::StreamProgress) -> String {
-    let first_byte = if progress.first_body_seen {
-        "seen"
-    } else {
-        "none"
-    };
-    let last_event = progress
-        .last_event_ms
-        .map_or_else(|| "none".to_owned(), |elapsed| format!("{elapsed}ms"));
-    format!(
-        "frames={} events={} content={}B buffered={}B first_byte={} elapsed={}ms last_event={}",
-        progress.provider_events,
-        progress.decoded_events,
-        progress.content_bytes,
-        progress.buffered_bytes,
-        first_byte,
-        progress.elapsed_ms,
-        last_event,
-    )
 }
 
 pub(super) const MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES: usize = 2 * 1024;

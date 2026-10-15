@@ -2387,53 +2387,54 @@ fn websocket_connection_limit_is_retried_before_generation() {
 }
 
 #[test]
-fn stream_failure_diagnostic_appends_wire_progress_inside_the_public_bound() {
-    let progress = octet_ai::StreamProgress {
-        provider_events: 412,
-        decoded_events: 38,
-        content_bytes: 18_204,
-        buffered_bytes: 96,
-        first_body_seen: true,
-        elapsed_ms: 97_321,
-        last_event_ms: Some(97_000),
+fn stream_failure_public_diagnostic_omits_wire_progress() {
+    let stream_failure = || AiError::StreamFailure {
+        inner: Box::new(AiError::Provider(octet_ai::ProviderError {
+            code: Some("upstream_error".into()),
+            kind: Some("server_error".into()),
+            message: "upstream temporarily unavailable".into(),
+            request_id: Some("req-stream".into()),
+        })),
+        progress: octet_ai::StreamProgress {
+            provider_events: 308,
+            decoded_events: 306,
+            content_bytes: 9_526,
+            buffered_bytes: 0,
+            first_body_seen: true,
+            elapsed_ms: 33_418,
+            last_event_ms: Some(33_418),
+        },
     };
-    let suffix = "stream_progress=frames=412 events=38 content=18204B buffered=96B first_byte=seen elapsed=97321ms last_event=97000ms";
-
-    let inner = AiError::Provider(octet_ai::ProviderError {
-        // Four oversized fields push the bare diagnostic past the public
-        // bound, so the wrapper must reserve room for its progress field
-        // instead of letting truncation clip the progress off the end.
-        code: Some("x".repeat(600)),
-        kind: Some("y".repeat(600)),
-        message: "z".repeat(600),
-        request_id: Some("w".repeat(600)),
-    });
-    let bare = public_ai_error_diagnostic(&inner, "openai", "gpt-test");
-    assert_eq!(
-        bare.len(),
-        MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES,
-        "fixture must overflow the public bound"
-    );
-    assert!(bare.ends_with('…'));
-
-    let wrapped = public_ai_error_diagnostic(
-        &AiError::StreamFailure {
-            inner: Box::new(inner),
-            progress,
+    let expected = "provider=openai model=gpt-test phase=response body (provider error) code=upstream_error kind=server_error detail=upstream temporarily unavailable request_id=req-stream";
+    let direct = public_error_diagnostic(&AgentError::Ai(stream_failure()), "openai", "gpt-test");
+    let recovered = public_error_diagnostic(
+        &AgentError::ProviderRecovery {
+            retries: 2,
+            usage_unknown: false,
+            source: stream_failure(),
         },
         "openai",
         "gpt-test",
     );
-    assert!(
-        wrapped.len() <= MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES,
-        "wrapped diagnostic must stay inside the public bound: {}",
-        wrapped.len()
-    );
-    assert!(
-        wrapped.ends_with(suffix),
-        "truncation must not clip the progress field: {wrapped}"
-    );
-    assert!(wrapped.contains("phase=response body (provider error)"));
+
+    assert_eq!(direct, expected);
+    assert!(recovered.starts_with("replacements=2 failed_usage=not_observed "));
+    assert!(recovered.ends_with(expected));
+    for diagnostic in [&direct, &recovered] {
+        assert!(diagnostic.len() <= MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES);
+        for field in [
+            "stream_progress=",
+            "frames=",
+            "events=",
+            "content=",
+            "buffered=",
+            "first_byte=",
+            "elapsed=",
+            "last_event=",
+        ] {
+            assert!(!diagnostic.contains(field), "{diagnostic}");
+        }
+    }
 }
 
 #[test]
