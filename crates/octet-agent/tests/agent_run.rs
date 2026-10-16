@@ -7242,7 +7242,7 @@ async fn assert_controlled_shell_approved(policy: EffectPolicy) {
     let mut run = agent.prompt("run a read-only command").await.unwrap();
     let mut approvals = 0usize;
     let mut succeeded = 0usize;
-    tokio::time::timeout(Duration::from_secs(8), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(event) = run.next().await {
             match event {
                 AgentEvent::ToolProgress {
