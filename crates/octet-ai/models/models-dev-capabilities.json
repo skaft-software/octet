@@ -13673,7 +13673,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16000
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -13989,7 +13989,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -20083,6 +20083,36 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/reflection/beam-1.0-501b-a23b": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Beam 1.0 501B A23B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/rekaai/reka-edge": {
     "limit": {
       "context": 16384,
@@ -21833,7 +21863,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [

@@ -30,6 +30,10 @@ boundaries and known limitations.
 - Native Tern keeps its default touchpad scrolling and selection: octet no longer
   captures the mouse for the native surface. ANSI fallback keeps the requested
   capture policy.
+- Captured-mouse transcript web links open on a plain left-click release, without
+  Shift or Ctrl. Dragging still selects/copies; movement, intervening input and
+  changed layout revoke link activation. Only HTTP(S) targets reach the browser
+  helper; native Tern and uncaptured terminal link gestures are unchanged.
 - `/context` during a run shows the same usage grid and categories as when idle,
   instead of a flat list.
 - Windows `powershell` tool calls render like `bash`: full command header,

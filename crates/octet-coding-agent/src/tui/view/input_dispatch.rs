@@ -203,6 +203,7 @@ impl InteractiveShell {
 
     pub(super) fn reset_input_interaction(&mut self) {
         self.input_dispatch.jump_forward = None;
+        self.state.borrow_mut().pending_link_press = None;
     }
 
     /// Only assistant semantic text is copied, never hidden reasoning, tools,
