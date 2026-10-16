@@ -357,16 +357,10 @@ pub(super) fn lower_tool_media_part(
             {
                 omissions
                     .push("[audio omitted: the active model does not accept audio input]".into());
-            } else if model.spec.protocol != Protocol::OpenAiChat {
-                omissions
-                    .push("[audio omitted: this protocol cannot replay audio tool output]".into());
-            } else if !matches!(
-                audio.format,
-                octet_ai::AudioFormat::Wav | octet_ai::AudioFormat::Mp3
-            ) {
+            } else if !model.spec.supports_audio_input(audio.format) {
                 omissions.push(format!(
-                    "[audio omitted: OpenAI Chat accepts WAV or MP3 input, got {:?}]",
-                    audio.format
+                    "[audio omitted: {:?} does not accept {:?} audio input]",
+                    model.spec.protocol, audio.format
                 ));
             } else {
                 accepted_kinds.push(ToolOutputMediaKind::Audio);

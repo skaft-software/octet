@@ -145,6 +145,32 @@ fn ordered_image_and_audio_inputs_remain_typed() {
 }
 
 #[test]
+fn google_audio_inputs_preserve_format_and_bytes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let model = model_with_inputs(
+        Protocol::GoogleGenerativeAi,
+        ModalitySet::none().with(Modality::Audio),
+    );
+    for (extension, format) in [
+        ("wav", AudioFormat::Wav),
+        ("mp3", AudioFormat::Mp3),
+        ("flac", AudioFormat::Flac),
+        ("aac", AudioFormat::Aac),
+        ("ogg", AudioFormat::Opus),
+    ] {
+        let path = workspace.path().join(format!("music.{extension}"));
+        std::fs::write(&path, b"original sound").unwrap();
+        let mut request = base_request(workspace.path().to_path_buf());
+        request.media = vec![MediaInput::Audio { path }];
+        let input = load_user_input(&request, "listen".into(), &model).unwrap();
+        assert!(
+            matches!(&input.parts[1], InputPart::Media(octet_ai::Media::Audio(audio))
+            if audio.format == format && matches!(&audio.payload, octet_ai::AudioPayload::Inline(data) if data.as_ref() == b"original sound"))
+        );
+    }
+}
+
+#[test]
 fn audio_requires_a_route_effectively_supporting_its_format() {
     let workspace = tempfile::tempdir().unwrap();
     let audio = workspace.path().join("music.wav");

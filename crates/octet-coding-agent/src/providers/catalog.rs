@@ -340,12 +340,15 @@ pub(crate) fn public_headers(
 }
 
 fn static_model_capabilities(model: &StaticModelPreset) -> Capabilities {
+    let mut input_modalities = ModalitySet::none();
+    if model.vision {
+        input_modalities = input_modalities.with(octet_ai::Modality::Image);
+    }
+    if model.audio {
+        input_modalities = input_modalities.with(octet_ai::Modality::Audio);
+    }
     Capabilities {
-        input_modalities: if model.vision {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        },
+        input_modalities,
         output_modalities: ModalitySet::none(),
         tools: true,
         parallel_tool_calls: model.protocol != Protocol::OpenAiChat,
@@ -456,6 +459,32 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn static_gemini_presets_advertise_audio_input_only() {
+        use super::super::models::{GOOGLE_MODELS, OPENCODE_GO_MODELS, OPENCODE_MODELS};
+        for model in GOOGLE_MODELS
+            .iter()
+            .chain(OPENCODE_GO_MODELS)
+            .chain(OPENCODE_MODELS)
+        {
+            let capabilities = static_model_capabilities(model);
+            assert_eq!(
+                capabilities
+                    .input_modalities
+                    .contains(octet_ai::Modality::Audio),
+                model.audio,
+                "{}",
+                model.id
+            );
+            assert!(!capabilities
+                .output_modalities
+                .contains(octet_ai::Modality::Audio));
+            if model.protocol == Protocol::GoogleGenerativeAi {
+                assert!(model.audio, "{}", model.id);
+            }
+        }
+    }
 
     #[test]
     fn static_gemini_thinking_levels_match_the_pinned_provider_metadata() {

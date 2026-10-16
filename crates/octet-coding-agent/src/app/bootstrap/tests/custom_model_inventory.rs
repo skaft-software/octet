@@ -996,6 +996,10 @@ fn opencode_gemini_4_argon_offers_its_thinking_levels_from_an_id_only_inventory(
             .resolve(&ModelId(format!("{provider}/{id}")))
             .unwrap();
         assert_eq!(model.spec.protocol, Protocol::GoogleGenerativeAi, "{id}");
+        assert!(
+            model.spec.supports_audio_input(octet_ai::AudioFormat::Mp3),
+            "{provider}/{id}"
+        );
         assert_eq!(
             crate::app::supported_levels_with_subagents(&model, false),
             [

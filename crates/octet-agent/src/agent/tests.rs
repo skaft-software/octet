@@ -2927,6 +2927,33 @@ fn openai_chat_wav_and_mp3_follow_the_paired_tool_result() {
 }
 
 #[test]
+fn google_tool_audio_follows_the_paired_result_in_all_supported_formats() {
+    let model = tool_media_model(
+        Protocol::GoogleGenerativeAi,
+        octet_ai::ModalitySet::none().with(octet_ai::Modality::Audio),
+    );
+    for &format in Protocol::GoogleGenerativeAi.audio_input_formats() {
+        let result = Ok(ToolOutput::new("read=audio").with_media(Media::audio_bytes(
+            bytes::Bytes::from_static(b"audio"),
+            format,
+        )));
+        let (message, accepted, _, is_error, _) = lower_tool_result(
+            octet_ai::ToolCallId("call".into()),
+            &result,
+            &model,
+            4096,
+            Vec::new(),
+        );
+        assert_eq!(accepted, vec![ToolOutputMediaKind::Audio]);
+        assert!(!is_error);
+        assert!(matches!(message.content[0], UserPart::ToolResult(_)));
+        assert!(
+            matches!(&message.content[1], UserPart::Media(Media::Audio(audio)) if audio.format == format)
+        );
+    }
+}
+
+#[test]
 fn unsupported_tool_audio_is_an_error_without_media_or_indicator() {
     let responses = tool_media_model(
         Protocol::OpenAiResponses,
@@ -2945,7 +2972,7 @@ fn unsupported_tool_audio_is_an_error_without_media_or_indicator() {
     );
     assert!(accepted.is_empty());
     assert!(is_error);
-    assert!(text.contains("protocol cannot replay audio"));
+    assert!(text.contains("OpenAiResponses does not accept Wav audio input"));
     assert_eq!(message.content.len(), 1);
 
     let chat = tool_media_model(
@@ -2965,7 +2992,7 @@ fn unsupported_tool_audio_is_an_error_without_media_or_indicator() {
     );
     assert!(accepted.is_empty());
     assert!(is_error);
-    assert!(text.contains("accepts WAV or MP3"));
+    assert!(text.contains("OpenAiChat does not accept Aac audio input"));
     assert_eq!(message.content.len(), 1);
 }
 

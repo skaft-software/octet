@@ -122,6 +122,22 @@ fn inline_routes_reject_unsafe_urls_modes_and_headers() {
 }
 
 #[test]
+fn google_media_route_admits_its_supported_audio_formats() {
+    let mut request = base_request(PathBuf::from("."));
+    request.input_modalities = vec![HostInputModality::Audio];
+    for extension in ["wav", "mp3", "flac", "aac", "ogg"] {
+        request.media = vec![MediaInput::Audio {
+            path: PathBuf::from(format!("clip.{extension}")),
+        }];
+        validate_inline_media_route(&request, Protocol::GoogleGenerativeAi).unwrap();
+    }
+    request.media = vec![MediaInput::Audio {
+        path: PathBuf::from("clip.pcm"),
+    }];
+    assert!(validate_inline_media_route(&request, Protocol::GoogleGenerativeAi).is_err());
+}
+
+#[test]
 fn inline_media_validation_is_route_effective_and_actionable() {
     let mut request = base_request(PathBuf::from("."));
     request.base_url = Some("https://example.com/v1".into());

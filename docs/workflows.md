@@ -48,9 +48,9 @@ from an earlier message and `/clone` copies the current state. See
 
 Explicitly paste/drop a path through the terminal paste mechanism, or select it
 with `@` completion. Check the image/audio chip before submitting; typed paths
-alone are not attachments. Native audio is WAV/MP3 only on compatible OpenAI Chat
-routes. See the
-[audio/image recipe, formats, limits, and privacy rules](media.md).
+alone are not attachments. Native audio needs a compatible model and route:
+OpenAI Chat accepts WAV/MP3; Google `generateContent` accepts WAV/MP3/AAC/FLAC/Ogg
+Opus. See the [audio/image recipe, formats, limits, and privacy rules](media.md).
 
 ## Subagents
 

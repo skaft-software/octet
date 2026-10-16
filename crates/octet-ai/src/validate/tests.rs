@@ -10,7 +10,9 @@
 
 use super::*;
 use crate::test_fixtures::{base_request, reasoning_capability};
-use crate::types::{AssistantMessage, Message, ModalitySet, ToolCall, ToolCallId, UserMessage};
+use crate::types::{
+    AssistantMessage, AudioFormat, Message, ModalitySet, ToolCall, ToolCallId, UserMessage,
+};
 
 fn dummy_caps(
     image: bool,

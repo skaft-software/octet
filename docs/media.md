@@ -39,7 +39,7 @@ rest keep their order and payload.
 
 | Where | What it accepts |
 | --- | --- |
-| TUI attachment or built-in `read` | PNG/JPEG/GIF/WebP images, **5 MiB each**; native WAV/MP3 audio, **20 MiB each**, only with a compatible model on OpenAI Chat Completions. |
+| TUI attachment or built-in `read` | PNG/JPEG/GIF/WebP images, **5 MiB each**; native audio, **20 MiB each**, with a compatible model: WAV/MP3 on OpenAI Chat Completions; WAV/MP3/AAC/FLAC/Ogg Opus on Google `generateContent`. |
 | Native `octet-host` `media` | Same per-file limits; at most **8 images / 20 MiB total**, **4 audio clips / 40 MiB total**, and **12 items per request**. [Run request contract](sdk.md#run-requests). |
 
 Attachments stay in order with the text. Each submission admits at most **8
@@ -47,12 +47,40 @@ images / 20 MiB of inline image bytes** before decoding. That doesn't limit
 separate `read` tool results. Unsupported formats, unreadable files and
 oversized files fail with a message. Video paths are never native media: an
 explicit video attachment is refused with a diagnostic and stays visible as
-text. Recognizing a file isn't the same as the provider accepting it: FLAC,
-Opus, AAC and PCM16 aren't native inputs just because octet knows the extension.
-Native audio needs both a capable model and the OpenAI Chat WAV or MP3 route.
-Responses, Anthropic, Gemini and arbitrary OpenAI-compatible endpoints aren't
-native-audio routes. There's no automatic transcription or transcoding, and a
-provider may still reject a file octet accepted.
+text. Recognizing a file isn't the same as the provider accepting it. Native
+audio needs both a capable model and a supported format on its selected route.
+Gemini, Vertex AI and Google-compatible OpenCode routes send inline audio bytes
+as `inlineData`; OpenRouter keeps its Chat WAV/MP3 format contract. Responses
+and Anthropic aren't native-audio routes, and an arbitrary OpenAI-compatible
+endpoint does not establish audio support. Raw PCM16 is not supported on Google
+because the canonical format lacks required sample-rate metadata. Google audio
+output and provider file references are not implemented. There's no automatic
+transcription or transcoding, and a provider may still reject a file octet
+accepted. The raw-byte safety cap is not a guarantee that a base64-encoded
+request fits the provider's total request limit.
+
+### Oversized audio
+
+The **20 MiB audio cap counts raw file bytes** and is an octet safety bound, not
+Gemini's provider allowance. Gemini documents **20 MB for the entire inline
+request**, including base64 expansion and the rest of the prompt. A file below
+octet's cap may therefore still exceed the provider's limit.
+
+High sample-rate/bit-depth WAVs can be much larger than compressed audio. A
+73,608,392-byte WAV and a 22,542,626-byte WAV both exceed the same 20 MiB audio
+cap; lowering the sample rate or bit depth alone does not guarantee a fit.
+Export a compressed copy or split the recording into smaller clips. For example,
+with a separately installed FFmpeg (this keeps the original and refuses to
+overwrite an existing output):
+
+```sh
+ffmpeg -n -i input.wav -vn -c:a libmp3lame -b:a 192k input-inline.mp3
+```
+
+Check the output size and use a model/route that supports its format. Leave
+room for base64 and the rest of the request. octet does not automatically
+transcode or upload oversized files; large-file API support is tracked in
+[#593](https://github.com/skaft-software/octet/issues/593).
 
 <details>
 <summary>Image size limits and resizing</summary>

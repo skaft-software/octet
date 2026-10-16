@@ -10,7 +10,7 @@ Provider-independent inference for octet's agent loop.
 - Amazon Bedrock Converse
 - Google generateContent
 
-The crate supports tools, reasoning continuation state, images, Chat conversational audio, structured output, strict/lossy cross-protocol conversion, dynamic authentication, integer usage pricing, custom endpoints, cancellation by stream drop, an embedded offline model catalog, and OpenRouter's asynchronous Batch API.
+The crate supports tools, reasoning continuation state, images, Google inline audio input, Chat conversational audio, structured output, strict/lossy cross-protocol conversion, dynamic authentication, integer usage pricing, custom endpoints, cancellation by stream drop, an embedded offline model catalog, and OpenRouter's asynchronous Batch API.
 
 Feature support varies by protocol; this list does not imply uniform capabilities
 or live-provider acceptance across all five.
