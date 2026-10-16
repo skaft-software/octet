@@ -364,3 +364,6 @@ mod harness;
 
 #[cfg(test)]
 mod inference_tests;
+
+#[cfg(test)]
+mod cache_audit_tests;

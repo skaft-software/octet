@@ -2,11 +2,11 @@
 //!
 //! Off unless `OCTET_PROVIDER_REQUEST_TRACE` is set to `stderr` or to the path
 //! of a file; the value is read from the request's environment overrides first
-//! and then from the process. Each request appends one JSON line describing
-//! only the *shape* of what was sent (item types and counts, image counts and
-//! bytes, whether reasoning carried `encrypted_content`, the transport and
-//! whether `previous_response_id` was set) and, when the provider answers with
-//! an error status, one line with that status and request id.
+//! and then from the process. Requests record shape, bounded salted segment
+//! digests and prefix offsets at canonical/encoded/final-wire boundaries, plus
+//! terminal provider usage correlated by request id. Rejections record status
+//! and a sanitized provider request id. Prefix byte estimates are never provider
+//! cache measurements.
 //!
 //! Nothing here records a prompt, tool argument, tool output, header, URL,
 //! credential, response id, image data or reasoning content: it exists to make
@@ -19,6 +19,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Map, Value};
+
+mod cache;
+pub(crate) use cache::CacheTraceState;
 
 /// Environment variable naming the trace sink (`stderr` or a file path).
 pub(crate) const REQUEST_TRACE_ENV: &str = "OCTET_PROVIDER_REQUEST_TRACE";
@@ -36,6 +39,7 @@ enum Sink {
 pub(crate) struct RequestTrace {
     sink: Sink,
     id: u64,
+    cache: Option<cache::CacheTrace>,
 }
 
 impl RequestTrace {
@@ -54,11 +58,60 @@ impl RequestTrace {
         Some(Self {
             sink,
             id: NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed),
+            cache: None,
         })
+    }
+
+    /// Enables bounded comparisons for this client's session/model lane.
+    pub(crate) fn with_cache_state(
+        mut self,
+        state: std::sync::Arc<std::sync::Mutex<CacheTraceState>>,
+        model: &crate::Model,
+        request: &crate::Request,
+    ) -> Self {
+        self.cache = Some(cache::CacheTrace::new(state, model, request));
+        self.stage(
+            "canonical",
+            &serde_json::to_vec(request).expect("request serializes"),
+        );
+        self
+    }
+
+    /// Records a pipeline stage without persisting any of its content.
+    pub(crate) fn stage(&self, stage: &'static str, bytes: &[u8]) {
+        if let Some(cache) = &self.cache {
+            let mut line = cache.observe(self.id, stage, bytes);
+            line["ts_ms"] = json!(now_ms());
+            self.emit(line);
+        }
+    }
+
+    /// Records final, disjoint provider usage, not a prefix estimate.
+    pub(crate) fn usage(&self, usage: &crate::Usage) {
+        if self.cache.is_some() {
+            let mut line = cache::usage(self.id, usage);
+            line["ts_ms"] = json!(now_ms());
+            self.emit(line);
+        }
+    }
+
+    /// Records the exact uncompressed HTTP JSON after all payload hooks.
+    pub(crate) fn http_request(&self, api_model: &str, bytes: &[u8]) {
+        self.stage("wire_http", bytes);
+        match serde_json::from_slice(bytes) {
+            Ok(body) => self.request("http", api_model, &body),
+            Err(_) => self.request_bytes("http", api_model, bytes.len()),
+        }
     }
 
     /// Records the shape of a request body about to be sent.
     pub(crate) fn request(&self, transport: &'static str, api_model: &str, body: &Value) {
+        if transport == "websocket" {
+            self.stage(
+                "wire_websocket",
+                &serde_json::to_vec(body).expect("frame serializes"),
+            );
+        }
         let mut line = Map::new();
         line.insert("event".into(), json!("request"));
         line.insert("id".into(), json!(self.id));
@@ -110,11 +163,14 @@ impl RequestTrace {
                 let _ = std::io::stderr().write_all(text.as_bytes());
             }
             Sink::File(path) => {
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
                 {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    options.mode(0o600);
+                }
+                if let Ok(mut file) = options.open(path) {
                     let _ = file.write_all(text.as_bytes());
                 }
             }

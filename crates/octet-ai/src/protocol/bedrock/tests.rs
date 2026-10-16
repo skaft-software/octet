@@ -240,6 +240,68 @@ fn request_builder_uses_converse_shape() {
         .ends_with("/model/fixture-api-name/converse-stream"));
 }
 
+#[test]
+fn cache_points_are_native_model_gated_retention_aware_and_non_destructive() {
+    for (name, supported) in [
+        ("us.anthropic.claude-sonnet-4-20250514-v1:0", true),
+        (
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-7-sonnet-20250219-v1:0",
+            true,
+        ),
+        ("anthropic.claude-3-5-haiku-20241022-v1:0", true),
+        ("anthropic.claude-3-5-sonnet-20241022-v2:0", false),
+        ("amazon.nova-pro-v1:0", false),
+        (
+            "arn:aws:bedrock:us-east-1:123:application-inference-profile/opaque",
+            false,
+        ),
+        ("fixture-api-name", false),
+    ] {
+        for retention in [
+            crate::CacheRetention::None,
+            crate::CacheRetention::Short,
+            crate::CacheRetention::Long,
+        ] {
+            let mut model = harness::model(Protocol::BedrockConverse, None);
+            std::sync::Arc::make_mut(&mut model.spec).api_name = name.into();
+            let request = Request {
+                system: Some("stable".into()),
+                messages: vec![Message::User(crate::UserMessage {
+                    content: vec![UserPart::Text("inspect".into())],
+                })],
+                cache_retention: retention,
+                ..base_request()
+            };
+            let original = serde_json::to_value(&request).unwrap();
+            let body: Value =
+                serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+            let enabled = supported && retention != crate::CacheRetention::None;
+            assert_eq!(
+                body["system"].as_array().unwrap().len(),
+                if enabled { 2 } else { 1 }
+            );
+            assert_eq!(
+                body["messages"][0]["content"].as_array().unwrap().len(),
+                if enabled { 2 } else { 1 }
+            );
+            if enabled {
+                assert_eq!(body["system"][1]["cachePoint"]["type"], "default");
+                assert_eq!(
+                    body["system"][1]["cachePoint"].get("ttl").is_some(),
+                    retention == crate::CacheRetention::Long
+                );
+                std::sync::Arc::make_mut(&mut model.spec)
+                    .cache
+                    .supports_long_retention = false;
+                let short: Value =
+                    serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+                assert!(short["system"][1]["cachePoint"].get("ttl").is_none());
+            }
+            assert_eq!(original, serde_json::to_value(&request).unwrap());
+        }
+    }
+}
+
 fn thinking_model() -> crate::catalog::Model {
     let mut model = harness::model(Protocol::BedrockConverse, None);
     let spec = std::sync::Arc::make_mut(&mut model.spec);

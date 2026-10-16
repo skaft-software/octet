@@ -20,6 +20,28 @@ use crate::types::{
 };
 use crate::validate::{normalize_request_reasoning, validate_request};
 
+// Native Converse cache points are model-specific, not valid for every route.
+// Match only foundation-model identities, including regional inference profiles
+// and model ARNs. Opaque application-profile ARNs remain unsupported rather
+// than guessing from a user-controlled display name. Nova caches automatically.
+fn supports_prompt_caching(api_name: &str) -> bool {
+    let Some((_, name)) = api_name.split_once("anthropic.claude-") else {
+        return false;
+    };
+    [
+        "3-5-haiku-",
+        "3-7-sonnet-",
+        "sonnet-4-",
+        "opus-4-",
+        "haiku-4-",
+        "fable-5-",
+        "sonnet-5-",
+        "opus-5-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+
 const MAX_EVENT_STREAM_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENT_STREAM_BUFFER_BYTES: usize = MAX_EVENT_STREAM_FRAME_BYTES + 12;
 
@@ -262,6 +284,37 @@ pub(crate) fn build_request(
         );
     }
 
+    let cache_point = (request.cache_retention != crate::CacheRetention::None
+        && supports_prompt_caching(&model.spec.api_name))
+    .then(|| {
+        let mut point = json!({"cachePoint": {"type": "default"}});
+        if request.cache_retention == crate::CacheRetention::Long
+            && model.spec.cache.supports_long_retention
+        {
+            point["cachePoint"]["ttl"] = json!("1h");
+        }
+        point
+    });
+    if let Some(point) = &cache_point {
+        let users: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| (message.role == "user").then_some(index))
+            .collect();
+        if let Some(&last) = users.last() {
+            if let Some(&previous) = users.iter().rev().nth(1) {
+                let distance: usize = messages[previous + 1..]
+                    .iter()
+                    .map(|message| message.content.len())
+                    .sum();
+                if distance >= 20 {
+                    messages[previous].content.push(point.clone());
+                }
+            }
+            messages[last].content.push(point.clone());
+        }
+    }
+
     let mut body = Map::new();
     body.insert(
         "messages".to_owned(),
@@ -269,7 +322,9 @@ pub(crate) fn build_request(
             .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?,
     );
     if let Some(system) = &request.system {
-        body.insert("system".to_owned(), json!([{"text": system}]));
+        let mut blocks = vec![json!({"text": system})];
+        blocks.extend(cache_point);
+        body.insert("system".to_owned(), json!(blocks));
     }
     let mut inference = Map::new();
     inference.insert(

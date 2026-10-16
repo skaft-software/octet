@@ -323,10 +323,7 @@ pub(super) async fn stream_http(
     }
 
     if let Some(trace) = &trace {
-        match serde_json::from_slice::<serde_json::Value>(&parts.body) {
-            Ok(body) => trace.request("http", &model.spec.api_name, &body),
-            Err(_) => trace.request_bytes("http", &model.spec.api_name, parts.body.len()),
-        }
+        trace.http_request(&model.spec.api_name, &parts.body);
     }
 
     // 3. Send the HTTP request
