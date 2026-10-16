@@ -277,8 +277,8 @@ octet extension list
 ```
 
 The five executable bundles are pinned exactly to the
-running host: the published 0.9.4 bundles require `=0.9.4`. See the
-[0.9.4 release notes](releases/v0.9.4.md) and the version-pinned GitHub release
+running host: the published 0.9.5 bundles require `=0.9.5`. See the
+[0.9.5 release notes](releases/v0.9.5.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
 match the running host version:
 

@@ -262,13 +262,13 @@ tool calls, media, and provider metadata are not recovered as output events.
 
 Every registered `Tool` classifies the exact parsed call through host-owned code. The model cannot provide or lower this classification, and the trait default is `Unknown`. Unknown effects fail closed under every policy, including `UnsafeHost`. Before any hook or tool implementation receives a call, the agent constructs a bounded canonical `EffectIntent` over the principal, run, tool-catalog generation, provider call ID, tool name, effect, arguments, and policy version.
 
-The default `Controlled` policy admits `Pure` and `WorkspaceRead`, requests interactive confirmation for workspace mutation and non-whitelisted `HostProcess` calls, auto-approves a conservative set of known-safe read-only `bash` commands, and otherwise denies host reads/mutations, native processes, network, delegation, executable extensions, and unknown effects. `UnsafeHost` admits classified effects but is not containment. The coding product
+The default `Controlled` broker policy admits `Pure` and `WorkspaceRead`, requests exact one-shot confirmation for workspace mutation and every `bash` or `powershell` `HostProcess` call, and otherwise denies host reads/mutations, native processes, network, delegation, executable extensions, and unknown effects. Shell names, paths, syntax and parsed arguments never prove read-only execution authority. `ControlledBashApproval` has the same shell requirement. Policy version 2 binds the changed contract into every intent. `UnsafeHost` admits classified effects but is not containment. The coding product
 selects it by default; `--safe-mode` selects `ControlledBashApproval`. Product code
 must additionally prevent executable-extension process startup under controlled
 policies because a broker check at later tool invocation cannot contain an
 already-running executable.
 
-Workspace-mutation approval creates a random, short-lived capability bound to the canonical intent digest. Tokens are atomically single-use, stored by one-way verifier, redacted in debug output, and never supplied to tools. Dispatch reserves admission before `before_tool_call`, then commits and consumes the exact grant only after all hooks pass and immediately before calling `Tool::execute`. Hook denial or cancellation drops and revokes an uncommitted reservation; cancellation after commit cannot restore it. `after_tool_call` runs only for a committed effect.
+Shell and workspace-mutation approval creates a random, short-lived capability bound to the canonical intent digest. Tokens are atomically single-use, stored by one-way verifier, redacted in debug output, and never supplied to tools. Dispatch reserves admission before `before_tool_call`, then commits and consumes the exact grant only after all hooks pass and immediately before calling `Tool::execute`. Hook denial or cancellation drops and revokes an uncommitted reservation; cancellation after commit cannot restore it. `after_tool_call` runs only for a committed effect.
 
 Sequential, parallel, and crash-recovery dispatch all use this boundary. The
 ordered live wave path intersects static `ToolConcurrency` with exact host
@@ -291,7 +291,7 @@ nested calls share the same overlap rule.
 Crash replay separately intersects `ReplaySafety::Safe` with exact host
 classification and permits only exact `Pure` and `WorkspaceRead` calls. A broker or argument denial is returned to the provider as a paired tool error before hooks or executable code; a trusted hook may veto an otherwise admitted call before dispatch.
 
-The broker is a deterministic admission reference monitor, not an OS sandbox. Controlled intentionally denies effect classes that still lack isolation or dedicated brokers, while allowing safe read-only `bash` commands through the `Controlled` process channel; `ControlledBashApproval` (selected by `--safe-mode`) confirms every `bash` call. The default `UnsafeHost` policy lets classified command and process effects use ambient host authority.
+The broker is a deterministic admission reference monitor, not an OS sandbox. Both controlled policies require approval for every shell call and deny effect classes that still lack isolation or dedicated brokers. `ControlledBashApproval` remains the policy selected by `--safe-mode`. The default `UnsafeHost` policy still lets classified command and process effects use ambient host authority without approval.
 
 `ToolPolicyDecision` is secret-safe host evidence emitted after `ToolStarted` and
 before its matching `ToolFinished`. An allowed decision is finalized only after

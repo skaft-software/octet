@@ -35,6 +35,9 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         for contract in (
             "--lib tui::terminal", "-- secure_fs tools::bash::tests",
             "--test windows_process_current", "Expand-Archive $archive",
+            "effect::tests tools::edit::tests extension_bulk::tests",
+            "extension_bulk_host::tests::temporary_storage_never_promises_durability",
+            "--test agent_run controlled_shell_",
             "$env:PATH = \"$env:SystemRoot\\System32;$env:SystemRoot\"",
             "$env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'",
             "--test windows_conpty", "Windows archives differ",
@@ -50,11 +53,11 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
     def test_npm_launcher_resolves_windows_x64_platform_package(self):
         launcher = json.loads(
             (ROOT / "packages/npm/launcher/package.json.in").read_text()
-            .replace("__VERSION__", "0.9.4")
+            .replace("__VERSION__", "0.9.5")
         )
         self.assertEqual(
             launcher["optionalDependencies"].get("@skaft/octet-win32-x64"),
-            "0.9.4",
+            "0.9.5",
         )
         resolver = (ROOT / "packages/npm/launcher/lib/launch.js").read_text()
         self.assertIn("'win32-x64': '@skaft/octet-win32-x64'", resolver)
@@ -70,10 +73,10 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
             binaries.mkdir()
             for name in ("octet.exe", "octet-host.exe"):
                 (binaries / name).write_bytes(b"MZ" + name.encode())
-            archive_a = PACKAGER.package(binaries, output_a, "0.9.4", ROOT)
-            archive_b = PACKAGER.package(binaries, output_b, "0.9.4", ROOT)
+            archive_a = PACKAGER.package(binaries, output_a, "0.9.5", ROOT)
+            archive_b = PACKAGER.package(binaries, output_b, "0.9.5", ROOT)
             self.assertEqual(archive_a.read_bytes(), archive_b.read_bytes())
-            root = f"octet-0.9.4-{TARGET}/"
+            root = f"octet-0.9.5-{TARGET}/"
             with zipfile.ZipFile(archive_a) as archive:
                 names = set(archive.namelist())
                 self.assertIn(root + "octet.exe", names)
@@ -103,9 +106,9 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("install-octet.ps1", docs)
         self.assertIn("Windows x86-64", docs)
         self.assertIn("not yet published", docs)
-        self.assertIn("v0.9.4 is not yet published to npm", docs)
+        self.assertIn("v0.9.5 is not yet published to npm", docs)
         windows = (ROOT / "docs/windows.md").read_text()
-        self.assertIn("/releases/tag/v0.9.4", windows)
+        self.assertIn("/releases/tag/v0.9.5", windows)
         self.assertIn("these do not qualify the\nMSVC release archive", windows)
 
 

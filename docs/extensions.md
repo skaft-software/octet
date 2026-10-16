@@ -59,7 +59,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for **octet 0.9.4**: the
+only the contributions you need. It's a source recipe for **octet 0.9.5**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact
@@ -209,10 +209,10 @@ Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
 names or imports. The local host, SDK source packages and five shipped executable
-bundles have distribution version **0.9.4**. That doesn't select an extension
+bundles have distribution version **0.9.5**. That doesn't select an extension
 API or publish SDK registries. Catalog installation needs version-matched
 published assets: see [installation](installation.md) and the [release
-notes](releases/v0.9.4.md).
+notes](releases/v0.9.5.md).
 
 Declare the entrypoint and the tools you actually supply. Return the complete
 tool and command catalogs and the selected protocol features from

@@ -987,23 +987,38 @@ const OPENAI_CHAT_AUDIO_OUTPUT_FORMATS: &[AudioFormat] = &[
     AudioFormat::Pcm16,
 ];
 
+impl Protocol {
+    /// Inline audio formats implemented by this wire codec. Model capability
+    /// metadata must also opt in before any of these formats can be used.
+    pub fn audio_input_formats(self) -> &'static [AudioFormat] {
+        match self {
+            Self::OpenAiChat => OPENAI_CHAT_AUDIO_INPUT_FORMATS,
+            Self::GoogleGenerativeAi => &[
+                AudioFormat::Wav,
+                AudioFormat::Mp3,
+                AudioFormat::Aac,
+                AudioFormat::Flac,
+                AudioFormat::Opus,
+            ],
+            _ => &[],
+        }
+    }
+}
+
 impl ModelSpec {
     /// Returns route-effective audio capabilities, or `None` when neither audio
     /// input nor generated audio is available through the selected protocol.
     pub fn audio_capabilities(&self) -> Option<AudioCapabilities> {
-        if self.protocol != Protocol::OpenAiChat {
-            return None;
-        }
-
         let input_formats = if self.capabilities.input_modalities.contains(Modality::Audio) {
-            OPENAI_CHAT_AUDIO_INPUT_FORMATS
+            self.protocol.audio_input_formats()
         } else {
             &[]
         };
-        let output_formats = if self
-            .capabilities
-            .output_modalities
-            .contains(Modality::Audio)
+        let output_formats = if self.protocol == Protocol::OpenAiChat
+            && self
+                .capabilities
+                .output_modalities
+                .contains(Modality::Audio)
         {
             OPENAI_CHAT_AUDIO_OUTPUT_FORMATS
         } else {

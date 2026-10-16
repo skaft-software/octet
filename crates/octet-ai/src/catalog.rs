@@ -384,12 +384,13 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
         || spec.limits.max_output_tokens > spec.limits.context_window
         || (spec.protocol == Protocol::GoogleGenerativeAi
             && !google_api_name_is_safe(&spec.api_name))
+        || (spec.protocol.audio_input_formats().is_empty()
+            && spec.capabilities.input_modalities.contains(Modality::Audio))
         || (spec.protocol != Protocol::OpenAiChat
-            && (spec.capabilities.input_modalities.contains(Modality::Audio)
-                || spec
-                    .capabilities
-                    .output_modalities
-                    .contains(Modality::Audio)))
+            && spec
+                .capabilities
+                .output_modalities
+                .contains(Modality::Audio))
     {
         return Err(ConfigError::InvalidModel(spec.id.clone()));
     }

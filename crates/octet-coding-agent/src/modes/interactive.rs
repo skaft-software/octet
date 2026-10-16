@@ -1342,6 +1342,7 @@ where
 
 fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
     if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
+        shell.cancel_thinking_submission("thinking change interrupted");
         shell.request_close();
         return true;
     }
@@ -1360,8 +1361,12 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         return false;
     }
     match shell.translate_input(Some(event), true) {
-        InputAction::Abort | InputAction::DispatchQueued => return true,
+        InputAction::Abort | InputAction::DispatchQueued => {
+            shell.cancel_thinking_submission("thinking change interrupted");
+            return true;
+        }
         InputAction::Closed => {
+            shell.cancel_thinking_submission("thinking change interrupted");
             shell.request_close();
             return true;
         }
@@ -1378,13 +1383,15 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
         InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
-        InputAction::Queue(_)
-        | InputAction::Steer(_)
-        | InputAction::Submit(_)
-        | InputAction::Command(_) => {
-            // This operation has no RunControl owner. Keep the complete draft
-            // rather than pretending Enter delivered it or discarding it.
-            shell.notice("operation in progress · draft kept for the next prompt");
+        InputAction::Queue(_) | InputAction::Steer(_) | InputAction::Submit(_) => {
+            if !shell.queue_thinking_submission() {
+                // Other operations have no pending submission owner. Commands
+                // and shell escapes are never admitted as delayed model input.
+                shell.notice("operation in progress · draft kept for the next prompt");
+            }
+        }
+        InputAction::Command(_) => {
+            shell.notice("operation in progress · draft kept for the next prompt")
         }
         InputAction::Close => shell.clear_error(),
         _ => return false,
@@ -2348,6 +2355,9 @@ pub struct ActiveRunInspection {
     goal: Result<GoalAccess, ActiveGoalError>,
     /// Effective `/settings` facts (defaults, theme, transport, images).
     settings: commands::SettingsSurface,
+    /// Captured compaction policy so mid-run `/context` derives the same
+    /// free-space/buffer slices as the idle report without borrowing the app.
+    compaction: crate::config::CompactionPolicy,
     extension_menu: extension_menu::Snapshot,
     cache_warming_status: octet_agent::CacheWarmingStatus,
     cache_warming_control: Option<RunControl>,
@@ -2390,6 +2400,7 @@ impl ActiveRunInspection {
             service_tier: app.agent.service_tier(),
             goal: GoalAccess::from_app(app),
             settings: commands::SettingsSurface::capture(app),
+            compaction: app.config.compaction.clone(),
             extension_menu: extension_menu::Snapshot::capture(app),
             cache_warming_status: app.agent.cache_warming_status(),
             cache_warming_control: None,
@@ -2423,40 +2434,6 @@ impl ActiveRunInspection {
     fn goal_access(&self) -> Result<&GoalAccess, &ActiveGoalError> {
         self.goal.as_ref()
     }
-}
-
-/// Immediate `/context` body for an active run.
-///
-/// The styled idle report (`tui::context::ContextReport`) can only be built
-/// from `&App`, which the run holds. The run's own live context snapshot is the
-/// authoritative alternative for the same quantities.
-fn active_context_text(snapshot: &octet_agent::ContextSnapshot, model: &Model) -> String {
-    let breakdown = &snapshot.context;
-    let mut text = format!(
-        "Model: {}\nContext window: {} tokens\nEstimated next request: {} tokens\n\n",
-        model
-            .spec
-            .display_name
-            .as_deref()
-            .unwrap_or(&model.spec.api_name),
-        breakdown.context_limit,
-        breakdown.total_tokens,
-    );
-    for (label, tokens) in [
-        ("Runtime framing and tools", breakdown.system_tokens),
-        ("System instructions", breakdown.instruction_tokens),
-        ("Conversation", breakdown.conversation_tokens),
-        ("Tool results", breakdown.tool_result_tokens),
-        ("Attachments", breakdown.attachment_tokens),
-        ("Compaction summaries", breakdown.compaction_summary_tokens),
-        ("Other", breakdown.other_tokens),
-    ] {
-        text.push_str(&format!("{label}: {tokens} tokens\n"));
-    }
-    if let Some(measured) = breakdown.provider_tokens {
-        text.push_str(&format!("Provider measurement: {measured} tokens\n"));
-    }
-    text
 }
 
 /// Install a panel, but leave input and the caller-driven Run with the main loop.
@@ -2924,11 +2901,13 @@ where
             shell.queue_follow_up(ComposedInput::from_text(format!("/{invocation}")));
             shell.notice("prompt template queued for expansion at the next idle boundary");
         }
-        Command::Context => shell.show_report_facts(
-            "Context",
-            "Review the estimated request context before the next turn",
-            active_context_text(context, &inspection.model),
-        ),
+        Command::Context => {
+            shell.show_context_report(crate::tui::context::ContextReport::from_live_breakdown(
+                &context.context,
+                &inspection.model,
+                &inspection.compaction,
+            ))
+        }
         Command::Update => {
             // The check is a bounded local request. Run events buffer until it
             // settles, exactly like the live `/subagents` panel, and the next
@@ -5059,6 +5038,16 @@ fn update_session_title(
     shell.set_session_name(name.as_deref());
 }
 
+fn thinking_selection_owner(app: &App) -> String {
+    format!(
+        "{}:{}:{}:{:?}",
+        app.agent.session().resource_owner_key(),
+        app.model.endpoint.id.0,
+        app.model.spec.id.0,
+        app.reasoning_mode
+    )
+}
+
 fn update_status(shell: &mut InteractiveShell, app: &App) {
     update_session_title(shell, &app.sessions, app.agent.session());
     let context_estimate = status_context_estimate(app);
@@ -5068,12 +5057,7 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
         .endpoint_label(&app.model.endpoint.id)
         .unwrap_or(&app.model.endpoint.id.0);
     shell.set_thinking_cycle(
-        format!(
-            "{}:{}:{}",
-            app.agent.session().resource_owner_key(),
-            app.model.endpoint.id.0,
-            app.model.spec.id.0
-        ),
+        thinking_selection_owner(app),
         app_thinking_levels(app)
             .into_iter()
             .map(|level| {
@@ -5098,7 +5082,8 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
         context_estimate,
         &cache_stats,
     ));
-    shell.set_input_modalities(app.model.spec.capabilities.input_modalities);
+    shell.set_input_modalities(app.model.spec.effective_input_modalities());
+    shell.set_audio_input_formats(app.model.spec.protocol.audio_input_formats());
     shell.set_workspace(app.config.workspace.clone());
     shell.set_prompt_templates(app.prompts.descriptors());
     shell.set_skill_commands(Arc::from(
@@ -7194,6 +7179,7 @@ async fn apply_deferred_thinking<S>(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<App>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -7209,9 +7195,10 @@ where
                 .is_ok_and(|choice| choice == reasoning)
         });
         if selectable {
-            app = select_thinking(app, shell, input, reasoning, None).await?;
+            app = select_thinking(app, shell, input, reasoning, None, reload).await?;
         } else {
             shell.error("thinking unchanged: selected level is no longer available".into());
+            shell.cancel_thinking_submission("selected thinking level is no longer available");
             update_status(shell, &app);
             shell.render();
         }
@@ -7219,22 +7206,49 @@ where
     Ok(app)
 }
 
-/// Apply a user thinking selection before saving its startup preference. Qualified
-/// Responses controls validate both the advertised choice and the host's
-/// observation runtime before committing a durable selection.
+/// Commit the next idle request's thinking without replacing App or extensions.
+/// The Agent validates the advertised choice and observation runtime, persists
+/// Config for ordinary routes, and retains qualified Responses replay semantics.
+fn select_idle_thinking(app: &mut App, reasoning: ReasoningConfig) -> anyhow::Result<()> {
+    if app.model.responses_features().reasoning_effort_updates {
+        // Keep the qualified durable replay control; idle selection must not
+        // manufacture protocol qualification for other endpoints.
+        app.agent.set_reasoning(reasoning)?;
+    } else {
+        let label = reasoning_label(&reasoning);
+        app.agent
+            .select_model_at_idle(app.model.clone(), reasoning, label)?;
+    }
+    app.reasoning = app.agent.reasoning().clone();
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    Ok(())
+}
+
+/// Apply a user thinking selection before saving its startup preference.
 fn select_thinking<'a, S>(
     app: App,
     shell: &'a mut InteractiveShell,
     input: &'a mut S,
     reasoning: ReasoningConfig,
     picker: Option<(ReasoningMode, ThinkingLevel)>,
+    reload: &'a mut crate::reload::ReloadSupervisor,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<App>> + 'a>>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin + 'a,
 {
     // Queued controls have several selection arms. Keep their rebuild-backed
     // futures heap-owned so the idle dispatcher does not duplicate stack frames.
-    Box::pin(select_thinking_inner(app, shell, input, reasoning, picker))
+    Box::pin(async move {
+        shell.begin_thinking_wait();
+        let result = select_thinking_inner(app, shell, input, reasoning, picker, reload).await;
+        shell.end_thinking_wait(result.is_err());
+        result
+    })
 }
 
 async fn select_thinking_inner<S>(
@@ -7243,6 +7257,7 @@ async fn select_thinking_inner<S>(
     input: &mut S,
     reasoning: ReasoningConfig,
     picker: Option<(ReasoningMode, ThinkingLevel)>,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<App>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -7254,17 +7269,16 @@ where
         || reasoning_label(&reasoning),
         |(_, level)| level.label().to_owned(),
     );
-    let qualified = app.model.responses_features().reasoning_effort_updates;
-    if qualified {
-        if let Err(error) = app.agent.set_reasoning(reasoning.clone()) {
+    let transitioned = mode.is_some_and(|mode| mode != app.reasoning_mode);
+    if !transitioned {
+        if let Err(error) = select_idle_thinking(&mut app, reasoning.clone()) {
             shell.error(format!("thinking unchanged: {error}"));
+            shell.cancel_thinking_submission("thinking change failed");
             update_status(shell, &app);
             shell.render();
             return Ok(app);
         }
-        app.reasoning = app.agent.reasoning().clone();
     }
-    let transitioned = !qualified || mode.is_some_and(|mode| mode != app.reasoning_mode);
     if transitioned {
         // Advance the local cursor before borrowing App. A second press during
         // rebuild must advance from this selection, not from the old effort.
@@ -7284,29 +7298,26 @@ where
     // wait's input owner retains any later presses as one latest local choice.
     update_status(shell, &app);
     shell.render();
-    if let Some(Err(error)) = await_with_ctrl_c(
+    let persisted = await_with_ctrl_c(
         persist_configuration(Some(&mut app.executable_extensions), || {
-            crate::cli::persist_reasoning(&preference)
+            let receipt = crate::cli::persist_thinking_selection(&preference, mode)?;
+            if let Some(receipt) = receipt {
+                reload.acknowledge_applied_write(&receipt);
+            }
+            Ok(())
         }),
         shell,
         input,
     )
-    .await
-    {
-        shell.error(format!("failed to save thinking preference: {error}"));
-    }
-    if let Some(mode) = mode {
-        if let Some(Err(error)) = await_with_ctrl_c(
-            persist_configuration(Some(&mut app.executable_extensions), || {
-                crate::cli::persist_reasoning_mode(mode)
-            }),
-            shell,
-            input,
-        )
-        .await
-        {
-            shell.error(format!("failed to save reasoning mode preference: {error}"));
+    .await;
+    match persisted {
+        Some(Err(error)) => {
+            let message = format!("failed to save thinking preference: {error}");
+            shell.error(message.clone());
+            shell.cancel_thinking_submission(&message);
         }
+        None => shell.cancel_thinking_submission("thinking change interrupted"),
+        Some(Ok(())) => {}
     }
     if !transitioned {
         app.executable_extensions.notify_reasoning_selected_all();
@@ -7367,17 +7378,15 @@ where
         _ => None,
     };
     if let Some(reasoning) = direct_reasoning {
-        if app.model.responses_features().reasoning_effort_updates {
-            match app.agent.set_reasoning(reasoning.clone()) {
-                Ok(()) => {
-                    app.reasoning = app.agent.reasoning().clone();
-                    update_status(shell, &app);
-                    app.executable_extensions.notify_reasoning_selected_all();
-                }
-                Err(error) => shell.error(format!("thinking unchanged: {error}")),
+        match select_idle_thinking(&mut app, reasoning.clone()) {
+            Ok(()) => {
+                app.reasoning = app.agent.reasoning().clone();
+                update_status(shell, &app);
+                app.executable_extensions.notify_reasoning_selected_all();
             }
-            return Ok(app);
+            Err(error) => shell.error(format!("thinking unchanged: {error}")),
         }
+        return Ok(app);
     }
     let _diagnostics = crate::output::defer_tui_diagnostics();
     if let Reconfig::Model(id) = &reconfig {
@@ -8525,7 +8534,7 @@ async fn apply_pending_actions(
             PendingIdleAction::ActiveThinkingSelection(reasoning)
             | PendingIdleAction::ChangeThinking(reasoning) => {
                 let target = reasoning.clone();
-                app = select_thinking(app, shell, input, reasoning, None).await?;
+                app = select_thinking(app, shell, input, reasoning, None, reload).await?;
                 if app.reasoning == target {
                     shell.notice("thinking change applied at the idle boundary");
                 }
@@ -8535,7 +8544,7 @@ async fn apply_pending_actions(
                 {
                     Ok(reasoning) => {
                         let target = reasoning.clone();
-                        app = select_thinking(app, shell, input, reasoning, None).await?;
+                        app = select_thinking(app, shell, input, reasoning, None, reload).await?;
                         if app.reasoning == target {
                             shell.notice("thinking change applied at the idle boundary");
                         }
@@ -8643,7 +8652,8 @@ async fn apply_pending_actions(
                         app.subagents_available(),
                     )?;
                     app =
-                        select_thinking(app, shell, input, reasoning, Some((mode, level))).await?;
+                        select_thinking(app, shell, input, reasoning, Some((mode, level)), reload)
+                            .await?;
                 }
             }
             PendingIdleAction::Skills(sub) => {
@@ -9129,8 +9139,8 @@ fn record_shell_escape(app: &mut App, record: &commands::ShellEscapeRecord) -> a
 ///
 /// This builds the same canonical `bash` intent the model tool would produce
 /// and lets the shared [`EffectBroker`] decide: `unsafe_host` admits it,
-/// `controlled` asks only for commands its shell-safety analysis flags, and
-/// `controlled_bash_approval` asks for every command. The confirmation is the
+/// both `controlled` and `controlled_bash_approval` ask for every command.
+/// The confirmation is the
 /// same picker the model run uses; a denial is reported, never swallowed.
 enum ShellEscapeApproval {
     Approved,
@@ -10597,7 +10607,7 @@ async fn run_idle_command_inner(
             let reasoning =
                 requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
             app = boxed_idle_app_action(app, |app| {
-                select_thinking(app, shell, input, reasoning, None)
+                select_thinking(app, shell, input, reasoning, None, reload)
             })
             .await?;
         }
@@ -10618,7 +10628,7 @@ async fn run_idle_command_inner(
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
                 app = boxed_idle_app_action(app, |app| {
-                    select_thinking(app, shell, input, reasoning, Some((mode, level)))
+                    select_thinking(app, shell, input, reasoning, Some((mode, level)), reload)
                 })
                 .await?;
             }
@@ -12844,7 +12854,7 @@ async fn run_interactive_once(
             shutdown_for_exit(&mut app, &mut shell).await;
             break;
         }
-        app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
+        app = apply_deferred_thinking(app, &mut shell, &mut input, &mut reload).await?;
         refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
         // Attach every extension handshake that settled while the loop was
         // idle. An attach can add tools, commands, skills, prompts, themes and
@@ -12868,7 +12878,15 @@ async fn run_interactive_once(
             shell.set_run_label("idle");
             extension_status_shown = false;
         }
-        let queued_input = if startup_input.is_none() {
+        let thinking_input = if startup_input.is_none() {
+            shell.take_thinking_submission(&thinking_selection_owner(&app), &app.reasoning)
+        } else {
+            None
+        };
+        let thinking_fence = thinking_input
+            .as_ref()
+            .map(|_| (thinking_selection_owner(&app), app.reasoning.clone()));
+        let queued_input = if startup_input.is_none() && thinking_input.is_none() {
             shell.take_ready_follow_up(
                 crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
                     == octet_agent::QueueDeliveryMode::All,
@@ -12877,7 +12895,7 @@ async fn run_interactive_once(
             None
         };
         let queued_submission = queued_input.is_some();
-        let idle = match startup_input.take().or(queued_input) {
+        let idle = match startup_input.take().or(thinking_input).or(queued_input) {
             Some(input) if !input.is_empty() => Idle::Submit(input),
             _ => {
                 wait_for_prompt(
@@ -12969,7 +12987,8 @@ async fn run_interactive_once(
                 )?;
                 let reasoning =
                     requested_thinking_to_reasoning(level, &app.model, app.subagents_available())?;
-                app = select_thinking(app, &mut shell, &mut input, reasoning, None).await?;
+                app = select_thinking(app, &mut shell, &mut input, reasoning, None, &mut reload)
+                    .await?;
                 schedule_responses_prewarm(&app);
                 shell.render();
             }
@@ -13219,7 +13238,7 @@ async fn run_interactive_once(
                         continue;
                     }
                 };
-                app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
+                app = apply_deferred_thinking(app, &mut shell, &mut input, &mut reload).await?;
                 app.executable_extensions.refresh_host_state(
                     app.agent.session(),
                     &app.model,
@@ -13264,7 +13283,7 @@ async fn run_interactive_once(
                 // Prompt composition is another App-borrowing input wait. Drain
                 // its latest selection before admitting the request, not after a
                 // subsequent active-run selection has already been made.
-                app = apply_deferred_thinking(app, &mut shell, &mut input).await?;
+                app = apply_deferred_thinking(app, &mut shell, &mut input, &mut reload).await?;
                 let pending_context_count = composition.pending_context_count;
                 for notification in composition.notifications {
                     shell.notice(notification);
@@ -13305,6 +13324,22 @@ async fn run_interactive_once(
                     };
                 for diagnostic in provider_diagnostics {
                     shell.notice(diagnostic);
+                }
+
+                // Prompt hooks may yield input and apply another thinking
+                // choice. Recheck the captured Enter at the actual admission
+                // boundary, not merely when removing it from its pending slot.
+                if thinking_fence.as_ref().is_some_and(|(owner, reasoning)| {
+                    owner != &thinking_selection_owner(&app) || reasoning != &app.reasoning
+                }) {
+                    app.agent.set_system_prompt(app.system.clone());
+                    shell.restore_composed(retry_composed);
+                    shell.error(
+                        "thinking selection or session changed · prompt not sent; draft restored"
+                            .into(),
+                    );
+                    shell.render();
+                    continue;
                 }
 
                 // Capture the pane's session identity before the run borrows

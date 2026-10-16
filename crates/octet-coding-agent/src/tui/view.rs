@@ -1752,6 +1752,8 @@ pub(crate) struct ShellState {
     ledger: composer::AttachmentLedger,
     /// Input modalities of the active model; gates attach attempts.
     pub(crate) input_modalities: ModalitySet,
+    /// Inline audio formats implemented by the active provider route.
+    audio_input_formats: &'static [octet_ai::AudioFormat],
     /// Workspace root and its mention-completion index.
     pub(crate) workspace: Option<PathBuf>,
     /// Completed mention index, or `None` while a walk is in flight, before one
@@ -2203,6 +2205,7 @@ impl ShellState {
             prompt_history_navigation: Default::default(),
             ledger: Default::default(),
             input_modalities: Default::default(),
+            audio_input_formats: octet_ai::Protocol::OpenAiChat.audio_input_formats(),
             workspace: Default::default(),
             file_index: Default::default(),
             file_index_scanning: Default::default(),
@@ -5916,19 +5919,24 @@ impl InteractiveShell {
                     // failing item cannot leave partial chips.
                     let pasted = TextEditor::normalize_paste(&text);
                     let modalities = state.input_modalities;
-                    let inserted = match state.ledger.attach_explicit_paths(&pasted, modalities) {
-                        Ok(Some(replaced)) => replaced,
-                        Ok(None) => match composer::classify_paste(&pasted) {
-                            composer::PasteKind::LargeText => {
-                                state.ledger.attach_pasted_text(pasted)
+                    let audio_formats = state.audio_input_formats;
+                    let inserted =
+                        match state
+                            .ledger
+                            .attach_explicit_paths(&pasted, modalities, audio_formats)
+                        {
+                            Ok(Some(replaced)) => replaced,
+                            Ok(None) => match composer::classify_paste(&pasted) {
+                                composer::PasteKind::LargeText => {
+                                    state.ledger.attach_pasted_text(pasted)
+                                }
+                                _ => pasted,
+                            },
+                            Err(error) => {
+                                state.push_block(TranscriptBlock::Notice(error.to_string()));
+                                pasted
                             }
-                            _ => pasted,
-                        },
-                        Err(error) => {
-                            state.push_block(TranscriptBlock::Notice(error.to_string()));
-                            pasted
-                        }
-                    };
+                        };
                     state
                         .editor
                         .apply(EditAction::Paste(inserted), geometry.text_width());
@@ -6242,7 +6250,11 @@ impl InteractiveShell {
                 format!("@{}", suggestion.completion)
             } else if composer::media_kind_for_path(&suggestion.path).is_some() {
                 let modalities = state.input_modalities;
-                match state.ledger.attach_media(&suggestion.path, modalities) {
+                let audio_formats = state.audio_input_formats;
+                match state
+                    .ledger
+                    .attach_media(&suggestion.path, modalities, audio_formats)
+                {
                     Ok(chip) => chip,
                     Err(error) => {
                         state.push_block(TranscriptBlock::Notice(error.to_string()));
@@ -6905,6 +6917,11 @@ impl InteractiveShell {
 
     pub fn set_input_modalities(&mut self, modalities: ModalitySet) {
         self.state.borrow_mut().input_modalities = modalities;
+    }
+
+    /// Update the route-effective formats used for audio attachment admission.
+    pub fn set_audio_input_formats(&mut self, formats: &'static [octet_ai::AudioFormat]) {
+        self.state.borrow_mut().audio_input_formats = formats;
     }
 
     /// Prepend older prompts supplied newest-first without changing the draft
@@ -9127,6 +9144,10 @@ impl InteractiveShell {
             state.push_block(TranscriptBlock::UpdateAvailable(notice));
         }
         state.invalidate_transcript();
+        drop(state);
+        // A branch switch/rebind must not carry an old Enter into the newly
+        // hydrated conversation, even if its model and effort are unchanged.
+        self.cancel_thinking_submission("session view changed");
         Ok(())
     }
 

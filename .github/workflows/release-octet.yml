@@ -350,6 +350,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:
           targets: ${{ matrix.target }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
       - name: Verify release Rust compiler
         run: test "$(rustc --version | awk '{print $2}')" = "1.97.1"
       # Build release artifacts from clean runner state. CI caches remain useful
@@ -395,6 +398,11 @@ jobs:
           package="octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}"
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           test -x "$RUNNER_TEMP/$package/octet-host"
+          python3 source/scripts/check-release-journey.py \
+            --binary "$RUNNER_TEMP/$package/octet" \
+            --host-binary "$RUNNER_TEMP/$package/octet-host" \
+            --expected-version "${{ needs.resolve.outputs.version }}" \
+            --report "$RUNNER_TEMP/JOURNEY-${{ matrix.target }}.json"
           if tar -tzf "$archive" | grep -E '(^|/)(\.DS_Store|__pycache__|research|plans|reports|superpowers)(/|$)'; then
             echo "release archive contains a local-only asset" >&2
             exit 1
@@ -437,16 +445,24 @@ jobs:
           $request = '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}'
           $hello = $request | & "$release/octet-host.exe"
           if ($LASTEXITCODE -ne 0 -or $hello -notmatch '"type":"hello"') { throw 'Windows host smoke test failed' }
+      - name: Qualify controlled admission, edits and temporary bulk on MSVC
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- effect::tests tools::edit::tests extension_bulk::tests extension_bulk_host::tests::temporary_storage_never_promises_durability
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC policy/edit/temporary-bulk qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test agent_run controlled_shell_
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC shell admission qualification failed' }
       - name: Qualify native MSVC runtime and terminal
         working-directory: source
         shell: pwsh
         run: |
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
           if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
-          # Windows is a preview platform in 0.9.4. This rename-race test hit
+          # Windows is a preview platform in 0.9.5. This rename-race test hit
           # ERROR_SHARING_VIOLATION on the MSVC release runner (it passes in
           # Windows CI); skipped here at the maintainer's direction, tracked
-          # for repair after 0.9.4.
+          # for repair after 0.9.5.
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter --skip secure_fs::tests::windows_publication_stays_bound_to_original_parent
           if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current

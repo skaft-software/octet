@@ -244,6 +244,45 @@ fn audio_transcripts_replace_unreplayable_user_tool_and_assistant_media() {
 }
 
 #[test]
+fn google_audio_history_survives_borrowed_and_owned_request_transforms() {
+    let mut target = model("google", Protocol::GoogleGenerativeAi, false);
+    Arc::make_mut(&mut target.spec)
+        .capabilities
+        .input_modalities = ModalitySet::none().with(Modality::Audio);
+    let messages = vec![
+        Message::User(UserMessage {
+            content: target
+                .spec
+                .protocol
+                .audio_input_formats()
+                .iter()
+                .map(|format| {
+                    UserPart::Media(Media::Audio(AudioMedia {
+                        payload: AudioPayload::Inline(bytes::Bytes::from_static(b"audio")),
+                        format: *format,
+                        transcript: None,
+                    }))
+                })
+                .collect(),
+        }),
+        Message::Assistant(AssistantMessage {
+            model: ModelId("source".into()),
+            protocol: Protocol::OpenAiChat,
+            content: vec![AssistantPart::Text("heard".into())],
+        }),
+    ];
+    let expected = serde_json::to_value(&messages).unwrap();
+    assert_eq!(
+        serde_json::to_value(transform_request_messages(&messages, &target)).unwrap(),
+        expected
+    );
+    assert_eq!(
+        serde_json::to_value(transform_request_messages_owned(messages, &target)).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn request_transform_preserves_pending_media_but_normalizes_history() {
     let image = Media::Image(ImageMedia {
         source: ImageSource::Inline(bytes::Bytes::from_static(b"image")),

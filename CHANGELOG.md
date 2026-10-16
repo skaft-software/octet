@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.9.5] - 2026-10-16
+
+The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
+boundaries and known limitations.
+
+### Fixed
+
+- Audio-capable Gemini, Vertex AI and Google-compatible OpenCode models retain
+  audio in discovery, attachments and `read` results, and send inline
+  WAV/MP3/AAC/FLAC/Ogg Opus bytes through native Google `generateContent`.
+  Google audio output, raw PCM16 and provider file references remain unsupported;
+  inline media safety limits are unchanged.
+- Oversized WAV/audio reads report the 20 MiB raw-audio cap and suggest
+  compression or splitting, instead of a misleading 32 MiB text-file limit.
+  Inline safety limits and original media bytes are unchanged.
+- `octet update` on Windows recognizes an `install-octet.ps1` installation and
+  updates it by re-running the version-pinned PowerShell installer. It reported
+  that it could not detect the install method and suggested the Unix `curl | sh`
+  installer. An update still succeeds while an older session runs from
+  `octet.exe.old`.
+- Same-mode idle thinking changes preserve the active session and executable
+  extensions instead of rebuilding them. Verified, already-applied thinking
+  preference writes no longer trigger a second resource reload; external edits
+  and extension configuration notifications retain their normal handling.
+- Enter during a thinking-change wait retains one complete prompt for exactly-once
+  idle submission under its intended session and thinking selection. Cancellation
+  or a changed selection explicitly restores the draft, including attachments.
+- Native Tern keeps its default touchpad scrolling and selection: octet no longer
+  captures the mouse for the native surface. ANSI fallback keeps the requested
+  capture policy.
+- `/context` during a run shows the same usage grid and categories as when idle,
+  instead of a flat list.
+- Windows `powershell` tool calls render like `bash`: full command header,
+  output tail, failure reason and Ctrl+O disclosure, instead of a one-line
+  72-character summary.
+- Surfaced provider errors after a mid-stream failure no longer include internal
+  stream progress counters (`stream_progress=frames=… events=…`).
+- Controlled shell policies require an exact one-shot approval for each shell
+  command. `edit` and `write` preserve a file's newline convention and hash the
+  raw bytes. Non-Unix temporary bulk-lock roots use a stable private lock file.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- The 0.9.4, 0.9.3, 0.9.2, 0.9.1 and 0.9.0 known limitations below still apply.
+
 ## [0.9.4] - 2026-10-15
 
 The [release notes](docs/releases/v0.9.4.md) record shipped scope, qualification

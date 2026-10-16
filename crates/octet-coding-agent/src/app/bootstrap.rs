@@ -2978,9 +2978,8 @@ pub(crate) fn register_openai_compatible_models_from_response(
         } else {
             ModalitySet::none()
         };
-        // Audio inventory metadata is only actionable on the Chat codec; the
-        // Responses and Anthropic codecs intentionally have no audio mapping.
-        if model.audio && protocol == Protocol::OpenAiChat {
+        // Inventory audio requires an implemented input mapping on this route.
+        if model.audio && !protocol.audio_input_formats().is_empty() {
             input_modalities = input_modalities.with(octet_ai::Modality::Audio);
         }
         crate::providers::register_discovered_model(
@@ -6204,17 +6203,22 @@ const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60
 const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.2";
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
-    let Some(max_active_tokens) = config
-        .compaction
-        .max_active_tokens
-        .filter(|tokens| *tokens > 0)
-    else {
-        return config.compaction.threshold_fraction;
+    effective_policy_threshold_fraction(&config.compaction, model)
+}
+
+/// Threshold fraction from a captured compaction policy, for surfaces that
+/// render mid-run without borrowing the application the run owns.
+pub(crate) fn effective_policy_threshold_fraction(
+    policy: &crate::config::CompactionPolicy,
+    model: &Model,
+) -> f64 {
+    let Some(max_active_tokens) = policy.max_active_tokens.filter(|tokens| *tokens > 0) else {
+        return policy.threshold_fraction;
     };
     let context_window = model.spec.limits.context_window.max(1);
     let absolute_fraction =
         (max_active_tokens.min(context_window) as f64) / (context_window as f64);
-    config.compaction.threshold_fraction.min(absolute_fraction)
+    policy.threshold_fraction.min(absolute_fraction)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

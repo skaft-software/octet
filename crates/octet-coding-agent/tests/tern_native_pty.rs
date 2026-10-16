@@ -2003,6 +2003,111 @@ fn native_credit_starvation_coalesces_edits_until_actual_frame_acknowledgement()
 }
 
 #[test]
+fn native_surface_keeps_touchpad_and_selection_terminal_owned() {
+    for args in [
+        vec![],
+        vec!["--mouse", "app"],
+        vec!["--mouse", "terminal"],
+        vec!["--mouse", "off"],
+        vec!["--tui-mode", "inline"],
+    ] {
+        let mut pty = NativePty::configured(
+            Options {
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                ..Options::default()
+            },
+            |_, _, _| {},
+        );
+        pty.ready();
+        let output = String::from_utf8_lossy(&pty.output);
+        for mode in [1000, 1002, 1003, 1006, 1015, 1016] {
+            assert!(
+                !output.contains(&format!("\x1b[?{mode}h")),
+                "native surface enabled ANSI mouse mode {mode} with {args:?}"
+            );
+        }
+        // Explicitly clear inherited reporting, not merely omit an enable.
+        assert!(output.contains("\x1b[?1006l"));
+        pty.send(b"touchpad-draft");
+        pty.wait(|pty| pty.draft() == "touchpad-draft");
+        pty.close();
+    }
+}
+
+#[test]
+fn native_ansi_fallback_restores_the_requested_mouse_policy() {
+    for (args, capture) in [
+        (vec![], true),
+        (vec!["--tui-mode", "inline", "--mouse", "app"], true),
+        (vec!["--tui-mode", "inline"], false),
+        (vec!["--mouse", "terminal"], false),
+        (vec!["--mouse", "off"], false),
+    ] {
+        let mut pty = NativePty::configured(
+            Options {
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                kinds: TSP_KINDS
+                    .iter()
+                    .filter(|kind| **kind != "editor")
+                    .map(|kind| (*kind).to_owned())
+                    .collect(),
+                ..Options::default()
+            },
+            |_, _, _| {},
+        );
+        pty.wait(|pty| {
+            String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable")
+        });
+        pty.send(b"fallback-draft");
+        pty.wait(|pty| String::from_utf8_lossy(&pty.output).contains("fallback-draft"));
+        let mut parser = vt100::Parser::new(40, 100, 1024);
+        parser.process(&pty.output);
+        assert_eq!(
+            parser.screen().mouse_protocol_mode(),
+            if capture {
+                vt100::MouseProtocolMode::AnyMotion
+            } else {
+                vt100::MouseProtocolMode::None
+            },
+            "fallback mouse policy with {args:?}"
+        );
+        if capture {
+            assert_eq!(
+                parser.screen().mouse_protocol_encoding(),
+                vt100::MouseProtocolEncoding::Sgr
+            );
+        }
+        pty.close();
+    }
+}
+
+#[test]
+fn native_disabled_keeps_default_ansi_touchpad_capture() {
+    let mut pty = NativePty::configured(
+        Options {
+            args: vec!["--tern".into(), "off".into()],
+            ..Options::default()
+        },
+        |_, _, _| {},
+    );
+    pty.wait(|pty| String::from_utf8_lossy(&pty.output).contains("\x1b[?1006h"));
+    pty.send(b"ansi-draft");
+    pty.wait(|pty| String::from_utf8_lossy(&pty.output).contains("ansi-draft"));
+    let mut parser = vt100::Parser::new(40, 100, 1024);
+    parser.process(&pty.output);
+    assert!(!pty.hello);
+    assert_eq!(
+        parser.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::AnyMotion
+    );
+    assert_eq!(
+        parser.screen().mouse_protocol_encoding(),
+        vt100::MouseProtocolEncoding::Sgr
+    );
+    pty.close();
+}
+
+#[test]
 fn native_scroll_forwarding_requires_advertisement_and_does_not_scroll_behind_report() {
     for supported in [false, true] {
         let mut pty = NativePty::configured(

@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "octet-agent"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1308,8 +1308,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml 1.1.6+spec-1.1.0",
- "tree-sitter",
- "tree-sitter-bash",
  "url",
  "windows-sys 0.61.2",
  "wiremock",
@@ -1317,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "octet-ai"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1343,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "octet-coding-agent"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1399,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "octet-migrate-types"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1407,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "octet-tern"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "libc",
  "serde",
@@ -2561,16 +2559,6 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-bash"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
-dependencies = [
- "cc",
  "tree-sitter-language",
 ]
 

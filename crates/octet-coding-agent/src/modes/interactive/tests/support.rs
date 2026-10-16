@@ -291,6 +291,7 @@ pub(super) fn test_run_inspection() -> &'static ActiveRunInspection {
                 steering_mode: octet_agent::QueueDeliveryMode::OneAtATime,
                 follow_up_mode: octet_agent::QueueDeliveryMode::OneAtATime,
             },
+            compaction: crate::config::CompactionPolicy::default(),
             extension_menu: extension_menu::Snapshot::default(),
             cache_warming_control: None,
             cache_warming_status: octet_agent::CacheWarmingStatus {
@@ -347,6 +348,7 @@ pub(super) fn test_run_inspection_with_session(dir: &Path) -> ActiveRunInspectio
             steering_mode: octet_agent::QueueDeliveryMode::OneAtATime,
             follow_up_mode: octet_agent::QueueDeliveryMode::OneAtATime,
         },
+        compaction: crate::config::CompactionPolicy::default(),
         extension_menu: extension_menu::Snapshot::default(),
         cache_warming_control: None,
         cache_warming_status: octet_agent::CacheWarmingStatus {

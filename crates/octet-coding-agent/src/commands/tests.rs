@@ -923,7 +923,7 @@ fn status_references_real_runtime_features() {
         "Model turns",
         "Tool calls",
         "Security model: local agent with workspace trust gates",
-        "Effect policy: controlled (workspace mutation and unsafe bash calls need approval; other ambient host effects denied)",
+        "Effect policy: controlled (workspace mutation and every shell call need approval; other ambient host effects denied)",
         "Built-in file paths: workspace-only guard",
         "File edits: enabled",
         "Process execution: enabled",

@@ -52,7 +52,7 @@ pub fn media_kind_for_path(path: &Path) -> Option<MediaKind> {
         "wav" => Some(MediaKind::Audio(AudioFormat::Wav)),
         "mp3" => Some(MediaKind::Audio(AudioFormat::Mp3)),
         "flac" => Some(MediaKind::Audio(AudioFormat::Flac)),
-        "opus" => Some(MediaKind::Audio(AudioFormat::Opus)),
+        "opus" | "ogg" => Some(MediaKind::Audio(AudioFormat::Opus)),
         "aac" | "m4a" => Some(MediaKind::Audio(AudioFormat::Aac)),
         _ => None,
     }
@@ -99,7 +99,7 @@ impl std::fmt::Display for AttachError {
             ),
             Self::UnsupportedMediaType(kind) => write!(
                 f,
-                "unsupported {kind} input (native input supports images and WAV/MP3 audio)",
+                "unsupported {kind} input (native input supports images and route-compatible audio)",
             ),
         }
     }
@@ -120,14 +120,18 @@ struct PreparedMedia {
     path: String,
 }
 
-fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, AttachError> {
+fn prepare_media(
+    path: &Path,
+    modalities: ModalitySet,
+    audio_formats: &[AudioFormat],
+) -> Result<PreparedMedia, AttachError> {
     let kind = match media_kind_for_path(path) {
         Some(kind) => kind,
         None => {
             return Err(match unsupported_media_type_for_path(path) {
                 Some(kind) => AttachError::UnsupportedMediaType(kind),
                 None => AttachError::Unreadable(
-                    "unsupported media extension (images: PNG/JPEG/GIF/WebP; audio: WAV/MP3)"
+                    "unsupported media extension (images: PNG/JPEG/GIF/WebP; audio: WAV/MP3/AAC/FLAC/Opus)"
                         .into(),
                 ),
             });
@@ -143,7 +147,7 @@ fn prepare_media(path: &Path, modalities: ModalitySet) -> Result<PreparedMedia, 
         });
     }
     if let MediaKind::Audio(format) = &kind {
-        if !matches!(format, AudioFormat::Wav | AudioFormat::Mp3) {
+        if !audio_formats.contains(format) {
             return Err(AttachError::UnsupportedAudioFormat(*format));
         }
     }
@@ -261,10 +265,11 @@ impl AttachmentLedger {
         &mut self,
         path: &Path,
         modalities: ModalitySet,
+        audio_formats: &[AudioFormat],
     ) -> Result<String, AttachError> {
         let paths = [path.to_path_buf()];
         let chip = self
-            .attach_media_batch(&paths, modalities)?
+            .attach_media_batch(&paths, modalities, audio_formats)?
             .into_iter()
             .next()
             .expect("a one-file batch returns one chip");
@@ -281,10 +286,11 @@ impl AttachmentLedger {
         &mut self,
         paths: &[PathBuf],
         modalities: ModalitySet,
+        audio_formats: &[AudioFormat],
     ) -> Result<Vec<String>, AttachError> {
         let prepared = paths
             .iter()
-            .map(|path| prepare_media(path, modalities))
+            .map(|path| prepare_media(path, modalities, audio_formats))
             .collect::<Result<Vec<_>, _>>()?;
         let mut chips = Vec::with_capacity(prepared.len());
         for prepared in prepared {
@@ -303,6 +309,7 @@ impl AttachmentLedger {
         &mut self,
         text: &str,
         modalities: ModalitySet,
+        audio_formats: &[AudioFormat],
     ) -> Result<Option<String>, AttachError> {
         let dropped = match explicit_dropped_paths(text) {
             Some(dropped) => dropped,
@@ -314,7 +321,7 @@ impl AttachmentLedger {
                 if media_kind_for_path(&dropped.path).is_some()
                     || unsupported_media_type_for_path(&dropped.path).is_some()
                 {
-                    prepare_media(&dropped.path, modalities).map(Some)
+                    prepare_media(&dropped.path, modalities, audio_formats).map(Some)
                 } else {
                     Ok(None)
                 }

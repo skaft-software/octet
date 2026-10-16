@@ -70,7 +70,7 @@ configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
 [CLI alternatives](cli.md#provider-setup). This setup flow is part of the current
-0.9.4 source candidate; availability in older published versions differs.
+0.9.5 source candidate; availability in older published versions differs.
 
 ## Cloud setup
 
@@ -203,7 +203,8 @@ preview version.
 owner-private ADC file. Otherwise octet checks the owner-private default ADC
 file. `authorized_user` and PKCS#8 `service_account` files work. Access tokens
 refresh in memory, and octet neither runs `gcloud` nor stores credential values.
-Gemini presets support tools, structured JSON output and images.
+Gemini presets support tools, structured JSON output, images and inline audio
+input. See [audio formats and limits](media.md#formats-and-limits).
 
 </details>
 

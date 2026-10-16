@@ -863,6 +863,14 @@ impl ObserveSummary {
     }
 }
 
+/// A host-owned write whose before/after revisions were checked by persistence.
+/// Contains metadata only, never configuration contents.
+pub(crate) struct AppliedConfigWrite {
+    pub(crate) path: PathBuf,
+    pub(crate) before: FileFingerprint,
+    pub(crate) after: FileFingerprint,
+}
+
 /// Per-layer evidence for one queued or admitted pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LayerChange {
@@ -1412,6 +1420,23 @@ impl ReloadSupervisor {
     /// Whether sampling and applying happen.
     pub fn is_enabled(&self) -> bool {
         self.settings.enabled
+    }
+
+    /// Advance just an already-applied configuration revision. Never clear
+    /// queued evidence, acknowledge an unseen prior edit, or reset debounce.
+    /// Equality has the same documented metadata resolution as ordinary scans.
+    pub(crate) fn acknowledge_applied_write(&mut self, write: &AppliedConfigWrite) -> bool {
+        if self.in_flight.is_some() || self.stale.contains_key(&ReloadLayer::Resources) {
+            return false;
+        }
+        let Some(entry) = self.baseline.get_mut(&write.path) else {
+            return false;
+        };
+        if entry.layer != ReloadLayer::Resources || entry.fingerprint != write.before {
+            return false;
+        }
+        entry.fingerprint = write.after;
+        true
     }
 
     /// Whether a pass currently owns an admitted plan.

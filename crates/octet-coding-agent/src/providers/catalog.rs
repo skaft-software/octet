@@ -340,12 +340,15 @@ pub(crate) fn public_headers(
 }
 
 fn static_model_capabilities(model: &StaticModelPreset) -> Capabilities {
+    let mut input_modalities = ModalitySet::none();
+    if model.vision {
+        input_modalities = input_modalities.with(octet_ai::Modality::Image);
+    }
+    if model.audio {
+        input_modalities = input_modalities.with(octet_ai::Modality::Audio);
+    }
     Capabilities {
-        input_modalities: if model.vision {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        },
+        input_modalities,
         output_modalities: ModalitySet::none(),
         tools: true,
         parallel_tool_calls: model.protocol != Protocol::OpenAiChat,
@@ -458,10 +461,38 @@ mod tests {
     };
 
     #[test]
+    fn static_gemini_presets_advertise_audio_input_only() {
+        use super::super::models::{GOOGLE_MODELS, OPENCODE_GO_MODELS, OPENCODE_MODELS};
+        for model in GOOGLE_MODELS
+            .iter()
+            .chain(OPENCODE_GO_MODELS)
+            .chain(OPENCODE_MODELS)
+        {
+            let capabilities = static_model_capabilities(model);
+            assert_eq!(
+                capabilities
+                    .input_modalities
+                    .contains(octet_ai::Modality::Audio),
+                model.audio,
+                "{}",
+                model.id
+            );
+            assert!(!capabilities
+                .output_modalities
+                .contains(octet_ai::Modality::Audio));
+            if model.protocol == Protocol::GoogleGenerativeAi {
+                assert!(model.audio, "{}", model.id);
+            }
+        }
+    }
+
+    #[test]
     fn static_gemini_thinking_levels_match_the_pinned_provider_metadata() {
         use super::super::models::{GOOGLE_MODELS, OPENCODE_GO_MODELS, OPENCODE_MODELS};
         // Native Gemini and Vertex have no models.dev entry of their own;
-        // OpenRouter's Google entries carry the same model-owned levels.
+        // OpenRouter's Google entries carry the same enabled model-owned levels.
+        // OpenRouter's `none` represents Off, not a native Gemini thinkingLevel;
+        // compare every enabled level exactly without importing that control.
         let mut checked = 0;
         for (provider, prefix, models) in [
             ("openrouter", "google/", GOOGLE_MODELS),
@@ -489,7 +520,9 @@ mod tests {
                             .as_array()
                             .unwrap()
                             .iter()
-                            .map(|value| value.as_str().unwrap().to_owned())
+                            .map(|value| value.as_str().unwrap())
+                            .filter(|value| provider != "openrouter" || *value != "none")
+                            .map(str::to_owned)
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_else(|| panic!("{provider}/{key} has no pinned effort levels"));

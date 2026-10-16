@@ -57,6 +57,7 @@ pub struct StaticModelPreset {
     pub context_window: u64,
     pub max_output_tokens: u64,
     pub vision: bool,
+    pub audio: bool,
     pub reasoning: bool,
     pub(crate) reasoning_mode: StaticReasoningMode,
     /// Lowest portable reasoning effort that the provider accepts.
@@ -85,12 +86,18 @@ impl StaticModelPreset {
             context_window,
             max_output_tokens,
             vision,
+            audio: false,
             reasoning,
             reasoning_mode: StaticReasoningMode::Effort,
             min_reasoning_effort: ReasoningEffort::Minimal,
             max_reasoning_effort,
             openai_chat_reasoning_profile: StaticOpenAiChatReasoningProfile::Standard,
         }
+    }
+
+    const fn with_audio(mut self) -> Self {
+        self.audio = true;
+        self
     }
 
     const fn with_reasoning_mode(mut self, mode: StaticReasoningMode) -> Self {
@@ -249,6 +256,7 @@ pub const OPENCODE_GO_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -411,6 +419,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: true }),
     StaticModelPreset::new(
         "gemini-2.5-flash-lite",
@@ -422,6 +431,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: true }),
     StaticModelPreset::new(
         "gemini-2.5-pro",
@@ -433,6 +443,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleBudget { off: false }),
     StaticModelPreset::new(
         "gemini-3-flash-preview",
@@ -444,6 +455,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -458,6 +470,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -472,6 +485,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -486,6 +500,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -500,6 +515,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -514,6 +530,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -528,6 +545,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -542,6 +560,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -556,6 +575,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -570,6 +590,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -584,6 +605,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -598,6 +620,7 @@ pub const GOOGLE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -616,6 +639,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -812,6 +836,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -826,6 +851,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -840,6 +866,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -854,6 +881,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: false,
@@ -868,6 +896,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -882,6 +911,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: true,
         medium: true,
@@ -896,6 +926,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
@@ -910,6 +941,7 @@ pub const OPENCODE_MODELS: &[StaticModelPreset] = &[
         true,
         ReasoningEffort::High,
     )
+    .with_audio()
     .with_reasoning_mode(StaticReasoningMode::GoogleLevels {
         minimal: false,
         medium: true,
