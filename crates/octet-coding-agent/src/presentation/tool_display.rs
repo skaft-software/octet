@@ -28,7 +28,7 @@ pub(crate) fn is_subagent_tool(name: &str) -> bool {
 /// is retained for the header, wrapped across rows, and expandable. The
 /// Windows `powershell` tool shares the bash envelope (`exit=`/`duration=`)
 /// and the `command` argument, so it belongs here rather than in the generic
-/// extension summary (which collapses to one 72-character line).
+/// extension summary.
 pub(crate) fn is_shell_tool(name: &str) -> bool {
     matches!(name, "bash" | "exec" | "powershell")
 }
@@ -257,36 +257,27 @@ fn summarize_bash(name: &str, args: &serde_json::Value, workspace: Option<&Path>
 /// Pick the most informative top-level argument of an extension tool call so
 /// its transcript header can read `• Web search  <query>` the same way core
 /// tools read `• Read  <file>`. Well-known argument names win; otherwise the
-/// first string value is used. Long values collapse to one line and truncate.
+/// first string value is used. Retain the complete value so the renderer can
+/// wrap and bound its preview by visible rows without losing full disclosure.
 fn primary_arg_detail(args: &serde_json::Value) -> Option<String> {
     const PREFERRED_KEYS: [&str; 12] = [
         "command", "url", "path", "file", "query", "pattern", "target", "name", "task", "title",
         "key", "message",
     ];
-    const MAX_DETAIL_CHARS: usize = 72;
-
     let object = args.as_object()?;
     let mut candidate = PREFERRED_KEYS.iter().find_map(|key| {
         object
             .get(*key)
             .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.trim().is_empty())
     });
     if candidate.is_none() {
         candidate = object
             .values()
             .filter_map(serde_json::Value::as_str)
-            .map(str::trim)
-            .find(|value| !value.is_empty());
+            .find(|value| !value.trim().is_empty());
     }
-    let candidate = candidate?;
-    let detail: String = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
-    if detail.chars().count() <= MAX_DETAIL_CHARS {
-        return Some(detail);
-    }
-    let truncated: String = detail.chars().take(MAX_DETAIL_CHARS).collect();
-    Some(format!("{truncated}…"))
+    candidate.map(str::to_owned)
 }
 
 /// Normalize a path only for presentation. Execution retains the raw model
@@ -455,6 +446,27 @@ mod tests {
 
         assert!(!is_shell_tool("read"));
         assert!(!is_shell_tool("mcp__server__tool"));
+    }
+
+    #[test]
+    fn generic_tool_input_retains_the_selected_value_without_flattening_or_truncation() {
+        let command = format!("printf {}\n\n    printf final", "界e\u{301}👩‍💻".repeat(40));
+        let args = serde_json::json!({
+            "command": command,
+            "token": "private-unselected-field",
+            "nested": {"command": "private-nested-field"},
+        });
+        let display = summarize_tool("remote_shell", &args);
+        assert_eq!(display.value.as_deref(), Some(command.as_str()));
+        assert_eq!(display.active, format!("running remote shell: {command}"));
+        assert_eq!(display.success, format!("finished remote shell: {command}"));
+        assert_eq!(display.failure, format!("remote shell failed: {command}"));
+        assert!(!display.active.contains("private-"));
+        assert_eq!(
+            primary_arg_detail(&serde_json::json!({"query": " \n ", "title": "selected"})),
+            Some("selected".into())
+        );
+        assert_eq!(primary_arg_detail(&serde_json::json!({"code": 42})), None);
     }
 
     #[test]

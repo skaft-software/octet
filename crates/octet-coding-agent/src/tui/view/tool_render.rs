@@ -5,7 +5,7 @@ use sexy_tui_rs::{
 };
 
 use super::terminal_text::sanitize_for_terminal;
-use super::{subdued_text, wrap_hanging, ToolPanel};
+use super::{fit_line, subdued_text, wrap_hanging, ToolPanel};
 use crate::tui::theme::OctetTheme;
 
 #[cfg(test)]
@@ -154,6 +154,41 @@ pub(super) fn tool_value_indent_width(label: &str) -> usize {
 
 pub(super) fn tool_value_indent(label: &str) -> String {
     " ".repeat(tool_value_indent_width(label))
+}
+
+/// Bound tool input only after sanitization and width-dependent wrapping.
+/// The retained display value and semantic copy remain complete for Ctrl+O.
+const COMPACT_TOOL_INPUT_ROWS: usize = 6;
+
+pub(super) fn tool_input_preview(
+    mut rows: Vec<String>,
+    kind: &str,
+    continuation: &str,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> Vec<String> {
+    if expanded || rows.len() <= COMPACT_TOOL_INPUT_ROWS {
+        return rows;
+    }
+    let hidden = rows.len() - COMPACT_TOOL_INPUT_ROWS;
+    rows.truncate(COMPACT_TOOL_INPUT_ROWS);
+    let ellipsis = if theme.unicode() { "…" } else { "..." };
+    let separator = if theme.unicode() { " · " } else { " - " };
+    let unit = if hidden == 1 { "row" } else { "rows" };
+    let long = format!("{ellipsis} {hidden} {kind} {unit} hidden{separator}Ctrl+O");
+    let short = format!("+{hidden} Ctrl+O");
+    let available = usize::from(width).saturating_sub(visible_width(continuation));
+    let hint = if visible_width(&long) <= available {
+        long
+    } else {
+        short
+    };
+    rows.push(fit_line(
+        &format!("{continuation}{}", subdued_text(theme, &hint)),
+        width,
+    ));
+    rows
 }
 
 pub(super) fn bounded_tool_failure_reason(panel: &ToolPanel) -> Option<String> {
@@ -320,3 +355,7 @@ pub(super) fn without_redundant_tool_lead(tool: &str, text: &str) -> String {
         text.to_owned()
     }
 }
+
+#[cfg(test)]
+#[path = "tool_input_preview_tests.rs"]
+mod tests;

@@ -253,10 +253,11 @@ and completed reasoning disappears again once collapsed.
 
 ## Tool output and workers
 
-In terse mode, a Bash command shows its first three rendered lines, then a count
-of hidden command lines. Ctrl+O expands the full retained command and collapses
-it again. That doesn't change the executed command or the separate output
-preview.
+Bash and PowerShell commands wrap to the available width. In terse mode, they
+show up to six rendered command rows, then a count of hidden rows. Generic tool
+input previews use the same six-row limit for their selected argument, preserving
+newlines. Ctrl+O expands the full retained input and collapses it again. That
+doesn't change tool execution or the separate output preview.
 
 `--show-images` (or `show_images = true`) shows tool-result images inline. It's
 off by default and works on Kitty-compatible terminals. Others fall back to
