@@ -123,7 +123,8 @@ fn finalized_tool_rows_are_stable(panel: &ToolPanel) -> bool {
         // Rendering determines diff truncation after width-dependent wrap.
         // A recognized diff is therefore kept atomic conservatively.
         "edit" | "write" if !panel.is_error => tool_diff(panel).is_some(),
-        _ => false,
+        // Selected generic input values can wrap beyond the preview budget.
+        _ => panel.display.value.is_some(),
     };
     *panel.cached_disclosure_sensitive.borrow_mut() = Some(disclosure_sensitive);
     !disclosure_sensitive
@@ -380,6 +381,16 @@ mod tests {
             false,
         );
         assert!(!finalized_block_rows_are_stable(&codemode));
+
+        let generic = finalized_tool(
+            "remote_shell",
+            serde_json::json!({"command": "x".repeat(300)}),
+            "",
+            false,
+        );
+        assert!(!finalized_block_rows_are_stable(&generic));
+        let no_input = finalized_tool("remote_shell", serde_json::json!({}), "", false);
+        assert!(finalized_block_rows_are_stable(&no_input));
 
         let short_bash = finalized_tool(
             "bash",

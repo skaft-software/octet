@@ -395,10 +395,25 @@ pub(super) fn render_block_planned_with_rainbow(
                 let gap = tool_value_indent_width(&tool).saturating_sub(label_width);
                 let label_prefix = format!("{label}{}", " ".repeat(gap));
                 let continuation = tool_value_indent(&tool);
-                wrap_hanging(&text, &label_prefix, &continuation, width)
+                let rows = wrap_hanging(&text, &label_prefix, &continuation, width);
+                if panel.display.value.is_some() {
+                    super::tool_render::tool_input_preview(
+                        rows,
+                        "input",
+                        &continuation,
+                        theme,
+                        width,
+                        verbose_tools,
+                    )
+                } else {
+                    rows
+                }
             };
             let nested_width = width.saturating_sub(2).max(1);
-            if quiet_summary {
+            if quiet_summary
+                && panel.display.shell_command.is_none()
+                && (panel.display.value.is_none() || panel.name == "codemode")
+            {
                 lines.truncate(1);
             }
             if panel.grouped_child

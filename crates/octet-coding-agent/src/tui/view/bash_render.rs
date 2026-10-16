@@ -4,7 +4,7 @@ use sexy_tui_rs::{visible_width, RichRenderer};
 
 use super::output_window::bounded_head_tail_rows;
 use super::terminal_text::{normalize_carriage_return_progress, sanitize_for_terminal};
-use super::tool_render::tool_value_indent_width;
+use super::tool_render::{tool_input_preview, tool_value_indent_width};
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS};
 use crate::tui::theme::OctetTheme;
 
@@ -305,7 +305,7 @@ pub(super) fn render_bash_row(
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
-    _expanded: bool,
+    expanded: bool,
 ) -> Vec<String> {
     let action_gap = tool_value_indent_width(action).saturating_sub(visible_width(action));
     let prefix = format!(
@@ -317,11 +317,11 @@ pub(super) fn render_bash_row(
     let content_width = width
         .saturating_sub(u16::try_from(visible_width(&prefix)).unwrap_or(u16::MAX))
         .max(1);
-    // Commands are intent, not output: retain every sanitized, wrapped row in
-    // both disclosure modes, including custom themes and multiline scripts.
+    // Commands have their own visual-row budget, independent of output.
+    // Keep the full sanitized command available through disclosure and copy.
     let command = renderer.render_inline_syntax_wrapped(command, "bash", content_width);
     let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
-    command
+    let rows = command
         .lines
         .into_iter()
         .enumerate()
@@ -330,7 +330,8 @@ pub(super) fn render_bash_row(
             let content = if use_plain { line.plain } else { line.styled };
             fit_line(&format!("{prefix}{content}"), width)
         })
-        .collect()
+        .collect();
+    tool_input_preview(rows, "command", &continuation, theme, width, expanded)
 }
 
 #[cfg(test)]
@@ -388,10 +389,15 @@ mod tests {
         let renderer = theme.rich_renderer();
         let collapsed = render_bash_row(command, action, &renderer, theme, width, false);
         let expanded = render_bash_row(command, action, &renderer, theme, width, true);
-        assert_eq!(
-            collapsed, expanded,
-            "commands must remain complete in terse mode"
-        );
+        if expanded.len() <= 6 {
+            assert_eq!(collapsed, expanded, "short commands must remain complete");
+        } else {
+            assert_eq!(collapsed.len(), 7, "six command rows plus one hint");
+            assert_eq!(collapsed[..6], expanded[..6]);
+            let hint = strip_terminal_sequences(&collapsed[6]);
+            assert!(hint.contains(&format!("{}", expanded.len() - 6)), "{hint}");
+            assert!(hint.contains("Ctrl+O"), "{hint}");
+        }
         for rows in [&collapsed, &expanded] {
             assert!(rows
                 .iter()
@@ -458,6 +464,12 @@ mod tests {
         assert!(collapsed.join("\n").contains("fourth"));
         let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", "Bash", &theme, 100);
         assert_eq!(multiline.len(), 4);
+        let longer = format!("{command}\nprintf seventh\nprintf eighth");
+        let (collapsed, expanded) = assert_input_window(&longer, "Bash", &theme, 100);
+        assert_eq!(expanded.len(), 8);
+        assert!(collapsed[6].contains("2 command rows hidden"));
+        assert!(!collapsed.join("\n").contains("seventh"));
+        assert!(expanded.join("\n").contains("eighth"));
     }
 
     #[test]
@@ -484,7 +496,14 @@ mod tests {
                     .copy_text,
                 command,
             );
-            assert_eq!(collapsed.len(), expanded.len());
+            assert_eq!(
+                collapsed.len(),
+                if expanded.len() > 6 {
+                    7
+                } else {
+                    expanded.len()
+                }
+            );
         }
     }
 
@@ -543,7 +562,7 @@ mod tests {
     #[test]
     fn bash_input_window_leaves_arguments_and_output_tail_independent() {
         let theme = test_theme();
-        let command = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth";
+        let command = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth\nprintf sixth\nprintf seventh\nprintf eighth";
         let output =
             "exit=0 duration=0.2s\nstdout: 8 lines\n1\n2\n3\n4\n5\n6\n7\n8\ncomplete_stdout=true";
         let panel = panel(command, output);
@@ -557,7 +576,7 @@ mod tests {
                 100,
                 expanded,
             );
-            assert_eq!(input.len(), 5);
+            assert_eq!(input.len(), if expanded { 8 } else { 7 });
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);
             let plain = plain_rows(&tail);

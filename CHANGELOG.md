@@ -32,9 +32,12 @@ boundaries and known limitations.
   capture policy.
 - `/context` during a run shows the same usage grid and categories as when idle,
   instead of a flat list.
-- Windows `powershell` tool calls render like `bash`: full command header,
-  output tail, failure reason and Ctrl+O disclosure, instead of a one-line
-  72-character summary.
+- Tool input previews wrap to six visible rows instead of clipping a generic
+  tool's selected argument at 72 characters. Bash and PowerShell commands use
+  the same row budget; Ctrl+O and semantic copy retain the complete sanitized
+  input, including newlines, independently of output previews.
+- Windows `powershell` tool calls render like `bash`: command header, output
+  tail, failure reason and Ctrl+O disclosure.
 - Surfaced provider errors after a mid-stream failure no longer include internal
   stream progress counters (`stream_progress=frames=… events=…`).
 - Controlled shell policies require an exact one-shot approval for each shell
