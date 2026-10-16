@@ -4,3 +4,4 @@ data: {"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"id":"call-
 
 data: {"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":8,"totalTokenCount":20}}
 
+: End of synthetic stream.
