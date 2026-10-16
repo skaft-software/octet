@@ -147,6 +147,50 @@ fn consecutive_tool_calls_have_one_breathing_row_between_them() {
 }
 
 #[test]
+fn notes_after_tool_calls_keep_a_blank_vertical_transition() {
+    let mut shell = InteractiveShell::test_shell();
+    let run_id = shell.begin_run("local");
+    let id = ToolCallId("note-spacing-tool".into());
+    shell.on_run_event(
+        run_id,
+        &octet_agent::AgentEvent::ToolStarted {
+            id: id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "echo ready"}),
+        },
+    );
+    shell.on_run_event(
+        run_id,
+        &octet_agent::AgentEvent::ToolFinished {
+            id,
+            result: Ok(octet_agent::ToolOutput::new("ready")),
+            duration: Duration::from_millis(1),
+        },
+    );
+    shell.notice("theme display updated; preference saves at the next idle boundary");
+
+    let rows = shell
+        .state
+        .borrow()
+        .rendered_transcript(100)
+        .iter()
+        .map(|line| strip_terminal_sequences(line))
+        .collect::<Vec<_>>();
+    let note_row = rows
+        .iter()
+        .position(|row| row.contains("theme display updated"))
+        .expect("the note is rendered");
+    assert!(
+        rows[..note_row]
+            .iter()
+            .any(|row| row.contains("echo ready")),
+        "the completed tool call is rendered before the note: {rows:?}"
+    );
+    assert!(note_row > 0, "{rows:?}");
+    assert!(rows[note_row - 1].trim().is_empty(), "{rows:?}");
+}
+
+#[test]
 fn read_results_stay_hidden_in_collapsed_and_expanded_modes() {
     use octet_agent::ToolOutput;
 
