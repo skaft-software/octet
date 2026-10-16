@@ -700,7 +700,6 @@ pub(crate) fn decode_stream_event(
                     decode_google_function_call(
                         &mut events,
                         builder,
-                        part_index,
                         function_call,
                         part.thought_signature.as_deref(),
                     )?;
@@ -787,7 +786,6 @@ fn decode_google_text_part(
 fn decode_google_function_call(
     events: &mut Vec<StreamEvent>,
     builder: &mut ResponseBuilder,
-    provider_part_index: usize,
     call: GoogleFunctionCall,
     signature: Option<&str>,
 ) -> Result<(), AiError> {
@@ -801,14 +799,30 @@ fn decode_google_function_call(
             "Google function-call name is empty".to_owned(),
         )));
     }
-    let key = format!("google_candidate_0_function_{provider_part_index}");
-    let index = google_canonical_index(builder, &key);
-    if !builder.tool_call_builders.contains_key(&index) {
-        let id = call
-            .id
-            .filter(|id| !id.is_empty())
-            .map(|id| crate::protocol::normalize_tool_call_id(&id))
-            .unwrap_or_else(|| format!("google_call_{index}"));
+    // Part positions are local to each SSE chunk: two independent calls may
+    // both be parts[0]. Only a provider call ID can identify a cumulative update.
+    // Older Google routes omit IDs and send complete calls, so each occurrence
+    // needs its own canonical index, even for identical names and arguments.
+    let id = call
+        .id
+        .filter(|id| !id.is_empty())
+        .map(|id| crate::protocol::normalize_tool_call_id(&id));
+    let index = if let Some(id) = &id {
+        google_canonical_index(builder, &format!("google_candidate_0_function_id_{id}"))
+    } else {
+        let index = builder.next_canonical_index;
+        builder.next_canonical_index += 1;
+        index
+    };
+    if let Some(existing) = builder.tool_call_builders.get(&index) {
+        if existing.name != call.name {
+            return Err(DecodeError::InvalidProviderField(
+                "Google function-call name changed for the same ID".to_owned(),
+            )
+            .into());
+        }
+    } else {
+        let id = id.unwrap_or_else(|| format!("google_call_{index}"));
         emit_event(
             events,
             builder,

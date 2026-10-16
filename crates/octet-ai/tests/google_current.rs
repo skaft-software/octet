@@ -161,6 +161,164 @@ async fn gemini_current_request_tool_stream_signature_and_usage_fixture() {
 }
 
 #[tokio::test]
+async fn opencode_parallel_google_calls_survive_streaming_and_result_replay() {
+    use octet_ai::{AssistantPart, StopReason, ToolResult, ToolResultPart};
+    use wiremock::{Request as WireRequest, Respond};
+
+    struct Script;
+    impl Respond for Script {
+        fn respond(&self, request: &WireRequest) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let replay = body["contents"].as_array().unwrap().iter().any(|content| {
+                content["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|part| part.get("functionResponse").is_some())
+            });
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(if replay {
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Both cities received.\"}]},\"finishReason\":\"STOP\"}]}\n\n"
+                } else {
+                    include_str!("fixtures/google/parallel_tool_calls.sse")
+                })
+        }
+    }
+
+    for (provider, api_name, base_path) in [
+        ("opencode", "gemini-4-argon", "/zen/v1/"),
+        (
+            "opencode-go",
+            "gemini-4-argon-contributor",
+            "/inference/go/v1/",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "{base_path}models/{api_name}:streamGenerateContent"
+            )))
+            .and(header("authorization", "Bearer fixture-key"))
+            .and(header("x-opencode-session", "parallel-session"))
+            .respond_with(Script)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut model = fixture_model(&format!("{}{base_path}", server.uri()));
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.api_name = api_name.into();
+        spec.id = ModelId(format!("{provider}/{api_name}"));
+        spec.endpoint = EndpointId(format!("{provider}-google"));
+        spec.cache.send_session_affinity_headers = true;
+        let endpoint = Arc::make_mut(&mut model.endpoint);
+        endpoint.id = model.spec.endpoint.clone();
+        endpoint.auth = Auth::bearer("fixture-key");
+        let mut request = fixture_request();
+        request.session_id = Some("parallel-session".into());
+        let client = AiClient::new();
+        let events = client
+            .stream(&model, request.clone())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Started { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ToolCallStart { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ToolCallEnd { .. }))
+                .count(),
+            2
+        );
+        let response = events
+            .into_iter()
+            .find_map(|event| match event {
+                StreamEvent::Finished(response) => Some(response),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(response.usage.total_tokens, 20);
+        let calls = response
+            .message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(call.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id.0, "call-paris");
+        assert_eq!(calls[0].arguments_json, r#"{"city":"Paris"}"#);
+        assert_eq!(calls[1].id.0, "call-berlin");
+        assert_eq!(calls[1].arguments_json, r#"{"city":"Berlin"}"#);
+        assert!(calls.iter().all(|call| call.argument_error.is_none()));
+        request.messages.push(Message::Assistant(response.message));
+        request.messages.push(Message::User(UserMessage {
+            content: calls
+                .iter()
+                .enumerate()
+                .map(|(position, call)| {
+                    UserPart::ToolResult(ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: vec![ToolResultPart::Text(format!("result-{position}"))],
+                        is_error: false,
+                        added_tool_names: None,
+                    })
+                })
+                .collect(),
+        }));
+        let final_response = client.complete(&model, request).await.unwrap();
+        assert!(matches!(final_response.message.content.as_slice(),
+            [AssistantPart::Text(text)] if text == "Both cities received."
+        ));
+        let requests = server.received_requests().await.unwrap();
+        let replay: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        for (position, (id, city, signature)) in [
+            ("call-paris", "Paris", "paris-signature"),
+            ("call-berlin", "Berlin", "berlin-signature"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                replay["contents"][1]["parts"][position],
+                serde_json::json!({
+                    "functionCall": {"id": id, "name": "lookup", "args": {"city": city}},
+                    "thoughtSignature": signature,
+                })
+            );
+            assert_eq!(
+                replay["contents"][2]["parts"][position],
+                serde_json::json!({
+                    "functionResponse": {"id": id, "name": "lookup", "response": {"output": format!("result-{position}")}},
+                })
+            );
+        }
+        // Provider metadata is retained for same-model replay, never exposed as reasoning.
+        assert!(replay["contents"][1]["parts"][0].get("thought").is_none());
+    }
+}
+
+#[tokio::test]
 async fn gemini_current_error_and_drop_cancellation_fixtures() {
     let error_server = MockServer::start().await;
     Mock::given(method("POST"))
