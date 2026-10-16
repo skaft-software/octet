@@ -353,13 +353,24 @@ impl OctetTerminal<Stdout> {
             terminal::Clear(terminal::ClearType::All),
             cursor::MoveTo(0, 0),
         )?;
-        if capture_mouse {
+        // Native Tern owns an inline surface, regardless of the ANSI screen
+        // preference. Capturing here diverts its touchpad/selection gestures
+        // into ANSI mouse events instead of the native document. ANSI fallback
+        // restores the requested capture policy.
+        let native_tern = crate::tui::view::tern::enabled_cached();
+        if capture_mouse && !native_tern {
             enable_cell_mouse_capture(&mut out)?;
+        } else {
+            // Clear inherited reporting on byte-oriented terminals. Windows'
+            // DisableMouseCapture restores a mode saved by EnableMouseCapture
+            // and fails if capture has never been enabled in this process.
+            #[cfg(not(windows))]
+            execute!(out, event::DisableMouseCapture)?;
         }
         // Native Tern can change pane/OS focus without changing visibility.
         // Request the standard notifications consumed by the shared frontend;
         // native rendering bypasses sexy-tui's terminal startup entirely.
-        if crate::tui::view::tern::enabled_cached() {
+        if native_tern {
             execute!(out, event::EnableFocusChange)?;
             lifecycle::mark_focus_reporting_active();
         }
