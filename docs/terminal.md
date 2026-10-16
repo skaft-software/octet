@@ -150,8 +150,11 @@ bounded semantic viewport as well, and lets a resumed session load newest-first.
 Explicit CLI choices take precedence over configured mouse policy.
 
 A `pi` theme changes presentation, not viewport ownership. Native Tern surfaces
-negotiate their own layout; their large pickers and report overlays do not change
-the ordinary ANSI launch default.
+negotiate their own inline layout and leave ANSI mouse reporting off, including
+with `--mouse app`, so Tern owns touchpad scrolling and selection without Shift.
+If native rendering fails, the ANSI fallback restores the requested mouse policy.
+`--tern off` uses the ordinary ANSI policy even inside Tern. Native pickers and
+report overlays do not change the ordinary ANSI launch default.
 
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing

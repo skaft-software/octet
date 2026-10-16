@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use sexy_tui_rs::{CommitCursor, Component, FrameUpdate, TUI};
+use sexy_tui_rs::{CommitCursor, Component, FrameUpdate, Terminal, TUI};
 
 use super::native_scrollback::{
     render_shell, render_shell_update_with_cursor, render_shell_update_without_cursor,
@@ -502,7 +502,7 @@ pub(super) fn reconcile_terminal_size(
 }
 
 pub(super) fn render_loop(
-    terminal: OctetTerminal,
+    mut terminal: OctetTerminal,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
@@ -510,6 +510,34 @@ pub(super) fn render_loop(
     clear_on_start: bool,
 ) {
     let alternate_screen = state.fullscreen();
+    state.borrow_mut().render_threaded = true;
+    if super::tern::enabled_cached() {
+        match render_native_loop(
+            &mut terminal,
+            &state,
+            &size,
+            &rx,
+            &synchronize_terminal_size,
+        ) {
+            Ok(()) => return,
+            Err(error) => {
+                // Restore ANSI input ownership only after native negotiation or
+                // protocol I/O fails. A native surface never needs mouse capture.
+                if application_viewport {
+                    if let Err(error) = OctetTerminal::set_mouse_capture(true) {
+                        state.borrow_mut().error =
+                            Some(format!("terminal mouse capture failed: {error}"));
+                    }
+                }
+                // Keep the diagnostic outside pending history installation,
+                // which replaces the startup transcript atomically.
+                crate::output::stderr_line(format!(
+                    "Native Tern rendering unavailable: {error}. Using terminal rendering."
+                ));
+                terminal.show_cursor();
+            }
+        }
+    }
     render_loop_with_terminal(
         terminal,
         state,
@@ -598,7 +626,7 @@ impl InteractiveShell {
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
-    mut terminal: impl sexy_tui_rs::Terminal + 'static,
+    terminal: impl sexy_tui_rs::Terminal + 'static,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
@@ -611,22 +639,6 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
-    if super::tern::enabled() {
-        match render_native_loop(&mut terminal, &state, &size, &rx, &synchronize_size) {
-            Ok(()) => return,
-            Err(error) => {
-                // Fallback is explicit and only follows failed negotiation or
-                // protocol I/O. Resizes never create an ANSI presentation.
-                // Keep the diagnostic outside pending history installation,
-                // which replaces the startup transcript atomically. The normal
-                // diagnostic queue admits it once startup is ready.
-                crate::output::stderr_line(format!(
-                    "Native Tern rendering unavailable: {error}. Using terminal rendering."
-                ));
-                terminal.show_cursor();
-            }
-        }
-    }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
