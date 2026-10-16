@@ -116,6 +116,250 @@ fn request(messages: Vec<Message>) -> Request {
     }
 }
 
+struct ChangeSystem(std::sync::atomic::AtomicUsize);
+
+impl octet_ai::PayloadHook for ChangeSystem {
+    fn on_payload(
+        &self,
+        mut payload: Value,
+        _: &octet_ai::HookModelContext,
+    ) -> Result<Option<Value>, octet_ai::AiError> {
+        let turn = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        payload["messages"][0]["content"] =
+            serde_json::json!(format!("SECRET volatile hook {turn}"));
+        Ok(Some(payload))
+    }
+}
+
+#[tokio::test]
+async fn trace_locates_hook_mutations_and_correlates_terminal_cache_usage() {
+    use futures_util::StreamExt as _;
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
+        .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1,\"cached_tokens\":98}}\n\ndata: [DONE]\n\n")
+        .insert_header("content-type", "text/event-stream")).mount(&server).await;
+    let mut model = responses_model(&server.uri());
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiChat;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let trace_path = std::env::temp_dir().join(format!(
+        "octet-cache-hook-trace-{}-{nonce}.jsonl",
+        std::process::id()
+    ));
+    let overrides = RequestOverrides {
+        env: BTreeMap::from([(
+            "OCTET_PROVIDER_REQUEST_TRACE".into(),
+            trace_path.to_string_lossy().into_owned(),
+        )]),
+        ..Default::default()
+    };
+    let hook = Arc::new(ChangeSystem(std::sync::atomic::AtomicUsize::new(0)));
+    let client = AiClient::new();
+    for _ in 0..2 {
+        let mut req = request(vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("SECRET stable user".into())],
+        })]);
+        req.system = Some("SECRET stable system".into());
+        req.session_id = Some("SECRET session identity".into());
+        let mut stream = client
+            .clone()
+            .stream_with_host_options(
+                &model,
+                req,
+                overrides.clone(),
+                octet_ai::HostRequestOptions {
+                    on_payload: Some(hook.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let written = std::fs::read_to_string(&trace_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&trace_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    std::fs::remove_file(trace_path).unwrap();
+    assert!(!written.contains("SECRET"));
+    assert!(!written.contains("loopback-api-key"));
+    assert!(!written.contains(&server.uri()));
+    let lines: Vec<Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let stage = |name: &str| {
+        lines
+            .iter()
+            .filter(|line| line["event"] == "cache_prefix" && line["stage"] == name)
+            .collect::<Vec<_>>()
+    };
+    for name in ["canonical", "encoded"] {
+        let stages = stage(name);
+        assert_eq!(stages[1]["raw_common_prefix_bytes"], stages[0]["bytes"]);
+    }
+    let stages = stage("wire_http");
+    assert_ne!(stages[0]["digest"], stages[1]["digest"]);
+    assert_eq!(stages[1]["first_changed_segment"], "/messages/0");
+    assert_eq!(stages[1]["previous_id"], stages[0]["id"]);
+    let requests = server.received_requests().await.unwrap();
+    let actual = requests[0]
+        .body
+        .iter()
+        .zip(&requests[1].body)
+        .position(|(a, b)| a != b)
+        .unwrap();
+    assert_eq!(stages[1]["raw_common_prefix_bytes"], actual);
+    let usage: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "cache_usage")
+        .collect();
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[1]["id"], stages[1]["id"]);
+    assert_eq!(usage[1]["total_input_tokens"], 100);
+    assert_eq!(usage[1]["fresh_input_tokens"], 2);
+    assert_eq!(usage[1]["cache_efficiency"], 0.98);
+}
+
+struct MoveResponsesBreakpoint(std::sync::atomic::AtomicUsize);
+
+impl octet_ai::PayloadHook for MoveResponsesBreakpoint {
+    fn on_payload(
+        &self,
+        mut payload: Value,
+        _: &octet_ai::HookModelContext,
+    ) -> Result<Option<Value>, octet_ai::AiError> {
+        let turn = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let block = if turn == 0 {
+            &mut payload["input"][0]["content"][0]
+        } else {
+            &mut payload["input"][2]["output"][0]
+        };
+        block["prompt_cache_breakpoint"] = serde_json::json!({"mode":"explicit"});
+        Ok(Some(payload))
+    }
+}
+
+#[tokio::test]
+async fn responses_flex_trace_distinguishes_breakpoint_hooks_from_history_changes() {
+    use futures_util::StreamExt as _;
+    let server = MockServer::start().await;
+    // Synthetic usage exercises normalization, not actual provider cache hits.
+    Mock::given(method("POST")).and(path("responses"))
+        .respond_with(ResponseTemplate::new(200)
+            .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"id\":\"response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"service_tier\":\"flex\",\"output\":[],\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":98,\"cache_write_tokens\":1},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\n")
+            .insert_header("content-type", "text/event-stream"))
+        .expect(2).mount(&server).await;
+    let mut model = responses_model(&server.uri());
+    Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+        octet_ai::ResponsesRuntimeProfile::Codex;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let trace_path = std::env::temp_dir().join(format!(
+        "octet-responses-flex-trace-{}-{nonce}.jsonl",
+        std::process::id()
+    ));
+    let overrides = RequestOverrides {
+        env: BTreeMap::from([(
+            "OCTET_PROVIDER_REQUEST_TRACE".into(),
+            trace_path.to_string_lossy().into_owned(),
+        )]),
+        ..Default::default()
+    };
+    let input: octet_ai::ResponsesInput = serde_json::from_value(serde_json::json!([
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"SECRET prompt"}]},
+        {"type":"function_call","call_id":"SECRET call","name":"read","arguments":"{\"path\":\"SECRET path\"}"},
+        {"type":"function_call_output","call_id":"SECRET call","output":[{"type":"input_text","text":"SECRET result"}]}
+    ])).unwrap();
+    let mut req = request(vec![Message::User(UserMessage {
+        content: vec![UserPart::Text("SECRET prompt".into())],
+    })]);
+    req.responses = Some(
+        octet_ai::ResponsesOptions::full_replay(input)
+            .with_service_tier(octet_ai::ServiceTier::Flex),
+    );
+    req.session_id = Some("SECRET stable session".into());
+    let client = AiClient::new();
+    let hook = Arc::new(MoveResponsesBreakpoint(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    for _ in 0..2 {
+        let mut stream = client
+            .stream_with_host_options(
+                &model,
+                req.clone(),
+                overrides.clone(),
+                octet_ai::HostRequestOptions {
+                    on_payload: Some(hook.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let written = std::fs::read_to_string(&trace_path).unwrap();
+    std::fs::remove_file(&trace_path).unwrap();
+    assert!(!written.contains("SECRET"));
+    assert!(!written.contains("loopback-api-key"));
+    assert!(!written.contains(&server.uri()));
+    let lines: Vec<Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for name in ["canonical", "encoded", "wire_http"] {
+        let stages: Vec<_> = lines
+            .iter()
+            .filter(|line| line["event"] == "cache_prefix" && line["stage"] == name)
+            .collect();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(
+            stages[1]["prefix_common_bytes"],
+            stages[0]["prefix_view_bytes"]
+        );
+        assert_eq!(stages[1]["previous_suffix_estimated_tokens"], 0);
+        if name == "wire_http" {
+            assert_ne!(stages[0]["digest"], stages[1]["digest"]);
+            assert_eq!(
+                stages[0]["cache_controls"]["breakpoints"],
+                serde_json::json!(["/input/0/content/0"])
+            );
+            assert_eq!(
+                stages[1]["cache_controls"]["breakpoints"],
+                serde_json::json!(["/input/2/output/0"])
+            );
+            let usage = lines
+                .iter()
+                .find(|line| line["event"] == "cache_usage" && line["id"] == stages[1]["id"])
+                .unwrap();
+            assert_eq!(usage["uncached_input_tokens"], 1);
+            assert_eq!(usage["cache_write_tokens"], 1);
+            assert_eq!(usage["total_input_tokens"], 100);
+            assert_eq!(usage["cache_efficiency"], 0.98);
+        } else {
+            assert_eq!(stages[0]["digest"], stages[1]["digest"]);
+        }
+    }
+    let received = server.received_requests().await.unwrap();
+    for request in received {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["service_tier"], "flex");
+    }
+}
+
 #[tokio::test]
 async fn trace_describes_a_rejected_screenshot_history_without_its_content() {
     let server = MockServer::start().await;
@@ -160,6 +404,18 @@ async fn trace_describes_a_rejected_screenshot_history_without_its_content() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    let prefixes: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "cache_prefix")
+        .collect();
+    assert_eq!(prefixes.len(), 3, "{written}");
+    assert_eq!(prefixes[0]["stage"], "canonical");
+    assert_eq!(prefixes[1]["stage"], "encoded");
+    assert_eq!(prefixes[2]["stage"], "wire_http");
+    let lines: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] != "cache_prefix")
+        .collect();
     assert_eq!(lines.len(), 2, "{written}");
 
     let request = &lines[0];
@@ -185,4 +441,5 @@ async fn trace_describes_a_rejected_screenshot_history_without_its_content() {
     assert_eq!(rejection["status"], 400);
     assert_eq!(rejection["provider_request_id"], "req_loopback_400");
     assert_eq!(rejection["id"], request["id"]);
+    assert_eq!(prefixes[2]["id"], request["id"]);
 }

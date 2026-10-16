@@ -12568,3 +12568,6 @@ mod partial_assistant_journal;
 
 #[path = "agent_run/responses_prewarm.rs"]
 mod responses_prewarm;
+
+#[path = "cache_audit/agent.rs"]
+mod cache_audit;

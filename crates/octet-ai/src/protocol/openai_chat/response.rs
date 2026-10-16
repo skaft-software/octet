@@ -152,6 +152,7 @@ pub(super) struct ChatUsage {
     timing: crate::inference::wire::RawMetrics,
     prompt_tokens_details: Option<ChatPromptTokensDetails>,
     prompt_cache_hit_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
     completion_tokens_details: Option<ChatCompletionTokensDetails>,
 }
 
@@ -165,6 +166,7 @@ impl<'de> Deserialize<'de> for ChatUsage {
             CompletionTokens,
             PromptTokensDetails,
             PromptCacheHitTokens,
+            CachedTokens,
             CompletionTokensDetails,
             CompletionTime,
             PromptTime,
@@ -184,6 +186,7 @@ impl<'de> Deserialize<'de> for ChatUsage {
                 let mut completion_tokens = None;
                 let mut prompt_tokens_details = None;
                 let mut prompt_cache_hit_tokens = None;
+                let mut cached_tokens = None;
                 let mut completion_tokens_details = None;
                 let mut timing = crate::inference::wire::RawMetrics::default();
                 while let Some(key) = map.next_key::<Field>()? {
@@ -205,6 +208,10 @@ impl<'de> Deserialize<'de> for ChatUsage {
                         Field::PromptCacheHitTokens => (
                             "prompt_cache_hit_tokens",
                             prompt_cache_hit_tokens.replace(map.next_value()?).is_some(),
+                        ),
+                        Field::CachedTokens => (
+                            "cached_tokens",
+                            cached_tokens.replace(map.next_value()?).is_some(),
                         ),
                         Field::CompletionTokensDetails => (
                             "completion_tokens_details",
@@ -243,6 +250,7 @@ impl<'de> Deserialize<'de> for ChatUsage {
                     timing,
                     prompt_tokens_details: prompt_tokens_details.unwrap_or_default(),
                     prompt_cache_hit_tokens: prompt_cache_hit_tokens.unwrap_or_default(),
+                    cached_tokens: cached_tokens.unwrap_or_default(),
                     completion_tokens_details: completion_tokens_details.unwrap_or_default(),
                 })
             }
@@ -576,6 +584,8 @@ pub(super) fn map_usage(usage: &ChatUsage) -> Result<Usage, AiError> {
         .as_ref()
         .and_then(|details| details.cached_tokens)
         .or(usage.prompt_cache_hit_tokens)
+        // Kimi reports this alias on its final streaming usage chunk.
+        .or(usage.cached_tokens)
         .unwrap_or(0);
     let cache_write = usage
         .prompt_tokens_details
