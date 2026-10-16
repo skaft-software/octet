@@ -12,15 +12,15 @@ use super::surface_frame::{
 use super::surface_layout::{block_prompt_color, compile_surface_plan_for_render};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
-    render_diff_only, render_tool_failure_reason, tool_diff, tool_display_label, tool_grid_label,
-    tool_value_indent, tool_value_indent_width, without_redundant_tool_lead,
+    render_diff_only, render_tool_failure_reason, shell_row_label, tool_diff, tool_display_label,
+    tool_grid_label, tool_value_indent, tool_value_indent_width, without_redundant_tool_lead,
 };
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
     subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
 };
-use crate::presentation::tool_display::compact_path;
+use crate::presentation::tool_display::{compact_path, is_shell_tool};
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
 
 /// Round display-only token counts; the telemetry and accounting remain exact.
@@ -333,8 +333,8 @@ pub(super) fn render_block_planned_with_rainbow(
                 .resolve::<bool>("quiet_tool_summaries")
                 .unwrap_or(false)
                 && !verbose_tools;
-            let compact_bash = matches!(panel.name.as_str(), "bash" | "exec")
-                && panel.display.shell_command.is_some();
+            let compact_bash =
+                is_shell_tool(panel.name.as_str()) && panel.display.shell_command.is_some();
             let mut lines = if let Some(source) = super::codemode_render::source(panel) {
                 super::codemode_render::render_source(
                     &source,
@@ -344,7 +344,14 @@ pub(super) fn render_block_planned_with_rainbow(
                     verbose_tools,
                 )
             } else if let Some(command) = panel.display.shell_command.as_deref() {
-                render_bash_row(command, rich_renderer, theme, width, verbose_tools)
+                render_bash_row(
+                    command,
+                    shell_row_label(&panel.name),
+                    rich_renderer,
+                    theme,
+                    width,
+                    verbose_tools,
+                )
             } else {
                 let compact = width < 60 || quiet_summary;
                 let summary = if !panel.finished {
@@ -399,7 +406,7 @@ pub(super) fn render_block_planned_with_rainbow(
                 && theme
                     .resolve::<bool>("quiet_tool_summaries")
                     .unwrap_or(false)
-                && matches!(panel.name.as_str(), "bash" | "exec")
+                && is_shell_tool(panel.name.as_str())
             {
                 if let Some(first) = lines.first_mut() {
                     *first = fit_line(&format!("-> {first}"), width);
@@ -445,7 +452,7 @@ pub(super) fn render_block_planned_with_rainbow(
                         nested_width,
                         verbose_tools,
                     )),
-                    "bash" | "exec" if compact_bash => output_lines.extend(
+                    name if is_shell_tool(name) && compact_bash => output_lines.extend(
                         render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
                     ),
                     "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
