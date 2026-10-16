@@ -7059,26 +7059,59 @@ async fn controlled_effects_are_denied_before_hooks_or_execution() {
 }
 
 #[tokio::test]
-async fn controlled_safe_bash_runs_without_approval_prompt() {
+async fn controlled_shell_spelling_bypasses_are_denied_before_real_tool_dispatch() {
+    for policy in [
+        EffectPolicy::Controlled,
+        EffectPolicy::ControlledBashApproval,
+    ] {
+        for command in [
+            "ls",
+            "./ls",
+            "__ABSOLUTE_LS__",
+            r"git diff --outpu\t=proof.txt --no-index a.txt b.txt",
+            "git diff --outpu\"t\"=proof.txt --no-index a.txt b.txt",
+        ] {
+            assert_controlled_shell_denied(policy, command).await;
+        }
+    }
+}
+
+async fn assert_controlled_shell_denied(policy: EffectPolicy, command: &str) {
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let executable = workspace.join("ls");
+    std::fs::write(&executable, "#!/bin/sh\nprintf marker > unauthorized.txt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(workspace.join("a.txt"), "before\n").unwrap();
+    std::fs::write(workspace.join("b.txt"), "after\n").unwrap();
+    let command = command.replace("__ABSOLUTE_LS__", &format!("'{}'", executable.display()));
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
         .respond_with(Script {
             bodies: vec![
-                tool_turn(&[("call_process", "bash", serde_json::json!({"command": "ls"}))]),
-                text_turn("safe process complete"),
+                tool_turn(&[(
+                    "call_process",
+                    "bash",
+                    serde_json::json!({"command": command}),
+                )]),
+                text_turn("denied process complete"),
             ],
             next: AtomicUsize::new(0),
         })
+        .expect(2)
         .mount(&server)
         .await;
-    let workspace_dir = tempfile::tempdir().unwrap();
-    let session_dir = tempfile::tempdir().unwrap();
-    let workspace = workspace_dir.path().canonicalize().unwrap();
     let before = Arc::new(AtomicUsize::new(0));
     let after = Arc::new(AtomicUsize::new(0));
     let mut extensions = ExtensionHost::new();
-    extensions.load(&CoreTools);
+    // Explicit even on Windows: denial must precede shell resolution/execution.
+    extensions.tool(octet_agent::BashTool::default());
     extensions.tool_call_hook(AdmissionHookProbe {
         before: Arc::clone(&before),
         after: Arc::clone(&after),
@@ -7086,14 +7119,13 @@ async fn controlled_safe_bash_runs_without_approval_prompt() {
     let mut sandbox = SandboxConfig::new(&workspace);
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
-
     let mut agent = Agent::new(AgentConfig {
         client: AiClient::new(),
         model: scripted_model(&server.uri()),
         session: Session::create(session_dir.path().join("session.jsonl")).unwrap(),
-        system: "safe bash test".into(),
+        system: "shell approval regression".into(),
         sandbox,
-        effect_broker: EffectBroker::new(EffectPolicy::Controlled),
+        effect_broker: EffectBroker::new(policy),
         extensions,
         max_turns: Some(4),
         reasoning: ReasoningConfig::Off,
@@ -7102,34 +7134,38 @@ async fn controlled_safe_bash_runs_without_approval_prompt() {
         session_id: None,
     })
     .unwrap();
-
-    let mut run = agent.prompt("run a read-only command").await.unwrap();
+    let mut run = agent.prompt("run the proposed command").await.unwrap();
     let mut approvals = 0usize;
     let mut events = Vec::new();
-    while let Some(event) = run.next().await {
-        if matches!(
-            &event,
-            AgentEvent::ToolProgress {
-                progress: octet_agent::ToolProgress::Confirmation(_),
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(event) = run.next().await {
+            if let AgentEvent::ToolProgress {
+                progress: octet_agent::ToolProgress::Confirmation(request),
                 ..
+            } = &event
+            {
+                approvals += 1;
+                assert_eq!(before.load(Ordering::SeqCst), 0);
+                assert!(!workspace.join("unauthorized.txt").exists());
+                assert!(!workspace.join("proof.txt").exists());
+                request.clone().respond(false);
             }
-        ) {
-            approvals += 1;
+            events.push(event);
         }
-        events.push(event);
-    }
+    })
+    .await
+    .expect("bounded approval denial");
     drop(run);
-
-    assert_eq!(approvals, 0);
-    assert_eq!(before.load(Ordering::SeqCst), 1);
-    assert_eq!(after.load(Ordering::SeqCst), 1);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolFinished {
-            id,
-            result: Ok(_),
-            ..
-        } if id.0 == "call_process"
+    assert_eq!(approvals, 1, "{policy:?}: {command}");
+    assert_eq!(before.load(Ordering::SeqCst), 0);
+    assert_eq!(after.load(Ordering::SeqCst), 0);
+    assert!(!workspace.join("unauthorized.txt").exists());
+    assert!(!workspace.join("proof.txt").exists());
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::ToolFinished { id, result: Err(_), .. } if id.0 == "call_process"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::ToolPolicyDecision { decision, .. } if !decision.allowed
     )));
     assert!(matches!(
         assert_single_run_finished(&events),
@@ -7138,14 +7174,35 @@ async fn controlled_safe_bash_runs_without_approval_prompt() {
 }
 
 #[tokio::test]
-async fn controlled_safe_bash_approval_profile_needs_confirmation() {
+async fn controlled_shell_approval_profile_needs_confirmation() {
+    for policy in [
+        EffectPolicy::Controlled,
+        EffectPolicy::ControlledBashApproval,
+    ] {
+        assert_controlled_shell_approved(policy).await;
+    }
+}
+
+async fn assert_controlled_shell_approved(policy: EffectPolicy) {
+    let (shell, command) = if cfg!(windows) {
+        ("powershell", "Get-Location")
+    } else {
+        ("bash", "pwd")
+    };
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
         .respond_with(Script {
             bodies: vec![
-                tool_turn(&[("call_process", "bash", serde_json::json!({"command": "ls"}))]),
-                text_turn("safe process complete"),
+                tool_turn(&[
+                    ("call_first", shell, serde_json::json!({"command": command})),
+                    (
+                        "call_second",
+                        shell,
+                        serde_json::json!({"command": command}),
+                    ),
+                ]),
+                text_turn("approved process complete"),
             ],
             next: AtomicUsize::new(0),
         })
@@ -7170,9 +7227,9 @@ async fn controlled_safe_bash_approval_profile_needs_confirmation() {
         client: AiClient::new(),
         model: scripted_model(&server.uri()),
         session: Session::create(session_dir.path().join("session.jsonl")).unwrap(),
-        system: "safe bash test".into(),
+        system: "shell exact approval test".into(),
         sandbox,
-        effect_broker: EffectBroker::new(EffectPolicy::ControlledBashApproval),
+        effect_broker: EffectBroker::new(policy),
         extensions,
         max_turns: Some(4),
         reasoning: ReasoningConfig::Off,
@@ -7184,21 +7241,34 @@ async fn controlled_safe_bash_approval_profile_needs_confirmation() {
 
     let mut run = agent.prompt("run a read-only command").await.unwrap();
     let mut approvals = 0usize;
-    while let Some(event) = run.next().await {
-        if let AgentEvent::ToolProgress {
-            progress: octet_agent::ToolProgress::Confirmation(request),
-            ..
-        } = &event
-        {
-            approvals += 1;
-            request.clone().respond(true);
+    let mut succeeded = 0usize;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(event) = run.next().await {
+            match event {
+                AgentEvent::ToolProgress {
+                    progress: octet_agent::ToolProgress::Confirmation(request),
+                    ..
+                } => {
+                    assert_eq!(before.load(Ordering::SeqCst), approvals);
+                    approvals += 1;
+                    request.respond(true);
+                }
+                AgentEvent::ToolFinished { result: Ok(_), .. } => succeeded += 1,
+                _ => {}
+            }
         }
-    }
+    })
+    .await
+    .expect("bounded approved shell calls");
     drop(run);
 
-    assert_eq!(approvals, 1);
-    assert_eq!(before.load(Ordering::SeqCst), 1);
-    assert_eq!(after.load(Ordering::SeqCst), 1);
+    assert_eq!(succeeded, 2);
+    assert_eq!(
+        approvals, 2,
+        "identical commands still need separate approvals"
+    );
+    assert_eq!(before.load(Ordering::SeqCst), 2);
+    assert_eq!(after.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

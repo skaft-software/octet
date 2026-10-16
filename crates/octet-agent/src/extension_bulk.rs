@@ -340,8 +340,18 @@ impl BulkStore {
         {
             return Err(BulkError::QuotaExceeded);
         }
+        #[cfg(unix)]
         let root_lock = secure_fs::open_private_directory_for_lock(root)?;
+        // LockFileEx cannot lock directories. This stable owner-private file
+        // must not be removed at drop: unlinking a lock permits split owners.
+        #[cfg(not(unix))]
+        let root_lock = {
+            secure_fs::create_private_directory_all(root)?;
+            secure_fs::open_private_lock_file(&root.join(".octet-bulk.lock"))?
+        };
         fs2::FileExt::try_lock_exclusive(&root_lock)?;
+        #[cfg(not(unix))]
+        secure_fs::validate_private_lock_after_acquire(&root.join(".octet-bulk.lock"), &root_lock)?;
         let transfer = Arc::new(Directory(secure_fs::create_bound_private_directory(
             root,
             "bulk-transfer",

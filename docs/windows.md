@@ -290,12 +290,11 @@ The command travels as UTF-16LE base64, so quotes, `$`, backticks and newlines
 are never re-quoted, and a short prelude sets `[Console]::OutputEncoding` and
 `$OutputEncoding` to UTF-8 so output decodes the same under both versions.
 
-Approval is the same as for `bash`, with one difference: under
-`--effect-policy controlled` every `powershell` call asks first, because the
-known-safe command list parses only Bash syntax. Under `unsafe_host` (the
-default) and `controlled_bash_approval`/`--safe-mode` the two shells behave
-identically. `--no-process`, `--no-shell` and `--exclude-tools powershell`
-remove it.
+Approval is identical for both shells: `controlled` and
+`controlled_bash_approval`/`--safe-mode` require exact one-shot approval for every
+call. `unsafe_host` (the default) requires none. There is no command-name or
+syntax-based auto-approval. `--no-process`, `--no-shell` and
+`--exclude-tools powershell` remove it.
 
 ### Using Bash on Windows instead
 
@@ -362,6 +361,19 @@ starts, and is supervised, exactly as on other platforms. Dogfood codemode
 bundles instead contain native `bin/codemode.exe`; the Pi adapter uses Node
 22.19+ and its bundled dependencies. Neither installation nor extraction enables
 an extension or authorizes Pi factory execution.
+
+### Bulk-object storage boundary
+
+Ephemeral bulk-object transport uses a stable owner-private `.octet-bulk.lock`
+file on Windows; a directory handle cannot be locked with `LockFileEx`. The lock
+file remains after closing a persistent root so reopening cannot split ownership.
+Payloads and leases still clean up independently. Unix retains directory locking.
+
+Durable bulk retention/recovery across host restart is **not qualified on Windows**:
+the directory-sync path can fail with `storage_unavailable`. Do not interpret
+successful temporary transport or root locking as durable-retention support.
+The file-replacement interruption gap above also remains unresolved. Native
+GNU tests do not qualify an MSVC archive or attended desktop behavior.
 
 ## Computer use
 
