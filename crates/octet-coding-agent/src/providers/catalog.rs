@@ -490,7 +490,9 @@ mod tests {
     fn static_gemini_thinking_levels_match_the_pinned_provider_metadata() {
         use super::super::models::{GOOGLE_MODELS, OPENCODE_GO_MODELS, OPENCODE_MODELS};
         // Native Gemini and Vertex have no models.dev entry of their own;
-        // OpenRouter's Google entries carry the same model-owned levels.
+        // OpenRouter's Google entries carry the same enabled model-owned levels.
+        // OpenRouter's `none` represents Off, not a native Gemini thinkingLevel;
+        // compare every enabled level exactly without importing that control.
         let mut checked = 0;
         for (provider, prefix, models) in [
             ("openrouter", "google/", GOOGLE_MODELS),
@@ -518,7 +520,9 @@ mod tests {
                             .as_array()
                             .unwrap()
                             .iter()
-                            .map(|value| value.as_str().unwrap().to_owned())
+                            .map(|value| value.as_str().unwrap())
+                            .filter(|value| provider != "openrouter" || *value != "none")
+                            .map(str::to_owned)
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_else(|| panic!("{provider}/{key} has no pinned effort levels"));
