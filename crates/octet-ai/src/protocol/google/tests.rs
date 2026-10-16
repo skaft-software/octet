@@ -327,14 +327,13 @@ fn argument_update_reserves_before_mutating_the_retained_object() {
         ResponseBuilder::new(model().spec.id.clone(), Protocol::GoogleGenerativeAi, None);
     let mut events = Vec::new();
     let call = |args| GoogleFunctionCall {
-        id: None,
+        id: Some("call_1".to_owned()),
         name: "read".to_owned(),
         args,
     };
     decode_google_function_call(
         &mut events,
         &mut builder,
-        0,
         call(serde_json::json!({"path": "a"})),
         None,
     )
@@ -349,7 +348,6 @@ fn argument_update_reserves_before_mutating_the_retained_object() {
         decode_google_function_call(
             &mut events,
             &mut builder,
-            0,
             call(serde_json::json!({"line": 2})),
             None
         ),
@@ -397,6 +395,201 @@ fn merges_cumulative_function_arguments_before_finish() {
         response.message.content.as_slice(),
         [AssistantPart::ToolCall(call)] if call.arguments_json == r#"{"line":2,"path":"a"}"#
     ));
+}
+
+#[test]
+fn parallel_calls_in_separate_chunks_keep_their_identity_arguments_and_signatures() {
+    for ids in [Some(["call_1", "call_2"]), None, Some(["", ""])] {
+        let stream_model = model_with_api_name("gemini-4-argon-contributor");
+        let mut builder = ResponseBuilder::new(
+            stream_model.spec.id.clone(),
+            Protocol::GoogleGenerativeAi,
+            None,
+        );
+        let mut events = Vec::new();
+        for (position, (name, args, signature)) in [
+            ("read", serde_json::json!({"path": "first.txt"}), "sig-1"),
+            ("bash", serde_json::json!({"command": "pwd"}), "sig-2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut call = serde_json::json!({"name": name, "args": args});
+            if let Some(ids) = ids {
+                call["id"] = ids[position].into();
+            }
+            let frame = SseEvent {
+                event: None,
+                data: serde_json::json!({"candidates": [{"content": {"parts": [{
+                    "functionCall": call, "thoughtSignature": signature
+                }]}}]})
+                .to_string(),
+            };
+            events.extend(decode_stream_event(&stream_model, &frame, &mut builder).unwrap());
+        }
+        let terminal = SseEvent {
+            event: None,
+            data: r#"{"candidates":[{"finishReason":"STOP"}]}"#.into(),
+        };
+        events.extend(decode_stream_event(&stream_model, &terminal, &mut builder).unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ToolCallStart { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ToolCallEnd { .. }))
+                .count(),
+            2
+        );
+        let response = events
+            .into_iter()
+            .find_map(|event| match event {
+                StreamEvent::Finished(response) => Some(response),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        let [AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature: first_signature,
+        }), AssistantPart::ToolCall(first), AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature: second_signature,
+        }), AssistantPart::ToolCall(second)] = response.message.content.as_slice()
+        else {
+            panic!("expected two signed calls: {response:?}");
+        };
+        assert_eq!(first_signature, "sig-1");
+        assert_eq!(second_signature, "sig-2");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.name, "read");
+        assert_eq!(first.arguments_json, r#"{"path":"first.txt"}"#);
+        assert_eq!(second.name, "bash");
+        assert_eq!(second.arguments_json, r#"{"command":"pwd"}"#);
+        if let Some(ids) = ids.filter(|ids| !ids[0].is_empty()) {
+            assert_eq!(first.id.0, ids[0]);
+            assert_eq!(second.id.0, ids[1]);
+        }
+    }
+}
+
+#[test]
+fn cumulative_call_snapshots_follow_ids_not_chunk_positions() {
+    let stream_model = model();
+    let mut builder = ResponseBuilder::new(
+        stream_model.spec.id.clone(),
+        Protocol::GoogleGenerativeAi,
+        None,
+    );
+    let first = SseEvent {
+        event: None,
+        data: r#"{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"read","args":{"path":"a"}}},{"functionCall":{"id":"call_2","name":"read","args":{"path":"b"}}}]}}]}"#.into(),
+    };
+    let last = SseEvent {
+        event: None,
+        data: r#"{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_2","name":"read","args":{"path":"b","line":2}}},{"functionCall":{"id":"call_1","name":"read","args":{"path":"a","line":1}}}]},"finishReason":"STOP"}]}"#.into(),
+    };
+    decode_stream_event(&stream_model, &first, &mut builder).unwrap();
+    let events = decode_stream_event(&stream_model, &last, &mut builder).unwrap();
+    let response = events
+        .into_iter()
+        .find_map(|event| match event {
+            StreamEvent::Finished(response) => Some(response),
+            _ => None,
+        })
+        .unwrap();
+    let [AssistantPart::ToolCall(first), AssistantPart::ToolCall(second)] =
+        response.message.content.as_slice()
+    else {
+        panic!("expected two calls");
+    };
+    assert_eq!(first.id.0, "call_1");
+    assert_eq!(first.arguments_json, r#"{"line":1,"path":"a"}"#);
+    assert_eq!(second.id.0, "call_2");
+    assert_eq!(second.arguments_json, r#"{"line":2,"path":"b"}"#);
+}
+
+#[test]
+fn rejects_a_tool_name_change_for_the_same_call_id() {
+    let mut builder =
+        ResponseBuilder::new(model().spec.id.clone(), Protocol::GoogleGenerativeAi, None);
+    let mut events = Vec::new();
+    for (name, should_succeed) in [("read", true), ("bash", false)] {
+        let result = decode_google_function_call(
+            &mut events,
+            &mut builder,
+            GoogleFunctionCall {
+                id: Some("call_1".into()),
+                name: name.into(),
+                args: serde_json::json!({}),
+            },
+            None,
+        );
+        if should_succeed {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result,
+                Err(AiError::Decode(DecodeError::InvalidProviderField(_)))
+            ));
+        }
+    }
+}
+
+#[test]
+fn idless_identical_calls_are_not_deduplicated() {
+    let stream_model = model();
+    let mut builder = ResponseBuilder::new(
+        stream_model.spec.id.clone(),
+        Protocol::GoogleGenerativeAi,
+        None,
+    );
+    let frame = SseEvent {
+        event: None,
+        data: r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{}}},{"functionCall":{"name":"read","args":{}}}]}}]}"#.into(),
+    };
+    for _ in 0..2 {
+        decode_stream_event(&stream_model, &frame, &mut builder).unwrap();
+    }
+    assert_eq!(builder.tool_call_builders.len(), 4);
+    let ids = builder
+        .tool_call_builders
+        .values()
+        .map(|call| &call.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 4);
+}
+
+#[test]
+fn calls_across_chunks_still_enforce_the_response_part_limit() {
+    for with_id in [false, true] {
+        let mut builder =
+            ResponseBuilder::new(model().spec.id.clone(), Protocol::GoogleGenerativeAi, None);
+        let mut events = Vec::new();
+        for position in 0..=crate::stream::MAX_RESPONSE_PARTS {
+            let result = decode_google_function_call(
+                &mut events,
+                &mut builder,
+                GoogleFunctionCall {
+                    id: with_id.then(|| format!("call_{position}")),
+                    name: "read".into(),
+                    args: serde_json::json!({}),
+                },
+                None,
+            );
+            if position < crate::stream::MAX_RESPONSE_PARTS {
+                result.unwrap();
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AiError::Decode(DecodeError::TooManyResponseParts))
+                ));
+            }
+        }
+    }
 }
 
 #[test]
