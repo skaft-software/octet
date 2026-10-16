@@ -6,12 +6,12 @@
 
 ## Install native binaries
 
-Native v0.9.4 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
+Native v0.9.5 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
 and Windows x86-64 (MSVC, preview). Use the version-pinned
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.9.4)
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.9.5)
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
-The [v0.9.4 notes](releases/v0.9.4.md) separate shipped scope from unqualified
+The [v0.9.5 notes](releases/v0.9.5.md) separate shipped scope from unqualified
 acceptance. The experimental Pi compatibility extension is not shipped.
 
 Windows support is a preview. On Windows x86-64, download the version-matched `install-octet.ps1` from that
@@ -21,8 +21,8 @@ qualification is separate from GNU test builds.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.9.4/install-octet.sh | sh
-octet --version   # octet 0.9.4
+  https://github.com/skaft-software/octet/releases/download/v0.9.5/install-octet.sh | sh
+octet --version   # octet 0.9.5
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data stay
@@ -33,14 +33,14 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
-**v0.9.4 is not yet published to npm.**
+**v0.9.5 is not yet published to npm.**
 
 After approved npm publication, Node.js can install the same signed platform
 package on macOS Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64:
 
 ```sh
-npm install -g @skaft/octet@0.9.4
-octet --version   # octet 0.9.4
+npm install -g @skaft/octet@0.9.5
+octet --version   # octet 0.9.5
 ```
 
 This installs the `@skaft/octet` launcher plus the matching platform package
@@ -49,9 +49,9 @@ This installs the `@skaft/octet` launcher plus the matching platform package
 from the same verified
 release assets as the native installer. The launcher has no install-time
 lifecycle scripts. To pin an exact version instead of tracking `latest`, use
-`npm install -g @skaft/octet@0.9.4` ([distribution](distribution.md)). npm
+`npm install -g @skaft/octet@0.9.5` ([distribution](distribution.md)). npm
 publication is separate from native publication; do not use this command until
-v0.9.4 registry publication and provenance are recorded on the release page.
+v0.9.5 registry publication and provenance are recorded on the release page.
 See [Windows](windows.md) for native versus unsigned test-build boundaries. [Distribution channels](distribution.md) has the exact
 boundaries. The [historical Ygg
 instructions](reference/historical-installation.md) describe older releases, not
@@ -109,7 +109,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.9.4. Check `octet --version`, and use matching
+This checkout targets octet 0.9.5. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -135,7 +135,7 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles are pinned to
-the host version. After publication, install assets matching octet `0.9.4` from
+the host version. After publication, install assets matching octet `0.9.5` from
 its version-pinned release. Until then, run reviewed source extensions from this
 checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
 
@@ -170,12 +170,12 @@ reference](cli.md#packages).
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 
 The five shipped executable-bundle manifests declare API `0.4`, distribution version
-`0.9.4`, and require octet `=0.9.4`. Older bundles stay pinned to their host.
+`0.9.5`, and require octet `=0.9.5`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.
 Generated contract bindings alone aren't a process runtime. `octet-pi-compat`
-is source-only experimental work and is excluded from the v0.9.4 catalog;
+is source-only experimental work and is excluded from the v0.9.5 catalog;
 previously installed experimental copies are not automatically removed.
 
 ## Container

@@ -1,12 +1,12 @@
 # Distribution channels
 
-The octet 0.9.4 release's [version-pinned GitHub page](https://github.com/skaft-software/octet/releases/tag/v0.9.4)
+The octet 0.9.5 release's [version-pinned GitHub page](https://github.com/skaft-software/octet/releases/tag/v0.9.5)
 records immutable native assets, signatures, exact-source qualification and
-actual channel availability. The [release notes](releases/v0.9.4.md) distinguish
+actual channel availability. The [release notes](releases/v0.9.5.md) distinguish
 shipped scope from unrun acceptance. Pi compatibility is excluded: the release
 catalog contains five optional executable bundles, not the experimental adapter.
 
-The planned npm channel is `@skaft/octet@0.9.4` (launcher plus four signed platform
+The planned npm channel is `@skaft/octet@0.9.5` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels. Native publication does not publish them.
 
@@ -17,7 +17,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-This release's distribution target is **0.9.4**. The distribution version does not
+This release's distribution target is **0.9.5**. The distribution version does not
 change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
@@ -31,7 +31,7 @@ channel evidence.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and five shipped executable-bundle distribution versions | `0.9.4`; installed compatibility `requires_octet = "=0.9.4"` |
+| Product, SDK and five shipped executable-bundle distribution versions | `0.9.5`; installed compatibility `requires_octet = "=0.9.5"` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -43,7 +43,7 @@ supported wire, and the generated `0.3` types aren't a complete `0.3` process
 runtime. The minimal canonical process example and independent Aider adapter
 keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter remains
 experimental source-only work; neither its stock bundle nor configured local
-bridge is shipped in v0.9.4. Renaming
+bridge is shipped in v0.9.5. Renaming
 first-party wire fields such as `octet_version` doesn't renumber APIs or keep
 old-name aliases. Historical releases, measurements, upstream copyrights, Pi
 pins, independent example versions and mismatch fixtures keep their original
@@ -71,20 +71,20 @@ Cargo can build the published canonical tag's exact source (Rust 1.88+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.9.4 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.9.5 --bins octet-coding-agent
 ```
 
-Use this command only after the canonical `v0.9.4` tag is published.
+Use this command only after the canonical `v0.9.5` tag is published.
 `cargo install octet` and registry-based `cargo install octet-coding-agent`
 aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.9.4 is not published to npm.** Only
+and registry provenance verification. **0.9.5 is not published to npm.** Only
 after verified publication, pin the version to reproduce one exact release:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.4
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.5
 ```
 
 `npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
@@ -205,9 +205,9 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 ## Other channels
 
-The planned v0.9.4 version-pinned shell installer targets macOS arm64 and x64 and
+The planned v0.9.5 version-pinned shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
-Windows x86-64 and would publish as `@skaft/octet@0.9.4`. See the [npm release
+Windows x86-64 and would publish as `@skaft/octet@0.9.5`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

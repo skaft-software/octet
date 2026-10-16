@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Exact-version 0.9.4 release tooling. Published assets must match this version.
+# Exact-version 0.9.5 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.9.4"
+version="0.9.5"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -357,10 +357,10 @@ identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.ps1",
     "install-octet.sh",
-    "octet-0.9.4-aarch64-apple-darwin.tar.gz",
-    "octet-0.9.4-x86_64-apple-darwin.tar.gz",
-    "octet-0.9.4-x86_64-pc-windows-msvc.zip",
-    "octet-0.9.4-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.9.5-aarch64-apple-darwin.tar.gz",
+    "octet-0.9.5-x86_64-apple-darwin.tar.gz",
+    "octet-0.9.5-x86_64-pc-windows-msvc.zip",
+    "octet-0.9.5-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
