@@ -91,7 +91,9 @@ archive, path and trust checks are still required.
 ## Update and release notes
 
 Run `octet update` to update through the channel that installed the binary, then
-restart octet. `octet update --check` checks without installing. Starting an
+restart octet. On Windows, an `install-octet.ps1` installation in its default
+`%LOCALAPPDATA%\Programs\octet\bin` directory is updated by re-running the
+version-pinned PowerShell installer. `octet update --check` checks without installing. Starting an
 interactive session also makes one quiet, bounded release check unless
 `--offline` is set. A newer stable release adds an `octet update` hint to the
 splash, or a single notice at the live tail if the splash is already in history.

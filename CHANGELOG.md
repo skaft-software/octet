@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `octet update` on Windows recognizes an `install-octet.ps1` installation and
+  updates it by re-running the version-pinned PowerShell installer. It reported
+  that it could not detect the install method and suggested the Unix `curl | sh`
+  installer.
+
 ## [0.9.4] - 2026-10-15
 
 The [release notes](docs/releases/v0.9.4.md) record shipped scope, qualification
