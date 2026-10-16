@@ -431,7 +431,9 @@ impl PtyOctet {
                     }
                     text.push_str("\nMOUSE-WRAPPED ");
                     text.push_str(&"wrapped Unicode 界é text ".repeat(12));
-                    text.push_str("\n\nMOUSE-END\n");
+                    text.push_str(
+                        "\n\nMOUSE-END [LINK-PROBE](https://example.test/docs?x=1&y=2)\n",
+                    );
                     session
                         .append(octet_agent::EntryValue::Message(
                             octet_ai::Message::Assistant(octet_ai::AssistantMessage {
@@ -536,6 +538,22 @@ impl PtyOctet {
             StartupFixture::MouseHistory => {
                 command.args(["--model", "custom/probe", "--theme", "dark", "--continue"]);
                 command.env("SSH_CONNECTION", "192.0.2.1 12345 192.0.2.2 22");
+                // Exercise rendered OSC 8 links under a link-capable profile.
+                command.env("TERM", "xterm-ghostty");
+                // Observe browser handoff without opening a real page or changing
+                // the test runner's environment. Clipboard transport remains OSC 52.
+                let bin = home.join("bin");
+                fs::create_dir_all(&bin).unwrap();
+                for name in ["open", "xdg-open"] {
+                    let opener = bin.join(name);
+                    fs::write(
+                        &opener,
+                        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/link-activations\"\n",
+                    )
+                    .unwrap();
+                    fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
             }
             StartupFixture::Changelog { model, initial } => {
                 command.args(["--theme", "dark"]);

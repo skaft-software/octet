@@ -34,9 +34,9 @@ fn generated_pricing_is_provider_scoped_and_integer_based() {
     // generator scales those to integer micro-units.
     let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
         .expect("provider-specific snapshot price");
-    assert_eq!(routed.input, TokenRate(388_368));
-    assert_eq!(routed.output, TokenRate(776_736));
-    assert_eq!(routed.cache_read, TokenRate(32_364));
+    assert_eq!(routed.input, TokenRate(347_826));
+    assert_eq!(routed.output, TokenRate(695_652));
+    assert_eq!(routed.cache_read, TokenRate(28_986));
     assert_eq!(routed.reasoning, None);
     assert!(model_pricing("openai", "gpt-5.6").is_none());
     assert!(model_pricing("openai", "gpt-5.6-sol").is_some());
