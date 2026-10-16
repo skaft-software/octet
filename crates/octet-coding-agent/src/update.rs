@@ -279,6 +279,9 @@ pub(crate) enum InstallMethod {
     /// The version-pinned installer placed the binaries under a prefix whose
     /// documentation tree is still present.
     Installer { bin_dir: PathBuf },
+    /// The version-pinned `install-octet.ps1` placed the binaries in its
+    /// default Windows directory, `%LOCALAPPDATA%\Programs\octet\bin`.
+    WindowsInstaller { bin_dir: PathBuf },
     /// `cargo install` from the octet git repository.
     Cargo,
     /// A validated global npm installation of the public launcher and a
@@ -299,6 +302,8 @@ pub(crate) enum InstallMethod {
 pub(crate) enum UpdateAction {
     /// Re-run the version-pinned installer for the target release.
     Installer { version: semver::Version },
+    /// Re-run the version-pinned PowerShell installer for the target release.
+    WindowsInstaller { version: semver::Version },
     /// Reinstall the target release from the octet git repository.
     Cargo { version: semver::Version },
     /// Install the exact public npm package version globally without running
@@ -315,6 +320,9 @@ impl UpdateAction {
     ) -> Option<UpdateAction> {
         match method {
             InstallMethod::Installer { .. } => Some(Self::Installer {
+                version: version.clone(),
+            }),
+            InstallMethod::WindowsInstaller { .. } => Some(Self::WindowsInstaller {
                 version: version.clone(),
             }),
             InstallMethod::Cargo => Some(Self::Cargo {
@@ -335,6 +343,16 @@ impl UpdateAction {
                 vec![
                     OsString::from("-c"),
                     OsString::from(install_script(&version.to_string())),
+                ],
+            ),
+            Self::WindowsInstaller { version } => (
+                OsString::from("powershell"),
+                vec![
+                    OsString::from("-NoProfile"),
+                    OsString::from("-ExecutionPolicy"),
+                    OsString::from("Bypass"),
+                    OsString::from("-Command"),
+                    OsString::from(windows_install_script(&version.to_string())),
                 ],
             ),
             Self::Cargo { version } => (
@@ -362,6 +380,7 @@ impl UpdateAction {
     pub(crate) fn command_str(&self) -> String {
         match self {
             Self::Installer { version } => install_script(&version.to_string()),
+            Self::WindowsInstaller { version } => windows_install_script(&version.to_string()),
             Self::Cargo { version } => format!(
                 "cargo install --locked --git {REPOSITORY} --tag v{version} --bins octet-coding-agent"
             ),
@@ -400,6 +419,16 @@ fn install_script(version: &str) -> String {
     )
 }
 
+/// The version-pinned PowerShell installer invocation for a release. It
+/// downloads the script to a file and runs it with `-File`, because the
+/// script's `[CmdletBinding()]` parameter block cannot be piped to
+/// `Invoke-Expression`.
+fn windows_install_script(version: &str) -> String {
+    format!(
+        "$s = Join-Path $env:TEMP 'install-octet.ps1'; Invoke-WebRequest -UseBasicParsing -Uri {RELEASE_DOWNLOAD_BASE}/v{version}/install-octet.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s -Version {version}; Remove-Item $s"
+    )
+}
+
 /// Environment inputs for install-method detection, separated from process
 /// state so detection is deterministic in tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -412,6 +441,8 @@ pub(crate) struct InstallEnvironment {
     install_dir: Option<PathBuf>,
     /// Override for the installer data directory.
     data_dir: Option<PathBuf>,
+    /// The default `install-octet.ps1` target directory. Only set on Windows.
+    windows_install_dir: Option<PathBuf>,
     /// The exact root returned by `npm root -g`; injected in tests so layout
     /// detection itself never needs to spawn a process.
     npm_root: Option<PathBuf>,
@@ -430,6 +461,11 @@ impl InstallEnvironment {
             data_dir: std::env::var_os("OCTET_DATA_DIR")
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute()),
+            windows_install_dir: cfg!(windows)
+                .then(dirs::data_local_dir)
+                .flatten()
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("Programs").join("octet").join("bin")),
             npm_root: None,
         }
     }
@@ -452,6 +488,9 @@ pub(crate) fn detect_install_method(exe: &Path) -> InstallMethod {
     {
         return InstallMethod::Installer { bin_dir };
     }
+    if windows_installer_target_matches(&bin_dir, &environment) {
+        return InstallMethod::WindowsInstaller { bin_dir };
+    }
     if is_cargo_bin_dir(&bin_dir, &environment) {
         return InstallMethod::Cargo;
     }
@@ -470,6 +509,9 @@ pub(crate) fn detect_install_method_in(exe: &Path, env: &InstallEnvironment) -> 
     };
     if installer_docs_present(&bin_dir, env) && installer_target_matches(&bin_dir, env) {
         return InstallMethod::Installer { bin_dir };
+    }
+    if windows_installer_target_matches(&bin_dir, env) {
+        return InstallMethod::WindowsInstaller { bin_dir };
     }
     if is_cargo_bin_dir(&bin_dir, env) {
         return InstallMethod::Cargo;
@@ -903,6 +945,14 @@ fn installer_target_matches(bin_dir: &Path, env: &InstallEnvironment) -> bool {
         .is_some_and(|target| same_directory(bin_dir, target))
 }
 
+/// `install-octet.ps1` installs no documentation tree, so its default target
+/// directory alone identifies it. The directory is octet-specific.
+fn windows_installer_target_matches(bin_dir: &Path, env: &InstallEnvironment) -> bool {
+    env.windows_install_dir
+        .as_ref()
+        .is_some_and(|target| same_directory(bin_dir, target))
+}
+
 /// Treats two directories as equal via canonicalized paths when both exist,
 /// falling back to raw comparison when either side cannot be canonicalized
 /// (a missing directory must not equal another missing directory).
@@ -970,7 +1020,11 @@ fn manual_update_hint(method: &InstallMethod, latest: &semver::Version) -> Strin
         ),
         InstallMethod::Unknown => format!(
             "could not detect how this octet was installed; update manually:\n  {}\nSee {REPOSITORY}#install",
-            install_script(&latest.to_string())
+            if cfg!(windows) {
+                windows_install_script(&latest.to_string())
+            } else {
+                install_script(&latest.to_string())
+            }
         ),
         _ => unreachable!("methods with an update action do not need manual instructions"),
     }
@@ -988,6 +1042,9 @@ async fn run_update(
     progress::banner(latest, &format!("Updating from v{current}"));
     let status = match action {
         UpdateAction::Installer { version } => run_installer(version).await?,
+        UpdateAction::WindowsInstaller { version } => {
+            run_windows_installer(version, &executable).await?
+        }
         UpdateAction::Cargo { .. } | UpdateAction::Npm { .. } => {
             let (program, args) = action.command_args();
             let mut command = tokio::process::Command::new(&program);
@@ -1076,6 +1133,150 @@ async fn run_installer(version: &semver::Version) -> anyhow::Result<std::process
         .status()
         .await
         .context("failed to run the version-pinned installer")
+}
+
+/// Windows refuses to overwrite a running executable but allows renaming it, so
+/// the running binaries move aside before `install-octet.ps1` copies the new
+/// ones in, and move back if the installer fails.
+async fn run_windows_installer(
+    version: &semver::Version,
+    executable: &Path,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let url = format!("{RELEASE_DOWNLOAD_BASE}/v{version}/install-octet.ps1");
+    let mut download = tokio::process::Command::new("curl");
+    download
+        .args([
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--location",
+            "--max-redirs",
+            "5",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "300",
+            "--max-filesize",
+            "262144",
+            "--output",
+            "-",
+        ])
+        .arg(&url);
+    let script = progress::Activity::new("Downloading installer")
+        .wait(download_installer_script(
+            &mut download,
+            &url,
+            Duration::from_secs(300),
+        ))
+        .await?;
+    // PowerShell runs scripts from a `.ps1` path, so this is a private
+    // directory that is removed on drop rather than an unnamed file.
+    let directory = tempfile::tempdir()?;
+    let installer = directory.path().join("install-octet.ps1");
+    std::fs::write(&installer, &script)?;
+
+    let bin_dir = executable
+        .parent()
+        .context("could not locate the installed octet directory")?;
+    let moved = move_running_binaries_aside(bin_dir)?;
+    let status = tokio::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&installer)
+        .arg("-Version")
+        .arg(version.to_string())
+        .arg("-InstallDirectory")
+        .arg(bin_dir)
+        .kill_on_drop(true)
+        .status()
+        .await
+        .context("failed to run the version-pinned installer");
+    if !matches!(&status, Ok(status) if status.success()) {
+        restore_moved_binaries(&moved);
+    }
+    status
+}
+
+const WINDOWS_BINARIES: [&str; 2] = ["octet.exe", "octet-host.exe"];
+
+/// Renames each installed binary aside so the installer can write its
+/// replacement. Sessions already running keep their image under the new name.
+/// Returns the moves made.
+fn move_running_binaries_aside(bin_dir: &Path) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
+    remove_stale_binaries(bin_dir);
+    let mut moved = Vec::new();
+    for name in WINDOWS_BINARIES {
+        let current = bin_dir.join(name);
+        if !current.is_file() {
+            continue;
+        }
+        let aside = unused_aside_path(bin_dir, name);
+        if let Err(error) = std::fs::rename(&current, &aside) {
+            restore_moved_binaries(&moved);
+            return Err(error).with_context(|| {
+                format!(
+                    "could not move {} aside for the update; close other octet sessions and retry",
+                    current.display()
+                )
+            });
+        }
+        moved.push((current, aside));
+    }
+    Ok(moved)
+}
+
+/// Deletes binaries moved aside by earlier updates. A session started before
+/// such an update may still be running one, which Windows refuses to delete;
+/// that file is left for a later update.
+fn remove_stale_binaries(bin_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(bin_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if WINDOWS_BINARIES.iter().any(|name| {
+            file_name
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(".old"))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        }) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `<name>.old`, or `<name>.old-<n>` when a running earlier generation still
+/// holds that name.
+fn unused_aside_path(bin_dir: &Path, name: &str) -> PathBuf {
+    let mut aside = bin_dir.join(format!("{name}.old"));
+    let mut suffix = 1u32;
+    while aside.exists() {
+        aside = bin_dir.join(format!("{name}.old-{suffix}"));
+        suffix += 1;
+    }
+    aside
+}
+
+/// Puts moved binaries back where the installer did not write a replacement.
+fn restore_moved_binaries(moved: &[(PathBuf, PathBuf)]) {
+    for (current, aside) in moved {
+        if !current.exists() {
+            let _ = std::fs::rename(aside, current);
+        }
+    }
 }
 
 async fn download_installer_script(

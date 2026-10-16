@@ -930,6 +930,80 @@ fn refuses_installer_installation_that_the_installer_would_not_update() {
 }
 
 #[test]
+fn detects_windows_installer_installation_by_default_target() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = root.path().join("AppData/Local/Programs/octet/bin");
+    create_dir(&bin_dir);
+    let env = InstallEnvironment {
+        windows_install_dir: Some(bin_dir.clone()),
+        ..InstallEnvironment::default()
+    };
+    assert_eq!(
+        detect_install_method_in(&bin_dir.join("octet.exe"), &env),
+        InstallMethod::WindowsInstaller { bin_dir }
+    );
+
+    let elsewhere = root.path().join("tools");
+    create_dir(&elsewhere);
+    assert_eq!(
+        detect_install_method_in(&elsewhere.join("octet.exe"), &env),
+        InstallMethod::Unknown
+    );
+}
+
+#[test]
+fn moves_running_windows_binaries_aside_and_restores_them() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = root.path();
+    std::fs::write(bin_dir.join("octet.exe"), "new-old").unwrap();
+    std::fs::write(bin_dir.join("octet.exe.old"), "stale").unwrap();
+    std::fs::write(bin_dir.join("octet-host.exe"), "host").unwrap();
+
+    let moved = move_running_binaries_aside(bin_dir).unwrap();
+    assert_eq!(moved.len(), 2);
+    assert!(!bin_dir.join("octet.exe").exists());
+    assert!(!bin_dir.join("octet-host.exe").exists());
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("octet.exe.old")).unwrap(),
+        "new-old"
+    );
+
+    // A replacement the installer already wrote is kept.
+    std::fs::write(bin_dir.join("octet.exe"), "installed").unwrap();
+    restore_moved_binaries(&moved);
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("octet.exe")).unwrap(),
+        "installed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("octet-host.exe")).unwrap(),
+        "host"
+    );
+}
+
+#[test]
+fn moves_binaries_aside_past_a_stale_generation_that_cannot_be_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = root.path();
+    std::fs::write(bin_dir.join("octet.exe"), "current").unwrap();
+    std::fs::write(bin_dir.join("octet.exe.old-3"), "older").unwrap();
+    // Stands in for an earlier generation a running session still holds:
+    // a non-empty directory cannot be removed as a file.
+    create_dir(&bin_dir.join("octet.exe.old/held"));
+
+    let moved = move_running_binaries_aside(bin_dir).unwrap();
+    assert_eq!(
+        moved,
+        vec![(bin_dir.join("octet.exe"), bin_dir.join("octet.exe.old-1"))]
+    );
+    assert!(!bin_dir.join("octet.exe.old-3").exists());
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("octet.exe.old-1")).unwrap(),
+        "current"
+    );
+}
+
+#[test]
 fn detects_cargo_installation() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -1108,6 +1182,17 @@ fn maps_install_methods_to_update_actions() {
         })
     );
     assert_eq!(
+        UpdateAction::for_method(
+            &InstallMethod::WindowsInstaller {
+                bin_dir: bin_dir.clone()
+            },
+            &version
+        ),
+        Some(UpdateAction::WindowsInstaller {
+            version: version.clone()
+        })
+    );
+    assert_eq!(
         UpdateAction::for_method(&InstallMethod::Cargo, &version),
         Some(UpdateAction::Cargo {
             version: version.clone()
@@ -1158,6 +1243,17 @@ fn renders_documented_update_commands() {
             OsString::from(installer.command_str())
         ]
     );
+
+    let windows = UpdateAction::WindowsInstaller {
+        version: "0.5.0".parse().unwrap(),
+    };
+    assert_eq!(
+        windows.command_str(),
+        "$s = Join-Path $env:TEMP 'install-octet.ps1'; Invoke-WebRequest -UseBasicParsing -Uri https://github.com/skaft-software/octet/releases/download/v0.5.0/install-octet.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s -Version 0.5.0; Remove-Item $s"
+    );
+    let (program, args) = windows.command_args();
+    assert_eq!(program, OsString::from("powershell"));
+    assert_eq!(args.last(), Some(&OsString::from(windows.command_str())));
 
     let cargo = UpdateAction::Cargo {
         version: "0.5.0".parse().unwrap(),
