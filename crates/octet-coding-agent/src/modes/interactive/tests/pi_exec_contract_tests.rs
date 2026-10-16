@@ -109,7 +109,7 @@ impl crate::extensions::ExtensionConfirmationHandler for ExecPicker {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pi_exec_controlled_safe_runs_without_picker_and_risky_uses_exact_approval() {
+async fn pi_exec_controlled_requires_exact_approval_for_every_exec_without_shell_expansion() {
     let (directory, mut app) = pi_app_policy(
         r#"
 import { appendFileSync } from 'node:fs';
@@ -130,13 +130,16 @@ export default pi => {
         .execute_command_with_confirmation("safe", Vec::new(), &mut picker)
         .await
         .unwrap();
-    assert_eq!(picker.prompts, 0);
+    // Controlled policies never infer authority from command spelling, so even
+    // a plain argv exec needs its own exact approval. Its arguments still never
+    // reach a shell.
+    assert_eq!(picker.prompts, 1);
     assert!(!app.config.workspace.join("forbidden").exists());
     app.executable_extensions
         .execute_command_with_confirmation("risky", Vec::new(), &mut picker)
         .await
         .unwrap();
-    assert_eq!(picker.prompts, 1);
+    assert_eq!(picker.prompts, 2);
     assert!(app.config.workspace.join("approved").exists());
     let records: Vec<serde_json::Value> =
         std::fs::read_to_string(directory.path().join("trace.jsonl"))
