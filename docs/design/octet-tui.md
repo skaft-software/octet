@@ -444,9 +444,13 @@ to preserve the action name within the label cap. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 
-Bash headers retain the complete command in both disclosure modes and all themes,
-wrapping at whitespace where possible and hard-wrapping oversized graphemes by
-terminal cell width. Semantic copy preserves the command. Collapsed output keeps
+Bash and PowerShell headers wrap at whitespace where possible and hard-wrap
+oversized words by terminal cell width without splitting graphemes. Collapsed
+headers show up to six rendered command rows with an exact hidden-row count;
+Ctrl+O reveals the complete retained command. Generic tool headers retain their
+selected argument with newlines intact and use the same six-row preview, rather
+than truncating at a fixed character count. Semantic copy preserves the full
+sanitized input, never the raw argument envelope. Collapsed output keeps
 both its head and tail within the visual-row budget, with an exact omitted-middle
 count distinct from irrecoverable capture-byte loss. Local-shell output remains
 tail-only. The command is independent of the output budget.
