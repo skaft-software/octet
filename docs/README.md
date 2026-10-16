@@ -3,7 +3,7 @@
 octet is a fast, small coding host for cloud and local models. Extensions add
 tools and bounded, host-shaped integrations. They don't promise Pi execution
 parity or an everything-as-extension platform. These docs describe the octet
-**0.9.4** release. [Installation](installation.md) separates source builds from
+**0.9.5** release. [Installation](installation.md) separates source builds from
 version-pinned publication channels and their recorded qualification.
 
 ## Getting started
@@ -49,7 +49,7 @@ version-pinned publication channels and their recorded qualification.
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Pi extension adapter (source-only; not shipped in v0.9.4)](pi-compatibility.md)
+- [Pi extension adapter (source-only; not shipped in v0.9.5)](pi-compatibility.md)
 - [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 
 ## Development

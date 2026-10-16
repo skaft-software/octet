@@ -7111,7 +7111,7 @@ async fn assert_controlled_shell_denied(policy: EffectPolicy, command: &str) {
     let after = Arc::new(AtomicUsize::new(0));
     let mut extensions = ExtensionHost::new();
     // Explicit even on Windows: denial must precede shell resolution/execution.
-    extensions.tool(octet_agent::BashTool::default());
+    extensions.tool(octet_agent::BashTool);
     extensions.tool_call_hook(AdmissionHookProbe {
         before: Arc::clone(&before),
         after: Arc::clone(&after),
