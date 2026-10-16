@@ -1209,17 +1209,18 @@ async fn run_windows_installer(
 
 const WINDOWS_BINARIES: [&str; 2] = ["octet.exe", "octet-host.exe"];
 
-/// Renames each installed binary to `<name>.old`, replacing a leftover from an
-/// earlier update when that file is no longer running. Returns the moves made.
+/// Renames each installed binary aside so the installer can write its
+/// replacement. Sessions already running keep their image under the new name.
+/// Returns the moves made.
 fn move_running_binaries_aside(bin_dir: &Path) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
+    remove_stale_binaries(bin_dir);
     let mut moved = Vec::new();
     for name in WINDOWS_BINARIES {
         let current = bin_dir.join(name);
         if !current.is_file() {
             continue;
         }
-        let aside = bin_dir.join(format!("{name}.old"));
-        let _ = std::fs::remove_file(&aside);
+        let aside = unused_aside_path(bin_dir, name);
         if let Err(error) = std::fs::rename(&current, &aside) {
             restore_moved_binaries(&moved);
             return Err(error).with_context(|| {
@@ -1232,6 +1233,41 @@ fn move_running_binaries_aside(bin_dir: &Path) -> anyhow::Result<Vec<(PathBuf, P
         moved.push((current, aside));
     }
     Ok(moved)
+}
+
+/// Deletes binaries moved aside by earlier updates. A session started before
+/// such an update may still be running one, which Windows refuses to delete;
+/// that file is left for a later update.
+fn remove_stale_binaries(bin_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(bin_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if WINDOWS_BINARIES.iter().any(|name| {
+            file_name
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(".old"))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        }) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `<name>.old`, or `<name>.old-<n>` when a running earlier generation still
+/// holds that name.
+fn unused_aside_path(bin_dir: &Path, name: &str) -> PathBuf {
+    let mut aside = bin_dir.join(format!("{name}.old"));
+    let mut suffix = 1u32;
+    while aside.exists() {
+        aside = bin_dir.join(format!("{name}.old-{suffix}"));
+        suffix += 1;
+    }
+    aside
 }
 
 /// Puts moved binaries back where the installer did not write a replacement.

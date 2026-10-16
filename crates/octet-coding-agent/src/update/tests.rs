@@ -982,6 +982,28 @@ fn moves_running_windows_binaries_aside_and_restores_them() {
 }
 
 #[test]
+fn moves_binaries_aside_past_a_stale_generation_that_cannot_be_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = root.path();
+    std::fs::write(bin_dir.join("octet.exe"), "current").unwrap();
+    std::fs::write(bin_dir.join("octet.exe.old-3"), "older").unwrap();
+    // Stands in for an earlier generation a running session still holds:
+    // a non-empty directory cannot be removed as a file.
+    create_dir(&bin_dir.join("octet.exe.old/held"));
+
+    let moved = move_running_binaries_aside(bin_dir).unwrap();
+    assert_eq!(
+        moved,
+        vec![(bin_dir.join("octet.exe"), bin_dir.join("octet.exe.old-1"))]
+    );
+    assert!(!bin_dir.join("octet.exe.old-3").exists());
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("octet.exe.old-1")).unwrap(),
+        "current"
+    );
+}
+
+#[test]
 fn detects_cargo_installation() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
