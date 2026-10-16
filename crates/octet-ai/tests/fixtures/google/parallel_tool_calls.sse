@@ -1,0 +1,6 @@
+data: {"responseId":"parallel-google","candidates":[{"index":0,"content":{"parts":[{"functionCall":{"id":"call-paris","name":"lookup","args":{"city":"Paris"}},"thoughtSignature":"paris-signature"}]}}]}
+
+data: {"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"id":"call-berlin","name":"lookup","args":{"city":"Berlin"}},"thoughtSignature":"berlin-signature"}]}}]}
+
+data: {"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":8,"totalTokenCount":20}}
+
