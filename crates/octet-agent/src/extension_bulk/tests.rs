@@ -30,6 +30,13 @@ impl Drop for Hook {
 pub(super) fn fixture(limits: BulkLimits) -> (tempfile::TempDir, BulkStore, BulkParent) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
+    // Match the host's owner-private child convention on elevated Windows.
+    #[cfg(windows)]
+    let root = {
+        let root = root.join("store");
+        secure_fs::create_private_directory_all(&root).unwrap();
+        root
+    };
     let mut store = BulkStore::new(&root, limits).unwrap();
     let parent = BulkParent {
         owner: BulkOwner {
@@ -94,6 +101,25 @@ fn empty(store: &mut BulkStore) {
     assert!(store.durable_jobs.is_empty());
     assert_eq!(file_count(store.transfer_directory()), 0);
     assert_eq!(file_count(store.backing.0.path()), 0);
+}
+
+#[test]
+fn bulk_root_lock_is_exclusive_and_reusable_after_store_drop() {
+    let (_temp, store, _) = fixture(BulkLimits::default());
+    let root = store.root.clone();
+    assert!(matches!(
+        BulkStore::new(&root, BulkLimits::default()),
+        Err(BulkError::StorageUnavailable)
+    ));
+    drop(store);
+    let reopened = BulkStore::new(&root, BulkLimits::default()).unwrap();
+    assert!(matches!(
+        BulkStore::new(&root, BulkLimits::default()),
+        Err(BulkError::StorageUnavailable)
+    ));
+    drop(reopened);
+    #[cfg(not(unix))]
+    assert!(root.join(".octet-bulk.lock").is_file());
 }
 
 #[test]
@@ -758,12 +784,14 @@ fn bulk_limits_mime_and_digest_are_bounded() {
 
 #[test]
 fn bulk_store_drop_cleans_files_and_fences_inflight_copy() {
-    let (temp, mut store, parent) = fixture(BulkLimits::default());
+    let (_temp, mut store, parent) = fixture(BulkLimits::default());
+    let root = store.root.clone();
     let ticket = write_bytes(&mut store, &parent, b"abc");
     let job = store
         .prepare_commit(&parent, &ticket.ticket, 3, &digest(b"abc"))
         .unwrap();
     drop(store);
     assert_eq!(job.run().err(), Some(BulkError::Unavailable));
-    assert_eq!(file_count(temp.path()), 0);
+    // Windows retains its stable lock file, never payload/transfer files.
+    assert_eq!(file_count(&root), usize::from(cfg!(not(unix))));
 }

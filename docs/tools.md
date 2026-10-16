@@ -55,6 +55,13 @@ run one at a time, and results reach the model in the order it asked.
 | Block commands | `--no-process` or `--no-shell` |
 | Turn off every tool | `--no-tools` |
 
+The `edit` tool accepts LF or CRLF old/new text using the file's first line-ending
+convention (LF if it has no newline). Inserted lines use that convention; unmatched
+bytes, including a UTF-8 BOM and existing mixed endings, stay untouched. A mixed-ending
+region must match the selected convention. `read` and `edit` hashes always cover the
+original file bytes, not a line-ending-normalized view; `expected_hash` still rejects
+stale files before replacement.
+
 ## Optional JavaScript composition
 
 [octet-codemode](../extensions/octet-codemode/README.md) is a first-party octet
@@ -93,8 +100,8 @@ Pick a policy with `effect_policy`, `OCTET_EFFECT_POLICY` or `--effect-policy`:
 | Value | What happens |
 | --- | --- |
 | `unsafe_host` | The default. Full access for effects octet can classify. |
-| `controlled` | Workspace reads and pure calls run freely. File changes and bash calls not on the safe list ask first. Known-safe read-only bash calls may be auto-approved; `powershell` calls always ask, because the safe list only understands Bash syntax. Other effects are denied. |
-| `controlled_bash_approval` | File changes ask first, and **every** bash or powershell call asks first, once. Other effects are denied. |
+| `controlled` | Workspace reads and pure calls run freely. File changes and **every** bash or powershell call require exact one-shot approval. Command names or spelling never establish read-only authority. Other effects are denied. |
+| `controlled_bash_approval` | The safe-mode policy. The same exact shell and file-change approval requirement as `controlled`; other effects are denied. |
 
 Full access implicitly grants host authority to the executable extensions you
 select, but they stay **disabled by default** until you enable them. A grant

@@ -3,8 +3,8 @@
 //! The broker is deliberately host-owned: tools classify their effects in
 //! trusted Rust code, model arguments are canonicalized before policy is
 //! evaluated, and unknown classifications fail closed. This is an admission
-//! boundary, not an OS sandbox; process and extension effects remain denied by
-//! the controlled policy until an isolated execution backend exists.
+//! boundary, not an OS sandbox; controlled shell calls require exact approval,
+//! while other process and extension effects remain denied.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ pub const MAX_EFFECT_GRANTS: usize = 256;
 /// Maximum lifetime of an effect grant.
 pub const MAX_EFFECT_GRANT_TTL: Duration = Duration::from_secs(5 * 60);
 /// Version of the deterministic policy and canonical intent envelope.
-pub const EFFECT_POLICY_VERSION: u64 = 1;
+pub const EFFECT_POLICY_VERSION: u64 = 2;
 
 const APPROVED_EFFECT_GRANT_TTL: Duration = Duration::from_secs(60);
 const APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -97,12 +97,12 @@ impl ToolEffect {
 #[serde(rename_all = "snake_case")]
 pub enum EffectPolicy {
     /// Allow pure computation and workspace reads, require an exact one-shot
-    /// approval for workspace mutation and potentially auto-approved known-safe
-    /// `bash` process execution, and deny every other effect.
+    /// approval for workspace mutation and every shell call, and deny every
+    /// other effect. Command spelling never establishes read-only authority.
     #[default]
     Controlled,
-    /// A stricter `Controlled` mode where every `bash` process execution, even
-    /// known-safe commands, requires exact one-shot approval.
+    /// The policy selected by safe mode. Like `Controlled`, every shell call
+    /// and workspace mutation requires exact one-shot approval.
     ControlledBashApproval,
     /// Allow every authoritatively classified effect. Unknown tools still fail
     /// closed. This profile runs effects with the octet process's ambient OS
@@ -227,10 +227,6 @@ pub struct EffectIntent {
     confirmation_arguments: String,
     confirmation_detail: String,
     digest: [u8; 32],
-    /// `bash` command safety classification was conservative and precomputed
-    /// during construction so host-policy decisions stay deterministic without
-    /// reparsing command payloads.
-    bash_requires_approval: bool,
 }
 
 impl fmt::Debug for EffectIntent {
@@ -340,7 +336,6 @@ impl EffectIntent {
         let digest = streaming_digest(&envelope)?;
         let confirmation_arguments = approval_projection(&tool, arguments)?;
         let confirmation_detail = approval_human_detail(&tool, arguments)?;
-        let bash_requires_approval = requires_bash_host_process_approval(&tool, arguments);
 
         Ok(Self {
             principal,
@@ -352,7 +347,6 @@ impl EffectIntent {
             confirmation_arguments,
             confirmation_detail,
             digest,
-            bash_requires_approval,
         })
     }
 
@@ -384,10 +378,6 @@ impl EffectIntent {
     /// Host-owned effect classification.
     pub fn effect(&self) -> ToolEffect {
         self.effect
-    }
-
-    fn bash_requires_approval(&self) -> bool {
-        self.bash_requires_approval
     }
 
     /// Bounded, spoof-resistant argument projection included in confirmations.
@@ -761,12 +751,6 @@ impl EffectBroker {
         // `powershell` is the Windows default shell tool: it shares bash's
         // process authority and admission path, never a weaker one.
         let is_bash = matches!(intent.tool(), "bash" | "powershell");
-        let bash_requires_approval = match self.policy {
-            EffectPolicy::UnsafeHost => false,
-            EffectPolicy::ControlledBashApproval => is_bash,
-            EffectPolicy::Controlled => is_bash && intent.bash_requires_approval(),
-        };
-
         match self.policy {
             EffectPolicy::UnsafeHost => EffectRequirement::Allow,
             EffectPolicy::Controlled | EffectPolicy::ControlledBashApproval => {
@@ -783,11 +767,9 @@ impl EffectBroker {
                     ),
                     ToolEffect::HostProcess => {
                         if is_bash {
-                            if bash_requires_approval {
-                                EffectRequirement::Approval
-                            } else {
-                                EffectRequirement::Allow
-                            }
+                            // Neither an executable basename nor parsed shell
+                            // arguments prove the executed process is read-only.
+                            EffectRequirement::Approval
                         } else {
                             EffectRequirement::Deny(
                                 "native execution requires an OS or VM isolation backend"
@@ -816,27 +798,6 @@ impl Default for EffectBroker {
     fn default() -> Self {
         Self::new(EffectPolicy::Controlled)
     }
-}
-
-fn requires_bash_host_process_approval(tool: &str, arguments: &serde_json::Value) -> bool {
-    match tool {
-        "bash" => {}
-        // The known-safe analysis parses Bash syntax only. PowerShell commands
-        // are never auto-approved by it, so controlled mode always confirms.
-        "powershell" => return true,
-        _ => return false,
-    }
-    let Some(values) = arguments.as_object() else {
-        return true;
-    };
-    let Some(command) = values.get("command").and_then(serde_json::Value::as_str) else {
-        return true;
-    };
-    !is_known_safe_bash_command(command)
-}
-
-fn is_known_safe_bash_command(command: &str) -> bool {
-    crate::shell_safety::is_known_safe_bash_command(command)
 }
 
 #[derive(Debug)]
@@ -1434,7 +1395,7 @@ mod tests {
         );
         assert_eq!(
             left.digest(),
-            "6e66594192f9e608344971e73142af1d24335437dccef8b70d7f606c4d0afb67"
+            "79f2fc2843ba909ab559aa3f6b167a701af11bc53ac60840ca5db05d5bce6b94"
         );
     }
 
@@ -1988,24 +1949,47 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn known_safe_bash_command_matches_codex_like_sequences() {
-        assert!(is_known_safe_bash_command("ls && pwd"));
-        assert!(is_known_safe_bash_command("echo 'hi' ; ls | wc -l"));
-        assert!(is_known_safe_bash_command(
-            "bash -lc \"ls && grep 'fn' Cargo.toml\""
-        ));
-
-        assert!(!is_known_safe_bash_command("ls || (pwd && echo hi)"));
-        assert!(!is_known_safe_bash_command(
-            "printf 'owned' > /tmp/owned.txt"
-        ));
-        assert!(!is_known_safe_bash_command("find . -name file.txt -delete"));
-        assert!(!is_known_safe_bash_command("bash -ic 'ls'"));
+    #[tokio::test]
+    async fn controlled_policies_never_infer_shell_authority_from_command_spelling() {
+        for policy in [
+            EffectPolicy::Controlled,
+            EffectPolicy::ControlledBashApproval,
+        ] {
+            let broker = EffectBroker::new(policy);
+            for command in [
+                "ls",
+                "ls && pwd; echo 'hi' | wc -l",
+                "./ls",
+                "/tmp/ls",
+                "./CAT",
+                "bash -lc 'ls'",
+                "git diff --output=proof.txt --no-index a.txt b.txt",
+                r"git diff --outpu\t=proof.txt --no-index a.txt b.txt",
+                "git diff --outpu\"t\"=proof.txt --no-index a.txt b.txt",
+            ] {
+                let intent = EffectIntent::new(
+                    "principal",
+                    "run-1",
+                    1,
+                    "call-1",
+                    "bash",
+                    ToolEffect::HostProcess,
+                    serde_json::json!({"command": command}),
+                )
+                .unwrap();
+                assert!(
+                    matches!(
+                        broker.authorize(&intent, None).await,
+                        Err(EffectBrokerError::ApprovalUnavailable { .. })
+                    ),
+                    "{policy:?}: {command}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
-    async fn controlled_policy_approves_safe_bash_without_progress_channel() {
+    async fn controlled_policy_requires_approval_for_simple_bash_without_progress_channel() {
         let broker = EffectBroker::new(EffectPolicy::Controlled);
         let safe = EffectIntent::new(
             "principal",
@@ -2017,11 +2001,14 @@ mod tests {
             serde_json::json!({"command": "ls -la"}),
         )
         .unwrap();
-        assert!(broker.authorize(&safe, None).await.is_ok());
+        assert!(matches!(
+            broker.authorize(&safe, None).await,
+            Err(EffectBrokerError::ApprovalUnavailable { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn controlled_policy_approves_complex_safe_bash_sequence_without_progress_channel() {
+    async fn controlled_policy_requires_approval_for_composite_bash_without_progress_channel() {
         let broker = EffectBroker::new(EffectPolicy::Controlled);
         let safe = EffectIntent::new(
             "principal",
@@ -2033,7 +2020,10 @@ mod tests {
             serde_json::json!({"command": "ls && pwd; echo 'hi there' | wc -l"}),
         )
         .unwrap();
-        assert!(broker.authorize(&safe, None).await.is_ok());
+        assert!(matches!(
+            broker.authorize(&safe, None).await,
+            Err(EffectBrokerError::ApprovalUnavailable { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2109,9 +2099,8 @@ mod tests {
             )
             .unwrap()
         };
-        // Bash's known-safe parser never classifies PowerShell syntax, so a
-        // read-only looking command still needs approval in controlled mode,
-        // instead of being denied as an unbrokered native process.
+        // Both shell tools need approval even for read-only looking commands,
+        // instead of being denied as unbrokered native processes.
         for policy in [
             EffectPolicy::Controlled,
             EffectPolicy::ControlledBashApproval,

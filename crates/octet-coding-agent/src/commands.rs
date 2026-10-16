@@ -1219,10 +1219,10 @@ fn path_access(allow_external_paths: bool) -> &'static str {
 fn effect_policy(policy: octet_agent::EffectPolicy) -> &'static str {
     match policy {
         octet_agent::EffectPolicy::Controlled => {
-            "controlled (workspace mutation and unsafe bash calls need approval; other ambient host effects denied)"
+            "controlled (workspace mutation and every shell call need approval; other ambient host effects denied)"
         }
         octet_agent::EffectPolicy::ControlledBashApproval => {
-            "controlled (all bash calls need approval; other ambient host effects denied)"
+            "controlled (workspace mutation and every shell call need approval; other ambient host effects denied)"
         }
         octet_agent::EffectPolicy::UnsafeHost => {
             "full access (no sandbox and no approvals: tools and enabled extensions run with your OS permissions)"

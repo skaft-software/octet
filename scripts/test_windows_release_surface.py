@@ -35,6 +35,9 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         for contract in (
             "--lib tui::terminal", "-- secure_fs tools::bash::tests",
             "--test windows_process_current", "Expand-Archive $archive",
+            "effect::tests tools::edit::tests extension_bulk::tests",
+            "extension_bulk_host::tests::temporary_storage_never_promises_durability",
+            "--test agent_run controlled_shell_",
             "$env:PATH = \"$env:SystemRoot\\System32;$env:SystemRoot\"",
             "$env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'",
             "--test windows_conpty", "Windows archives differ",
