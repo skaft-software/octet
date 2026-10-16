@@ -9127,6 +9127,10 @@ impl InteractiveShell {
             state.push_block(TranscriptBlock::UpdateAvailable(notice));
         }
         state.invalidate_transcript();
+        drop(state);
+        // A branch switch/rebind must not carry an old Enter into the newly
+        // hydrated conversation, even if its model and effort are unchanged.
+        self.cancel_thinking_submission("session view changed");
         Ok(())
     }
 

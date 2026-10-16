@@ -54,8 +54,24 @@ host-selected effort; neither label claims provider acknowledgement or measured
 cache reuse. The wire baseline stays pinned while ordered `configuration_update`
 items carry subsequent changes. Resume restores the durable effective choice.
 
-Idle changes use the same durable control. Settings persistence failures remain
-visible. Explicit interactive choices reject unsupported efforts (including
+Same-mode idle changes commit the selected thinking durably without reopening
+the session or restarting extensions, including on Chat and other routes without
+active Responses updates. This does not grant those routes mid-run controls.
+Changing the reasoning mode still uses the ordinary reconfiguration path.
+Thinking and its picker mode preference are saved in one atomic transaction;
+settings persistence failures remain visible. The watcher acknowledges only a
+verified host write whose prior metadata matches its baseline and has no queued
+resource changes. Other edits retain normal reload behavior (and the watcher's
+documented metadata-resolution limits).
+
+Enter during a thinking-change wait retains one complete prompt, including
+attachments, for the ordinary idle admission path. It is dispatched once only
+if its session/route and selected thinking still match. Cancellation, failure,
+a session/branch rebind, or a different selection restores it with an explicit
+not-sent error; later typing remains a separate draft. Commands and shell
+escapes are not admitted this way.
+
+Explicit interactive choices reject unsupported efforts (including
 Codex Off when absent, and Ultra without advertised V2 and live observation)
 rather than silently clamping them. Provider configuration updates accept ordinary
 effort only; Ultra is not a pure effort update. Qualified transitions into or out
