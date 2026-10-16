@@ -164,6 +164,13 @@ its draft-clear/interrupt meaning. Composer, footer and separator rows are not
 transcript text. Shift+drag remains your terminal's native selection override
 where the terminal supports it.
 
+With capture on, a plain left-click on an HTTP(S) transcript link opens it in
+an available system browser on release, without Shift or Ctrl. Dragging a link
+selects/copies instead; moving away and back does not activate it. Resize,
+scrolling, focus changes and intervening input cancel the pending click. Octet
+never launches local-file or application-protocol links this way. With capture
+off, including native Tern, link gestures remain terminal-owned.
+
 Copy writes to an available local clipboard helper and emits OSC 52 to the
 terminal, so SSH/remote sessions can reach the client clipboard. The terminal must
 permit OSC 52; inside tmux enable `set -g set-clipboard on`. Remote transport sends
