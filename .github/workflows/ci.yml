@@ -71,7 +71,7 @@ jobs:
             scripts/test-octet-npm.sh \
             scripts/test-octet-npm-install.sh \
             scripts/test-homebrew-formula.sh
-          python3 -m py_compile scripts/provider-acceptance.py scripts/generate-octet-release-metadata.py scripts/create-octet-npm-manifest.py scripts/verify-octet-npm.py scripts/verify-octet-npm-provenance.py scripts/generate-homebrew-formula.py
+          python3 -m py_compile scripts/check-contributor.py scripts/check-release-journey.py scripts/provider-acceptance.py scripts/generate-octet-release-metadata.py scripts/create-octet-npm-manifest.py scripts/verify-octet-npm.py scripts/verify-octet-npm-provenance.py scripts/generate-homebrew-formula.py
           python3 scripts/test_provider_acceptance.py
           python3 scripts/test_release_serve_trust.py
           python3 scripts/test_release_source_qualification.py
@@ -345,12 +345,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --lib -- `
             secure_fs `
+            effect::tests tools::edit::tests extension_bulk::tests `
+            extension_bulk_host::tests::temporary_storage_never_promises_durability `
             session::tests::journal `
             tools::bash::tests `
             tools::powershell::tests `
             extension_process::tests::python_script_detection_uses_the_extension_or_interpreter_line `
             extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter `
             extension_process::tests::compaction_strategy_negotiates_and_renders_through_host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test agent_run controlled_shell_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test agent_run partial_assistant_journal -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -650,12 +654,15 @@ jobs:
           HOME="$home" "$package/octet" --help >/dev/null
           printf '%s\n' '{"protocol_version":1,"request_id":"rc-smoke","command":"hello"}' \
             | HOME="$home" "$package/octet-host" | grep -F '"type":"hello"' >/dev/null
+          python3 source/scripts/check-release-journey.py \
+            --binary "$package/octet" --host-binary "$package/octet-host" \
+            --expected-version "$version" --report "$RUNNER_TEMP/octet-rc/JOURNEY-${{ matrix.target }}.json"
           commit=$(git -C source rev-parse HEAD)
           echo "name=octet-rc-${commit:0:12}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
           python3 - "$RUNNER_TEMP/octet-rc" <<'PY'
           import hashlib, pathlib, sys
           root = pathlib.Path(sys.argv[1])
-          files = sorted([*root.rglob('*.tar.gz'), *root.rglob('BUILD-INFO.json')])
+          files = sorted([*root.rglob('*.tar.gz'), *root.rglob('BUILD-INFO.json'), *root.glob('JOURNEY-*.json')])
           (root / 'SHA256SUMS').write_text(''.join(
               f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n'
               for path in files), encoding='utf-8')
@@ -692,3 +699,11 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"ci-smoke","command":"hello"}' \
             | "$RUNNER_TEMP/octet-install/bin/octet-host" \
             | grep -F '"type":"hello"' >/dev/null
+      - name: Exercise installed binaries with disposable loopback coding and recovery
+        timeout-minutes: 5
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          python3 scripts/check-release-journey.py \
+            --binary "$RUNNER_TEMP/octet-install/bin/octet" \
+            --host-binary "$RUNNER_TEMP/octet-install/bin/octet-host" \
+            --expected-version "$version"

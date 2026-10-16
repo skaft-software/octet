@@ -27,6 +27,9 @@ for availability and qualification status.
   code runs as a host process with your OS permissions, outside the tool-effect
   broker, so safe mode is **not** a sandbox. Approved actions still affect the
   real workspace.
+- `--effect-policy controlled` also requires exact one-shot approval for every
+  shell call and workspace mutation. There is no command-name or syntax-based
+  auto-approval. Safe mode already required approval for every shell call.
 - Full-access CLI launches default to `allow_external_paths = true`, which lets
   the built-in file tools reach outside the workspace. Set it to `false` for
   workspace-local file access. `--safe-mode` forces `false`. File-path limits

@@ -9129,8 +9129,8 @@ fn record_shell_escape(app: &mut App, record: &commands::ShellEscapeRecord) -> a
 ///
 /// This builds the same canonical `bash` intent the model tool would produce
 /// and lets the shared [`EffectBroker`] decide: `unsafe_host` admits it,
-/// `controlled` asks only for commands its shell-safety analysis flags, and
-/// `controlled_bash_approval` asks for every command. The confirmation is the
+/// both `controlled` and `controlled_bash_approval` ask for every command.
+/// The confirmation is the
 /// same picker the model run uses; a denial is reported, never swallowed.
 enum ShellEscapeApproval {
     Approved,

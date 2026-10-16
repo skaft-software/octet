@@ -114,6 +114,100 @@ async fn replace_exact_unique_match() {
     assert!(diff.contains("-fn b() {}"), "{diff}");
 }
 
+#[tokio::test]
+async fn read_then_edit_preserves_line_endings_and_hashes_original_bytes() {
+    for (original, old, new, expected) in [
+        ("one\r\ntwo\r\n", "one\ntwo", "ONE\nTWO", "ONE\r\nTWO\r\n"),
+        (
+            "one\r\ntwo\r\n",
+            "one",
+            "ONE\nTHREE",
+            "ONE\r\nTHREE\r\ntwo\r\n",
+        ),
+        ("one\r\ntwo", "one\r\ntwo", "ONE\r\nTWO", "ONE\r\nTWO"),
+        ("one\ntwo\n", "one\r\ntwo", "ONE\r\nTWO", "ONE\nTWO\n"),
+        (
+            "\u{feff}one\r\ntwo\r\n",
+            "one\ntwo",
+            "λ\n二",
+            "\u{feff}λ\r\n二\r\n",
+        ),
+        (
+            "prefix\r\none\r\ntwo\n",
+            "one",
+            "ONE\nNEW",
+            "prefix\r\nONE\r\nNEW\r\ntwo\n",
+        ),
+        ("one", "one", "ONE\r\nTWO", "ONE\nTWO"),
+        ("one\r\ntwo\r\n", "one\ntwo\n", "", ""),
+    ] {
+        let f = fixture();
+        let path = f.workspace.join("lines.txt");
+        std::fs::write(&path, original).unwrap();
+        let read = crate::ReadTool
+            .execute(json!({"path": "lines.txt"}), &f.ctx())
+            .await
+            .unwrap();
+        let hash = content_hash(original.as_bytes());
+        assert!(read.text.contains(&hash), "{}", read.text);
+        let output = EditTool
+            .execute(
+                json!({"path": "lines.txt", "oldText": old, "newText": new, "expected_hash": hash}),
+                &f.ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected.as_bytes());
+        assert!(output.text.contains(&content_hash(expected.as_bytes())));
+    }
+}
+
+#[tokio::test]
+async fn crlf_multiple_edits_match_original_regions_not_earlier_replacements() {
+    let f = fixture();
+    let path = f.workspace.join("lines.txt");
+    std::fs::write(&path, "a\r\nb\r\nc\r\nd\r\n").unwrap();
+    EditTool
+        .execute(
+            json!({"path": "lines.txt", "edits": [
+                {"oldText": "a\nb", "newText": "c\nd"},
+                {"oldText": "c\nd", "newText": "e\nf"}
+            ]}),
+            &f.ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"c\r\nd\r\ne\r\nf\r\n");
+}
+
+#[tokio::test]
+async fn crlf_normalization_preserves_ambiguity_overlap_and_stale_guards() {
+    let f = fixture();
+    let path = f.workspace.join("lines.txt");
+    let original = "a\r\nb\r\na\r\nb\r\nc\r\nd\r\n";
+    std::fs::write(&path, original).unwrap();
+    for (arguments, code) in [
+        (
+            json!({"path": "lines.txt", "old": "a\nb", "new": "X"}),
+            "ambiguous",
+        ),
+        (
+            json!({"path": "lines.txt", "edits": [
+                {"old": "b\nc", "new": "X"}, {"old": "c\nd", "new": "Y"}
+            ]}),
+            "overlapping_edits",
+        ),
+        (
+            json!({"path": "lines.txt", "old": "c\nd", "new": "X", "expected_hash": content_hash(original.replace("\r\n", "\n").as_bytes())}),
+            "stale_file",
+        ),
+    ] {
+        let error = EditTool.execute(arguments, &f.ctx()).await.unwrap_err();
+        assert!(error.message.contains(code), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+    }
+}
+
 #[test]
 fn unified_diff_uses_the_exact_match_and_counts_context_rows() {
     let full = "needle\nwrong\na\nb\nc\nneedle\nsecond\nafter-1\nafter-2\nafter-3\n";
@@ -291,8 +385,10 @@ async fn edit_requires_allow_edit() {
 #[tokio::test]
 async fn trusted_local_mode_edits_an_absolute_path() {
     let f = fixture();
-    let outside = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(outside.path(), "old").unwrap();
+    // Close the writable handle: Windows refuses replacement while another
+    // writer can still change the observed file.
+    let outside = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    std::fs::write(&outside, "old").unwrap();
     let mut sandbox = f.sandbox.clone();
     sandbox.allow_external_paths = true;
     let ctx = ToolContext {
@@ -309,7 +405,7 @@ async fn trusted_local_mode_edits_an_absolute_path() {
     EditTool
         .execute(
             json!({
-                "path": outside.path().to_string_lossy(),
+                "path": outside.to_string_lossy(),
                 "old": "old",
                 "new": "new"
             }),
@@ -317,7 +413,7 @@ async fn trusted_local_mode_edits_an_absolute_path() {
         )
         .await
         .unwrap();
-    assert_eq!(std::fs::read_to_string(outside.path()).unwrap(), "new");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "new");
 }
 
 #[tokio::test]

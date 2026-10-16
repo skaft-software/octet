@@ -255,8 +255,7 @@ async fn overlapped_process_output_streams_while_the_call_runs() {
 
 #[tokio::test]
 async fn process_calls_stay_one_at_a_time_when_the_broker_can_prompt() {
-    // Controlled mode admits a known-safe `bash` command without a prompt, but
-    // any process call there could need approval, so calls stay ordered.
+    // Every controlled shell call needs exact approval, so calls stay ordered.
     let mut f = fixture(
         "bash",
         &["first", "second", "third"],
@@ -265,8 +264,17 @@ async fn process_calls_stay_one_at_a_time_when_the_broker_can_prompt() {
     let mut run = f.agent.prompt("run all").await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while let Some(event) = run.next().await {
-            if let AgentEvent::RunFinished { reason, .. } = event {
-                assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+            match event {
+                AgentEvent::ToolProgress {
+                    progress: ToolProgress::Confirmation(request),
+                    ..
+                } => {
+                    request.respond(true);
+                }
+                AgentEvent::RunFinished { reason, .. } => {
+                    assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                }
+                _ => {}
             }
         }
     })

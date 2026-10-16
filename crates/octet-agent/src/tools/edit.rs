@@ -87,7 +87,9 @@ fn normalize(mut args: serde_json::Value) -> Result<EditArgs, ToolError> {
 /// The built-in `edit` tool: exact string replacement in an existing file.
 ///
 /// `old` must be non-empty and occur exactly once in the file.  `new` may be
-/// empty to delete the matched text.  `expected_hash` from a prior `read`
+/// empty to delete the matched text. LF/CRLF arguments follow the file's first
+/// line ending (LF when none exists); untouched bytes are preserved.
+/// `expected_hash` from a prior `read`
 /// provides optimistic concurrency — the edit is rejected as stale when the
 /// current content no longer matches.
 ///
@@ -108,7 +110,7 @@ impl Tool for EditTool {
             name: "edit".to_string(),
             description: "Replace unique, non-overlapping regions in one file. Every edits[].oldText \
                           matches the original file, never earlier replacements. Merge overlapping edits. \
-                          Legacy old/new remains accepted. expected_hash rejects stale reads."
+                          LF/CRLF replacement text follows the file's line endings. Legacy old/new remains accepted. expected_hash rejects stale reads."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -245,8 +247,21 @@ fn replace(
             "error invalid_utf8\n{display_path}: replace only supports UTF-8 text; file was not modified"
         ))
     })?;
+    // Read presents lines without CRLF terminators. Match LF or CRLF arguments
+    // against the file's convention, without rewriting untouched bytes or BOMs.
+    // Hashes above and at commit still refer to the original/updated raw bytes.
+    let crlf = text
+        .find('\n')
+        .is_some_and(|index| index > 0 && text.as_bytes()[index - 1] == b'\r');
+    let edits: Vec<_> = edits
+        .iter()
+        .map(|edit| Replacement {
+            old: with_line_endings(&edit.old, crlf),
+            new: with_line_endings(&edit.new, crlf),
+        })
+        .collect();
     let mut regions = Vec::with_capacity(edits.len());
-    for edit in edits {
+    for edit in &edits {
         let start = text
             .find(&edit.old)
             .ok_or_else(|| no_match_error(display_path, &edit.old, text))?;
@@ -323,6 +338,15 @@ fn replace(
         .commit_if(updated.as_bytes(), || cancellation.is_cancelled())
         .map_err(|error| file_error(display_path, error))?;
     Ok(output)
+}
+
+fn with_line_endings(text: &str, crlf: bool) -> String {
+    let lf = text.replace("\r\n", "\n");
+    if crlf {
+        lf.replace('\n', "\r\n")
+    } else {
+        lf
+    }
 }
 
 /// Builds the `no_match` error, suggesting nearby lines that resemble the

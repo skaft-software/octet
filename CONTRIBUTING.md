@@ -7,8 +7,8 @@ changes small and back them with evidence.
 ## Development setup
 
 The octet source supports macOS and Linux and needs Rust 1.88 or newer. A native
-Windows x64 build (`x86_64-pc-windows-gnu`) is built and tested in CI but not
-released yet: see [Windows](docs/windows.md). Install Rust through
+Windows x64 GNU build is tested in CI; the MSVC release channel remains a
+preview with separate qualification: see [Windows](docs/windows.md). Install Rust through
 [rustup](https://rustup.rs/). `rg` (ripgrep) is preferred for content search when
 available; `grep` is the fallback, so ripgrep is not required. Clone the
 repository if you need a checkout:
@@ -71,6 +71,22 @@ and the Docker context.
 
 ## Tests
 
+For a first credential-free pass (Python 3.10+ and Rust 1.88+):
+
+```sh
+cargo fetch --locked                 # one-time dependency download, if needed
+python3 scripts/check-contributor.py # use python on Windows
+```
+
+The script never installs packages or contacts a provider. Cargo checks run
+`--offline`; a cold compile can take several minutes. `--list` shows the exact
+commands. It runs selected policy/file/temporary-bulk tests, real agent-dispatch
+approval regressions, the Python SDK and patch-whitespace checks. It does **not**
+run the full workspace, Pi adapter, durable Windows bulk storage, paid providers
+or attended desktop checks. Expected skips carry a reason; a failure stays a
+failure. See the [testing lanes](docs/testing/README.md) for broader checks and
+platform limitations.
+
 Start with the narrowest regression that reproduces the behavior, then test the
 affected crate. Before requesting review, run:
 
@@ -101,6 +117,22 @@ the separately approved credentialed checks in
 against the immutable release SHA. Live checks are optional; release qualification
 does not require live credentials. An unselected check is recorded as **NOT RUN**,
 not a pass or waiver.
+
+## Finding a bounded first change
+
+| Boundary | Start here | Protect |
+| --- | --- | --- |
+| Provider wire/auth | `crates/octet-ai/src/` | Typed responses, redaction, bounded parsing; no tool authority |
+| Policy and tool dispatch | `crates/octet-agent/src/effect.rs`, `agent/`, `tools/` | Exact approvals before hooks/execution; original-byte edit hashes |
+| Persistence/recovery | `crates/octet-agent/src/session/`, `secure_fs/` | Persist before execute; no automatic replay of unresolved mutations |
+| CLI and terminal | `crates/octet-coding-agent/src/` | Runtime owns state; frontend is an observer |
+| Extensions/SDK | `extensions/`, `sdk/` | Explicit host trust, protocol and resource bounds |
+
+Good first issues name one boundary, a minimal reproducer, one owning module and
+an executable acceptance check (for example an edit newline case or a sanitized
+provider-error fixture). Keep architecture changes incremental: extract a focused
+module when the relevant behavior changes, not as a repository-wide rewrite.
+[Architecture](docs/README.md#development) links the deeper boundary documents.
 
 ## Identity and documentation
 
