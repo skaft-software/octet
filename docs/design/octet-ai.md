@@ -73,7 +73,11 @@ input format support comes from `Protocol::audio_input_formats` plus the model's
 audio modality. Tool audio follows its paired function response as adjacent
 user media; embedded tool-result media remains unsupported. Cumulative function-call argument
 snapshots are merged before terminal assembly rather than concatenated as invalid
-JSON. Google thought text is canonical reasoning; a thought signature alone does
+JSON. Function calls are tracked by provider call ID, not their chunk-local part
+position; ID-less calls receive distinct synthetic IDs. This preserves parallel
+calls delivered in separate chunks, including on OpenCode Zen and Go, without
+merging their arguments or thought signatures. Google thought text is canonical
+reasoning; a thought signature alone does
 not make visible content reasoning.
 
 ## Responses Lite
