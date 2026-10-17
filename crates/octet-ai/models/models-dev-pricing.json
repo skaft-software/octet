@@ -3649,8 +3649,8 @@
   "openrouter/deepseek/deepseek-chat": {
     "cache_read": 0,
     "cache_write_5m": 0,
-    "input": 257400,
-    "output": 1028700,
+    "input": 320000,
+    "output": 890000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-chat-v3-0324": {
@@ -3710,9 +3710,9 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 15400,
+    "cache_read": 13100,
     "cache_write_5m": 0,
-    "input": 15400,
+    "input": 13100,
     "output": 1280000,
     "reasoning": null
   },
@@ -3724,10 +3724,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 32364,
+    "cache_read": 23070,
     "cache_write_5m": 0,
-    "input": 388368,
-    "output": 776736,
+    "input": 276834,
+    "output": 553668,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3738,10 +3738,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 3000,
+    "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 600000,
+    "input": 36000,
+    "output": 450000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -3941,10 +3941,10 @@
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
-    "cache_read": 50000,
+    "cache_read": 37500,
     "cache_write_5m": 0,
-    "input": 90000,
-    "output": 300000,
+    "input": 67500,
+    "output": 225000,
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it:free": {
@@ -4585,10 +4585,10 @@
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3.5-super-vl": {
-    "cache_read": 20000,
+    "cache_read": 80000,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 500000,
+    "input": 100000,
+    "output": 400000,
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3.5-super-vl:free": {
@@ -5438,6 +5438,13 @@
     "output": 470000,
     "reasoning": null
   },
+  "openrouter/reflection/beam-1.0-501b-a23b": {
+    "cache_read": 100000,
+    "cache_write_5m": 0,
+    "input": 1000000,
+    "output": 3000000,
+    "reasoning": null
+  },
   "openrouter/rekaai/reka-edge": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -5579,10 +5586,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 33000,
+    "cache_read": 20625,
     "cache_write_5m": 0,
-    "input": 132000,
-    "output": 528000,
+    "input": 82500,
+    "output": 330000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5593,10 +5600,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy4-preview": {
-    "cache_read": 42000,
+    "cache_read": 37800,
     "cache_write_5m": 0,
-    "input": 834000,
-    "output": 2501000,
+    "input": 750600,
+    "output": 2250900,
     "reasoning": null
   },
   "openrouter/thedrummer/cydonia-24b-v4.1": {
@@ -5774,6 +5781,13 @@
     "output": 8700000,
     "reasoning": null
   },
+  "openrouter/xingchen-agi/xing4.0-29b-a4b:free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
   "openrouter/z-ai/glm-4.5": {
     "cache_read": 110000,
     "cache_write_5m": 0,
@@ -5859,10 +5873,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 12500,
+    "cache_read": 11250,
     "cache_write_5m": 0,
-    "input": 25300,
-    "output": 676400,
+    "input": 17820,
+    "output": 450000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5915,10 +5929,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 714,
+    "cache_read": 5400,
     "cache_write_5m": 0,
-    "input": 35700,
-    "output": 142800,
+    "input": 36000,
+    "output": 450000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
@@ -5929,10 +5943,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 10800,
+    "cache_read": 11790,
     "cache_write_5m": 0,
-    "input": 13860,
-    "output": 1152000,
+    "input": 11790,
+    "output": 450000,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -6006,10 +6020,10 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 12500,
+    "cache_read": 11250,
     "cache_write_5m": 0,
-    "input": 25300,
-    "output": 676400,
+    "input": 17820,
+    "output": 450000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {

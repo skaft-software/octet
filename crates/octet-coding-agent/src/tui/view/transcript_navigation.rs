@@ -811,6 +811,19 @@ impl InteractiveShell {
     /// true when the query or a rendered navigation control consumed the event.
     /// translate_input also invokes it as the common dispatch fallback.
     pub fn intercept_transcript_input(&mut self, event: &Event) -> bool {
+        if !matches!(
+            event,
+            Event::Mouse(mouse) if matches!(
+                mouse.kind,
+                MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Moved
+            )
+        ) {
+            // Revoke clicks before search, chrome or an exclusive input owner
+            // can consume intervening wheel/focus/key/new-press events.
+            self.state.borrow_mut().pending_link_press = None;
+        }
         if matches!(
             event,
             Event::Resize(..) | Event::FocusLost | Event::FocusGained

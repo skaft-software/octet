@@ -1636,6 +1636,29 @@ pub(crate) struct PendingExtensionMessage {
     pub(crate) context_only: bool,
 }
 
+struct TranscriptLinkPress {
+    cell: (u16, u16),
+    target: String,
+    fence: renderer_geometry::GeometryFence,
+}
+
+impl TranscriptLinkPress {
+    fn new(state: &ShellState, row: u16, col: u16, target: String) -> Option<Self> {
+        // OSC 8 allows file and application schemes too. Application-owned
+        // clicks may only launch web pages, never a file or protocol handler.
+        let target = sexy_tui_rs::SafeUrl::parse(&target)?;
+        let url = url::Url::parse(target.as_str()).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        Some(Self {
+            cell: (row, col),
+            target: target.as_str().to_owned(),
+            fence: renderer_geometry::GeometryFence::capture(state),
+        })
+    }
+}
+
 pub(crate) struct ShellState {
     render_revision: u64,
     transcript_semantic_revision: u64,
@@ -1871,6 +1894,8 @@ pub(crate) struct ShellState {
     /// movement clears any prior selection; the first drag event promotes
     /// this anchor into `transcript_selection`.
     pending_selection_anchor: Option<TranscriptPosition>,
+    /// A web link under a stationary press; dragging or a layout change revokes it.
+    pending_link_press: Option<TranscriptLinkPress>,
     /// A press whose frame was on screen before its geometry was recorded.
     deferred_pointer_press: Option<renderer_geometry::DeferredPointerPress>,
     /// A drag which began in the transcript remains transcript-owned even
@@ -2260,6 +2285,7 @@ impl ShellState {
             new_output_count: Default::default(),
             transcript_selection: Default::default(),
             pending_selection_anchor: Default::default(),
+            pending_link_press: Default::default(),
             deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
             copy_buffer: Default::default(),
@@ -7211,12 +7237,20 @@ impl InteractiveShell {
     /// owned by pinned chrome return `None`, so a footer or composer row can
     /// never be mistaken for transcript content. The caller owns activation:
     /// this reports the validated target and never opens or fetches anything.
-    #[cfg(test)]
     pub fn transcript_link_at_screen_cell(&self, row: u16, col: u16) -> Option<String> {
         let state = self.state.borrow();
+        if state.startup_pending
+            || state.panel.is_some()
+            || state.overlay.is_some()
+            || state.tool_input_prompt.is_some()
+            || state.extension_ui.remote_fullscreen_overlay
+            || col >= state.transcript_content_width(state.size.0)
+        {
+            return None;
+        }
         if state.render_threaded {
             let line = state
-                .retained_render_geometry()?
+                .pointer_render_geometry()?
                 .visible_lines
                 .get(usize::from(row))?;
             return sexy_tui_rs::hyperlink_at_column(line, usize::from(col));
@@ -7236,10 +7270,13 @@ impl InteractiveShell {
 
     /// Record a pointer-down position in the transcript area. No selection
     /// is created until the pointer actually moves. A stationary click
-    /// simply clears any prior selection and does nothing else.
-    /// Shift+click extends an existing selection.
+    /// clears any prior selection and activates a web link on release.
+    /// Shift+click extends an existing selection without activating links.
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
         self.reset_input_interaction();
+        let link = (!extend)
+            .then(|| self.transcript_link_at_screen_cell(row, col))
+            .flatten();
         let mut state = self.state.borrow_mut();
         state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
@@ -7276,6 +7313,8 @@ impl InteractiveShell {
             // prior selection is cleared in `end_transcript_selection`.
             state.pending_selection_anchor = Some(position);
             state.selection_dragging = false;
+            state.pending_link_press =
+                link.and_then(|target| TranscriptLinkPress::new(&state, row, col, target));
         }
     }
 
@@ -7296,6 +7335,13 @@ impl InteractiveShell {
         //
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
+        if state
+            .pending_link_press
+            .as_ref()
+            .is_some_and(|press| press.cell != (row, col))
+        {
+            state.pending_link_press = None;
+        }
         Self::resolve_deferred_pointer_press(&mut state);
         if let Some(deferred) = state.deferred_pointer_press.as_mut() {
             deferred.motion = Some((row, col));
@@ -7356,9 +7402,18 @@ impl InteractiveShell {
 
     /// Finish a pointer gesture:
     /// - Drag that created a selection -> copy to clipboard, keep selection.
-    /// - Stationary click (no drag)    -> clear any prior selection.
+    /// - Stationary click (no drag)    -> clear selection and open a web link.
     pub fn end_transcript_selection(&mut self, row: u16, col: u16) {
+        self.end_transcript_selection_with(
+            row,
+            col,
+            crate::auth::subscription::login::open_browser,
+        );
+    }
+
+    fn end_transcript_selection_with(&mut self, row: u16, col: u16, open: impl FnOnce(&str)) {
         let mut state = self.state.borrow_mut();
+        let pressed_link = state.pending_link_press.take();
         Self::resolve_deferred_pointer_press(&mut state);
         state.deferred_pointer_press = None;
         if !state.selection_dragging && state.pending_selection_anchor.is_none() {
@@ -7382,6 +7437,18 @@ impl InteractiveShell {
             state.pending_selection_anchor = None;
             state.transcript_selection = None;
             state.selection_dragging = false;
+            let pressed_link = pressed_link.filter(|press| {
+                press.cell == (row, col)
+                    && press.fence == renderer_geometry::GeometryFence::capture(&state)
+            });
+            drop(state);
+            if let Some(press) = pressed_link {
+                if self.transcript_link_at_screen_cell(row, col).as_deref()
+                    == Some(press.target.as_str())
+                {
+                    open(&press.target);
+                }
+            }
             return;
         }
 
@@ -9346,6 +9413,8 @@ mod tern_welcome;
 mod tool_render;
 mod transcript_cache;
 pub(crate) mod transcript_extensions;
+#[cfg(test)]
+mod transcript_link_tests;
 mod transcript_navigation;
 
 #[path = "view/viewport.rs"]

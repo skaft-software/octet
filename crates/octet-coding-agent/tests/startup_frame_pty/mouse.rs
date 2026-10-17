@@ -162,6 +162,84 @@ fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
 }
 
 #[test]
+fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
+    let _lock = pty_test_lock().lock().unwrap();
+    for fullscreen in [true, false] {
+        let (mut octet, mut parser, mut consumed) = if fullscreen {
+            (
+                PtyOctet::spawn_default_fullscreen(
+                    Path::new(env!("CARGO_BIN_EXE_octet")),
+                    MouseMode::Default,
+                    StartupFixture::MouseHistory,
+                ),
+                vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024),
+                0,
+            )
+        } else {
+            history(MouseMode::App, INITIAL_COLUMNS, INITIAL_ROWS)
+        };
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "LINK-PROBE",
+            STARTUP_TIMEOUT,
+        );
+        octet.pty.write_input(b"link-draft-kept");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "link-draft-kept",
+            STARTUP_TIMEOUT,
+        );
+        settle(&mut octet, &mut parser, &mut consumed);
+        let (row, column) = (0..INITIAL_ROWS)
+            .find_map(|row| {
+                row_text(&parser, row, INITIAL_COLUMNS)
+                    .find("LINK-PROBE")
+                    .map(|column| (row, column as u16))
+            })
+            .expect("visible transcript link");
+        let log = octet._root.path().join("home/link-activations");
+        let expected = "https://example.test/docs?x=1&y=2\n";
+        octet.pty.write_input(&sgr(0, column, row, false));
+        settle(&mut octet, &mut parser, &mut consumed);
+        assert!(!log.exists(), "press alone must not open a page");
+        octet.pty.write_input(&sgr(0, column, row, true));
+        octet.wait_until(STARTUP_TIMEOUT, |_| {
+            fs::read_to_string(&log).is_ok_and(|text| text == expected)
+        });
+
+        // A second release has no authority; a drag beginning on the same link
+        // still selects/copies rather than opening it, even if motion is coalesced.
+        octet.pty.write_input(&sgr(0, column, row, true));
+        for with_motion in [true, false] {
+            let before = octet.pty.output.len();
+            let mut drag = sgr(0, column, row, false);
+            if with_motion {
+                drag.extend(sgr(32, column + 4, row, false));
+            }
+            drag.extend(sgr(0, column + 4, row, true));
+            octet.pty.write_input(&drag);
+            octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+                clipboard(&bytes[before..]).is_some()
+            });
+            assert_eq!(
+                clipboard(&octet.pty.output[before..]).as_deref(),
+                Some("LINK")
+            );
+        }
+        settle(&mut octet, &mut parser, &mut consumed);
+        assert_eq!(fs::read_to_string(log).unwrap(), expected);
+        assert!(parser.screen().contents().contains("link-draft-kept"));
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+    }
+}
+
+#[test]
 fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
     let _lock = pty_test_lock().lock().unwrap();
     let (mut octet, mut parser, mut consumed) = history(MouseMode::App, 100, 24);

@@ -7,6 +7,10 @@ boundaries and known limitations.
 
 ### Fixed
 
+- Parallel Google function calls delivered in separate stream chunks stay
+  distinct, including Gemini 4 Argon on OpenCode Zen and Argon Contributor on
+  OpenCode Go. Calls keep their own arguments, thought signatures and paired
+  results; cumulative updates are matched by call ID, not chunk-local position.
 - Audio-capable Gemini, Vertex AI and Google-compatible OpenCode models retain
   audio in discovery, attachments and `read` results, and send inline
   WAV/MP3/AAC/FLAC/Ogg Opus bytes through native Google `generateContent`.
@@ -30,11 +34,18 @@ boundaries and known limitations.
 - Native Tern keeps its default touchpad scrolling and selection: octet no longer
   captures the mouse for the native surface. ANSI fallback keeps the requested
   capture policy.
+- Captured-mouse transcript web links open on a plain left-click release, without
+  Shift or Ctrl. Dragging still selects/copies; movement, intervening input and
+  changed layout revoke link activation. Only HTTP(S) targets reach the browser
+  helper; native Tern and uncaptured terminal link gestures are unchanged.
 - `/context` during a run shows the same usage grid and categories as when idle,
   instead of a flat list.
-- Windows `powershell` tool calls render like `bash`: full command header,
-  output tail, failure reason and Ctrl+O disclosure, instead of a one-line
-  72-character summary.
+- Tool input previews wrap to six visible rows instead of clipping a generic
+  tool's selected argument at 72 characters. Bash and PowerShell commands use
+  the same row budget; Ctrl+O and semantic copy retain the complete sanitized
+  input, including newlines, independently of output previews.
+- Windows `powershell` tool calls render like `bash`: command header, output
+  tail, failure reason and Ctrl+O disclosure.
 - Surfaced provider errors after a mid-stream failure no longer include internal
   stream progress counters (`stream_progress=frames=… events=…`).
 - Controlled shell policies require an exact one-shot approval for each shell
