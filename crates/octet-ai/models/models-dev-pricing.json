@@ -3710,9 +3710,9 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 13100,
+    "cache_read": 19900,
     "cache_write_5m": 0,
-    "input": 13100,
+    "input": 19900,
     "output": 1280000,
     "reasoning": null
   },
@@ -3724,10 +3724,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 23070,
+    "cache_read": 18009,
     "cache_write_5m": 0,
-    "input": 276834,
-    "output": 553668,
+    "input": 216108,
+    "output": 432216,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -3738,10 +3738,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 5400,
+    "cache_read": 1600,
     "cache_write_5m": 0,
-    "input": 36000,
-    "output": 450000,
+    "input": 32000,
+    "output": 144000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -5586,10 +5586,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 20625,
+    "cache_read": 33000,
     "cache_write_5m": 0,
-    "input": 82500,
-    "output": 330000,
+    "input": 132000,
+    "output": 528000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5600,10 +5600,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy4-preview": {
-    "cache_read": 37800,
+    "cache_read": 42000,
     "cache_write_5m": 0,
-    "input": 750600,
-    "output": 2250900,
+    "input": 834000,
+    "output": 2501000,
     "reasoning": null
   },
   "openrouter/thedrummer/cydonia-24b-v4.1": {
@@ -5873,10 +5873,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 11250,
+    "cache_read": 12500,
     "cache_write_5m": 0,
-    "input": 17820,
-    "output": 450000,
+    "input": 24700,
+    "output": 683600,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5929,10 +5929,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 5400,
+    "cache_read": 1600,
     "cache_write_5m": 0,
-    "input": 36000,
-    "output": 450000,
+    "input": 32000,
+    "output": 144000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
@@ -5943,10 +5943,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 11790,
+    "cache_read": 1523,
     "cache_write_5m": 0,
-    "input": 11790,
-    "output": 450000,
+    "input": 12080,
+    "output": 143616,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -6020,10 +6020,10 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 11250,
+    "cache_read": 12500,
     "cache_write_5m": 0,
-    "input": 17820,
-    "output": 450000,
+    "input": 24700,
+    "output": 683600,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
