@@ -3689,10 +3689,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v3.2": {
-    "cache_read": 140000,
+    "cache_read": 28000,
     "cache_write_5m": 0,
-    "input": 259000,
-    "output": 800000,
+    "input": 280000,
+    "output": 420000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v3.2-exp": {
@@ -3738,10 +3738,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
-    "cache_read": 1600,
+    "cache_read": 9000,
     "cache_write_5m": 0,
-    "input": 32000,
-    "output": 144000,
+    "input": 40000,
+    "output": 700000,
     "reasoning": null
   },
   "openrouter/dots-studio/dots-3-note-preview:free": {
@@ -3749,6 +3749,13 @@
     "cache_write_5m": 0,
     "input": 0,
     "output": 0,
+    "reasoning": null
+  },
+  "openrouter/elorian/glimpse": {
+    "cache_read": 60000,
+    "cache_write_5m": 0,
+    "input": 600000,
+    "output": 3000000,
     "reasoning": null
   },
   "openrouter/fireworks/ember-1": {
@@ -5824,10 +5831,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-4.7": {
-    "cache_read": 110000,
+    "cache_read": 99000,
     "cache_write_5m": 0,
-    "input": 600000,
-    "output": 2200000,
+    "input": 540000,
+    "output": 1980000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-4.7-flash": {
@@ -5873,10 +5880,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 6000,
+    "cache_read": 18000,
     "cache_write_5m": 0,
-    "input": 40000,
-    "output": 200000,
+    "input": 49000,
+    "output": 650000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -5929,10 +5936,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-flash-latest": {
-    "cache_read": 1600,
+    "cache_read": 9000,
     "cache_write_5m": 0,
-    "input": 32000,
-    "output": 144000,
+    "input": 40000,
+    "output": 700000,
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
@@ -5943,10 +5950,10 @@
     "reasoning": null
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
-    "cache_read": 1523,
+    "cache_read": 5600,
     "cache_write_5m": 0,
-    "input": 16800,
-    "output": 112000,
+    "input": 21000,
+    "output": 528000,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -6020,10 +6027,10 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 6000,
+    "cache_read": 18000,
     "cache_write_5m": 0,
-    "input": 40000,
-    "output": 200000,
+    "input": 49000,
+    "output": 650000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {

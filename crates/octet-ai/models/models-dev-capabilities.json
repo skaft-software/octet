@@ -13793,7 +13793,7 @@
   "openrouter/deepseek/deepseek-v3.2": {
     "limit": {
       "context": 163840,
-      "output": 147456
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -14031,6 +14031,31 @@
       ]
     },
     "name": "Dots3-Note Preview (free)",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/elorian/glimpse": {
+    "limit": {
+      "context": 262144,
+      "output": 256000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Glimpse",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -21945,7 +21970,7 @@
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
