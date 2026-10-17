@@ -13989,7 +13989,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -14001,6 +14001,36 @@
       ]
     },
     "name": "DeepSeek V4.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/deepseek/deepseek-v4.1-flash-1017": {
+    "limit": {
+      "context": 1048576,
+      "output": 393216
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash 1017",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -21911,7 +21941,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -21970,7 +22000,7 @@
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -22336,7 +22366,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
