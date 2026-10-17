@@ -3710,10 +3710,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "cache_read": 8600,
+    "cache_read": 14000,
     "cache_write_5m": 0,
-    "input": 8600,
-    "output": 1280000,
+    "input": 70000,
+    "output": 140000,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
@@ -3724,10 +3724,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 18009,
+    "cache_read": 17400,
     "cache_write_5m": 0,
-    "input": 216108,
-    "output": 432216,
+    "input": 208800,
+    "output": 417600,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -5873,9 +5873,9 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 9600,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 15600,
+    "input": 40000,
     "output": 200000,
     "reasoning": null
   },
@@ -5945,8 +5945,8 @@
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "cache_read": 1523,
     "cache_write_5m": 0,
-    "input": 6880,
-    "output": 143616,
+    "input": 16800,
+    "output": 112000,
     "reasoning": null
   },
   "openrouter/~google/gemini-flash-latest": {
@@ -6020,17 +6020,17 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 9600,
+    "cache_read": 6000,
     "cache_write_5m": 0,
-    "input": 15600,
+    "input": 40000,
     "output": 200000,
     "reasoning": null
   },
   "openrouter/~z-ai/glm-latest": {
-    "cache_read": 56500,
+    "cache_read": 78000,
     "cache_write_5m": 0,
-    "input": 60800,
-    "output": 4400000,
+    "input": 79000,
+    "output": 4800000,
     "reasoning": null
   },
   "qwen-token-plan-cn/deepseek-v3.2": {
