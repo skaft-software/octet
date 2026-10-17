@@ -63,6 +63,9 @@ class ResourceProcessTests(ProcessHarness, unittest.TestCase):
         parent = self.send("tool/call", {"name": "hold", "arguments": {"counter": reference}})
         self.barrier("entered")
         self.send("$/cancelRequest", {"id": parent}, notification=True)
+        # Flushing stdin does not mean the child has applied cancellation. Keep
+        # native execution held until its token observes the notification.
+        self.barrier("cancel_observed")
         disposal = self.send("resource/dispose", {"resources": [reference], "reason": "retired"})
         self.assertNotIn("disposed", [r["event"] for r in self.events()])
         (self.root / "allow_terminal").touch()
