@@ -5880,10 +5880,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
-    "cache_read": 18000,
+    "cache_read": 30000,
     "cache_write_5m": 0,
-    "input": 49000,
-    "output": 650000,
+    "input": 150000,
+    "output": 500000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {
@@ -6027,9 +6027,9 @@
     "reasoning": null
   },
   "openrouter/~z-ai/glm-flash-latest": {
-    "cache_read": 18000,
+    "cache_read": 20000,
     "cache_write_5m": 0,
-    "input": 49000,
+    "input": 55000,
     "output": 650000,
     "reasoning": null
   },
