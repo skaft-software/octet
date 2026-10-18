@@ -984,13 +984,38 @@ tool-call end or successful reply. No POST is replayed. The built-in Mistral
 preset above still uses Chat. Conversations discovery, presets and broader
 native capabilities are separate work, not implied by these codec repairs.
 
+## Prompt caching
+
+With cache retention enabled, Anthropic Messages marks eligible tools, system
+and final content. Large tool batches also retain the preceding user breakpoint so it
+stays reachable within the provider's 20-block lookup window (at most four
+breakpoints total). Supported Claude Bedrock identities use native `cachePoint`
+blocks on system and user boundaries, with the same large-batch bridge. Short
+retention uses the native default; Long requests one hour only when the model's
+cache compatibility allows it. Unsupported models and opaque Bedrock application
+profiles receive no explicit points; Nova keeps automatic caching.
+
+Responses caching follows the selected route's declared controls, not a model
+name alone. Flex is a service tier on that same codec; its existing endpoint gate
+is described [above](#protocols-and-transport). Stable serialized prefixes do not
+prove that a provider's implicit breakpoint remains eligible when a user/tool-result
+group is extended. The local audit covers all builtin Responses models, including
+GPT-6 Luna, and declared Flex fixtures without claiming live hits or tier availability.
+
+These annotations do not remove or reorder context. Compaction, rolling
+screenshot bounds, changed tools/instructions and context hooks can still
+invalidate earlier prefixes. Cache availability, minimum sizes, TTLs and routing
+remain provider-dependent. [Cache warming](cache-warming.md) is additional
+billable work, not a repair for unstable prefixes. The credential-free
+[cache audit](https://github.com/skaft-software/octet/blob/v0.9.5/CACHE_AUDIT.md) separates local estimates from live usage.
+
 ## Provider request trace
 
 When a provider rejects a request with an opaque status (for example an HTTP 400
 whose body is only "Bad Request"), set `OCTET_PROVIDER_REQUEST_TRACE` to a file
-path (or `stderr`) before starting octet. Each request then appends one JSON
-line describing only its shape, and a rejection appends one line with the status
-and the provider's request id:
+path (or `stderr`) before starting octet. Use a fresh file for each process.
+Requests append JSON lines describing shape, prefix comparisons and terminal
+usage; a rejection adds the status and the provider's request id. Shape includes:
 
 - transport (`http` or `websocket`), the frame type, the API model name and the
   body size;
@@ -1001,9 +1026,47 @@ and the provider's request id:
   many reasoning items carry `encrypted_content` (never its content), and how
   many `computer_call_output` items carry no screenshot.
 
-The trace never records prompts, tool arguments or output, headers, URLs,
-credentials, response ids, image data or reasoning content, so a trace is
-suitable to attach to an issue. Leave the variable unset to disable it.
+`cache_prefix` events compare successive requests in the same client/session,
+model and endpoint lane at three stages: `canonical` (after agent context hooks,
+before model normalization), `encoded` (codec JSON, before payload hooks), and
+`wire_http` or `wire_websocket` (after hooks or continuation rewriting). HTTP
+bytes are the uncompressed JSON before compression/signing, not TLS bytes.
+Opaque host transports expose only the canonical stage. Special native steering,
+prewarm and standalone compact operations retain shape-only tracing where
+available, not this three-stage comparison contract.
+
+Events include client-private salted digests, tools/system/message segment
+paths and lengths, exact raw JSON common-prefix offsets, a diagnostic
+annotation-free prefix view, estimated invalidated suffix tokens (`bytes/4`),
+cache-point positions and a digest of other controls. These are **not provider
+tokenization or cache hits**. Only terminal `cache_usage` events carry decoded
+provider usage, correlated by `id`. Efficiency is
+`cache_read / (uncached_input + cache_write + cache_read)`; writes are fresh,
+one-hour writes are a subset, output is excluded, and zero/unreported input has
+no ratio. Compatible Chat usage accepts Kimi's top-level `cached_tokens` alias
+without adding it to other cached-token aliases.
+
+Responses native `prompt_cache_breakpoint` positions are included for documented
+input-text/image/file blocks in user/system/developer messages and function/custom
+tool outputs. Moving only those annotations does not count as a history rewrite
+in the diagnostic prefix view; raw body digests still change. Schemas, arguments,
+unknown fields and opaque reasoning are not stripped. Tracing never adds markers
+to outgoing requests or changes the route's cache policy.
+
+Comparison state is shared by client clones, never across process restarts.
+When enabled, raw/projection bytes stay in memory only: at most 12 snapshots,
+16 MiB of retained payload bytes and 2 MiB per observed body; oversized or
+non-JSON bodies clear the lane/stage's prior comparison. Segment output is
+capped at 256 entries. TTL and account affinity cannot be inferred from a byte
+match, and a missing comparison is not a cache miss.
+
+The trace never writes prompts, tool arguments or output, headers, URLs,
+credentials, response ids, image data or reasoning content. Digests use an
+unexported client-local salt, preventing cross-run correlation of content. New
+trace files are owner-only (`0600`) on Unix; existing permissions are unchanged.
+Review metadata before attaching a trace to an issue. Leave the variable unset
+to disable it. See the [audit](https://github.com/skaft-software/octet/blob/v0.9.5/CACHE_AUDIT.md) for reproducible checks and
+interpretation limits.
 
 ## Model-visible tool-result images
 

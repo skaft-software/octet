@@ -352,9 +352,15 @@ native editor and host output. Earlier failed runs remain retained. This is not
 OS-app switching, IME or Tern 0.3.1 evidence; those journeys remain untested.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
-exhaustion coalesces changes until acknowledgements arrive; negotiation,
-unsupported required kinds, protocol errors and acknowledgement timeouts
-produce an explicit notice before handing ownership to the ANSI renderer.
+exhaustion coalesces changes until acknowledgements arrive. If a previously
+negotiated UI stops acknowledging frames (including closing the last window),
+octet pauses native presentation and re-queries hello every two seconds. A fresh
+hello reopens and replays the current tree, media and host-selected input focus;
+no new frame credit is invented while detached. Initial negotiation failure,
+unsupported required kinds and protocol errors still produce an explicit notice
+before handing ownership to the ANSI renderer. Synthetic detach/reconnect tests
+cover replay and fresh native input; closing a real shared Tern window remains
+an attended qualification step.
 Normal exit keeps native transcript history; suspension removes the active
 surface and a resumed renderer negotiates a fresh one.
 

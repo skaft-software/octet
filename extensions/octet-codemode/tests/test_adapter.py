@@ -185,9 +185,9 @@ class Broker:
     async def start_code(self, code):
         return await self.request("tool/call", {"name": "codemode", "arguments": {"code": code}, "context": {}})
 
-    async def run(self, code):
+    async def run(self, code, timeout=10):
         id_ = await self.start_code(code)
-        message = await self.wait(lambda m: m.get("id") == id_)
+        message = await self.wait(lambda m: m.get("id") == id_, timeout=timeout)
         if "error" in message:
             raise AssertionError(message)
         return message["result"]
@@ -475,13 +475,19 @@ class EngineCases:
 
     async def test_output_and_memory_limits_prevent_commit(self):
         b = await self.broker()
-        for code in ('store("bad",1);text("x".repeat(17*1024*1024));',
-                     'store("bad",1);for(let i=0;i<4097;i++)text(i);',
-                     f'store("bad",1);for(let i=0;i<65;i++)image("data:image/png;base64,{PNG}");',
-                     'store("bad",1);const rows=new Array(40000000).fill(1);return rows.length;'):
-            result = await b.run(code)
-            self.assertTrue(result["is_error"], text(result))
-        self.assertFalse(b.commits)
+        for code, kind, message in (
+                ('store("bad",1);text("x".repeat(17*1024*1024));', "sandbox", "output capture limit exceeded"),
+                ('store("bad",1);for(let i=0;i<4097;i++)text(i);', "sandbox", "output capture limit exceeded"),
+                (f'store("bad",1);for(let i=0;i<65;i++)image("data:image/png;base64,{PNG}");', "sandbox", "output capture limit exceeded"),
+                ('store("bad",1);const bytes=new ArrayBuffer(257*1024*1024);return bytes.byteLength;', "script", "out of memory")):
+            with self.subTest(code=code):
+                # Large output crosses the Wasmi bridge within the runtime's
+                # 25-second script deadline, not the broker's usual 10 seconds.
+                result = await b.run(code, timeout=30)
+                self.assertTrue(result["is_error"], text(result))
+                self.assertEqual(result["metadata"]["error_kind"], kind, text(result))
+                self.assertIn(message, text(result))
+                self.assertFalse(b.commits)
 
     async def test_commands_malformed_requests_and_oversized_frame(self):
         b = await self.broker()

@@ -46,7 +46,7 @@ fn generated_pricing_is_provider_scoped_and_integer_based() {
 #[test]
 fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
     let flash = model_capability_metadata("deepseek", "deepseek-flash").unwrap();
-    assert_eq!(flash["name"], "DeepSeek V4.1 Flash");
+    assert_eq!(flash["name"], "DeepSeek V4.1 Flash 1017");
     assert_eq!(flash["limit"]["context"], 1_000_000);
     assert_eq!(flash["limit"]["output"], 393_216);
     assert_eq!(
@@ -60,7 +60,7 @@ fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
     );
     assert_eq!(
         model_display_name("deepseek/deepseek-flash").as_deref(),
-        Some("DeepSeek V4.1 Flash")
+        Some("DeepSeek V4.1 Flash 1017")
     );
     for provider in ["openai", "codex", "custom", "openrouter"] {
         assert!(model_capability_metadata(provider, "deepseek-flash").is_none());

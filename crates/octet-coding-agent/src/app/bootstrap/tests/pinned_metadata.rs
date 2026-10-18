@@ -843,7 +843,7 @@ fn pinned_metadata_enriches_discovered_display_only() {
     assert_eq!(model.spec.api_name, "deepseek-flash");
     assert_eq!(
         model.spec.display_name.as_deref(),
-        Some("DeepSeek V4.1 Flash")
+        Some("DeepSeek V4.1 Flash 1017")
     );
     // A sparse endpoint publishes no limits, so the pinned provider record
     // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
@@ -1034,7 +1034,10 @@ fn pinned_metadata_is_provider_and_protocol_scoped_and_preserves_cerebras_defaul
     let model = api_models_from_response_for(&body, Some(declaration))
         .unwrap()
         .remove(0);
-    assert_eq!(model.display_name.as_deref(), Some("DeepSeek V4.1 Flash"));
+    assert_eq!(
+        model.display_name.as_deref(),
+        Some("DeepSeek V4.1 Flash 1017")
+    );
     let reasoning = discovered_reasoning_capability(
         declaration,
         Protocol::OpenAiChat,
@@ -1420,7 +1423,7 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         if api_name == "deepseek-flash" {
             assert_eq!(
                 legacy.spec.display_name.as_deref(),
-                Some("DeepSeek V4.1 Flash")
+                Some("DeepSeek V4.1 Flash 1017")
             );
         }
     }
@@ -1552,7 +1555,7 @@ fn pinned_metadata_raw_v1_provider_cache_upgrades_without_synthesizing_persisted
             let model = catalog.resolve(&ModelId(DEEPSEEK_MODEL_ID.into())).unwrap();
             assert_eq!(
                 model.spec.display_name.as_deref(),
-                Some("DeepSeek V4.1 Flash")
+                Some("DeepSeek V4.1 Flash 1017")
             );
             let reasoning = model.spec.capabilities.reasoning.as_ref();
             if assertion.get("reasoning").is_none() {

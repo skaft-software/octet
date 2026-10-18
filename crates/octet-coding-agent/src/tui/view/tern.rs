@@ -117,6 +117,7 @@ pub(super) struct TernSurface {
     last_sent: Option<Instant>,
     started: Instant,
     ready: bool,
+    recovering: bool,
     opened: bool,
     visible: bool,
     regions: bool,
@@ -159,6 +160,7 @@ impl TernSurface {
             last_sent: None,
             started: Instant::now(),
             ready: false,
+            recovering: false,
             opened: false,
             visible: true,
             regions: false,
@@ -190,6 +192,33 @@ impl TernSurface {
             self.force_focus = true;
             self.credit_blocked = None;
         }
+    }
+
+    fn reset_surface(&mut self) -> io::Result<()> {
+        if self.opened {
+            self.client.close(SURFACE, false)?;
+        }
+        self.opened = false;
+        self.regions = false;
+        self.sent = Projection::default();
+        self.main_key = None;
+        self.receipts.clear();
+        self.images = Default::default();
+        self.brand = Default::default();
+        self.last_key = None;
+        self.theme_key = None;
+        self.last_sent = None;
+        self.credit_blocked = None;
+        self.force_focus = true;
+        self.client.reset_surface(SURFACE);
+        Ok(())
+    }
+
+    fn query_reconnect(&mut self) -> io::Result<()> {
+        self.client
+            .query_hello("octet", Some(env!("CARGO_PKG_VERSION")), &["edit"])?;
+        self.started = Instant::now();
+        Ok(())
     }
 
     fn observe(&mut self, message: &Incoming) -> io::Result<()> {
@@ -230,6 +259,13 @@ impl TernSurface {
                         "Tern does not support octet's native surface vocabulary",
                     ));
                 }
+                if self.recovering {
+                    // The terminal UI may have lost its entire retained tree.
+                    // Reopen only after a real hello, never on a timer alone.
+                    self.reset_surface()?;
+                    self.visible = true;
+                    self.recovering = false;
+                }
                 self.ready = true;
                 self.last_key = None;
                 self.main_key = None;
@@ -249,19 +285,7 @@ impl TernSurface {
             {
                 // Reopen only on explicit eviction, never on resize/zoom. A
                 // fresh surface is required before its retained tree is replayed.
-                if self.opened {
-                    self.client.close(SURFACE, false)?;
-                }
-                self.opened = false;
-                self.regions = false;
-                self.sent = Projection::default();
-                self.main_key = None;
-                self.receipts.clear();
-                self.images = Default::default();
-                self.brand = Default::default();
-                self.last_key = None;
-                self.theme_key = None;
-                self.client.reset_surface(SURFACE);
+                self.reset_surface()?;
             }
             Incoming::Event(Event::Visible { sf, visible })
                 if sf.as_deref().is_none_or(|id| id == SURFACE) =>
@@ -370,6 +394,10 @@ impl TernSurface {
         }
         if !self.ready {
             if self.started.elapsed() >= HELLO_TIMEOUT {
+                if self.recovering {
+                    self.query_reconnect()?;
+                    return Ok(());
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Tern did not answer the native hello query",
@@ -384,16 +412,16 @@ impl TernSurface {
             return Ok(());
         }
         if !self.client.has_credit(SURFACE) {
-            // A hidden pane stops acknowledging frames while the terminal keeps
-            // it suspended: that is not a failure, and returning to the tab must
-            // not find the renderer already fallen back. Only a *visible* surface
-            // that has stopped being acknowledged is a real timeout.
+            // Last-window detach need not send Visible(false). Preserve native
+            // ownership and probe for the returning UI instead of permanently
+            // falling back to ANSI. No frames are sent without a fresh hello.
             let blocked = self.credit_blocked.get_or_insert_with(Instant::now);
-            if self.visible && blocked.elapsed() >= HELLO_TIMEOUT {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Tern stopped acknowledging native frames",
-                ));
+            if blocked.elapsed() >= HELLO_TIMEOUT {
+                self.query_reconnect()?;
+                self.ready = false;
+                self.recovering = true;
+                self.receipts.clear();
+                state.borrow_mut().painted_panel = None;
             }
             return Ok(());
         }

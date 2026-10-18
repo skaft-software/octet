@@ -1249,6 +1249,31 @@ fn chat_usage_accepts_gateway_cache_aliases_and_keeps_buckets_disjoint() {
 }
 
 #[test]
+fn kimi_top_level_cached_tokens_is_a_read_alias_not_additive() {
+    for (details, alias, expected) in [
+        (serde_json::Value::Null, None, 980),
+        (serde_json::json!({"cached_tokens": 0}), Some(700), 0),
+        (serde_json::Value::Null, Some(700), 700),
+    ] {
+        let mut value = serde_json::json!({
+            "prompt_tokens": 1000, "completion_tokens": 5, "cached_tokens": 980,
+            "prompt_tokens_details": details,
+        });
+        if let Some(alias) = alias {
+            value["prompt_cache_hit_tokens"] = serde_json::json!(alias);
+        }
+        let mapped = map_usage(&serde_json::from_value::<ChatUsage>(value).unwrap()).unwrap();
+        assert_eq!(mapped.cache_read_tokens, expected);
+        assert_eq!(mapped.input_tokens, 1000 - expected);
+        assert_eq!(mapped.total_tokens, 1005);
+    }
+    assert!(serde_json::from_str::<ChatUsage>(
+        r#"{"prompt_tokens":1,"completion_tokens":1,"cached_tokens":0,"cached_tokens":0}"#
+    )
+    .is_err());
+}
+
+#[test]
 fn cache_retention_controls_openai_chat_key() {
     let mut model = make_test_model(false, false, false, false, false, false);
     let mut req = Request {

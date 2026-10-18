@@ -952,12 +952,38 @@ async fn request_trace_records_the_websocket_continuation_shape_without_content(
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 1, "{written}");
-    assert_eq!(lines[0]["event"], "request");
-    assert_eq!(lines[0]["transport"], "websocket");
-    assert_eq!(lines[0]["previous_response_id"], true);
-    assert_eq!(lines[0]["input_items"], 1);
-    assert_eq!(lines[0]["item_types"]["message"], 1);
+    assert_eq!(lines.len(), 5, "{written}");
+    let prefixes: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "cache_prefix")
+        .collect();
+    assert_eq!(prefixes.len(), 3);
+    assert_eq!(prefixes[0]["stage"], "canonical");
+    assert_eq!(prefixes[1]["stage"], "encoded");
+    assert_eq!(prefixes[2]["stage"], "wire_websocket");
+    assert_eq!(
+        prefixes[1]["cache_controls"]["previous_response_id_present"],
+        false
+    );
+    assert_eq!(
+        prefixes[2]["cache_controls"]["previous_response_id_present"],
+        true
+    );
+    let requests = server.requests().await;
+    assert_eq!(
+        prefixes[2]["bytes"],
+        serde_json::to_vec(&requests[1]).unwrap().len()
+    );
+    let request = &lines[3];
+    assert_eq!(request["event"], "request");
+    assert_eq!(request["transport"], "websocket");
+    assert_eq!(request["previous_response_id"], true);
+    assert_eq!(request["input_items"], 1);
+    assert_eq!(request["item_types"]["message"], 1);
+    assert_eq!(prefixes[2]["id"], request["id"]);
+    assert_eq!(lines[4]["event"], "cache_usage");
+    assert_eq!(lines[4]["id"], request["id"]);
+    assert_eq!(lines[4]["total_input_tokens"], 2);
 }
 
 #[tokio::test]

@@ -724,8 +724,42 @@ pub(crate) fn build_request(
         );
     }
 
+    // A breakpoint searches only 20 content-block boundaries backwards. Large
+    // parallel tool batches can move the newest point beyond that window. Use
+    // the fourth available slot to retain the preceding user boundary in that
+    // case (system + tools + previous user + final content <= 4). This changes
+    // annotations only, never conversation content or tool-result ordering.
+    if let Some(marker) = cache_marker {
+        if let Some(previous) =
+            messages
+                .iter()
+                .enumerate()
+                .rev()
+                .skip(1)
+                .find_map(|(index, message)| {
+                    matches!(message, AnthropicMessage::User { .. }).then_some(index)
+                })
+        {
+            let distance: usize = messages[previous + 1..]
+                .iter()
+                .map(|message| match message {
+                    AnthropicMessage::User { content }
+                    | AnthropicMessage::Assistant { content } => content.len(),
+                    AnthropicMessage::System { .. } => 0,
+                })
+                .sum();
+            if distance >= 20 {
+                if let AnthropicMessage::User { content } = &mut messages[previous] {
+                    if let Some(block) = content.last_mut() {
+                        set_content_cache_control(block, marker);
+                    }
+                }
+            }
+        }
+    }
+
     // Ordinary requests and exact cache-warming replays use the same final
-    // real user breakpoint; a replay changes only the output-token cap.
+    // content breakpoint; a replay changes only the output-token cap.
     if let Some(marker) = cache_marker {
         let content = match messages.last_mut() {
             Some(AnthropicMessage::User { content } | AnthropicMessage::Assistant { content }) => {
