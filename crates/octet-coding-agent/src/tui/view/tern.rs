@@ -24,6 +24,26 @@ use crate::tui::theme::ModelLab;
 pub(super) const SURFACE: &str = "octet.session";
 const FRAME_INTERVAL: Duration = Duration::from_millis(32);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+/// A visible surface that waits this long for a frame acknowledgement has the
+/// missing acknowledgements forgiven and keeps presenting, as omp does.
+const ACK_STALL: Duration = Duration::from_secs(5);
+/// A terminal `error` replays the retained tree on a fresh surface. More than
+/// this many replays inside the window means the terminal cannot take the tree.
+const RESYNC_BUDGET: usize = 3;
+const RESYNC_WINDOW: Duration = Duration::from_secs(60);
+/// Errors this soon after a replay belong to the incident that caused it: the
+/// other ops of one rejected frame, and frames in flight when it was reopened.
+const RESYNC_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Columns from which the composer placeholder fits its discovery hints on one
+/// line. A wrapped placeholder resizes the composer, so narrower panes use a
+/// short placeholder and the welcome rail carries the hints instead: they live
+/// in exactly one place at any width.
+const PLACEHOLDER_HINTS_MIN_COLS: u16 = 56;
+
+pub(super) fn hints_in_placeholder(cols: u16) -> bool {
+    cols >= PLACEHOLDER_HINTS_MIN_COLS
+}
 
 /// The resolved `--tern` / `OCTET_TERN` policy, published once at startup.
 ///
@@ -134,6 +154,8 @@ pub(super) struct TernSurface {
     /// if the focused control did not change.
     force_focus: bool,
     credit_blocked: Option<Instant>,
+    /// When recent terminal `error` events replayed the surface.
+    resyncs: std::collections::VecDeque<Instant>,
     images: super::tern_images::NativeImages,
     brand: super::tern_welcome::Brand,
     receipts:
@@ -171,6 +193,7 @@ impl TernSurface {
             last_focus_resync: 0,
             force_focus: false,
             credit_blocked: None,
+            resyncs: Default::default(),
             receipts: Default::default(),
             images: Default::default(),
             brand: Default::default(),
@@ -190,6 +213,64 @@ impl TernSurface {
             self.force_focus = true;
             self.credit_blocked = None;
         }
+    }
+
+    /// Close the surface and forget everything retained about it, so the next
+    /// frame reopens it and replays the whole tree with fresh credit.
+    fn reopen(&mut self) -> io::Result<()> {
+        if self.opened {
+            self.client.close(SURFACE, false)?;
+        }
+        self.opened = false;
+        self.regions = false;
+        self.sent = Projection::default();
+        self.main_key = None;
+        self.receipts.clear();
+        self.images = Default::default();
+        self.brand = Default::default();
+        self.last_key = None;
+        self.theme_key = None;
+        self.credit_blocked = None;
+        self.client.reset_surface(SURFACE);
+        Ok(())
+    }
+
+    /// A rejected op leaves Tern's document unknown against the retained tree.
+    /// Replay the tree on a fresh surface instead of abandoning native
+    /// rendering. Only a terminal that keeps rejecting the replays is treated
+    /// as unable to host the surface, so a deterministic rejection cannot
+    /// reopen it in a loop.
+    fn resync_after_error(&mut self, msg: &str) -> io::Result<()> {
+        let now = Instant::now();
+        if self
+            .resyncs
+            .back()
+            .is_some_and(|at| now.duration_since(*at) < RESYNC_DEBOUNCE)
+        {
+            return Ok(());
+        }
+        while self
+            .resyncs
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= RESYNC_WINDOW)
+        {
+            self.resyncs.pop_front();
+        }
+        if self.resyncs.len() >= RESYNC_BUDGET {
+            return Err(io::Error::other(format!("Tern surface: {msg}")));
+        }
+        self.resyncs.push_back(now);
+        self.reopen()
+    }
+
+    /// Treat every frame sent so far as acknowledged. `Ack` is clamped to the
+    /// sent sequence and never moves backwards, so late acknowledgements of the
+    /// forgiven frames change nothing and sequence numbers stay monotonic.
+    fn forgive_unacknowledged(&mut self) {
+        self.client.observe(&Incoming::Event(Event::Ack {
+            sf: SURFACE.into(),
+            s: u64::MAX,
+        }));
     }
 
     fn observe(&mut self, message: &Incoming) -> io::Result<()> {
@@ -241,7 +322,7 @@ impl TernSurface {
                 // protocol failure, and returning to the tab must not find the
                 // renderer already fallen back to ANSI.
                 if self.visible {
-                    return Err(io::Error::other(format!("Tern surface: {msg}")));
+                    self.resync_after_error(msg)?;
                 }
             }
             Incoming::Event(Event::Gone { sf, .. })
@@ -249,19 +330,7 @@ impl TernSurface {
             {
                 // Reopen only on explicit eviction, never on resize/zoom. A
                 // fresh surface is required before its retained tree is replayed.
-                if self.opened {
-                    self.client.close(SURFACE, false)?;
-                }
-                self.opened = false;
-                self.regions = false;
-                self.sent = Projection::default();
-                self.main_key = None;
-                self.receipts.clear();
-                self.images = Default::default();
-                self.brand = Default::default();
-                self.last_key = None;
-                self.theme_key = None;
-                self.client.reset_surface(SURFACE);
+                self.reopen()?;
             }
             Incoming::Event(Event::Visible { sf, visible })
                 if sf.as_deref().is_none_or(|id| id == SURFACE) =>
@@ -384,18 +453,16 @@ impl TernSurface {
             return Ok(());
         }
         if !self.client.has_credit(SURFACE) {
-            // A hidden pane stops acknowledging frames while the terminal keeps
-            // it suspended: that is not a failure, and returning to the tab must
-            // not find the renderer already fallen back. Only a *visible* surface
-            // that has stopped being acknowledged is a real timeout.
-            let blocked = self.credit_blocked.get_or_insert_with(Instant::now);
-            if self.visible && blocked.elapsed() >= HELLO_TIMEOUT {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Tern stopped acknowledging native frames",
-                ));
+            // A terminal that is slow to acknowledge (busy, occluded, throttled
+            // without a `Visible` event) is not a renderer failure. Coalesce
+            // until it answers; after a long silence forgive the missing
+            // acknowledgements and keep presenting rather than handing the pane
+            // to the ANSI renderer for the rest of the session.
+            let blocked = *self.credit_blocked.get_or_insert_with(Instant::now);
+            if blocked.elapsed() < ACK_STALL {
+                return Ok(());
             }
-            return Ok(());
+            self.forgive_unacknowledged();
         }
         self.credit_blocked = None;
         let now = Instant::now();
@@ -1346,10 +1413,12 @@ fn composer(shell: &ShellState) -> Node {
     } else {
         &shell.reasoning
     };
+    // Mirrored Pi themes keep Pi's flat, rule-framed input. Every other theme
+    // gets Tern's own editor card, the container omp's composer uses: it pads
+    // the editor, chips and meter on one inset and draws the context meter
+    // along its top edge, so neither separator rules nor gaps are needed.
+    let card = !shell.theme.is_pi_theme();
     let mut children = Vec::new();
-    if !shell.startup_pending && !shell.theme.is_pi_theme() {
-        children.push(Node::new("composer.rule", Kind::Rule, Props::new()));
-    }
     if let Some((used, total)) = shell
         .context_estimate
         .filter(|(_, total)| !shell.startup_pending && *total > 0)
@@ -1358,7 +1427,11 @@ fn composer(shell: &ShellState) -> Node {
             "composer.context",
             Kind::Meter,
             Props::new()
-                .role("octet.composer.context")
+                .role(if card {
+                    "omp.composer.context"
+                } else {
+                    "octet.composer.context"
+                })
                 .set("style", "bar")
                 .set("value", (used as f64 / total as f64).min(1.0))
                 .set(
@@ -1397,16 +1470,30 @@ fn composer(shell: &ShellState) -> Node {
                     "placeholder",
                     if shell.startup_pending {
                         ""
-                    } else {
+                    } else if hints_in_placeholder(shell.size.0) {
                         "Ask octet — / commands · @ files · ! shell"
+                    } else {
+                        "Ask octet…"
                     },
                 ),
         )],
     ));
+    // The card frames the draft from the first frame, so the resolved chrome
+    // fills it in without the editor changing frames when the ready frame lands.
+    let container = if card {
+        let props = Props::new().role("omp.editor").set("gap", "none");
+        if running {
+            props.tone(Tone::Pending)
+        } else {
+            props
+        }
+    } else {
+        Props::new().set("gap", "md")
+    };
     if shell.startup_pending {
         // Register and focus the genuine draft immediately. Only its resolved
         // chrome waits for the same ready frame as the welcome and transcript.
-        return Node::with_children("composer", Kind::Col, Props::new(), children);
+        return Node::with_children("composer", Kind::Col, container, children);
     }
     if shell.theme.is_pi_theme() {
         children.push(Node::new("composer.rule.bottom", Kind::Rule, Props::new()));
@@ -1567,12 +1654,7 @@ fn composer(shell: &ShellState) -> Node {
             .set("wrap", true),
         controls,
     ));
-    Node::with_children(
-        "composer",
-        Kind::Col,
-        Props::new().set("gap", "md"),
-        children,
-    )
+    Node::with_children("composer", Kind::Col, container, children)
 }
 
 fn report(shell: &ShellState, tables: bool) -> Option<Node> {

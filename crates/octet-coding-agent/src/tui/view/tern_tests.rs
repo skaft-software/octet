@@ -157,18 +157,13 @@ fn native_startup_registers_an_unframed_editable_draft_until_atomic_ready_frame(
     shell.finish_startup();
     surface.flush(&shell.state).unwrap();
     assert!(find_node(&surface.sent.main, "welcome").is_some());
-    for visible in [
-        "composer.rule",
-        "composer.context",
-        "composer.bar",
-        "composer.model",
-    ] {
+    for visible in ["composer.context", "composer.bar", "composer.model"] {
         assert!(find_node(&surface.sent.dock, visible).is_some());
     }
     let ready = output.last_frame().to_string();
     for together in [
         "welcome",
-        "composer.rule",
+        "composer.context",
         "composer.bar",
         "cerebras/gemma-4-31b",
     ] {
@@ -240,13 +235,16 @@ fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
     let composer = find_node(&projection.dock, "composer").unwrap();
     assert_eq!(composer.k, Kind::Col);
     let props = composer.p.as_ref().unwrap().as_map();
-    for removed in ["role", "head", "frame", "border"] {
+    // The frame is Tern's own editor card (omp's composer container), never a
+    // host-drawn head, frame or border.
+    for removed in ["head", "frame", "border"] {
         assert!(
             !props.contains_key(removed),
-            "borderless composer: {removed}"
+            "no host-drawn frame: {removed}"
         );
     }
-    assert_eq!(props["gap"], "md", "space above and below the editor");
+    assert_eq!(props["role"], "omp.editor");
+    assert_eq!(props["gap"], "none", "the card owns its inset and rhythm");
     assert_eq!(
         composer
             .c
@@ -255,23 +253,9 @@ fn composer_uses_native_layout_hooks_with_octet_controls_and_no_rows() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        [
-            "composer.rule",
-            "composer.context",
-            "composer.line",
-            "composer.bar"
-        ],
+        ["composer.context", "composer.line", "composer.bar"],
     );
-    assert_eq!(
-        find_node(&projection.dock, "composer.rule").unwrap().k,
-        Kind::Rule
-    );
-    walk(&projection.dock, &mut |node| {
-        assert_ne!(
-            node.p.as_ref().and_then(|props| props.as_map().get("role")),
-            Some(&json!("omp.editor"))
-        );
-    });
+    assert!(find_node(&projection.dock, "composer.rule").is_none());
     assert!(find_node(&projection.dock, "composer.context").is_some());
     assert!(projection.layer.iter().any(|node| node.k == Kind::Overlay));
     walk(&projection.dock, &mut |node| {
@@ -421,11 +405,12 @@ fn missing_credit_keeps_the_sent_baseline_until_the_latest_state_can_be_sent() {
             .as_map()["text"],
         "latest"
     );
+    // Out of credit again: a slow acknowledgement is waited for, never a
+    // renderer failure (the stall window itself is covered by
+    // `visible_ack_stall_is_slow_not_fatal_and_is_forgiven_after_the_window`).
     surface.credit_blocked = Some(Instant::now() - HELLO_TIMEOUT);
-    assert_eq!(
-        surface.flush(&shell.state).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
-    );
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 2);
 }
 
 #[test]
@@ -950,6 +935,141 @@ fn hidden_pane_keeps_its_place_and_reasserts_focus_on_return() {
         .unwrap()
         .iter()
         .any(|op| op[0] == "focus" && op[1] == "composer.editor"));
+}
+
+#[test]
+fn visible_ack_stall_is_slow_not_fatal_and_is_forgiven_after_the_window() {
+    let (shell, mut surface, output) = setup(1);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    shell
+        .state
+        .borrow_mut()
+        .editor
+        .set_text("typed while stalled");
+    // The only credit is spent and Tern is slow: coalesce, never fail.
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("f").len(), 1);
+    surface.credit_blocked = Some(Instant::now() - Duration::from_secs(3));
+    surface
+        .flush(&shell.state)
+        .expect("a three second ack delay is a slow terminal, not a renderer failure");
+    assert_eq!(output.messages("f").len(), 1);
+    // A long stall forgives the lost acknowledgement and presentation resumes
+    // on the same surface with monotonic sequence numbers.
+    surface.credit_blocked = Some(Instant::now() - Duration::from_secs(30));
+    surface
+        .flush(&shell.state)
+        .expect("an ack stall must not hand the pane to the ANSI renderer");
+    assert_eq!(output.messages("f").len(), 2);
+    assert_eq!(output.messages("o").len(), 1);
+    assert_eq!(output.last_frame()["s"], 2);
+    assert_eq!(
+        find_node(&surface.sent.dock, "composer.editor")
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["text"],
+        "typed while stalled"
+    );
+    // The late acknowledgements of the forgiven frames change nothing.
+    ack(&shell, 1);
+    ack(&shell, 2);
+    surface.flush(&shell.state).unwrap();
+    assert!(surface.client.has_credit(SURFACE));
+    assert_eq!(output.messages("o").len(), 1);
+}
+
+#[test]
+fn terminal_error_events_resync_the_surface_instead_of_ending_native_rendering() {
+    let (shell, mut surface, output) = setup(4);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("o").len(), 1);
+    shell
+        .state
+        .native()
+        .lock()
+        .unwrap()
+        .messages
+        .push_back(Incoming::Event(Event::Error {
+            sf: Some(SURFACE.into()),
+            s: Some(1),
+            op: Some(2),
+            msg: "unknown parent".into(),
+        }));
+    surface
+        .flush(&shell.state)
+        .expect("one rejected op must not end native rendering");
+    assert_eq!(output.messages("x").len(), 1);
+    assert_eq!(output.messages("o").len(), 2);
+    // The reopened surface starts over with the whole retained tree.
+    assert_eq!(output.last_frame()["s"], 1);
+    let ops = output.last_frame()["ops"].as_array().unwrap().clone();
+    assert!(ops.iter().any(|op| op[0] == "add" && op[1] == "dock"));
+    assert!(find_node(&surface.sent.dock, "composer.editor").is_some());
+}
+
+#[test]
+fn error_events_from_one_incident_replay_the_surface_once() {
+    let (shell, mut surface, output) = setup(8);
+    surface.flush(&shell.state).unwrap();
+    let reject = |count: usize| {
+        let mut mailbox = shell.state.native().lock().unwrap();
+        for op in 0..count {
+            mailbox.messages.push_back(Incoming::Event(Event::Error {
+                sf: Some(SURFACE.into()),
+                s: Some(1),
+                op: Some(op),
+                msg: "unknown parent".into(),
+            }));
+        }
+    };
+    // One rejected frame can report several ops, and frames already in flight
+    // when the surface was reopened still answer for the old one.
+    reject(5);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("o").len(), 2);
+    reject(2);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("o").len(), 2);
+    assert!(surface.resyncs.len() == 1);
+}
+
+#[test]
+fn persistent_terminal_errors_exhaust_the_resync_budget_and_then_yield_to_ansi() {
+    let (shell, mut surface, output) = setup(8);
+    surface.flush(&shell.state).unwrap();
+    let reject = || {
+        shell
+            .state
+            .native()
+            .lock()
+            .unwrap()
+            .messages
+            .push_back(Incoming::Event(Event::Error {
+                sf: Some(SURFACE.into()),
+                s: Some(1),
+                op: Some(0),
+                msg: "frame rejected".into(),
+            }));
+    };
+    for attempt in 1..=3 {
+        reject();
+        surface
+            .flush(&shell.state)
+            .unwrap_or_else(|error| panic!("resync {attempt} must stay native: {error}"));
+        // Distinct incidents, not echoes of one: let the debounce window pass.
+        for at in surface.resyncs.iter_mut() {
+            *at -= Duration::from_secs(1);
+        }
+    }
+    assert_eq!(output.messages("o").len(), 4);
+    reject();
+    let error = surface
+        .flush(&shell.state)
+        .expect_err("a surface Tern keeps rejecting must yield to ANSI");
+    assert!(error.to_string().contains("frame rejected"), "{error}");
 }
 
 #[test]
@@ -1586,14 +1706,25 @@ fn welcome_owns_its_layout_and_avoids_omp_logo_overrides() {
         let props = welcome.p.as_ref().unwrap().as_map();
         assert_eq!(props["role"], "octet.welcome");
         assert_eq!(props["align"], "center");
-        assert_eq!(props["gap"], "sm");
+        assert_eq!(props["gap"], "lg");
         assert_eq!(props["wrap"], true);
-        let children = welcome.c.as_ref().unwrap();
-        assert_eq!(children.len(), 6);
-        assert!(children.iter().all(|node| node.c.is_none()));
+        let groups = welcome.c.as_ref().unwrap();
+        assert_eq!(groups.len(), 4);
+        let identity = find_node(groups, "welcome.id").unwrap();
+        assert_eq!(identity.c.as_ref().unwrap().len(), 3);
+        assert!(identity
+            .c
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|node| node.c.is_none()));
         assert!(find_node(&surface.sent.main, "welcome.grid").is_none());
         assert!(find_node(&surface.sent.main, "welcome.brand").is_none());
-        for node in children.iter().filter(|node| node.k == Kind::Text) {
+        for node in groups
+            .iter()
+            .chain(identity.c.as_ref().unwrap())
+            .filter(|node| node.k == Kind::Text)
+        {
             assert_eq!(node.p.as_ref().unwrap().as_map()["wrap"], "word");
             assert!(!node.p.as_ref().unwrap().as_map()["spans"]
                 .as_array()
@@ -1730,8 +1861,134 @@ fn native_transcript_and_composer_use_the_full_available_pane_width() {
         let dock = find_node(&surface.sent.dock, "dock.content").unwrap();
         let composer = find_node(dock.c.as_deref().unwrap(), "composer").unwrap();
         assert_eq!(composer.p.as_ref().unwrap().as_map()["max"]["w"], 1.0);
-        assert_eq!(composer.p.as_ref().unwrap().as_map()["gap"], "md");
+        // The card owns its inset and rhythm; the dock only spaces its blocks.
+        assert_eq!(composer.p.as_ref().unwrap().as_map()["gap"], "none");
     }
+}
+
+fn editor_placeholder(surface: &TernSurface) -> String {
+    find_node(&surface.sent.dock, "composer.editor")
+        .unwrap()
+        .p
+        .as_ref()
+        .unwrap()
+        .as_map()["placeholder"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn default_theme_composer_is_a_tern_card_with_the_context_meter_on_its_top_edge() {
+    let (shell, mut surface, _) = setup(4);
+    shell.state.borrow_mut().context_estimate = Some((1234, 131072));
+    surface.flush(&shell.state).unwrap();
+    let composer = find_node(&surface.sent.dock, "composer").unwrap();
+    let props = composer.p.as_ref().unwrap().as_map();
+    assert_eq!(props["role"], "omp.editor");
+    assert_eq!(props["gap"], "none");
+    assert!(props.get("tone").is_none());
+    assert_eq!(props["max"]["w"], 1.0);
+    let children = composer.c.as_ref().unwrap();
+    assert_eq!(
+        children
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        ["composer.context", "composer.line", "composer.bar"]
+    );
+    assert_eq!(
+        children[0].p.as_ref().unwrap().as_map()["role"],
+        "omp.composer.context"
+    );
+    walk(children, &mut |node| assert_ne!(node.k, Kind::Rule));
+}
+
+#[test]
+fn a_running_turn_marks_the_composer_card_pending() {
+    let (mut shell, mut surface, _) = setup(4);
+    let _run = shell.begin_run("fixture");
+    surface.flush(&shell.state).unwrap();
+    let composer = find_node(&surface.sent.dock, "composer").unwrap();
+    assert_eq!(composer.p.as_ref().unwrap().as_map()["tone"], "pending");
+}
+
+#[test]
+fn the_composer_card_exists_before_the_ready_frame_so_the_draft_does_not_jump() {
+    let (shell, mut surface, _) = setup(4);
+    shell.state.borrow_mut().startup_pending = true;
+    surface.flush(&shell.state).unwrap();
+    let composer = find_node(&surface.sent.dock, "composer").unwrap();
+    assert_eq!(composer.p.as_ref().unwrap().as_map()["role"], "omp.editor");
+    assert_eq!(composer.p.as_ref().unwrap().as_map()["gap"], "none");
+}
+
+#[test]
+fn the_placeholder_carries_the_hints_only_where_it_fits_on_one_line() {
+    let (shell, mut surface, _) = setup(4);
+    for (cols, placeholder) in [
+        (20, "Ask octet…"),
+        (55, "Ask octet…"),
+        (56, "Ask octet — / commands · @ files · ! shell"),
+        (240, "Ask octet — / commands · @ files · ! shell"),
+    ] {
+        shell.state.borrow_mut().size = (cols, 40);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(editor_placeholder(&surface), placeholder, "{cols} columns");
+    }
+}
+
+#[test]
+fn a_width_change_reprojects_the_composer_without_any_other_state_change() {
+    let (shell, mut surface, _) = setup(8);
+    shell.state.borrow_mut().size = (120, 40);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(
+        editor_placeholder(&surface),
+        "Ask octet — / commands · @ files · ! shell"
+    );
+    ack(&shell, 1);
+    surface.flush(&shell.state).unwrap();
+    // `reconcile_terminal_size` stores the polled size without touching the
+    // render revision; the next frame must still see the new width.
+    shell.state.borrow_mut().size = (40, 40);
+    surface.last_sent = None;
+    surface.present(&shell.state).unwrap();
+    assert_eq!(editor_placeholder(&surface), "Ask octet…");
+}
+
+#[test]
+fn model_picker_price_column_uses_the_compact_in_out_form() {
+    let (mut shell, mut surface, _) = setup(2);
+    let detail = crate::tui::pickers::ModelPickerDetail {
+        name: "Model".into(),
+        context: 100_000,
+        output: 16_000,
+        price: "$0.35 · $0.75".into(),
+        cache_price: None,
+        input: "text".into(),
+        badges: Vec::new(),
+        source: Vec::new(),
+    };
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Models"),
+        items: vec!["model".into()],
+        descriptions: vec![None],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectGroupedModel {
+            models: vec![octet_ai::ModelId("model".into())],
+            providers: vec!["provider".into()],
+            details: vec![detail],
+            scope: None,
+        },
+    });
+    surface.flush(&shell.state).unwrap();
+    let json = serde_json::to_string(&surface.sent.layer).unwrap();
+    // The narrow column truncated "$0.35 · $0…"; the row fact is omp's `$in·out`.
+    assert!(json.contains(r#""price":"$0.35·0.75""#), "{json}");
+    // The detail pane keeps the readable form.
+    assert!(json.contains("$0.35 · $0.75"), "{json}");
 }
 
 #[test]
