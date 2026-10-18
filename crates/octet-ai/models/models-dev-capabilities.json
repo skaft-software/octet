@@ -670,6 +670,38 @@
     "structured_output": true,
     "tool_call": true
   },
+  "baseten/deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash 1017",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "baseten/deepseek-ai/DeepSeek-V4.1-Flash-Fast": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1285,7 +1317,7 @@
         "text"
       ]
     },
-    "name": "DeepSeek V4.1 Flash",
+    "name": "DeepSeek V4.1 Flash 1017",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -13960,7 +13992,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 384000
     },
     "modalities": {
       "input": [
@@ -13989,7 +14021,7 @@
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -19635,7 +19667,7 @@
   "openrouter/qwen/qwen3.5-35b-a3b": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -20884,6 +20916,25 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/unbiased/pareto-26.10": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pareto 26.10",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/unbiased/pareto-26.9": {
     "limit": {
       "context": 262144,
@@ -21699,7 +21750,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943717
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -21941,7 +21992,7 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -22285,7 +22336,7 @@
   },
   "openrouter/~unbiased/pareto-latest": {
     "limit": {
-      "context": 262144,
+      "context": 1048576,
       "output": 131072
     },
     "modalities": {
@@ -24361,6 +24412,40 @@
     "reasoning": false,
     "tool_call": true
   },
+  "together/meta-models/Muse-Spark-Open-816B-A42B": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Muse Spark Open",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "together/moonshotai/Kimi-K3": {
     "interleaved": {
       "field": "reasoning_content"
@@ -24389,6 +24474,34 @@
           "high",
           "max"
         ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "together/nvidia/NVIDIA-Nemotron-3.5-Super-VL": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 262144,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Super VL 120B A12B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
       }
     ],
     "structured_output": true,
@@ -24442,6 +24555,39 @@
         ]
       }
     ],
+    "tool_call": true
+  },
+  "together/reflection/Beam-1.0-501B-A23B": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Beam 1.0 501B A23B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "together/thinkingmachines/Inkling": {

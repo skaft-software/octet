@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.9.5] - 2026-10-16
+## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
 boundaries and known limitations.
@@ -34,6 +34,9 @@ boundaries and known limitations.
 - Native Tern keeps its default touchpad scrolling and selection: octet no longer
   captures the mouse for the native surface. ANSI fallback keeps the requested
   capture policy.
+- Native Tern reconnects after its UI stops acknowledging frames, including
+  last-window detach: presentation pauses until a fresh hello, then replays
+  the current transcript and draft with native input focus.
 - Captured-mouse transcript web links open on a plain left-click release, without
   Shift or Ctrl. Dragging still selects/copies; movement, intervening input and
   changed layout revoke link activation. Only HTTP(S) targets reach the browser
