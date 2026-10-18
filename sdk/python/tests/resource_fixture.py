@@ -89,7 +89,11 @@ def failed_parent(args: Create) -> TypedResult[Created]:
 @ext.typed_tool(name="hold", description="Hold native execution behind an explicit barrier", receiver="/counter", summary=lambda result: "Held counter.")
 def hold(args: Increment) -> int:
     log("entered")
+    observed = False
     while not (LOG.parent / "allow_terminal").exists():
+        if ext.cancellation.cancelled and not observed:
+            log("cancel_observed")
+            observed = True
         # Deliberately defer cooperation to prove cancellation alone is not a
         # native execution fence. The host still owns its finite grace deadline.
         time.sleep(0.005)
