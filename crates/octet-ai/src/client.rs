@@ -45,6 +45,19 @@ use crate::stream::{ResponseStream, StreamEvent};
 use crate::types::{EndpointId, Protocol, Request, Response};
 use crate::{ResponsesCompactRequest, ResponsesCompactResponse};
 
+fn trace_usage(
+    stream: ResponseStream,
+    trace: Option<crate::request_trace::RequestTrace>,
+) -> ResponseStream {
+    let Some(trace) = trace else { return stream };
+    Box::pin(stream.map(move |event| {
+        if let Ok(StreamEvent::Finished(response)) = &event {
+            trace.usage(&response.usage);
+        }
+        event
+    }))
+}
+
 struct FirstRequestActions {
     observed: bool,
     actions: Vec<Box<dyn FnOnce() + Send + 'static>>,
@@ -291,6 +304,7 @@ pub struct AiClient {
     stream_deadline: Duration,
     request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
     provider_request_hooks: Vec<Arc<dyn ProviderRequestHook>>,
+    cache_trace: Arc<StdMutex<crate::request_trace::CacheTraceState>>,
 }
 
 impl Default for AiClient {
@@ -385,6 +399,7 @@ impl AiClient {
                         .redirect(reqwest::redirect::Policy::none()),
                 )
                 .build()?,
+            cache_trace: Arc::default(),
             proxy_environment: Some(proxy_environment),
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
@@ -400,6 +415,7 @@ impl AiClient {
     pub fn with_http_client(http: reqwest::Client) -> Self {
         Self {
             http,
+            cache_trace: Arc::default(),
             proxy_environment: None,
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
@@ -936,6 +952,8 @@ impl AiClient {
         host_options: &HostRequestOptions,
     ) -> Result<ResponseStream, AiError> {
         let environment = &overrides.env;
+        let trace = crate::request_trace::RequestTrace::from_env(environment)
+            .map(|trace| trace.with_cache_state(self.cache_trace.clone(), model, &req));
         crate::catalog::validate_endpoint(&model.endpoint)?;
         crate::catalog::validate_model_spec(&model.spec)?;
         if model.spec.endpoint != model.endpoint.id {
@@ -960,7 +978,7 @@ impl AiClient {
             let stream = transport
                 .stream(HostStreamModel::from(model), request, diagnostics)
                 .await?;
-            return Ok(crate::stream::guard(stream));
+            return Ok(trace_usage(crate::stream::guard(stream), trace));
         }
 
         // Derive target-compatible replay history without mutating the caller's
@@ -998,6 +1016,10 @@ impl AiClient {
             }
             Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
         };
+
+        if let Some(trace) = &trace {
+            trace.stage("encoded", &parts.body);
+        }
 
         // A host payload hook sees and may replace exactly the encoded JSON the
         // codec produced, before any credential is attached or a byte is sent.
@@ -1098,7 +1120,7 @@ impl AiClient {
             diagnostic_redactor: diagnostic_redactor.clone(),
             on_response: host_options.on_response.clone(),
             provider_hooks,
-            trace: crate::request_trace::RequestTrace::from_env(environment),
+            trace: trace.clone(),
         };
 
         // Responses WebSockets are deliberately opt-in per endpoint. A
@@ -1172,19 +1194,22 @@ impl AiClient {
                     .await;
                 match result {
                     Ok(events) => {
-                        return Ok(responses_websocket_stream(
-                            self.responses_ws.clone(),
-                            websocket_key.clone(),
-                            model.clone(),
-                            fallback_request.requested_service_tier,
-                            events,
-                            fallback_request.pre_send_diagnostics.clone(),
-                            fallback_request.tool_definitions.clone(),
-                            buffer_ambiguous_compatibility_content,
-                            diagnostic_redactor,
-                            self.stream_initial_timeout,
-                            self.stream_idle_timeout,
-                            self.stream_deadline,
+                        return Ok(trace_usage(
+                            responses_websocket_stream(
+                                self.responses_ws.clone(),
+                                websocket_key.clone(),
+                                model.clone(),
+                                fallback_request.requested_service_tier,
+                                events,
+                                fallback_request.pre_send_diagnostics.clone(),
+                                fallback_request.tool_definitions.clone(),
+                                buffer_ambiguous_compatibility_content,
+                                diagnostic_redactor,
+                                self.stream_initial_timeout,
+                                self.stream_idle_timeout,
+                                self.stream_deadline,
+                            ),
+                            trace,
                         ));
                     }
                     Err(error) if websocket_open_failure_is_replay_safe(&error) => {}
@@ -1195,7 +1220,7 @@ impl AiClient {
             }
         }
 
-        stream_http(
+        let stream = stream_http(
             self.http.clone(),
             fallback_request,
             self.request_dispatch.clone(),
@@ -1203,7 +1228,8 @@ impl AiClient {
             self.stream_idle_timeout,
             self.stream_deadline,
         )
-        .await
+        .await?;
+        Ok(trace_usage(stream, trace))
     }
 
     /// Calls OpenAI's native `POST /responses/compact` endpoint.
