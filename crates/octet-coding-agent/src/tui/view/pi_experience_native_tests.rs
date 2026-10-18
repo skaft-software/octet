@@ -42,6 +42,20 @@ fn native_pi_cards_and_editor_rules_preserve_input_and_disclosure_ownership() {
                 "composer.bar"
             ]
         );
+        // Pi's flat, rule-framed input is not Tern's editor card, so it keeps its
+        // own meter styling rather than the card's top-edge meter.
+        let props = node.p.as_ref().unwrap().as_map();
+        assert!(props.get("role").is_none());
+        assert_eq!(props["gap"], "md");
+        assert_eq!(
+            find_node(children, "composer.context")
+                .unwrap()
+                .p
+                .as_ref()
+                .unwrap()
+                .as_map()["role"],
+            "octet.composer.context"
+        );
         let editor = find_node(children, "composer.editor").unwrap();
         assert_eq!(editor.k, Kind::Editor);
         assert_eq!(

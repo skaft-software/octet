@@ -160,13 +160,20 @@ move the preceding history.
 
 RAIL uses the pane's full available width for transcript, welcome and live
 composer chrome, without a separate character-capped reading column at default
-zoom. The composer is an integrated, borderless `col` with a separating `rule`,
-native editor, model and effort controls, context meter, session cost and
-Send/Stop; it is not an `omp.editor` card. A native medium gap separates its
-context meter, editor and button row so the editor has breathing room above
-and below. Typography and global Tern settings are unchanged.
+zoom. The composer is Tern's own `omp.editor` card, the container omp's
+composer uses: one inset for the native editor, the model and effort controls,
+the session cost and Send/Stop, with the context meter (`omp.composer.context`)
+along its top edge and a `pending` tone while a turn runs. The card is present
+from the first startup frame, so the draft does not change frames when the
+resolved chrome arrives. Mirrored Pi themes keep Pi's flat, rule-framed input.
+The placeholder carries the `/ commands · @ files · ! shell` hints from 56
+columns up; narrower panes use a short placeholder and the welcome row carries
+the hints, so they appear in one place and the placeholder never wraps and
+resizes the composer. Typography and global Tern settings are unchanged.
 
-The welcome is a compact conversation-local wrapping row. It uploads immutable,
+The welcome is a compact conversation-local wrapping row of groups (identity,
+release, access, tips) with a wider gap between groups than inside one, so a
+narrow pane wraps whole groups and never strands a version or a word. It uploads immutable,
 content-addressed PNG bytes from the canonical byte-mark rasterizer and requests
 40×20 logical pixels. The eight contiguous, baseline-aligned bars keep the
 `01101111` silhouette (positions 1 and 4 half-height) and 2:1 proportions;
@@ -195,7 +202,8 @@ gestures are fenced by the draft revision. Model, theme,
 thinking, session, fork and subagent pickers reuse the host's catalogues and
 filtering, with panel-epoch and source/catalogue-content-fenced gesture IDs.
 A refreshed ordinal cannot silently authorize a different session or worker. The model picker has real provider
-scopes, context/price columns, a current-model indicator, and a public-facts
+scopes, context/price columns (rows show the compact `$in·out`, the preview the
+readable `$in · $out`), a current-model indicator, and a public-facts
 preview (limits, input modalities, cache pricing and supported capabilities).
 Provider marks use seeded initials, the protocol's supported text mark rather
 than fabricated logos. Thinking is a compact native disclosure-sized sheet
@@ -352,10 +360,16 @@ native editor and host output. Earlier failed runs remain retained. This is not
 OS-app switching, IME or Tern 0.3.1 evidence; those journeys remain untested.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
-exhaustion coalesces changes until acknowledgements arrive; negotiation,
-unsupported required kinds, protocol errors and acknowledgement timeouts
-produce an explicit notice before handing ownership to the ANSI renderer.
-Normal exit keeps native transcript history; suspension removes the active
+exhaustion coalesces changes until acknowledgements arrive. A visible surface
+left unacknowledged for five seconds has the missing acknowledgements forgiven
+and keeps presenting, as omp does, so a busy or throttled terminal never ends
+native rendering. A terminal `error` event reopens the surface and replays the
+retained tree instead (the errors one incident produces within 250 ms count
+once); only a terminal that rejects more than three replays within a minute is
+treated as unable to host the surface. Negotiation failures,
+unsupported required kinds and that persistent rejection produce an explicit
+notice before handing ownership to the ANSI renderer, for the rest of the
+session. Normal exit keeps native transcript history; suspension removes the active
 surface and a resumed renderer negotiates a fresh one.
 
 Detection uses `TERM_PROGRAM=tern`, and the policy is a first-class setting:

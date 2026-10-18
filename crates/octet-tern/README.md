@@ -49,7 +49,7 @@ flowchart LR
 ## Scope and limits
 
 octet's interactive renderer exclusively owns a native surface inside Tern;
-it does not paint a hidden ANSI TUI. Its flat composer, native completions,
+it does not paint a hidden ANSI TUI. Its composer card, native completions,
 pickers and reports share the existing semantic model and input policy.
 Standalone clients and the demo can still use the scene and theme builders.
 
