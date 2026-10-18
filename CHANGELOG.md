@@ -1,29 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-
-- Anthropic caching keeps the previous conversation breakpoint reachable across
-  large parallel tool batches without removing or reordering context.
-- Supported Claude Bedrock routes emit native, retention-aware prompt cache
-  points; unsupported models and opaque application profiles are unchanged.
-- Compatible Chat usage recognizes Kimi's top-level `cached_tokens` alias without
-  double-counting other cache-read aliases.
-- Responses prefix diagnostics report native cache breakpoints without treating
-  annotation-only movement as rewritten history; provider payloads are unchanged.
-
-### Added
-
-- Opt-in provider request traces correlate bounded, salted prefix diagnostics at
-  canonical, encoded and final-wire boundaries with terminal provider usage,
-  without writing prompt, tool, reasoning or credential content. Credential-free
-  large-session regressions and `CACHE_AUDIT.md` distinguish byte estimates and
-  native-cache simulation from live-provider cache measurements. Shared Responses
-  regressions cover all builtin models, including GPT-6 Luna, plus declared Flex
-  tier fixtures, opaque replay and persisted-session reopen; these are not live
-  cache-hit or tier-availability qualification.
-
 ## [0.9.5] - 2026-10-16
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
@@ -75,6 +51,26 @@ boundaries and known limitations.
 - Controlled shell policies require an exact one-shot approval for each shell
   command. `edit` and `write` preserve a file's newline convention and hash the
   raw bytes. Non-Unix temporary bulk-lock roots use a stable private lock file.
+
+- Anthropic caching keeps the previous conversation breakpoint reachable across
+  large parallel tool batches without removing or reordering context.
+- Supported Claude Bedrock routes emit native, retention-aware prompt cache
+  points; unsupported models and opaque application profiles are unchanged.
+- Compatible Chat usage recognizes Kimi's top-level `cached_tokens` alias without
+  double-counting other cache-read aliases.
+- Responses prefix diagnostics report native cache breakpoints without treating
+  annotation-only movement as rewritten history; provider payloads are unchanged.
+
+### Added
+
+- Opt-in provider request traces correlate bounded, salted prefix diagnostics at
+  canonical, encoded and final-wire boundaries with terminal provider usage,
+  without writing prompt, tool, reasoning or credential content. Credential-free
+  large-session regressions and `CACHE_AUDIT.md` distinguish byte estimates and
+  native-cache simulation from live-provider cache measurements. Shared Responses
+  regressions cover all builtin models, including GPT-6 Luna, plus declared Flex
+  tier fixtures, opaque replay and persisted-session reopen; these are not live
+  cache-hit or tier-availability qualification.
 
 ### Known limitations
 

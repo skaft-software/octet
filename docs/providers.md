@@ -1007,7 +1007,7 @@ screenshot bounds, changed tools/instructions and context hooks can still
 invalidate earlier prefixes. Cache availability, minimum sizes, TTLs and routing
 remain provider-dependent. [Cache warming](cache-warming.md) is additional
 billable work, not a repair for unstable prefixes. The credential-free
-[cache audit](../CACHE_AUDIT.md) separates local estimates from live usage.
+[cache audit](https://github.com/skaft-software/octet/blob/v0.9.5/CACHE_AUDIT.md) separates local estimates from live usage.
 
 ## Provider request trace
 
@@ -1065,7 +1065,7 @@ credentials, response ids, image data or reasoning content. Digests use an
 unexported client-local salt, preventing cross-run correlation of content. New
 trace files are owner-only (`0600`) on Unix; existing permissions are unchanged.
 Review metadata before attaching a trace to an issue. Leave the variable unset
-to disable it. See the [audit](../CACHE_AUDIT.md) for reproducible checks and
+to disable it. See the [audit](https://github.com/skaft-software/octet/blob/v0.9.5/CACHE_AUDIT.md) for reproducible checks and
 interpretation limits.
 
 ## Model-visible tool-result images
