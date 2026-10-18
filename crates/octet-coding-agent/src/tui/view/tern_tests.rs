@@ -422,9 +422,59 @@ fn missing_credit_keeps_the_sent_baseline_until_the_latest_state_can_be_sent() {
         "latest"
     );
     surface.credit_blocked = Some(Instant::now() - HELLO_TIMEOUT);
+    surface.flush(&shell.state).unwrap();
+    assert!(surface.recovering);
+    assert!(!surface.ready);
+    assert!(!surface.client.has_credit(SURFACE));
+    assert_eq!(output.messages("q").len(), 2);
+    assert_eq!(output.messages("f").len(), 2);
+
+    // A detached window may stay away for arbitrarily long. Probe at bounded
+    // intervals without inventing credit or consuming pending host edits.
+    shell
+        .state
+        .borrow_mut()
+        .editor
+        .set_text("while detached 🦀");
+    surface.started = Instant::now() - HELLO_TIMEOUT;
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.messages("q").len(), 3);
+    assert_eq!(output.messages("f").len(), 2);
+    surface.observe(&hello(true, 1)).unwrap();
+    surface.flush(&shell.state).unwrap();
+    assert!(!surface.recovering);
+    assert_eq!(output.messages("o").len(), 2);
+    assert_eq!(output.last_frame()["s"], 1);
     assert_eq!(
-        surface.flush(&shell.state).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
+        find_node(&surface.sent.dock, "composer.editor")
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["text"],
+        "while detached 🦀"
+    );
+    assert!(output.last_frame()["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|op| op == &json!(["focus", "composer.editor"])));
+    ack(&shell, 1);
+    shell
+        .state
+        .borrow_mut()
+        .editor
+        .set_text("fresh input after reconnect");
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(output.last_frame()["s"], 2);
+    assert_eq!(
+        find_node(&surface.sent.dock, "composer.editor")
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["text"],
+        "fresh input after reconnect"
     );
 }
 

@@ -97,7 +97,19 @@ impl TernClient {
             features: Vec::new(),
             _raw: None,
         };
-        client.write(
+        client.query_hello(app, version, features)?;
+        Ok(client)
+    }
+
+    /// Re-query the terminal after a detached UI stops acknowledging frames.
+    /// This does not reset credit or authorize sending another frame.
+    pub fn query_hello(
+        &mut self,
+        app: &str,
+        version: Option<&str>,
+        features: &[&str],
+    ) -> io::Result<()> {
+        self.write(
             Verb::Query,
             &Query::Hello {
                 v: vec![TSP_VERSION],
@@ -108,8 +120,7 @@ impl TernClient {
                     .map(|feature| (*feature).to_owned())
                     .collect(),
             },
-        )?;
-        Ok(client)
+        )
     }
 
     /// The current APC body limit in bytes.

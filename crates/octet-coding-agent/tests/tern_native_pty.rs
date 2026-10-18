@@ -103,6 +103,7 @@ struct NativePty {
     hello: bool,
     options: Options,
     acknowledge: bool,
+    answer_hello: bool,
     // Set once close() hands the terminal back; late acknowledgements may race exit.
     closing: bool,
     withheld: Vec<Value>,
@@ -220,6 +221,7 @@ impl NativePty {
             hello: false,
             options,
             acknowledge: true,
+            answer_hello: true,
             closing: false,
             withheld: Vec::new(),
         }
@@ -328,11 +330,13 @@ impl NativePty {
                 "q" if body["q"] == "hello" => {
                     self.hello = true;
                     let hello = json!({"r":"hello","v":1,"term":"headless-test","kinds":self.options.kinds,"features":self.options.features,"apc":65536,"credits":self.options.credits,"cols":100,"dark":true,"reduceMotion":true});
-                    self.send(
-                        frame::encode_json(Verb::Reply, &hello, 65536)
-                            .unwrap()
-                            .as_bytes(),
-                    );
+                    if self.answer_hello {
+                        self.send(
+                            frame::encode_json(Verb::Reply, &hello, 65536)
+                                .unwrap()
+                                .as_bytes(),
+                        );
+                    }
                 }
                 "f" => {
                     self.frames += 1;
@@ -1998,6 +2002,50 @@ fn native_credit_starvation_coalesces_edits_until_actual_frame_acknowledgement()
         pty.event(ack);
     }
     pty.wait(|pty| pty.draft() == "abcdef");
+    assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
+    pty.close();
+}
+
+#[test]
+fn native_last_window_detach_reconnect_replays_and_accepts_fresh_input() {
+    let mut pty = NativePty::configured(
+        Options {
+            credits: 1,
+            ..Options::default()
+        },
+        |_, _, _| {},
+    );
+    pty.ready();
+    pty.settle();
+    let opens = pty.messages.iter().filter(|(verb, _)| verb == "o").count();
+    // Last-window detach sends neither visibility nor eviction. Its UI stops
+    // answering queries and frames, while the process and input owner survive.
+    pty.answer_hello = false;
+    pty.acknowledge = false;
+    pty.send(b"a");
+    pty.wait(|pty| pty.draft() == "a");
+    pty.send(b"bc");
+    pty.wait(|pty| pty.messages.iter().filter(|(v, _)| v == "q").count() >= 3);
+    assert_eq!(pty.draft(), "a");
+    assert_eq!(pty.messages.iter().filter(|(v, _)| v == "o").count(), opens);
+    pty.withheld.clear();
+    pty.nodes.clear();
+    pty.parents.clear();
+    pty.answer_hello = true;
+    pty.acknowledge = true;
+    pty.wait(|pty| pty.draft() == "abc");
+    assert_eq!(
+        pty.messages.iter().filter(|(v, _)| v == "o").count(),
+        opens + 1
+    );
+    for region in ["main", "dock", "layer"] {
+        assert!(pty.nodes.contains_key(region));
+    }
+    // Exercise actual native edit routing after replay, not only a new frame.
+    pty.edit("composer.editor", (3, 3), " fresh", 9, 3);
+    pty.wait(|pty| pty.draft() == "abc fresh");
+    pty.send(b"!");
+    pty.wait(|pty| pty.draft() == "abc fresh!");
     assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
     pty.close();
 }
