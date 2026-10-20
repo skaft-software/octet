@@ -2689,7 +2689,8 @@ fn discovered_reasoning_capability(
         return None;
     }
     let known = sparse_route_reasoning(declaration, protocol, id)
-        .or_else(|| declaration.static_reasoning_for(id, protocol));
+        .or_else(|| declaration.static_reasoning_for(id, protocol))
+        .or_else(|| declaration.pinned_reasoning_for(id, protocol));
     if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
         return None;
     }

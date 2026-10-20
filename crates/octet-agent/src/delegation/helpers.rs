@@ -71,6 +71,16 @@ pub(super) fn status_message(path: &str, status: &DelegatedAgentStatus) -> Strin
     }
 }
 
+/// Whether a worker's live task is executing or holds accepted work that it
+/// has not started. Accepted inputs stay durable either way; this only decides
+/// whether replacing the owner would interrupt something in progress.
+pub(super) fn worker_is_busy(record: &AgentRecord) -> bool {
+    record.status.is_running()
+        || matches!(record.status, DelegatedAgentStatus::Idle)
+        || record.pending_initial_task.is_some()
+        || !record.pending_follow_ups.is_empty()
+}
+
 /// One bounded durable snapshot of a session-owned worker.
 pub(super) fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
     DurableFleetRecord {

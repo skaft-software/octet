@@ -273,6 +273,54 @@ impl DelegationBinding {
             .count()
     }
 
+    /// Count worker tasks that are executing or still hold accepted work.
+    ///
+    /// A settled worker (completed, limit reached, failed, timed out or
+    /// interrupted) whose task only waits for a later follow-up runs nothing:
+    /// releasing its owner parks it with its outcome and durable session
+    /// retained, and an explicit follow-up resumes it. Such a worker is live
+    /// but not busy. A cancelled task that is still unwinding keeps its
+    /// running status until it settles, so it stays busy.
+    pub(crate) fn busy_worker_count(&self) -> usize {
+        self.manager
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .values()
+            .filter(|record| record.live_task && worker_is_busy(record))
+            .count()
+    }
+
+    /// Release this owner's workers and wait, bounded, for every live task to
+    /// park. Parked workers keep their durable sessions, outcomes and accepted
+    /// work; undelivered tasks reattach at the next owning run and settled
+    /// workers resume through an explicit follow-up. Returns how many tasks
+    /// are still live when `timeout` elapses.
+    pub(crate) async fn detach_workers(&self, timeout: std::time::Duration) -> usize {
+        self.request_shutdown();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.manager.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let live = self.active_worker_count();
+            if live == 0 {
+                return 0;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.active_worker_count();
+            }
+        }
+    }
+
+    /// Reactivate this root owner after [`Self::detach_workers`] when the
+    /// replacement it was preparing for did not happen, so parked workers are
+    /// reachable again without waiting for the next owning run.
+    pub(crate) fn reattach_workers(&self) -> Result<(), AgentError> {
+        self.prepare_owning_run()
+    }
+
     pub(crate) fn request_shutdown(&self) {
         self.manager.request_shutdown_descendants(&self.identity.id);
     }

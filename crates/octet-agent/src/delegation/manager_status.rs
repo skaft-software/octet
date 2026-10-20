@@ -348,6 +348,11 @@ impl DelegationManager {
                 record.status = status;
                 record.detached = true;
                 record.live_task = false;
+                // The cancelled token belonged to the incarnation that just
+                // parked. A later owner in this same process (a reload that
+                // detached its workers and then kept this App) resumes the
+                // record under a fresh token instead of a stopped one.
+                record.shutdown = crate::CancellationToken::default();
                 record
                     .completed_at_ms
                     .get_or_insert_with(|| u64::try_from(timestamp_ms()).unwrap_or(u64::MAX));

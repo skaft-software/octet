@@ -74,6 +74,43 @@ impl Agent {
             .map_or(0, DelegationBinding::active_worker_count)
     }
 
+    /// Returns how many delegated workers are executing or hold accepted work
+    /// they have not started.
+    ///
+    /// Settled workers (completed, limit reached, failed, timed out or
+    /// interrupted) still have a live task waiting for a follow-up, but
+    /// replacing this agent parks them with their outcome and durable session
+    /// retained, so they are not counted here.
+    pub fn busy_delegated_worker_count(&self) -> usize {
+        self.delegation
+            .as_ref()
+            .map_or(0, DelegationBinding::busy_worker_count)
+    }
+
+    /// Parks every delegated worker before this agent's owner is replaced.
+    ///
+    /// Workers stop through their cancellation path and keep their durable
+    /// child sessions, outcomes and accepted work: undelivered tasks reattach
+    /// at the next owning run, delivered work is never replayed, and a settled
+    /// or interrupted worker resumes through an explicit follow-up. Returns
+    /// how many worker tasks are still live when `timeout` elapses.
+    pub async fn detach_delegated_workers(&self, timeout: std::time::Duration) -> usize {
+        match &self.delegation {
+            Some(binding) => binding.detach_workers(timeout).await,
+            None => 0,
+        }
+    }
+
+    /// Reactivates delegation after [`Self::detach_delegated_workers`] when
+    /// this agent stays the owner (the replacement did not happen), so parked
+    /// workers are reachable again before the next run.
+    pub fn reattach_delegated_workers(&self) -> Result<(), AgentError> {
+        match &self.delegation {
+            Some(binding) => binding.reattach_workers(),
+            None => Ok(()),
+        }
+    }
+
     /// Returns the private team directory when V2 delegation is enabled.
     pub fn delegation_team_directory(&self) -> Option<&std::path::Path> {
         self.delegation
