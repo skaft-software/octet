@@ -57,8 +57,15 @@ mod intercept;
 #[cfg(unix)]
 #[path = "terminal_input/raw.rs"]
 mod raw;
+// Compiled for tests everywhere: the record decoding is platform-independent.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+#[path = "terminal_input/windows.rs"]
+mod windows;
 pub use codec::Packet;
 pub(crate) use intercept::InputInterceptors;
+#[cfg(windows)]
+pub(crate) use windows::ConsoleInput;
 #[path = "terminal_input/theme_colors.rs"]
 mod theme_colors;
 pub(crate) use theme_colors::{TerminalThemeColors, ThemeColorHandler};
@@ -480,6 +487,8 @@ fn candidate_status(text: &str) -> Candidate {
 pub struct ForegroundEvents {
     #[cfg(unix)]
     raw: raw::RawReader,
+    #[cfg(windows)]
+    console: windows::ConsoleReader,
     wake: Option<Pin<Box<Sleep>>>,
     // Open/register lazily: construction must not need a tty or Tokio runtime.
     #[cfg(unix)]
@@ -622,7 +631,14 @@ impl Stream for ForegroundEvents {
             this.raw = raw;
             result
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let mut console = std::mem::take(&mut this.console);
+            let result = this.poll_next_with(cx, || console.read());
+            this.console = console;
+            result
+        }
+        #[cfg(not(any(unix, windows)))]
         this.poll_next_with(cx, || {
             if crossterm::event::poll(Duration::from_millis(1))? {
                 crossterm::event::read().map(|event| Some(event.into()))

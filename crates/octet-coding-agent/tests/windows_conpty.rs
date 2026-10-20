@@ -531,6 +531,36 @@ fn full_width_rule(screen: &str, width: usize, glyph: char) -> bool {
     })
 }
 
+/// Pass first-run setup and return the screen with the composer ready.
+///
+/// The composer accepts typing while startup model discovery runs, and
+/// discovery then opens first-run provider setup over it, so input typed
+/// before setup appears would race it. Wait for setup (after first-run
+/// appearance setup on a fresh profile) and continue without a provider,
+/// which writes no provider data, before typing into the composer.
+fn composer_after_setup(console: &mut PseudoConsole) -> String {
+    let first_run = console.wait_for(
+        "first-run setup (this scenario needs a profile with no configured provider)",
+        |screen| {
+            screen.contains("Choose terminal appearance") || screen.contains("Set up a provider")
+        },
+    );
+    if !first_run.contains("Set up a provider") {
+        console.send(b"\r");
+        console.wait_for("first-run provider setup", |screen| {
+            screen.contains("Set up a provider")
+        });
+    }
+    console.type_text("Continue without");
+    console.send(b"\r");
+    console.wait_for("the composer after provider setup", |screen| {
+        !screen.contains("Set up a provider")
+            && ['-', '─']
+                .into_iter()
+                .any(|glyph| full_width_rule(screen, INITIAL.0.into(), glyph))
+    })
+}
+
 /// Start, type, resize, and exit through ConPTY, asserting the frontend
 /// profile selected from the native console rather than from TERM.
 fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
@@ -552,31 +582,7 @@ fn interactive_round_trip(environment: &[(&str, &str)], rule: char) {
         INITIAL,
     );
 
-    // The composer accepts typing while startup model discovery runs, and
-    // discovery then opens first-run provider setup over it, so input typed
-    // before setup appears would race it. Wait for setup (after first-run
-    // appearance setup on a fresh profile) and continue without a provider,
-    // which writes no provider data, before typing into the composer.
-    let first_run = console.wait_for(
-        "first-run setup (this scenario needs a profile with no configured provider)",
-        |screen| {
-            screen.contains("Choose terminal appearance") || screen.contains("Set up a provider")
-        },
-    );
-    if !first_run.contains("Set up a provider") {
-        console.send(b"\r");
-        console.wait_for("first-run provider setup", |screen| {
-            screen.contains("Set up a provider")
-        });
-    }
-    console.type_text("Continue without");
-    console.send(b"\r");
-    let started = console.wait_for("the composer after provider setup", |screen| {
-        !screen.contains("Set up a provider")
-            && ['-', '─']
-                .into_iter()
-                .any(|glyph| full_width_rule(screen, INITIAL.0.into(), glyph))
-    });
+    let started = composer_after_setup(&mut console);
     assert!(
         full_width_rule(&started, INITIAL.0.into(), rule),
         "expected full-width {rule:?} rules for this console profile:\n{started}"
@@ -675,6 +681,42 @@ fn windows_terminal_console_gets_the_rich_interactive_frontend() {
         &[("WT_SESSION", "00000000-0000-0000-0000-000000000000")],
         '─',
     );
+}
+
+#[test]
+fn bracketed_paste_reaches_the_composer_as_one_paste() {
+    // Crossterm's console-record decoder has no paste event, so a paste used to
+    // arrive as one key per character: each newline submitted and a dropped
+    // path was only typed text. Only a real paste collapses into a chip.
+    let _serial = serial();
+    if profile_has_configured_provider() {
+        eprintln!("skipping: this account has a configured custom provider");
+        return;
+    }
+    let scenario = Scenario::new();
+    let binary = octet_binary();
+    let mut console = PseudoConsole::spawn(
+        &binary,
+        &scenario.arguments(),
+        &scenario.workspace,
+        &[("WT_SESSION", "00000000-0000-0000-0000-000000000000")],
+        INITIAL,
+    );
+    composer_after_setup(&mut console);
+    let lines = (1..=40)
+        .map(|line| format!("pasted line {line}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    console.send(format!("\x1b[200~{lines}\x1b[201~").as_bytes());
+    let screen = console.wait_for("the paste collapsed into one chip", |screen| {
+        screen.contains("[Pasted text #1: 40 lines]")
+    });
+    for residue in ["[200~", "[201~", "pasted line 2"] {
+        assert!(
+            !screen.contains(residue),
+            "the paste leaked as keys ({residue:?}):\n{screen}"
+        );
+    }
 }
 
 #[test]

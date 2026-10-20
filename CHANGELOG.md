@@ -33,6 +33,13 @@ slowest measured paths.
 
 ### Fixed
 
+- Pasting on Windows works in Windows Terminal, WezTerm, Alacritty and Tern. A
+  paste arrived as one key per character, so each newline submitted the prompt,
+  a large paste never collapsed into a chip, and a dropped file stayed typed
+  text instead of attaching. octet now reads Windows console input as VT input
+  and decodes it with the parser Unix uses, so bracketed pastes, mouse reports
+  and key sequences arrive whole; Shift+Enter and Ctrl+Enter still insert a
+  newline. A console that refuses VT input keeps the previous reader.
 - A dropped PDF reached the model as the bare label `[PDF #1]`. Prompt
   composition rebuilt the model message from the transcript text, which keeps
   the chip, and discarded the text that carried the PDF's path, so the model was
