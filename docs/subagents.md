@@ -196,6 +196,18 @@ without reserving execution slots, so they cannot starve runnable siblings.
 A follow-up to a recovered, settled worker needs a free slot before acceptance;
 if capacity is full it is rejected without queuing or extending its deadline.
 
+`/reload` replaces the root agent, so it is an owner teardown. A settled worker
+(done, limit reached, failed, timed out or interrupted) only waits for a later
+follow-up, so a reload parks it with its outcome and child session retained and
+never refuses because of it; `subagent_continue` resumes it under the new owner,
+including after a host binary reload. A worker that is still running, or holds
+accepted work it has not started, blocks plain and automatic reloads. `/reload
+--force` is the explicit decision to detach it: the worker stops through its
+cancellation path, its durable record is written before the reload proceeds,
+undelivered tasks reattach on the next turn and delivered work is never
+replayed. If the forced reload does not replace the owner after all, the kept
+App reattaches the parked workers immediately.
+
 The restart roster remains bounded to 256 KiB. When completed/limit-reached
 output would exceed that budget, the roster retains explicitly marked output
 prefixes; complete committed responses remain in the referenced child sessions.

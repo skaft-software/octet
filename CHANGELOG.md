@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.9.6] - Unreleased
+
+### Fixed
+
+- Finished subagents no longer block `/reload`. A worker that completed, reached
+  its turn limit, failed, timed out or was interrupted only waits for a
+  follow-up, so a reload (including a host binary reload) parks it with its
+  result and session kept, and `subagent_continue` resumes it afterwards. A
+  turn-limited or detached worker used to block every reload until the session
+  was exited and resumed.
+- `/reload --force` now forces. A worker that is still running or has queued
+  work blocks plain and automatic reloads; `--force` detaches it through its
+  cancellation path, keeps its durable session and queued work, resumes
+  undelivered tasks on the next turn and never replays delivered work. It used
+  to refuse exactly like plain `/reload`. If the forced reload does not replace
+  the application, the parked workers are reattached immediately.
+- OpenCode Go and OpenCode Zen models without a hand-written preset offer their
+  thinking levels instead of only `off`. OpenCode's `/models` list carries IDs
+  only, so thinking now comes from each model's pinned models.dev record on its
+  own route (Gemini thinking levels, Claude adaptive thinking, Qwen budgets,
+  Chat and Responses effort). The 0.9.4 fix covered Gemini Argon alone.
+- OpenCode presets keep every input the pinned record documents: image input,
+  and audio where the route can send it, are no longer dropped by a stale
+  hand-written flag.
+- Native Tern rendering works on Windows. Tern answers there with OSC 877
+  framing, which octet did not recognize: the hello timed out, rendering fell
+  back to the terminal, and the reply appeared in the composer as
+  `]877;tsp;r;{"r":"hello",…}\`.
+
 ## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification

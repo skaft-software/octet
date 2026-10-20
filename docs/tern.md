@@ -26,6 +26,10 @@ ESC _ tsp ; <verb> [; k=v]* ; <body> ESC \
 - **Verbs** program → terminal: `q` query, `o` open a surface, `f` a frame of
   ops, `b` a blob, `t` the theme palette, `x` close.
 - **Verbs** terminal → program: `r` reply, `e` event.
+- Terminal → program messages may also arrive framed as OSC 877
+  (`ESC ] 877 ; tsp ; <verb> … ESC \` or BEL). Windows consoles don't pass APC
+  strings through, so Tern answers there in this framing; octet decodes both
+  identically and neither ever reaches the composer.
 - A body larger than the negotiated limit (default 65536 UTF-8 bytes) is chunked
   into pieces sharing `c=<id>`, all but the last carrying `m=1`.
 - Tern advertises itself with `TERM_PROGRAM=tern`; a program may start
