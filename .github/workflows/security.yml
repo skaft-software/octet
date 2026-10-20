@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       # cargo-audit validates Cargo.lock by default; unlike Cargo, current
@@ -46,11 +46,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-llvm-cov@0.8.7
       - run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: coverage-lcov
           path: lcov.info
