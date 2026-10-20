@@ -335,7 +335,7 @@ fn decorate(
                 let detail = details.get(index);
                 let label = detail.map(|detail| detail.name.as_str()).unwrap_or_else(|| items[index].strip_suffix(" (current)").unwrap_or(&items[index]));
                 json!({"id":index.to_string(), "label":safe(label), "detail":[{"t":safe(&model.0),"s":"dim mono"}],
-                    "facts":{"ctx":detail.map(|detail| detail.context),"price":detail.map(|detail| safe(&detail.price))},
+                    "facts":{"ctx":detail.map(|detail| detail.context),"price":detail.map(|detail| compact_price(&safe(&detail.price)))},
                     "badges":[]})
             }).collect::<Vec<_>>();
             let all_matches = super::panel_render::searched_indices_for_action(
@@ -558,6 +558,12 @@ pub(super) fn owns_action(shell: &ShellState, node: &str) -> bool {
         || ["sheet", "confirm", "cancel", "up", "down"]
             .iter()
             .any(|suffix| node == format!("{panel}.{suffix}"))
+}
+
+/// The row's price column is narrow: it showed `$0.35 · $0…` for `$0.35 · $0.75`.
+/// Rows carry omp's compact `$in·out`; the detail pane keeps the readable form.
+fn compact_price(price: &str) -> String {
+    price.replace(" · $", "·")
 }
 
 fn count_label(value: u64) -> String {

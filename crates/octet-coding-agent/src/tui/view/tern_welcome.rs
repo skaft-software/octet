@@ -87,26 +87,50 @@ pub(super) fn node(shell: &ShellState, brand: &Brand) -> Node {
             Span::styled(" · what's new", "dim"),
         ]
     };
+    // The composer placeholder carries the discovery hints where it fits on one
+    // line; the rail carries them where it does not, so they are never doubled.
+    // Each tip is its own item: a narrow pane wraps between them, never inside
+    // "ctrl+o details".
+    let mut tips = Vec::new();
+    if !super::tern::hints_in_placeholder(shell.size.0) {
+        tips.push(text(
+            "welcome.hints",
+            vec![Span::styled("/ commands · @ files · ! shell", "muted")],
+        ));
+    }
+    tips.push(text(
+        "welcome.details",
+        vec![Span::styled("ctrl+o details", "muted")],
+    ));
     // RAIL is one wrapping row in the conversation, not a centered startup card.
     // OMP's private welcome hooks impose their own logo sizing and animation.
     // Model, effort, context and input remain exclusively in the native composer.
+    // The row's groups are separated by a wider gap than the one inside a group
+    // and wrap whole, so a narrow pane never strands a version or a word.
     Node::with_children(
         "welcome",
         Kind::Row,
         Props::new()
             .role("octet.welcome")
             .set("align", "center")
-            .set("gap", "sm")
+            .set("gap", "lg")
             .set("wrap", true),
         vec![
-            brand.mark(),
-            text("welcome.name", vec![Span::styled("octet", "strong")]),
-            text(
-                "welcome.version",
-                vec![Span::styled(
-                    format!("v{}", env!("CARGO_PKG_VERSION")),
-                    "dim mono",
-                )],
+            Node::with_children(
+                "welcome.id",
+                Kind::Row,
+                Props::new().set("align", "center").set("gap", "sm"),
+                vec![
+                    brand.mark(),
+                    text("welcome.name", vec![Span::styled("octet", "strong")]),
+                    text(
+                        "welcome.version",
+                        vec![Span::styled(
+                            format!("v{}", env!("CARGO_PKG_VERSION")),
+                            "dim mono",
+                        )],
+                    ),
+                ],
             ),
             text("welcome.release", release),
             text(
@@ -124,12 +148,14 @@ pub(super) fn node(shell: &ShellState, brand: &Brand) -> Node {
                     },
                 )],
             ),
-            text(
+            Node::with_children(
                 "welcome.tips",
-                vec![Span::styled(
-                    "/ commands · @ files · ! shell · ctrl+o details",
-                    "muted",
-                )],
+                Kind::Row,
+                Props::new()
+                    .set("align", "center")
+                    .set("gap", "sm")
+                    .set("wrap", true),
+                tips,
             ),
         ],
     )
@@ -191,6 +217,17 @@ mod tests {
             .collect()
     }
 
+    /// The tips row's items as one line, in reading order.
+    fn tip_text(tips: &Node) -> String {
+        tips.c
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[test]
     fn rail_is_one_compact_wrapping_row_without_composer_controls_or_startup_whitespace() {
         let shell = InteractiveShell::test_shell();
@@ -203,27 +240,76 @@ mod tests {
             assert_eq!(rail.k, Kind::Row);
             let props = rail.p.as_ref().unwrap().as_map();
             assert_eq!(props["role"], "octet.welcome");
-            assert_eq!(props["gap"], "sm");
+            // Groups are told apart by a wider gap than the one inside a group,
+            // and wrap as whole groups, never leaving a word or a version behind.
+            assert_eq!(props["gap"], "lg");
             assert_eq!(props["wrap"], true);
             assert_eq!(props["align"], "center");
-            let children = rail.c.as_ref().unwrap();
-            assert_eq!(children.len(), 6);
+            let groups = rail.c.as_ref().unwrap();
+            assert_eq!(
+                groups
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "welcome.id",
+                    "welcome.release",
+                    "welcome.access",
+                    "welcome.tips"
+                ]
+            );
+            let identity = child(&rail, "welcome.id");
+            assert_eq!(identity.k, Kind::Row);
+            let props = identity.p.as_ref().unwrap().as_map();
+            assert_eq!(props["gap"], "sm");
+            assert_eq!(props["align"], "center");
+            let children = identity.c.as_ref().unwrap();
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["welcome.byte", "welcome.name", "welcome.version"]
+            );
             assert!(children.iter().all(|node| node.c.is_none()));
             assert!(children
                 .iter()
                 .all(|node| matches!(node.k, Kind::Text | Kind::Image)));
-            let mark = child(&rail, "welcome.byte");
+            // The tips wrap between their items, never inside "ctrl+o details".
+            let tips = child(&rail, "welcome.tips");
+            assert_eq!(tips.k, Kind::Row);
+            let props = tips.p.as_ref().unwrap().as_map();
+            assert_eq!(props["gap"], "sm");
+            assert_eq!(props["wrap"], true);
+            assert_eq!(
+                tips.c
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>(),
+                if crate::tui::view::tern::hints_in_placeholder(cols) {
+                    vec!["welcome.details"]
+                } else {
+                    vec!["welcome.hints", "welcome.details"]
+                }
+            );
+            let mark = child(identity, "welcome.byte");
             assert_eq!(mark.k, Kind::Image);
             let props = mark.p.as_ref().unwrap().as_map();
             assert_eq!(props["w"], 40);
             assert_eq!(props["h"], 20);
             assert_eq!(props["alt"], "octet byte mark: 01101111");
-            assert_eq!(plain(child(&rail, "welcome.name")), "octet");
+            assert_eq!(plain(child(identity, "welcome.name")), "octet");
             assert_eq!(
-                plain(child(&rail, "welcome.version")),
+                plain(child(identity, "welcome.version")),
                 format!("v{}", env!("CARGO_PKG_VERSION"))
             );
-            for text in children.iter().filter(|node| node.k == Kind::Text) {
+            for text in groups
+                .iter()
+                .chain(children)
+                .filter(|node| node.k == Kind::Text)
+            {
                 assert_eq!(text.p.as_ref().unwrap().as_map()["wrap"], "word");
                 assert!(!plain(text).contains('\n'));
             }
@@ -246,9 +332,36 @@ mod tests {
     }
 
     #[test]
+    fn discovery_hints_live_in_the_composer_placeholder_when_it_fits_and_in_the_rail_when_not() {
+        let shell = InteractiveShell::test_shell();
+        let brand = Brand::default();
+        for (cols, in_placeholder) in [
+            (20, false),
+            (40, false),
+            (55, false),
+            (56, true),
+            (240, true),
+        ] {
+            shell.state.borrow_mut().size = (cols, 24);
+            assert_eq!(
+                crate::tui::view::tern::hints_in_placeholder(cols),
+                in_placeholder
+            );
+            let rail = node(&shell.state.borrow(), &brand);
+            let tips = tip_text(child(&rail, "welcome.tips"));
+            assert!(tips.contains("ctrl+o details"), "{cols}: {tips}");
+            for hint in ["/ commands", "@ files", "! shell"] {
+                assert_eq!(tips.contains(hint), !in_placeholder, "{cols}: {tips}");
+            }
+        }
+    }
+
+    #[test]
     fn rail_retains_permission_and_discovery_hints_and_replaces_changelog_with_real_update() {
         let shell = InteractiveShell::test_shell();
         let brand = Brand::default();
+        // Narrow enough that the composer placeholder carries no hints.
+        shell.state.borrow_mut().size = (40, 24);
         for safe_mode in [false, true] {
             shell.state.borrow_mut().safe_mode = safe_mode;
             let rail = node(&shell.state.borrow(), &brand);
@@ -266,7 +379,7 @@ mod tests {
                 if safe_mode { "success" } else { "warning" }
             );
             assert!(plain(child(&rail, "welcome.release")).contains("/changelog"));
-            let tips = plain(child(&rail, "welcome.tips"));
+            let tips = tip_text(child(&rail, "welcome.tips"));
             for hint in ["/ commands", "@ files", "! shell", "ctrl+o details"] {
                 assert!(tips.contains(hint));
             }
@@ -284,8 +397,8 @@ mod tests {
                 updated.c.as_ref().unwrap().len()
             );
             assert_eq!(
-                child(&rail, "welcome.byte"),
-                child(&updated, "welcome.byte")
+                child(child(&rail, "welcome.id"), "welcome.byte"),
+                child(child(&updated, "welcome.id"), "welcome.byte")
             );
             shell.state.borrow_mut().available_update = None;
         }

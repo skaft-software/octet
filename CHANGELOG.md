@@ -93,6 +93,35 @@ not run against octet now can, and the slowest measured paths got faster.
 
 ## [0.9.5] - 2026-10-18
 
+### Changed
+
+- The native Tern composer is Tern's editor card, the container omp uses. The
+  editor, model and effort controls, working directory and Send share one inset,
+  and the context meter runs along the card's top edge; they sat on four
+  different distances from the pane edge, with uneven gaps between them. The
+  card is present from the first startup frame and shows a pending tone while a
+  turn runs. Mirrored Pi themes keep Pi's flat composer.
+- The welcome row groups its items (identity, release, access, tips) with a wider
+  gap between groups, wraps whole groups on narrow panes and no longer repeats
+  the `/ commands · @ files · ! shell` hints that the composer placeholder
+  shows. Panes under 56 columns use a short placeholder and show the hints in
+  the welcome row instead, so the placeholder never wraps and resizes the
+  composer.
+- Model picker rows show prices as `$in·out`; the price column truncated
+  `$0.35 · $0.75` to `$0.35 · $0…`. The preview pane keeps the readable form.
+
+### Fixed
+
+- Native Tern no longer drops back to the ANSI renderer for the rest of the
+  session when the terminal is merely slow or reports one error. A visible
+  surface left unacknowledged for five seconds has the missing acknowledgements
+  forgiven and keeps presenting, and a terminal `error` event reopens the surface
+  and replays the retained tree. Both ended native rendering after two seconds
+  or on the first event. Only a terminal that rejects more than three replays
+  within a minute still yields to ANSI, with the existing notice.
+
+## [0.9.5] - 2026-10-16
+
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
 boundaries and known limitations.
 
