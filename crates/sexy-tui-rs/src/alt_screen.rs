@@ -325,7 +325,7 @@ fn placements_in(rows: &[String]) -> Vec<Placement> {
                 .map(move |anchor| Placement {
                     row,
                     id: anchor.id().get(),
-                    rows: usize::from(anchor.layout().rows()),
+                    rows: usize::from(anchor.placed_rows()),
                 })
         })
         .collect()

@@ -12,6 +12,7 @@
 //! apart from the encoder is what makes it reviewable that no escape sequence is
 //! assembled anywhere else.
 
+use super::anchor::ImageCrop;
 use super::capabilities::ImageProtocol;
 use super::command::ImageTransmission;
 use super::error::ImageError;
@@ -27,6 +28,7 @@ pub(super) fn build_transmission<'a>(
     id: ImageId,
     image: &'a TerminalImage,
     layout: ImageLayout,
+    crop: Option<ImageCrop>,
     limits: &ImageLimits,
 ) -> Result<(ImageTransmission<'a>, usize, usize), ImageError> {
     let source_len = image.bytes().len();
@@ -43,7 +45,10 @@ pub(super) fn build_transmission<'a>(
     let base64_len = base64_len(source_len)?;
     let (first_header, continuation_more, continuation_last, output_len) = match protocol {
         ImageProtocol::Kitty => {
-            let first = kitty_transmit_header(id, layout, chunks > 1);
+            let first = match crop {
+                Some(crop) => kitty_cropped_transmit_header(id, image, layout, crop, chunks > 1),
+                None => kitty_transmit_header(id, layout, chunks > 1),
+            };
             let more = "\x1b_Gm=1;".to_owned();
             let last = "\x1b_Gm=0;".to_owned();
             let mut total = checked_add(first.len(), base64_len)?;
@@ -136,6 +141,34 @@ pub(super) fn kitty_transmit_header(id: ImageId, layout: ImageLayout, more: bool
         id.get(),
         layout.columns(),
         layout.rows(),
+        u8::from(more),
+    )
+}
+
+/// Transmit and place only the rows `crop` names: a source rectangle over that
+/// band of the image, scaled into the layout's columns and the shown rows.
+/// The band is proportional to the rows because the layout fitted the whole
+/// image into `layout.rows()` rows without distorting it.
+pub(super) fn kitty_cropped_transmit_header(
+    id: ImageId,
+    image: &TerminalImage,
+    layout: ImageLayout,
+    crop: ImageCrop,
+    more: bool,
+) -> String {
+    let dimensions = image.dimensions();
+    let height = u64::from(dimensions.height());
+    let rows = u64::from(layout.rows().max(1));
+    let top = height * u64::from(crop.skip_rows()) / rows;
+    let bottom = (height * (u64::from(crop.skip_rows()) + u64::from(crop.shown_rows())) / rows)
+        .clamp(top + 1, height.max(top + 1));
+    format!(
+        "\x1b_Ga=T,t=d,f=100,i={},q=2,c={},r={},x=0,y={top},w={},h={},C=1,m={};",
+        id.get(),
+        layout.columns(),
+        crop.shown_rows(),
+        dimensions.width(),
+        bottom - top,
         u8::from(more),
     )
 }

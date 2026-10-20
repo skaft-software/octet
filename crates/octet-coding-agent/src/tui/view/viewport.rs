@@ -585,7 +585,11 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
     let capacity = transcript_viewport_capacity(available, scrolled);
     let end = transcript.len().saturating_sub(scroll);
     let start = end.saturating_sub(capacity);
-    let mut lines = transcript[start..end].to_vec();
+    // An image cut by either edge of the viewport is placed only for its
+    // visible rows. Kitty-protocol terminals (Ghostty, Kitty, WezTerm) draw a
+    // placement over text at full height, so an uncropped one covered the
+    // scroll notice, composer and status bar below the transcript.
+    let mut lines = sexy_tui_rs::images::crop_anchors_to_window(&transcript, start, end);
     state.decorate_transcript_search(&mut lines, start);
     super::transcript_selection::decorate_selection(state, &mut lines, start);
     if scrolled || !state.follow_tail {

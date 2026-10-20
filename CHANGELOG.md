@@ -82,6 +82,15 @@ not run against octet now can, and the slowest measured paths got faster.
   inside a tool result, for example a `read` made earlier on a Claude or GPT
   model. The media is sent as inline data after the turn's function responses.
 
+### Fixed
+
+- Transcript images no longer spill over the composer and status bar in
+  Kitty-protocol terminals (Ghostty, Kitty, WezTerm). An image cut by the bottom
+  of the transcript view, for example while scrolled back, was still placed at
+  full height, and the terminal draws placements over text. A cut image is now
+  placed only for its visible rows, and one whose top has scrolled above the
+  view keeps showing its visible part instead of disappearing.
+
 ## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
