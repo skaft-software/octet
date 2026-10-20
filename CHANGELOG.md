@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.6] - Unreleased
+
+### Fixed
+
+- Transcript images no longer spill over the composer and status bar in
+  Kitty-protocol terminals (Ghostty, Kitty, WezTerm). An image cut by the bottom
+  of the transcript view, for example while scrolled back, was still placed at
+  full height, and the terminal draws placements over text. A cut image is now
+  placed only for its visible rows, and one whose top has scrolled above the
+  view keeps showing its visible part instead of disappearing.
+
 ## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification

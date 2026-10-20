@@ -676,3 +676,97 @@ fn debug_and_errors_never_echo_raw_payload_or_hostile_metadata() {
         .unwrap();
     assert!(!format!("{command:?}").contains("IDAT"));
 }
+
+fn kitty_anchor(id: u32, columns: u16, rows: u16) -> ImageAnchor {
+    ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(id).unwrap(),
+        ImageLayout::new(columns, rows).unwrap(),
+    )
+}
+
+/// One image reservation as the transcript emits it: the anchor on the first
+/// row, then the blank rows the placement covers.
+fn reservation(anchor: ImageAnchor) -> Vec<String> {
+    let mut rows = vec![anchor.marker()];
+    rows.resize(usize::from(anchor.layout().rows()), String::new());
+    rows
+}
+
+#[test]
+fn cropped_anchor_round_trips_and_rejects_impossible_windows() {
+    let anchor = kitty_anchor(7, 20, 10);
+    let cropped = anchor.cropped(3, 4).unwrap();
+    assert_eq!(cropped.placed_rows(), 4);
+    assert_eq!(ImageAnchor::parse(&cropped.marker()), Some(cropped));
+    assert!(cropped.marker().ends_with(",t=3,n=4\x1b\\"));
+    // The whole placement needs no crop and keeps the original spelling.
+    let whole = anchor.cropped(0, 10).unwrap();
+    assert_eq!(whole.crop(), None);
+    assert_eq!(whole.marker(), anchor.marker());
+    for (skip, shown) in [(0, 0), (8, 3), (11, 1)] {
+        assert!(anchor.cropped(skip, shown).is_none(), "{skip}+{shown}");
+    }
+    let marker = anchor.marker();
+    for suffix in [",t=0,n=10", ",t=9,n=5", ",t=1", ",n=1,t=1", ",t=1,n=1,x=2"] {
+        let malformed = marker.replace("\x1b\\", &format!("{suffix}\x1b\\"));
+        assert!(ImageAnchor::parse(&malformed).is_none(), "{suffix}");
+    }
+}
+
+#[test]
+fn window_crop_limits_placements_cut_by_either_edge() {
+    // Two images of 6 and 4 rows between text rows.
+    let first = kitty_anchor(1, 10, 6);
+    let second = kitty_anchor(2, 10, 4);
+    let mut lines = vec!["intro".to_owned()];
+    lines.extend(reservation(first)); // rows 1..7
+    lines.push("between".to_owned()); // row 7
+    lines.extend(reservation(second)); // rows 8..12
+    lines.push("outro".to_owned()); // row 12
+
+    // The window ends inside the second image: it draws its first two rows.
+    let window = crop_anchors_to_window(&lines, 2, 10);
+    assert_eq!(window.len(), 8);
+    let anchors = ImageAnchor::parse_all(&window[6]);
+    assert_eq!(anchors, vec![second.cropped(0, 2).unwrap()]);
+
+    // The first image's anchor row scrolled above the window: it is carried
+    // onto the first window row with its hidden top skipped.
+    let carried = ImageAnchor::parse_all(&window[0]);
+    assert_eq!(carried, vec![first.cropped(1, 5).unwrap()]);
+
+    // A window fully containing both images leaves them unchanged.
+    assert_eq!(crop_anchors_to_window(&lines, 0, lines.len()), lines);
+
+    // A window inside one image carries just the visible band.
+    let inside = crop_anchors_to_window(&lines, 3, 5);
+    assert_eq!(
+        ImageAnchor::parse_all(&inside[0]),
+        vec![first.cropped(2, 2).unwrap()]
+    );
+    assert!(inside[1].is_empty());
+}
+
+#[test]
+fn cropped_kitty_placement_sends_the_visible_band_as_a_source_rectangle() {
+    let image = image(png(100, 200, 4));
+    let layout = ImageLayout::new(10, 20).unwrap();
+    let anchor = kitty_anchor(5, 10, 20).cropped(5, 10).unwrap();
+    let mut encoded = Vec::new();
+    ImageProtocolEncoder::new(ImageProtocol::Kitty, ImageLimits::default())
+        .encode_place_cropped(anchor.id(), &image, layout, anchor.crop().unwrap())
+        .unwrap()
+        .write_to(&mut encoded)
+        .unwrap();
+    let encoded = String::from_utf8(encoded).unwrap();
+    assert!(
+        encoded.starts_with("\x1b_Ga=T,t=d,f=100,i=5,q=2,c=10,r=10,x=0,y=50,w=100,h=100,C=1,"),
+        "{encoded}"
+    );
+    assert!(
+        ImageProtocolEncoder::new(ImageProtocol::Iterm2, ImageLimits::default())
+            .encode_place_cropped(anchor.id(), &image, layout, anchor.crop().unwrap())
+            .is_err()
+    );
+}
