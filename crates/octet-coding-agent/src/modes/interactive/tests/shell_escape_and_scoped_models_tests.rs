@@ -509,6 +509,78 @@ fn model_scope_does_not_override_an_existing_explicit_session() {
     }
 }
 
+#[test]
+fn session_file_creates_in_place_resumes_native_files_and_imports_pi_files() {
+    use crate::config::ResumeSelector;
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = terminal_theme_test_config(directory.path().to_owned());
+    config.session_dir = directory.path().join("sessions");
+    config.invocation_cwd = directory.path().to_owned();
+    let select = |config: &mut crate::config::Config, path: &str| {
+        crate::cli::parity::ParityOptions {
+            session: Some(path.into()),
+            ..Default::default()
+        }
+        .select_session(config)
+    };
+
+    // A missing (relative) file is created in place, under new directories
+    // only: an existing directory keeps its permissions.
+    #[cfg(unix)]
+    let mode = |path: &std::path::Path| {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    };
+    #[cfg(unix)]
+    let before = mode(directory.path());
+    select(&mut config, "runs/kill.jsonl").unwrap();
+    let native = directory.path().join("runs/kill.jsonl");
+    assert!(matches!(&config.resume, ResumeSelector::File(path) if *path == native));
+    Session::open(&native).expect("an empty session file was created");
+    #[cfg(unix)]
+    assert_eq!(mode(directory.path()), before);
+    assert!(select(&mut config, "runs/kill.txt").is_err());
+
+    // An existing octet session is used in place and left as it was.
+    let mut session = Session::open(&native).unwrap();
+    session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("kept".into())],
+            },
+        )))
+        .unwrap();
+    drop(session);
+    let bytes = std::fs::read(&native).unwrap();
+    select(&mut config, native.to_str().unwrap()).unwrap();
+    assert!(matches!(&config.resume, ResumeSelector::File(path) if *path == native));
+    assert_eq!(std::fs::read(&native).unwrap(), bytes);
+
+    // A Pi v3 file is imported into the workspace store and left untouched.
+    let pi = directory.path().join("pi.jsonl");
+    let stamp = "2026-07-22T11:22:33.444Z";
+    let pi_bytes = [
+        serde_json::json!({"type":"session","version":3,"id":"pi","cwd":"/synthetic","timestamp":stamp}),
+        serde_json::json!({"type":"message","id":"u","parentId":null,"timestamp":stamp,"message":{"role":"user","content":"hello","timestamp":1}}),
+        serde_json::json!({"type":"message","id":"a","parentId":"u","timestamp":stamp,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"api":"openai-completions","provider":"bench","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":2}}),
+    ]
+    .iter()
+    .map(|record| format!("{record}\n"))
+    .collect::<String>();
+    std::fs::write(&pi, &pi_bytes).unwrap();
+    select(&mut config, pi.to_str().unwrap()).unwrap();
+    let ResumeSelector::Resume(Some(id)) = &config.resume else {
+        panic!(
+            "a Pi session resumes its imported copy: {:?}",
+            config.resume
+        );
+    };
+    let store = crate::session_store::SessionStore::new(&config.session_dir, &config.workspace);
+    let imported = Session::open(store.path_by_id(id).unwrap()).unwrap();
+    assert_eq!(imported.context().unwrap().len(), 2);
+    assert_eq!(std::fs::read_to_string(&pi).unwrap(), pi_bytes);
+}
+
 #[tokio::test]
 async fn direct_model_selection_enriches_and_unknown_models_preserve_the_app() {
     let (_directory, mut app) = crate::compaction::tests::app_for_estimate();

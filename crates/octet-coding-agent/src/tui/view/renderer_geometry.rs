@@ -230,7 +230,22 @@ pub(super) struct RenderedGeometry {
     pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
 impl RenderedGeometry {
+    #[cfg(test)]
     pub(super) fn capture(state: &ShellState, fence: GeometryFence) -> Self {
+        Self::capture_with(
+            state,
+            fence,
+            &mut super::transcript_selection::CopyRowsMemo::default(),
+        )
+    }
+
+    /// [`Self::capture`], reusing the renderer's copy-row alignments from
+    /// earlier frames for blocks that are still visible.
+    pub(super) fn capture_with(
+        state: &ShellState,
+        fence: GeometryFence,
+        copy_rows: &mut super::transcript_selection::CopyRowsMemo,
+    ) -> Self {
         let chrome =
             super::shell_chrome::shell_chrome(state, state.size.0, std::time::Instant::now());
         let total_rows = state.transcript_cache.borrow().lines.len();
@@ -250,9 +265,10 @@ impl RenderedGeometry {
         let blocks = (first_block..cache.block_starts.len())
             .take_while(|index| cache.block_starts[*index] < end)
             .filter_map(|index| {
+                let id = *state.transcript_commit_ids.get(index)?;
                 Some(VisibleBlockGeometry {
                     index,
-                    id: *state.transcript_commit_ids.get(index)?,
+                    id,
                     start: cache.block_starts[index],
                     rows: cache.block_lengths[index],
                     surface: cache.block_geometries[index],
@@ -268,12 +284,14 @@ impl RenderedGeometry {
                                 cache.block_geometries[index],
                                 start.saturating_sub(cache.block_starts[index])
                                     ..end.saturating_sub(cache.block_starts[index]),
+                                copy_rows.block(id),
                             )
                         })
                         .flatten(),
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        copy_rows.retain(&blocks.iter().map(|block| block.id).collect());
         Self {
             fence,
             panel: PanelRenderReceipt::capture(state, &chrome.panel),

@@ -1,5 +1,52 @@
 # Changelog
 
+## [Unreleased]
+
+Slated for 0.9.6. Driven by the Buffon harness benchmarks: workloads that could
+not run against octet now can, and the slowest measured paths got faster.
+
+### Added
+
+- Custom registry providers can set `"api": "anthropic-messages"` or
+  `"api": "openai-responses"` to reach an Anthropic- or Responses-compatible
+  gateway (or a local benchmark mock) at their `base_url`; Chat Completions
+  remains the default. Anthropic keys are sent as `x-api-key`. These providers
+  use their declared models; `GET /models` discovery stays Chat-only.
+- `--session FILE.jsonl` addresses a session by its file: a missing file is
+  created there and later runs resume it. A Pi v3 session file is imported as a
+  new session in this workspace on each launch and that copy is resumed; the Pi
+  file is never modified. Only missing parent directories are created.
+- RPC `tool_execution_end` results and their `toolResult` messages carry Pi's
+  `details` (a Pi-compatible tool's own details, otherwise an extension tool's
+  metadata), `structuredContent`, and media parts, instead of text only.
+
+### Fixed
+
+- Imported Pi sessions, extension-created sessions and sessions with
+  cache-warming records were listed as "(unreadable session)" in the resume
+  picker and `octet sessions list`, without a title, and were re-read on every
+  listing because unreadable summaries are never cached. Their first listing
+  now reads them once; later listings come from the catalog.
+
+### Changed
+
+- Fullscreen TUI streaming re-aligned the copy/selection rows of every visible
+  block from its first row on every frame, so a long answer cost more per token
+  as it grew. Alignments are now kept between frames and only rows whose painted
+  text or copy text changed are redone. Extension theme sync rebuilt the whole
+  theme palette on every UI refresh; it now does so only when the theme changes.
+  Together these cut renderer instructions while streaming a long answer by
+  about a third, and CPU per streamed token by about a fifth.
+- RPC `get_state` counts history messages without projecting the whole history
+  to JSON, and the per-turn context breakdown serializes the history once instead
+  of twice. A resumed 1,000-turn session is ready over RPC about a third sooner
+  and answers its first turn about a quarter faster.
+- `--no-session` print and RPC runs no longer make a workspace marker or session
+  catalog durable inside their throwaway store, removing several fsyncs from
+  startup and exit.
+- Pi session import decodes records straight from the parsed JSON and validates
+  the converted transcript once, cutting a 1,000-turn import by about a third.
+
 ## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification

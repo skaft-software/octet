@@ -168,6 +168,8 @@ pub enum ResumeSelector {
     Resume(Option<String>),
     /// Fork a selected session into a new session before launch.
     Fork(Option<String>),
+    /// Resume the session file at this path (`--session` creates a missing one).
+    File(PathBuf),
 }
 
 /// Product-level sandbox settings.

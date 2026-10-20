@@ -1737,6 +1737,7 @@ fn registry_for_prepared(
     let base_url = endpoint.to_string();
     let stored = authentication.into_storage();
     let provider = CustomProvider {
+        api: Default::default(),
         label,
         credential: CustomCredential {
             base_url,
@@ -2351,6 +2352,7 @@ mod tests {
             .save_registry(&CustomRegistry::single(
                 "local",
                 CustomProvider {
+                    api: Default::default(),
                     label: "Original label".into(),
                     credential: CustomCredential {
                         base_url: "http://127.0.0.1:1234/v1/".into(),
@@ -2533,6 +2535,7 @@ mod tests {
             .save_registry(&CustomRegistry::single(
                 "other",
                 CustomProvider {
+                    api: Default::default(),
                     label: "Other".to_owned(),
                     credential: CustomCredential {
                         base_url: "http://127.0.0.1:9999/v1/".to_owned(),

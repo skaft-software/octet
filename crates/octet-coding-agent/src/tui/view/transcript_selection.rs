@@ -277,6 +277,154 @@ fn wrapped_line_col_offset(text: &str, line_index: usize, col: u16, wrap_width: 
     (start_offset + cell_offset).min(text.len())
 }
 
+/// One painted row's alignment, with what it read to get there.
+#[derive(Clone, Debug)]
+struct AlignedCopyRow {
+    painted: String,
+    row: CopyRow,
+    cursor_before: usize,
+    cursor_after: usize,
+    /// End of the copy text a successful search read (`..examined_end`).
+    examined_end: usize,
+    /// Candidates that did not occur after `cursor_before`.
+    missed: Vec<String>,
+    /// The row's line ran to the end of the copy text.
+    to_text_end: bool,
+}
+
+impl AlignedCopyRow {
+    /// Whether this alignment still holds for `copy_text`, which shares its
+    /// first `common` bytes with the text it was made from.
+    fn still_holds(&self, copy_text: &str, common: usize, identical: bool) -> bool {
+        if identical {
+            return true;
+        }
+        if self.to_text_end || self.examined_end > common {
+            return false;
+        }
+        // A missed candidate did not occur in the shared prefix, so it can
+        // only occur now if it ends in the changed tail: search just that.
+        self.missed.iter().all(|candidate| {
+            let mut start = self
+                .cursor_before
+                .max(common.saturating_sub(candidate.len().saturating_sub(1)));
+            while !copy_text.is_char_boundary(start) {
+                start -= 1;
+            }
+            !copy_text[start..].contains(candidate.as_str())
+        })
+    }
+}
+
+/// Row alignments of one block, kept between frames by the renderer.
+#[derive(Clone, Debug, Default)]
+pub(super) struct BlockCopyMemo {
+    copy_text: String,
+    content_left: Option<u16>,
+    rows: Vec<AlignedCopyRow>,
+}
+
+impl BlockCopyMemo {
+    /// How many leading rows still align exactly as recorded: the same painted
+    /// row, and the same copy text wherever the row's searches could look.
+    fn reusable_rows(&self, content: &[String], copy_text: &str, content_left: u16) -> usize {
+        if self.content_left != Some(content_left) {
+            return 0;
+        }
+        let common = self
+            .copy_text
+            .bytes()
+            .zip(copy_text.bytes())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let identical = common == self.copy_text.len() && common == copy_text.len();
+        self.rows
+            .iter()
+            .zip(content)
+            .take_while(|(aligned, line)| {
+                aligned.painted == **line && aligned.still_holds(copy_text, common, identical)
+            })
+            .count()
+    }
+}
+
+/// Renderer-owned [`BlockCopyMemo`]s, keyed by transcript commit id.
+#[derive(Default)]
+pub(super) struct CopyRowsMemo(std::collections::HashMap<u64, BlockCopyMemo>);
+
+impl CopyRowsMemo {
+    pub(super) fn block(&mut self, id: u64) -> &mut BlockCopyMemo {
+        self.0.entry(id).or_default()
+    }
+
+    /// Forget blocks that left the viewport.
+    pub(super) fn retain(&mut self, visible: &std::collections::HashSet<u64>) {
+        self.0.retain(|id, _| visible.contains(id));
+    }
+}
+
+/// Align one painted row with the copy text, searching from `cursor`.
+fn align_copy_row(line: &str, copy_text: &str, cursor: usize, content_left: u16) -> AlignedCopyRow {
+    let plain = strip_terminal_sequences(line);
+    let mut aligned = AlignedCopyRow {
+        painted: line.to_owned(),
+        row: CopyRow {
+            text: String::new(),
+            offset: cursor,
+            painted_cells: content_left,
+        },
+        cursor_before: cursor,
+        cursor_after: cursor,
+        examined_end: cursor,
+        missed: Vec::new(),
+        to_text_end: false,
+    };
+    for candidate in copy_candidates(&plain) {
+        let Some(relative) = copy_text[cursor..].find(candidate.text) else {
+            aligned.missed.push(candidate.text.to_owned());
+            continue;
+        };
+        let matched = cursor + relative;
+        if candidate.line {
+            // The copy text spells its own marker for this row (`-`,
+            // `1.`, `#`), so the row names that complete copy line. The
+            // copy line starts where its own marker starts, one painted
+            // cell earlier per marker cell.
+            let line_start = copy_text[..matched]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let line_end = match copy_text[matched..].find('\n') {
+                Some(newline) => {
+                    aligned.examined_end = matched + newline + 1;
+                    matched + newline
+                }
+                None => {
+                    aligned.to_text_end = true;
+                    copy_text.len()
+                }
+            };
+            let prefix_cells = visible_width(&copy_text[line_start..matched]) as u16;
+            let painted_cells = candidate.painted_cells.saturating_sub(prefix_cells);
+            aligned.cursor_after = line_end;
+            aligned.row = CopyRow {
+                text: copy_text[line_start..line_end].to_owned(),
+                offset: line_start,
+                painted_cells,
+            };
+        } else {
+            aligned.cursor_after = matched + candidate.text.len();
+            aligned.examined_end = aligned.cursor_after;
+            aligned.row = CopyRow {
+                text: candidate.text.to_owned(),
+                offset: matched,
+                painted_cells: candidate.painted_cells,
+            };
+        }
+        break;
+    }
+    aligned
+}
+
 /// One painted content row aligned with the block's semantic copy text.
 #[derive(Clone, Debug)]
 struct CopyRow {
@@ -319,6 +467,29 @@ impl CopyRows {
         geometry: SurfaceGeometry,
         visible: std::ops::Range<usize>,
     ) -> Self {
+        Self::build_visible_with(
+            painted,
+            copy_text,
+            geometry,
+            visible,
+            &mut BlockCopyMemo::default(),
+        )
+    }
+
+    /// [`Self::build_visible`], reusing the rows `memo` aligned for an earlier
+    /// frame of the same block while their inputs are unchanged.
+    ///
+    /// Rows are aligned top to bottom, each searching the copy text from where
+    /// the previous row ended, so a visible row at the bottom of a long block
+    /// depends on every row above it. Without the memo, every frame of a
+    /// streaming answer re-stripped and re-matched the whole answer.
+    fn build_visible_with(
+        painted: &[String],
+        copy_text: &str,
+        geometry: SurfaceGeometry,
+        visible: std::ops::Range<usize>,
+        memo: &mut BlockCopyMemo,
+    ) -> Self {
         let first = geometry
             .transition_rows
             .saturating_add(geometry.leading_rows);
@@ -331,57 +502,25 @@ impl CopyRows {
             .unwrap_or_default();
         let from = visible.start.saturating_sub(first).min(content.len());
         let to = visible.end.saturating_sub(first).min(content.len());
-        let mut rows = Vec::with_capacity(to - from);
-        let mut cursor = 0usize;
-        for (index, line) in content.iter().take(to).enumerate() {
-            let plain = strip_terminal_sequences(line);
-            let mut row = CopyRow {
-                text: String::new(),
-                offset: cursor,
-                painted_cells: geometry.content_left,
-            };
-            for candidate in copy_candidates(&plain) {
-                let Some(relative) = copy_text[cursor..].find(candidate.text) else {
-                    continue;
-                };
-                let matched = cursor + relative;
-                row = if candidate.line {
-                    // The copy text spells its own marker for this row (`-`,
-                    // `1.`, `#`), so the row names that complete copy line. The
-                    // copy line starts where its own marker starts, one painted
-                    // cell earlier per marker cell.
-                    let line_start = copy_text[..matched]
-                        .rfind('\n')
-                        .map_or(0, |newline| newline + 1);
-                    let line_end = copy_text[matched..]
-                        .find('\n')
-                        .map_or(copy_text.len(), |newline| matched + newline);
-                    let prefix_cells = visible_width(&copy_text[line_start..matched]) as u16;
-                    let painted_cells = candidate.painted_cells.saturating_sub(prefix_cells);
-                    cursor = line_end;
-                    CopyRow {
-                        text: copy_text[line_start..line_end].to_owned(),
-                        offset: line_start,
-                        painted_cells,
-                    }
-                } else {
-                    cursor = matched + candidate.text.len();
-                    CopyRow {
-                        text: candidate.text.to_owned(),
-                        offset: matched,
-                        painted_cells: candidate.painted_cells,
-                    }
-                };
-                break;
-            }
-            if index >= from {
-                rows.push(row);
-            }
+        let reusable = memo.reusable_rows(content, copy_text, geometry.content_left);
+        memo.rows.truncate(reusable);
+        if memo.copy_text != copy_text {
+            copy_text.clone_into(&mut memo.copy_text);
+        }
+        memo.content_left = Some(geometry.content_left);
+        let mut cursor = memo.rows.last().map_or(0, |row| row.cursor_after);
+        for line in content.iter().take(to).skip(memo.rows.len()) {
+            let aligned = align_copy_row(line, copy_text, cursor, geometry.content_left);
+            cursor = aligned.cursor_after;
+            memo.rows.push(aligned);
         }
         Self {
             first_row: from,
             content_left: geometry.content_left,
-            rows,
+            rows: memo.rows[from..to]
+                .iter()
+                .map(|aligned| aligned.row.clone())
+                .collect(),
         }
     }
 
@@ -560,8 +699,9 @@ pub(super) fn visible_copy_rows(
     text: &str,
     geometry: SurfaceGeometry,
     visible: std::ops::Range<usize>,
+    memo: &mut BlockCopyMemo,
 ) -> Option<CopyRows> {
-    let rows = CopyRows::build_visible(painted, text, geometry, visible);
+    let rows = CopyRows::build_visible_with(painted, text, geometry, visible, memo);
     (!rows.is_empty()).then_some(rows)
 }
 

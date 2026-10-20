@@ -542,29 +542,8 @@ impl EventTranslator {
                             ));
                         }
                         ToolProgress::PartialResult(result) => {
-                            let content = result
-                                .content_parts()
-                                .iter()
-                                .map(|part| match part {
-                                    octet_agent::ToolOutputContentPart::Text(text) => {
-                                        json!({"type":"text","text":text})
-                                    }
-                                    octet_agent::ToolOutputContentPart::Media(media) => {
-                                        super::projection::media_content(media)
-                                    }
-                                })
-                                .collect::<Vec<_>>();
-                            let mut partial =
-                                json!({"content":content,"isError":result.is_error()});
-                            if let Some(details) = result
-                                .metadata()
-                                .and_then(|metadata| metadata.get("pi_details"))
-                            {
-                                partial["details"] = details.clone();
-                            }
-                            if let Some(structured) = result.structured_content() {
-                                partial["structuredContent"] = structured.clone();
-                            }
+                            let mut partial = tool_result_value(&result, true);
+                            partial["isError"] = Value::Bool(result.is_error());
                             output.send(json!({
                                 "type":"tool_execution_update", "toolCallId":id.0,
                                 "toolName":name, "args":args, "partialResult":partial,
@@ -590,14 +569,19 @@ impl EventTranslator {
                     .tools
                     .remove(&id.0)
                     .unwrap_or_else(|| (String::new(), Value::Null, RpcToolProgress::default()));
-                let (text, is_error) = match result {
-                    Ok(output_value) => {
-                        let is_error = output_value.is_error();
-                        (output_value.text, is_error)
-                    }
-                    Err(error) => (error.to_string(), true),
+                // Pi's `tool_execution_end` carries the tool's whole result:
+                // content parts (text and media), `details`, and structured
+                // content. Plain text tools project exactly as before.
+                let (result, is_error) = match result {
+                    Ok(output_value) => (
+                        tool_result_value(&output_value, false),
+                        output_value.is_error(),
+                    ),
+                    Err(error) => (
+                        json!({"content": [{"type": "text", "text": error.to_string()}]}),
+                        true,
+                    ),
                 };
-                let result = json!({"content": [{"type": "text", "text": text}]});
                 output.send(json!({
                     "type": "tool_execution_end",
                     "toolCallId": id.0,
@@ -605,14 +589,17 @@ impl EventTranslator {
                     "result": result,
                     "isError": is_error
                 }))?;
-                let tool_message = json!({
+                let mut tool_message = json!({
                     "role": "toolResult",
                     "toolCallId": id.0,
                     "toolName": name,
-                    "content": [{"type": "text", "text": text}],
+                    "content": result["content"],
                     "isError": is_error,
                     "timestamp": now_millis()
                 });
+                if let Some(details) = result.get("details") {
+                    tool_message["details"] = details.clone();
+                }
                 output.send(json!({"type": "message_start", "message": tool_message}))?;
                 output.send(json!({"type": "message_end", "message": tool_message}))?;
                 self.messages.push(tool_message.clone());
@@ -767,4 +754,43 @@ pub(super) fn active_state_value(
         }
     }
     state
+}
+
+/// Pi's tool-result shape: `content` parts, plus `details` and
+/// `structuredContent` when the tool returned them.
+///
+/// A final text-only result keeps the single compact text the model saw;
+/// partial results, and results with media, keep their part boundaries.
+/// `details` is a Pi-compatible tool's `pi_details`, otherwise a native
+/// extension's whole non-model-visible metadata object.
+fn tool_result_value(result: &octet_agent::ToolOutput, partial: bool) -> Value {
+    let keep_parts = partial
+        || result
+            .content_parts()
+            .iter()
+            .any(|part| matches!(part, octet_agent::ToolOutputContentPart::Media(_)));
+    let content = if keep_parts {
+        result
+            .content_parts()
+            .iter()
+            .map(|part| match part {
+                octet_agent::ToolOutputContentPart::Text(text) => {
+                    json!({"type":"text","text":text})
+                }
+                octet_agent::ToolOutputContentPart::Media(media) => {
+                    super::projection::media_content(media)
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![json!({"type":"text","text":result.text})]
+    };
+    let mut value = json!({ "content": content });
+    if let Some(metadata) = result.metadata() {
+        value["details"] = metadata.get("pi_details").unwrap_or(metadata).clone();
+    }
+    if let Some(structured) = result.structured_content() {
+        value["structuredContent"] = structured.clone();
+    }
+    value
 }

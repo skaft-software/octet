@@ -50,6 +50,12 @@ independent of [native-host protocol 1](sdk.md) and [extension API
 doesn't mean every Pi command or feature works, and it hasn't been tested
 against a pinned Pi release.
 
+A finished tool's `tool_execution_end` result and its `toolResult` message carry
+Pi's `details`: a Pi-compatible tool's own details, otherwise an extension tool's
+non-model-visible metadata. Structured content and media parts are included when
+the tool returned them. `get_state` reports `messageCount` without projecting the
+history, so it stays fast on long resumed sessions.
+
 </details>
 
 Startup keeps routine session lookup, replay and extension-loading progress off

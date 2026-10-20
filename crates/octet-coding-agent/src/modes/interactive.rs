@@ -2164,6 +2164,7 @@ fn login_custom(shell: &mut InteractiveShell) -> anyhow::Result<()> {
     }
 
     let provider = CustomProvider {
+        api: Default::default(),
         label: "Local endpoint".into(),
         credential: CustomCredential {
             base_url: "http://localhost:1234/v1/".into(),
@@ -7471,7 +7472,9 @@ fn herdr_launch_scope(app: &App) -> crate::herdr::restore::LaunchScope {
 fn herdr_startup_source(selector: &ResumeSelector) -> Option<&'static str> {
     match selector {
         ResumeSelector::New => Some("startup"),
-        ResumeSelector::Continue | ResumeSelector::Resume(_) => Some("resume"),
+        ResumeSelector::Continue | ResumeSelector::Resume(_) | ResumeSelector::File(_) => {
+            Some("resume")
+        }
         ResumeSelector::Fork(_) => Some("fork"),
     }
 }
