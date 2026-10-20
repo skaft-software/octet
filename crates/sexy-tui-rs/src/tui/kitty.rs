@@ -100,7 +100,7 @@ fn extract_kitty_image_rows(line: &str) -> usize {
             ImageAnchor::parse_all(line)
                 .into_iter()
                 .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
-                .map(|anchor| usize::from(anchor.layout().rows())),
+                .map(|anchor| usize::from(anchor.placed_rows())),
         )
         .max()
         .unwrap_or(1)

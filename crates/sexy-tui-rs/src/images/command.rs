@@ -18,6 +18,7 @@ use std::io::{self, Write};
 
 use crate::terminal::Terminal;
 
+use super::anchor::ImageCrop;
 use super::capabilities::ImageProtocol;
 use super::error::ImageError;
 use super::helpers::checked_add;
@@ -162,7 +163,26 @@ impl ImageProtocolEncoder {
         image: &'a TerminalImage,
         layout: ImageLayout,
     ) -> Result<ImageTerminalCommand<'a>, ImageError> {
-        self.encode_transmission(CommandKind::Place, id, image, layout)
+        self.encode_transmission(CommandKind::Place, id, image, layout, None)
+    }
+
+    /// Encode a placement that draws only the rows a viewport left visible.
+    ///
+    /// Kitty receives a source rectangle covering exactly those rows of the
+    /// image and a placement height of the visible rows, so nothing is drawn
+    /// past the window. iTerm2 has no source rectangle and returns
+    /// [`ImageError::UnsupportedOperation`].
+    pub fn encode_place_cropped<'a>(
+        &self,
+        id: ImageId,
+        image: &'a TerminalImage,
+        layout: ImageLayout,
+        crop: ImageCrop,
+    ) -> Result<ImageTerminalCommand<'a>, ImageError> {
+        if self.protocol != ImageProtocol::Kitty {
+            return Err(ImageError::UnsupportedOperation);
+        }
+        self.encode_transmission(CommandKind::Place, id, image, layout, Some(crop))
     }
 
     /// Encode a replacement. Kitty emits a targeted delete immediately before
@@ -177,7 +197,7 @@ impl ImageProtocolEncoder {
         if !self.protocol.supports_delete() {
             return Err(ImageError::UnsupportedOperation);
         }
-        self.encode_transmission(CommandKind::Replace, id, image, layout)
+        self.encode_transmission(CommandKind::Replace, id, image, layout, None)
     }
 
     /// Encode a targeted delete. iTerm2 has no equivalent targetable command
@@ -207,13 +227,14 @@ impl ImageProtocolEncoder {
         id: ImageId,
         image: &'a TerminalImage,
         layout: ImageLayout,
+        crop: Option<ImageCrop>,
     ) -> Result<ImageTerminalCommand<'a>, ImageError> {
         validate_existing_image(image, &self.limits)?;
         if !self.protocol.supports_format(image.format()) {
             return Err(ImageError::UnsupportedFormatForProtocol);
         }
         let (transmission, output_len, payload_chunks) =
-            build_transmission(self.protocol, id, image, layout, &self.limits)?;
+            build_transmission(self.protocol, id, image, layout, crop, &self.limits)?;
         let delete_prefix = (kind == CommandKind::Replace).then(|| kitty_delete_sequence(id));
         let encoded_len = delete_prefix.as_ref().map_or(Ok(output_len), |delete| {
             checked_add(delete.len(), output_len)

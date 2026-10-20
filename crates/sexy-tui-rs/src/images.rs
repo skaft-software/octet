@@ -61,7 +61,7 @@ mod plan;
 mod registry;
 mod transmit;
 
-pub use self::anchor::ImageAnchor;
+pub use self::anchor::{crop_anchors_to_window, ImageAnchor, ImageCrop};
 pub use self::capabilities::{
     parse_terminal_image_reply, ImageCapabilities, ImageCapabilityOverrides, ImageCapabilityQuery,
     ImageProtocol, TerminalImageReply,
