@@ -107,6 +107,79 @@ fn rpc_branch_summary_projection_retains_real_identity_and_provenance() {
 }
 
 #[test]
+fn rpc_message_count_matches_the_projected_history_for_every_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_fixture, app) = crate::compaction::tests::app_for_estimate();
+    let model = app.model.clone();
+    let mut session =
+        octet_agent::Session::create(directory.path().join("rpc-count.jsonl")).unwrap();
+    let image = || {
+        UserPart::Media(octet_ai::Media::image_bytes(
+            bytes::Bytes::from_static(b"png"),
+            "image/png".parse().unwrap(),
+        ))
+    };
+    let result = |id: &str| {
+        UserPart::ToolResult(octet_ai::ToolResult {
+            tool_call_id: octet_ai::ToolCallId(id.into()),
+            content: vec![octet_ai::ToolResultPart::Text(format!("{id} done"))],
+            is_error: false,
+            added_tool_names: None,
+        })
+    };
+    let user_turns = vec![
+        vec![UserPart::Text("hello".into())],
+        vec![],
+        vec![result("a")],
+        // Consecutive tool-result turns coalesce, media moving behind results.
+        vec![result("b"), image()],
+        vec![image(), result("c")],
+        vec![result("d")],
+        vec![
+            UserPart::Text("mixed".into()),
+            result("e"),
+            image(),
+            result("f"),
+        ],
+        vec![image(), UserPart::Text("trailing".into())],
+        vec![result("g")],
+    ];
+    assert_eq!(rpc_message_count(&session), 0);
+    for (index, content) in user_turns.into_iter().enumerate() {
+        session
+            .append(EntryValue::Message(Message::User(UserMessage { content })))
+            .unwrap();
+        assert_eq!(
+            rpc_message_count(&session),
+            rpc_messages_from_session(&session, &model).len(),
+            "after user turn {index}"
+        );
+        if index % 3 == 0 {
+            session
+                .append_assistant_turn(
+                    AssistantMessage {
+                        model: model.spec.id.clone(),
+                        protocol: model.spec.protocol,
+                        content: vec![AssistantPart::Text("answer".into())],
+                    },
+                    model.endpoint.id.clone(),
+                    model.spec.id.clone(),
+                    Usage::default(),
+                    None,
+                    StopReason::EndTurn,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                rpc_message_count(&session),
+                rpc_messages_from_session(&session, &model).len(),
+                "after assistant turn {index}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rpc_messages_keep_durable_identity_across_turns_reopen_and_branching() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rpc-identity.jsonl");
@@ -1339,4 +1412,81 @@ fn response_shape_omits_id_when_request_did() {
     response.insert("command".into(), Value::String("get_state".into()));
     response.insert("success".into(), Value::Bool(true));
     assert!(response.get("id").is_none());
+}
+
+#[test]
+fn rpc_tool_execution_end_carries_details_and_structured_content_like_pi() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let capture = RpcCapture::default();
+    let mut output = capture.output(false);
+    let mut queue = QueueState::default();
+    let mut finish = |id: &str, result| {
+        let mut translator = EventTranslator::new(&app, json!({"role": "user", "content": []}));
+        capture.0.lock().unwrap().clear();
+        for event in [
+            AgentEvent::ToolStarted {
+                id: octet_ai::ToolCallId(id.into()),
+                name: "bench_tool".into(),
+                args: json!({}),
+            },
+            AgentEvent::ToolFinished {
+                id: octet_ai::ToolCallId(id.into()),
+                result,
+                duration: std::time::Duration::ZERO,
+            },
+        ] {
+            translator.observe(event, &mut output, &mut queue).unwrap();
+        }
+        let frames = capture.frames();
+        let end = frames
+            .iter()
+            .find(|frame| frame["type"] == "tool_execution_end")
+            .unwrap()
+            .clone();
+        let message = frames
+            .iter()
+            .find(|frame| frame["type"] == "message_end")
+            .unwrap()["message"]
+            .clone();
+        (end, message)
+    };
+
+    // A native extension's metadata is the Pi `details`; structured content
+    // rides along, and the text stays the single content part.
+    let native = octet_agent::ToolOutput::new("ok")
+        .try_with_details(
+            Some(json!({"value": 1})),
+            Some(json!({"events": ["a", "b"]})),
+        )
+        .unwrap();
+    let (end, message) = finish("native", Ok(native));
+    assert_eq!(
+        end["result"],
+        json!({"content": [{"type": "text", "text": "ok"}], "details": {"events": ["a", "b"]},
+            "structuredContent": {"value": 1}})
+    );
+    assert_eq!(end["isError"], false);
+    assert_eq!(message["details"], json!({"events": ["a", "b"]}));
+    assert_eq!(message["content"], end["result"]["content"]);
+
+    // A Pi-compatible tool's own `details` wins over the rest of the metadata.
+    let pi = octet_agent::ToolOutput::new("pi")
+        .try_with_metadata(json!({"pi_details": {"n": 2}, "other": true}))
+        .unwrap();
+    let (end, _) = finish("pi", Ok(pi));
+    assert_eq!(end["result"]["details"], json!({"n": 2}));
+
+    // Plain text results and failures project exactly as before.
+    let (end, message) = finish("plain", Ok(octet_agent::ToolOutput::new("plain")));
+    assert_eq!(
+        end["result"],
+        json!({"content": [{"type": "text", "text": "plain"}]})
+    );
+    assert!(message.get("details").is_none());
+    let (end, _) = finish("failed", Err(octet_agent::ToolError::new("boom")));
+    assert_eq!(end["isError"], true);
+    assert!(end["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("boom"));
 }

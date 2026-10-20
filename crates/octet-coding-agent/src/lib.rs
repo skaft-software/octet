@@ -303,6 +303,7 @@ async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Resul
                         );
                     }
                     let provider = CustomProvider {
+                        api: Default::default(),
                         label: "Local endpoint".into(),
                         credential: CustomCredential {
                             base_url: "http://localhost:1234/v1/".into(),

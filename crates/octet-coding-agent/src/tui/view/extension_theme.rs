@@ -74,6 +74,15 @@ fn color(color: Color) -> Value {
         Color::Ansi16(index) | Color::Indexed(index) => Value::from(index),
     }
 }
+/// See [`InteractiveShell::extension_palette_key`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExtensionPaletteKey {
+    theme_epoch: u64,
+    model_lab: Option<crate::tui::theme::ModelLab>,
+    terminal_colors: crate::tui::terminal::TerminalThemeColors,
+    selected: String,
+}
+
 fn palette(theme: &OctetTheme, selector: &str) -> Value {
     let enabled = theme.capabilities().color != crate::tui::terminal::ColorDepth::None;
     let mut foregrounds = Map::new();
@@ -150,7 +159,7 @@ impl InteractiveShell {
     fn selected_theme_name(&self) -> String {
         self.runtime_config()
             .and_then(|config| config.theme.clone())
-            .unwrap_or_else(|| match self.theme().source() {
+            .unwrap_or_else(|| match self.state.borrow().theme.source() {
                 crate::tui::theme::ThemeSource::CompiledCards => "Cards".into(),
                 crate::tui::theme::ThemeSource::CompiledStill => "Still".into(),
                 crate::tui::theme::ThemeSource::CompiledPi => "pi".into(),
@@ -161,9 +170,27 @@ impl InteractiveShell {
                 crate::tui::theme::ThemeSource::CompiledDefault => "auto".into(),
             })
     }
+    /// Everything the active-theme palette ([`Self::extension_theme_get`]
+    /// with no name) depends on. Every theme mutation bumps the theme epoch or
+    /// changes the model lab or terminal colours, so an unchanged key means an
+    /// unchanged palette and extension-theme sync can skip rebuilding it.
+    pub(crate) fn extension_palette_key(&self) -> ExtensionPaletteKey {
+        // Resolve the name first: it reads the shell state itself, and that
+        // state is not reentrant.
+        let selected = self.selected_theme_name();
+        let state = self.state.borrow();
+        ExtensionPaletteKey {
+            theme_epoch: state.theme_epoch,
+            model_lab: state.model_lab,
+            terminal_colors: state.theme.terminal_colors(),
+            selected,
+        }
+    }
+
     pub(crate) fn extension_theme_get(&self, name: Option<&str>) -> Option<Value> {
         let Some(name) = name else {
-            return Some(palette(&self.theme(), &self.selected_theme_name()));
+            let selected = self.selected_theme_name();
+            return Some(palette(&self.state.borrow().theme, &selected));
         };
         if crate::tui::theme::compiled_file_theme_name(name)
             == Some(crate::tui::theme::PI_THEME_NAME)

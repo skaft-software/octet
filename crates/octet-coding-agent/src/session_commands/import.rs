@@ -70,21 +70,31 @@ pub(crate) fn import_session(
     drop(created);
     let creation_bytes =
         octet_agent::secure_fs::read_private_file_bounded(&staged, MAX_SESSION_FILE_BYTES)?;
-    let original_payload = encode_jsonl(&records)?;
-    octet_agent::secure_fs::write_private_atomic_if_unchanged(
-        &staged,
-        Some(&creation_bytes),
-        &original_payload,
-        MAX_SESSION_FILE_BYTES,
-    )?;
-    // Validate ALL source semantics before stripping authority. Otherwise a
-    // corrupt private sidecar could be silently hidden by the security projection.
-    validate_resumable(&staged)?;
+    // A Pi conversion is this module's own output: it has no private sidecar
+    // records or extension authority and already denies effect replay, so the
+    // security projection cannot hide anything in it and validating the final
+    // payload covers it. Each validation reopens the whole transcript, which
+    // dominated large Pi imports (and `--session <pi.jsonl>` startup).
+    let staged_bytes = if format == pi::FORMAT {
+        creation_bytes
+    } else {
+        let original_payload = encode_jsonl(&records)?;
+        octet_agent::secure_fs::write_private_atomic_if_unchanged(
+            &staged,
+            Some(&creation_bytes),
+            &original_payload,
+            MAX_SESSION_FILE_BYTES,
+        )?;
+        // Validate ALL source semantics before stripping authority. Otherwise a
+        // corrupt private sidecar could be silently hidden by the security projection.
+        validate_resumable(&staged)?;
+        original_payload
+    };
     strip_import_authority(&mut records, &mut warnings);
     let payload = encode_jsonl(&records)?;
     octet_agent::secure_fs::write_private_atomic_if_unchanged(
         &staged,
-        Some(&original_payload),
+        Some(&staged_bytes),
         &payload,
         MAX_SESSION_FILE_BYTES,
     )?;
@@ -228,11 +238,11 @@ pub(super) fn validate_records(records: &[Value]) -> anyhow::Result<()> {
     let mut uncommitted_entry = false;
     let mut header = false;
     for (position, value) in records.iter().enumerate() {
-        let encoded = serde_json::to_vec(value)?;
+        // Decode straight from the parsed value: re-encoding each record to
+        // bytes only to parse it again doubled the cost of large imports.
         let mut ignored = false;
-        let mut de = serde_json::Deserializer::from_slice(&encoded);
-        let record: SessionRecord = serde_ignored::deserialize(&mut de, |_| ignored = true)
-            .map_err(|_| {
+        let record: SessionRecord =
+            serde_ignored::deserialize(value, |_| ignored = true).map_err(|_| {
                 anyhow::anyhow!(
                     "unsupported or malformed Octet record at position {}",
                     position + 1

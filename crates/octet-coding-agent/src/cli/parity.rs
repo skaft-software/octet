@@ -1,6 +1,6 @@
 //! Additive invocation options; never changes persisted trust or credentials.
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use octet_agent::Session;
@@ -24,11 +24,15 @@ pub struct ParityOptions {
     /// Exact workspace-local session ID; create when missing, otherwise resume.
     #[arg(long, value_name = "ID", conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "no_session"])]
     pub session_id: Option<String>,
+    /// Session file to create when missing, otherwise resume. A Pi v3 session
+    /// file is imported as a new session in this workspace, which is resumed.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "session_id", "no_session", "name"])]
+    pub session: Option<PathBuf>,
     /// Set the selected session's display name (must not be empty).
     #[arg(long, short = 'n', value_name = "NAME")]
     pub name: Option<String>,
     /// Discard the headless transcript after persisting accounting-only usage.
-    #[arg(long, conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "session_id"])]
+    #[arg(long, conflicts_with_all = ["continue_", "resume_picker", "resume", "fork", "session_id", "session"])]
     pub no_session: bool,
     /// Comma-separated model patterns (`provider/*`, `sonnet:high`) that scope
     /// model selection and cycling to the credential-filtered catalog.
@@ -203,6 +207,9 @@ impl ParityOptions {
         if self.no_session {
             return self.begin_ephemeral(config);
         }
+        if let Some(path) = &self.session {
+            return select_session_file(config, path);
+        }
         if self.session_id.is_none() && self.name.is_none() {
             return Ok(());
         }
@@ -231,7 +238,9 @@ impl ParityOptions {
                     store.path_by_id(id)?;
                     id.clone()
                 }
-                ResumeSelector::Resume(None) | ResumeSelector::Fork(_) => anyhow::bail!(
+                ResumeSelector::Resume(None)
+                | ResumeSelector::Fork(_)
+                | ResumeSelector::File(_) => anyhow::bail!(
                     "--name with a session picker or --fork requires the startup metadata hook; select an exact existing session with --session-id, or rename it after forking"
                 ),
             }
@@ -270,6 +279,71 @@ impl ParityOptions {
         );
         Ok(())
     }
+}
+
+/// `--session <FILE>`: address a session by its file instead of its store id.
+///
+/// An octet session file is used in place: a missing one is created here (like
+/// a missing `--session-id`), so the same command creates it once and resumes
+/// it afterwards. Only missing parent directories are created; an existing
+/// directory's permissions are never changed. A Pi v3 session file is never
+/// written: each launch imports it as a new session in this workspace's store,
+/// exactly as `octet sessions import` does, and resumes that copy.
+fn select_session_file(config: &mut Config, path: &Path) -> anyhow::Result<()> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        config.invocation_cwd.join(path)
+    };
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        anyhow::bail!(
+            "--session requires a .jsonl session file: {}",
+            path.display()
+        );
+    }
+    if is_pi_session_file(&path)? {
+        let store = SessionStore::new(&config.session_dir, &config.workspace);
+        if !store.dir().is_dir() {
+            store.write_workspace_marker()?;
+        }
+        let report =
+            crate::session_commands::import_session(&store, &path, &config.invocation_cwd)?;
+        crate::output::stderr_line(format!(
+            "Imported Pi session {} as {}; the Pi file is not modified.",
+            path.display(),
+            report.id
+        ));
+        config.resume = ResumeSelector::Resume(Some(report.id));
+        return Ok(());
+    }
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Session::create(&path)?;
+    }
+    config.resume = ResumeSelector::File(path);
+    Ok(())
+}
+
+/// Whether `path` starts with a Pi session header (`{"type":"session",...}`).
+/// Only the first line is read; a missing file is not a Pi session.
+fn is_pi_session_file(path: &Path) -> anyhow::Result<bool> {
+    use std::io::BufRead as _;
+    const MAX_HEADER_BYTES: u64 = 64 * 1024;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(anyhow::anyhow!("--session {}: {error}", path.display()));
+        }
+    };
+    let mut line = Vec::new();
+    std::io::BufReader::new(file)
+        .take(MAX_HEADER_BYTES)
+        .read_until(b'\n', &mut line)?;
+    Ok(serde_json::from_slice::<serde_json::Value>(&line)
+        .is_ok_and(|header| header.get("type").and_then(|kind| kind.as_str()) == Some("session")))
 }
 
 /// One resolved `--models` entry: an ordered, credential-filtered model.

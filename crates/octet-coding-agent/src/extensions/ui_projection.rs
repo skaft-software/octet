@@ -353,7 +353,26 @@ impl ExecutableExtensions {
     /// a callback into the component factory. Existing process publication sends
     /// owner-fenced context updates to every admitted remote mount.
     pub(crate) fn refresh_frontend_theme(&self, shell: &InteractiveShell) {
+        // This runs for every UI sync (every streamed delta), and building the
+        // palette serializes the whole theme. Rebuild only when its inputs move.
+        let key = shell.extension_palette_key();
+        let mut published = self
+            .frontend_theme_key
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if published.as_ref() == Some(&key)
+            && self
+                .host_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .theme
+                .is_some()
+        {
+            return;
+        }
         let theme = shell.extension_theme_get(None);
+        *published = Some(key);
+        drop(published);
         let state = {
             let mut state = self
                 .host_state

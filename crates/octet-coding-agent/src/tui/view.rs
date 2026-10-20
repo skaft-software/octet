@@ -9393,6 +9393,7 @@ mod shell_chrome {
     pub(super) use super::remote_ui::shell_chrome;
 }
 mod extension_theme;
+pub(crate) use extension_theme::ExtensionPaletteKey;
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;

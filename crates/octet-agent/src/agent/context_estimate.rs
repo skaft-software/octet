@@ -253,6 +253,44 @@ pub(super) fn estimate_request_tokens(
         .saturating_add(64)
 }
 
+/// [`estimate_request_tokens`] from already-measured message sizes.
+///
+/// `estimate_request_tokens` serializes the tuple `(system, messages, tools)`,
+/// whose compact JSON is `[system,[m1,...,mn],tools]`. Given each message's
+/// serialized size, the same byte count follows from the framing alone, so a
+/// caller that already measured every message does not serialize the history
+/// a second time. The result is identical, including the fallback of 64.
+pub(super) fn estimate_request_tokens_from_message_bytes(
+    system: &str,
+    messages: &[Message],
+    message_bytes: &[u64],
+    tools: &[ToolDef],
+) -> u64 {
+    debug_assert_eq!(messages.len(), message_bytes.len());
+    let mut system_bytes = CountingWriter::default();
+    let mut tool_bytes = CountingWriter::default();
+    if serde_json::to_writer(&mut system_bytes, system).is_err()
+        || serde_json::to_writer(&mut tool_bytes, tools).is_err()
+    {
+        return 64;
+    }
+    let separators = (message_bytes.len() as u64).saturating_sub(1);
+    let bytes = message_bytes
+        .iter()
+        .fold(0u64, |total, bytes| total.saturating_add(*bytes))
+        .saturating_add(separators)
+        // `[` `,` `[` `]` `,` `]` around the three tuple fields.
+        .saturating_add(6)
+        .saturating_add(system_bytes.0)
+        .saturating_add(tool_bytes.0);
+    let (inline_payload_bytes, semantic_tokens) = request_media_adjustment(messages);
+    bytes
+        .saturating_sub(inline_payload_bytes)
+        .div_ceil(4)
+        .saturating_add(semantic_tokens)
+        .saturating_add(64)
+}
+
 pub(super) struct ExactResponsesReplay {
     pub(super) input: ResponsesInput,
     pub(super) replay: Arc<Vec<ResponsesReplayItem>>,
@@ -649,17 +687,29 @@ pub(super) fn reconcile_context_estimate(
     messages: &[Message],
     tools: &[ToolDef],
 ) -> RequestContextEstimate {
-    let structural_tokens = exact_responses_replay(session, model, system).map_or_else(
-        || estimate_request_tokens(system, messages, tools),
-        |exact| {
+    reconcile_context_estimate_with(session, model, system, tools, || {
+        estimate_request_tokens(system, messages, tools)
+    })
+}
+
+/// [`reconcile_context_estimate`] with the Chat-shaped structural estimate
+/// supplied by the caller, used only when no exact Responses replay applies.
+fn reconcile_context_estimate_with(
+    session: &Session,
+    model: &Model,
+    system: &str,
+    tools: &[ToolDef],
+    structural: impl FnOnce() -> u64,
+) -> RequestContextEstimate {
+    let structural_tokens =
+        exact_responses_replay(session, model, system).map_or_else(structural, |exact| {
             estimate_responses_request_tokens(
                 &exact.input,
                 &exact.replay,
                 tools,
                 exact.instructions.as_deref(),
             )
-        },
-    );
+        });
     let provider_tokens = provider_context_estimate(session, model);
     let input_tokens = provider_tokens.map_or(structural_tokens, |provider| {
         structural_tokens.max(provider)
@@ -698,7 +748,26 @@ pub(super) fn context_breakdown(
     messages: &[Message],
     tools: &[ToolDef],
 ) -> ContextBreakdown {
-    let estimate = reconcile_context_estimate(session, model, system, messages, tools);
+    // Serialize each message once: the sizes feed both the per-category split
+    // below and the whole-request structural estimate. Long sessions spent
+    // most of this function serializing the history twice.
+    let message_bytes = messages
+        .iter()
+        .map(|message| {
+            let mut bytes = CountingWriter::default();
+            serde_json::to_writer(&mut bytes, message)
+                .ok()
+                .map(|()| bytes.0)
+        })
+        .collect::<Vec<_>>();
+    let estimate = reconcile_context_estimate_with(session, model, system, tools, || {
+        match message_bytes.iter().copied().collect::<Option<Vec<_>>>() {
+            Some(sizes) => {
+                estimate_request_tokens_from_message_bytes(system, messages, &sizes, tools)
+            }
+            None => estimate_request_tokens(system, messages, tools),
+        }
+    });
     let mut remaining_structural = estimate.structural_tokens;
     let mut take = |requested: u64| {
         let accepted = requested.min(remaining_structural);
@@ -713,16 +782,15 @@ pub(super) fn context_breakdown(
     let mut attachment_tokens = 0u64;
     let mut compaction_summary_tokens = 0u64;
 
-    for message in messages {
+    for (message, bytes) in messages.iter().zip(&message_bytes) {
         let message_slice = std::slice::from_ref(message);
-        let mut bytes = CountingWriter::default();
-        if serde_json::to_writer(&mut bytes, message).is_err() {
+        let Some(bytes) = *bytes else {
             continue;
-        }
+        };
         let (inline_payload_bytes, semantic_media_tokens) = request_media_adjustment(message_slice);
         let media_tokens = take(semantic_media_tokens);
         attachment_tokens = attachment_tokens.saturating_add(media_tokens);
-        let non_media_tokens = bytes.0.saturating_sub(inline_payload_bytes).div_ceil(4);
+        let non_media_tokens = bytes.saturating_sub(inline_payload_bytes).div_ceil(4);
         let accepted = take(non_media_tokens);
         let is_tool = match message {
             Message::User(user) => user

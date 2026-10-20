@@ -614,6 +614,11 @@ impl SessionStore {
     /// Refresh the disposable title projection from an already replayed session.
     /// This keeps a normally closed session warm without reopening its JSONL.
     pub(crate) fn refresh_catalog_for_open_session(&self, session: &Session) -> anyhow::Result<()> {
+        // A `--no-session` store is deleted when the run finishes; a catalog
+        // row there would be durable writes for a directory nobody lists.
+        if super::is_ephemeral_transcript_root(&self.root) {
+            return Ok(());
+        }
         let id = session
             .path()
             .file_stem()

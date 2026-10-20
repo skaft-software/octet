@@ -4934,6 +4934,20 @@ fn resolve_custom_provider_auth(
     Ok((Auth::None, String::new()))
 }
 
+/// Present a registry credential the way the provider's protocol expects:
+/// Anthropic Messages endpoints read `x-api-key`, every other protocol a bearer.
+fn custom_provider_api_auth(api: crate::auth::custom::CustomProviderApi, auth: Auth) -> Auth {
+    if api != crate::auth::custom::CustomProviderApi::AnthropicMessages {
+        return auth;
+    }
+    let name = http::HeaderName::from_static("x-api-key");
+    match auth {
+        Auth::Bearer(secret) => Auth::header(name, secret),
+        Auth::BearerEnv { var } => Auth::header_env(name, var),
+        other => other,
+    }
+}
+
 const APPLE_FM_PROVIDER_ID: &str = "apple-fm";
 const APPLE_FM_BASE_URL: &str = "http://127.0.0.1:1976/v1/";
 const APPLE_FM_LABEL: &str = "Apple Foundation Models";
@@ -5145,6 +5159,7 @@ fn apple_foundation_models_server_is_running_blocking() -> bool {
 
 fn default_apple_foundation_models_provider() -> crate::auth::custom::CustomProvider {
     crate::auth::custom::CustomProvider {
+        api: Default::default(),
         label: APPLE_FM_LABEL.to_owned(),
         credential: crate::auth::custom::CustomCredential {
             base_url: APPLE_FM_BASE_URL.to_owned(),
@@ -5323,7 +5338,12 @@ fn register_custom_openai_provider(
 
     validate_custom_provider_id(provider_id)?;
     let (auth, effective_key) = resolve_custom_provider_auth(provider, legacy_single_endpoint)?;
+    let api = provider.api;
+    let auth = custom_provider_api_auth(api, auth);
     let mut cred = provider.credential.clone();
+    // `GET /models` discovery is the Chat Completions convention and sends a
+    // bearer key; other protocols use only their declared models.
+    cred.auto_discover &= api.is_default();
     // Discovery uses the resolved value in memory; it is never written back to
     // the provider registry. Requests use the redacted Auth strategy below.
     cred.api_key = effective_key.clone();
@@ -5515,7 +5535,7 @@ fn register_custom_openai_provider(
             endpoint: endpoint_id.clone(),
             api_name: model.api_name.clone(),
             display_name: configured_display,
-            protocol: Protocol::OpenAiChat,
+            protocol: api.protocol(),
             capabilities: Capabilities {
                 input_modalities: input_mods,
                 output_modalities: ModalitySet::none(),
@@ -8001,12 +8021,16 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
     }
     let sessions = SessionStore::new(&config.session_dir, &config.workspace);
     // Record the workspace path so cross-workspace browsing can name each
-    // session's home. Non-fatal: pickers fall back to directory names.
-    let _ = bootstrap_check(
-        "session-workspace-marker",
-        sessions.write_workspace_marker(),
-        |error| format!("warning: could not write session workspace marker: {error}"),
-    );
+    // session's home. Non-fatal: pickers fall back to directory names. A
+    // `--no-session` store is deleted at exit and never browsed, so its marker
+    // would only cost a durable write (three fsyncs) before readiness.
+    if !crate::session_store::is_ephemeral_transcript_root(&config.session_dir) {
+        let _ = bootstrap_check(
+            "session-workspace-marker",
+            sessions.write_workspace_marker(),
+            |error| format!("warning: could not write session workspace marker: {error}"),
+        );
+    }
     startup_phase("session.marker");
     let client = AiClient::try_new()?;
     startup_phase("catalog.client");
@@ -8370,6 +8394,8 @@ pub async fn resolve_launch_interactive(
             .await?;
             SessionSelection::OpenExisting(path)
         }
+        // `--session <FILE>` created a missing file during selection.
+        ResumeSelector::File(path) => SessionSelection::OpenExisting(path),
         ResumeSelector::Fork(source_id) => {
             let source_path = if let Some(id) = source_id {
                 let sessions = boot.sessions.clone();
@@ -8489,6 +8515,7 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         ResumeSelector::Resume(Some(id)) => {
             SessionSelection::OpenExisting(boot.sessions.path_by_id(id)?)
         }
+        ResumeSelector::File(path) => SessionSelection::OpenExisting(path.clone()),
         ResumeSelector::Fork(Some(id)) => {
             let source = resolve_fork_source_path(&boot.config, &boot.sessions, id)?;
             let destination = boot.sessions.new_path(stamp);
