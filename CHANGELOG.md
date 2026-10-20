@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.6] - Unreleased
+
+### Fixed
+
+- Gemini routes (Gemini API, Vertex AI, OpenCode Go and OpenCode Zen, including
+  Gemini 4 Argon Contributor) no longer fail a request with `Media in tool
+  results is unsupported` when the conversation holds an image or audio clip
+  inside a tool result, for example a `read` made earlier on a Claude or GPT
+  model. The media is sent as inline data after the turn's function responses.
+
 ## [0.9.5] - 2026-10-18
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
