@@ -199,9 +199,12 @@ impl ExecutableExtensions {
         })
     }
 
-    /// Count nonterminal workers in the current owner-fenced subagents roster.
-    /// This must be observed before releasing the App binding, not on its replacement.
-    pub(crate) fn active_subagent_worker_count(&self) -> usize {
+    /// Count pending or running workers in the current owner-fenced subagents
+    /// roster. This must be observed before releasing the App binding, not on its replacement.
+    pub(crate) fn busy_subagent_worker_count(&self) -> usize {
+        // `active` and `degraded` describe settled or detached workers (a
+        // reached turn limit, a parked session); only pending and running
+        // nodes describe work a reload could interrupt.
         self.presentation_views()
             .into_iter()
             .filter(|view| view.extension == SUBAGENTS_EXTENSION_NAME)
@@ -211,9 +214,7 @@ impl ExecutableExtensions {
                 matches!(
                     node.state,
                     octet_agent::ExtensionPresentationState::Pending
-                        | octet_agent::ExtensionPresentationState::Active
                         | octet_agent::ExtensionPresentationState::Running
-                        | octet_agent::ExtensionPresentationState::Degraded
                 )
             })
             .count()

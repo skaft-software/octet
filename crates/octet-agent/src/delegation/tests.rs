@@ -1410,6 +1410,130 @@ fn active_worker_count_uses_host_liveness_without_presentation() {
     assert!(manager.telemetry.lock().unwrap().sender.is_none());
 }
 
+#[test]
+fn busy_worker_count_excludes_settled_workers_waiting_for_follow_up() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let binding = manager.root_binding();
+    let statuses = [
+        DelegatedAgentStatus::Pending,
+        DelegatedAgentStatus::Running,
+        DelegatedAgentStatus::Completed {
+            output: "done".into(),
+        },
+        DelegatedAgentStatus::LimitReached {
+            output: "partial".into(),
+            turn_count: 3,
+            turn_limit: 3,
+        },
+        DelegatedAgentStatus::Failed {
+            error: "failed".into(),
+        },
+        DelegatedAgentStatus::TimedOut,
+        DelegatedAgentStatus::Interrupted,
+    ];
+    for (index, status) in statuses.into_iter().enumerate() {
+        let durable = DurableFleetRecord {
+            agent_id: format!("agent-{index}"),
+            status,
+            ..DurableFleetRecord::default()
+        };
+        insert_fixture_record(&manager, durable, false, true, false);
+    }
+    assert_eq!(binding.active_worker_count(), 7);
+    assert_eq!(
+        binding.busy_worker_count(),
+        2,
+        "settled workers only wait for a follow-up and never block a reload"
+    );
+    manager
+        .state
+        .lock()
+        .unwrap()
+        .records
+        .get_mut("agent-2")
+        .unwrap()
+        .pending_initial_task = Some(QueuedInitialTask {
+        task: "accepted but not started".into(),
+        delivery_id: "delivery-1".into(),
+        attempts: 0,
+    });
+    assert_eq!(
+        binding.busy_worker_count(),
+        3,
+        "accepted work that has not started is still busy"
+    );
+    manager
+        .state
+        .lock()
+        .unwrap()
+        .records
+        .get_mut("agent-0")
+        .unwrap()
+        .live_task = false;
+    assert_eq!(
+        binding.busy_worker_count(),
+        2,
+        "a stale pending label never manufactures host liveness"
+    );
+}
+
+#[tokio::test]
+async fn detaching_workers_waits_for_every_live_task_to_park() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let binding = manager.root_binding();
+    let status = DelegatedAgentStatus::Completed {
+        output: "settled".into(),
+    };
+    let (identity, commands) = insert_test_record(&manager, status.clone());
+    let token = {
+        let mut state = manager.state.lock().unwrap();
+        let record = state.records.get_mut(&identity.id).unwrap();
+        record.detached = false;
+        record.live_task = true;
+        record.shutdown.clone()
+    };
+    // Stand-in for the idle worker loop: it parks when its token is cancelled.
+    let worker = {
+        let manager = Arc::clone(&manager);
+        let id = identity.id.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            assert!(manager.park_released_worker(&id, Some(commands)));
+        })
+    };
+    assert_eq!(binding.detach_workers(Duration::from_secs(5)).await, 0);
+    worker.await.unwrap();
+    {
+        let state = manager.state.lock().unwrap();
+        let record = &state.records[&identity.id];
+        assert_eq!(record.status, status, "the settled outcome is retained");
+        assert!(record.detached);
+        assert!(!record.live_task);
+        assert!(
+            !record.shutdown.is_cancelled(),
+            "a parked record resumes under a fresh token, not its stopped one"
+        );
+    }
+
+    // A task that never parks is reported instead of waited on forever.
+    let (stuck, _commands) = insert_fixture_record(
+        &manager,
+        DurableFleetRecord {
+            agent_id: "agent-2".into(),
+            agent_path: "/root/stuck".into(),
+            status: DelegatedAgentStatus::Running,
+            ..DurableFleetRecord::default()
+        },
+        false,
+        true,
+        false,
+    );
+    assert_eq!(binding.detach_workers(Duration::from_millis(50)).await, 1);
+    assert!(manager.state.lock().unwrap().records[&stuck.id].live_task);
+}
+
 /// A durable record reconstructed from the roster: detached, with its
 /// parked command receiver owned by the record.
 fn insert_durable_detached_record(

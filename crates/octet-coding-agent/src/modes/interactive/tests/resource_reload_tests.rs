@@ -122,12 +122,16 @@ async fn resource_reload_refusal_preserves_worker_owner_and_control() {
     use crate::extensions::reload_lifecycle_test_support::fixture;
     use octet_agent::ExtensionPresentationState as State;
 
-    for state in [
-        State::Pending,
-        State::Active,
-        State::Running,
-        State::Degraded,
-    ] {
+    // Settled and detached workers (a reached turn limit, a parked session)
+    // are presented as active or degraded: they never block a reload.
+    for state in [State::Active, State::Degraded] {
+        let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let (extensions, _process, _wire) = fixture(directory.path(), Some(state)).await;
+        app.executable_extensions = extensions;
+        assert_eq!(busy_subagent_workers(&app), 0, "{state:?}");
+        app.executable_extensions.shutdown().await;
+    }
+    for state in [State::Pending, State::Running] {
         for host in [
             HostPass::ResourcesOnly,
             HostPass::Allowed {
@@ -163,7 +167,7 @@ async fn resource_reload_refusal_preserves_worker_owner_and_control() {
             assert!(Arc::ptr_eq(&skills, &app.skills), "the App was rebuilt");
             assert_eq!(std::fs::read(&path).unwrap(), session);
             assert_eq!(app.executable_extensions.presentation_views(), before);
-            assert_eq!(active_subagent_workers(&app), 1);
+            assert_eq!(busy_subagent_workers(&app), 1);
             assert!(process.is_running());
             assert_eq!(process.health_snapshot().generation, generation);
             assert!(!std::fs::read_to_string(&wire)
@@ -182,34 +186,56 @@ async fn resource_reload_refusal_preserves_worker_owner_and_control() {
     }
 }
 
+fn worker_tool_turn(name: &str, arguments: serde_json::Value) -> String {
+    [
+        serde_json::json!({"type":"message_start", "message":{
+            "id":"reload-worker", "usage":{"input_tokens":1,"output_tokens":0}}}),
+        serde_json::json!({"type":"content_block_start", "index":0,
+            "content_block":{"type":"tool_use", "id":name, "name":name}}),
+        serde_json::json!({"type":"content_block_delta", "index":0,
+            "delta":{"type":"input_json_delta", "partial_json":arguments.to_string()}}),
+        serde_json::json!({"type":"content_block_stop", "index":0}),
+        serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"},
+            "usage":{"output_tokens":1}}),
+        serde_json::json!({"type":"message_stop"}),
+    ]
+    .into_iter()
+    .map(|event| {
+        format!(
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+    })
+    .collect()
+}
+
+fn assert_no_tool_errors(app: &App) {
+    for entry in app.agent.session().entries() {
+        if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
+            for part in &message.content {
+                if let octet_ai::UserPart::ToolResult(result) = part {
+                    assert!(!result.is_error, "{result:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Native delegation on a fixture without the subagents extension. Production
+/// enables it during bootstrap; the rebuilt fixture re-enables it the same way.
+fn enable_native_delegation(app: &mut App, directory: &std::path::Path) {
+    app.agent
+        .enable_v2_delegation(octet_agent::DelegationConfig::new(
+            directory.join("delegation"),
+        ))
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resource_reload_refuses_host_worker_without_presentation_and_retains_control() {
+async fn resource_reload_parks_a_settled_host_worker_and_keeps_it_resumable() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn tool_turn(name: &str, arguments: serde_json::Value) -> String {
-        [
-            serde_json::json!({"type":"message_start", "message":{
-                "id":"reload-worker", "usage":{"input_tokens":1,"output_tokens":0}}}),
-            serde_json::json!({"type":"content_block_start", "index":0,
-                "content_block":{"type":"tool_use", "id":name, "name":name}}),
-            serde_json::json!({"type":"content_block_delta", "index":0,
-                "delta":{"type":"input_json_delta", "partial_json":arguments.to_string()}}),
-            serde_json::json!({"type":"content_block_stop", "index":0}),
-            serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"},
-                "usage":{"output_tokens":1}}),
-            serde_json::json!({"type":"message_stop"}),
-        ]
-        .into_iter()
-        .map(|event| {
-            format!(
-                "event: {}\ndata: {event}\n\n",
-                event["type"].as_str().unwrap()
-            )
-        })
-        .collect()
-    }
 
     // Exercise a real host-owned worker, with all inference restricted to
     // deterministic loopback responses and no subagents extension at all.
@@ -230,17 +256,17 @@ async fn resource_reload_refuses_host_worker_without_presentation_and_retains_co
                 text_turn().replace("done", &format!("worker task {turn} complete"))
             } else {
                 match roots.fetch_add(1, Ordering::SeqCst) {
-                    0 => tool_turn(
+                    0 => worker_tool_turn(
                         "spawn_agent",
                         serde_json::json!({
                         "task_name":"survivor", "message":"complete the first task"}),
                     ),
-                    1 | 4 => tool_turn("wait_agent", serde_json::json!({"timeout_ms":3000})),
+                    1 | 4 => worker_tool_turn("wait_agent", serde_json::json!({"timeout_ms":3000})),
                     2 | 5 => text_turn(),
-                    3 => tool_turn(
+                    3 => worker_tool_turn(
                         "followup_task",
                         serde_json::json!({
-                        "target":"/root/survivor", "message":"continue after refused reload"}),
+                        "target":"/root/survivor", "message":"continue after the reload"}),
                     ),
                     unexpected => panic!("unexpected root turn {unexpected}"),
                 }
@@ -256,91 +282,168 @@ async fn resource_reload_refuses_host_worker_without_presentation_and_retains_co
     // fixed local script above can request tools in this fixture.
     app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     app = rebuild_app(app, None, None, None, None).unwrap();
-    app.agent
-        .enable_v2_delegation(octet_agent::DelegationConfig::new(
-            directory.path().join("delegation"),
-        ))
-        .unwrap();
+    enable_native_delegation(&mut app, directory.path());
     assert_eq!(
         app.agent.complete("start survivor").await.unwrap().text,
         "done"
     );
-    for entry in app.agent.session().entries() {
-        if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
-            for part in &message.content {
-                if let octet_ai::UserPart::ToolResult(result) = part {
-                    assert!(!result.is_error, "{result:?}");
-                }
-            }
-        }
-    }
+    assert_no_tool_errors(&app);
     assert_eq!(child_turns.load(Ordering::SeqCst), 1);
-    // The first task has settled, but its live receiver must still block
-    // destructive reloads, even though no presentation roster exists.
+    // The first task settled. Its idle task still waits for a follow-up, but
+    // it runs nothing, so it must not block the reload.
     assert_eq!(app.agent.active_delegated_worker_count(), 1);
-    assert!(app.executable_extensions.presentation_views().is_empty());
-    assert_eq!(app.executable_extensions.active_subagent_worker_count(), 0);
+    assert_eq!(app.agent.busy_delegated_worker_count(), 0);
+    assert_eq!(busy_subagent_workers(&app), 0);
     let team = app.agent.delegation_team_directory().unwrap().to_path_buf();
     let child_path = team.join("0001-survivor.jsonl");
-    let child_before = std::fs::read(&child_path).unwrap();
-    let root_path = app.agent.session().path().to_owned();
-    let root_before = std::fs::read(&root_path).unwrap();
     let owner = app.agent.session().resource_owner_key();
     let skills = app.skills.clone();
     let mut shell = InteractiveShell::test_shell();
     let mut input = EventStream::from_stream(futures_util::stream::pending());
     let mut reexec = crate::reexec::ReexecController::capture().ok();
-    for host in [
+    let (next, plan, applied) = reload_resources_with_reexec(
+        app,
+        &mut shell,
+        &mut input,
+        reexec.as_mut(),
         HostPass::ResourcesOnly,
-        HostPass::Allowed {
-            redirect_confirmed: true,
-        },
-    ] {
-        let (next, plan, applied) = reload_resources_with_reexec(
-            app,
-            &mut shell,
-            &mut input,
-            reexec.as_mut(),
-            host,
-            &mut crate::reload::ReloadSupervisor::new(Default::default()),
-        )
-        .await
-        .unwrap();
-        app = next;
-        assert!(!applied);
-        assert!(plan.is_none());
-        assert!(Arc::ptr_eq(&skills, &app.skills));
-        assert_eq!(app.agent.session().resource_owner_key(), owner);
-        assert_eq!(app.agent.active_delegated_worker_count(), 1);
-        assert_eq!(std::fs::read(&root_path).unwrap(), root_before);
-        assert_eq!(std::fs::read(&child_path).unwrap(), child_before);
-    }
-    let notice = shell.debug_snapshot();
-    assert!(notice.contains("host worker tasks remain attached"));
-    assert!(notice.contains("then exit and resume the session to replace the owning host"));
-    assert!(notice.contains("The current application and workers are unchanged"));
-    // Control still targets the original child task/session, not a worker
-    // reconstructed from durable records after destroying the old owner.
+        &mut crate::reload::ReloadSupervisor::new(Default::default()),
+    )
+    .await
+    .unwrap();
+    app = next;
+    assert!(applied, "{}", shell.debug_snapshot());
+    assert!(plan.is_none());
+    assert!(!Arc::ptr_eq(&skills, &app.skills), "the App was rebuilt");
+    assert_eq!(app.agent.session().resource_owner_key(), owner);
+    let visible = shell.debug_snapshot();
+    assert!(!visible.contains("reload refused"), "{visible}");
+
+    // The rebuilt owner restores the parked worker from its durable roster
+    // and an explicit follow-up resumes the same child session.
+    enable_native_delegation(&mut app, directory.path());
     assert_eq!(
         app.agent.complete("continue survivor").await.unwrap().text,
         "done"
     );
+    assert_no_tool_errors(&app);
     assert_eq!(child_turns.load(Ordering::SeqCst), 2);
     assert_eq!(root_turns.load(Ordering::SeqCst), 6);
-    assert_eq!(app.agent.active_delegated_worker_count(), 1);
-    assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
-    assert!(std::fs::read_to_string(child_path)
-        .unwrap()
-        .contains("worker task 2 complete"));
-    for entry in app.agent.session().entries() {
-        if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
-            for part in &message.content {
-                if let octet_ai::UserPart::ToolResult(result) = part {
-                    assert!(!result.is_error, "{result:?}");
-                }
+    let child = std::fs::read_to_string(child_path).unwrap();
+    assert!(child.contains("worker task 1 complete"));
+    assert!(child.contains("worker task 2 complete"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_host_worker_refuses_plain_reload_and_force_detaches_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let root_turns = Arc::new(AtomicUsize::new(0));
+    let roots = root_turns.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let response =
+                ResponseTemplate::new(200).insert_header("content-type", "text/event-stream");
+            if body["system"].to_string().contains("You are /root/runner") {
+                // The worker's provider call never answers in time: it is
+                // still running when the reload is requested.
+                return response
+                    .set_body_string(text_turn())
+                    .set_delay(Duration::from_secs(120));
             }
+            let turn = match roots.fetch_add(1, Ordering::SeqCst) {
+                0 => worker_tool_turn(
+                    "spawn_agent",
+                    serde_json::json!({"task_name":"runner", "message":"keep working"}),
+                ),
+                1 => text_turn(),
+                unexpected => panic!("unexpected root turn {unexpected}"),
+            };
+            response.set_body_string(turn)
+        })
+        .mount(&server)
+        .await;
+    let (directory, mut app) = fast_test_app(scripted_model(&server.uri()));
+    app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    enable_native_delegation(&mut app, directory.path());
+    assert_eq!(
+        app.agent.complete("start runner").await.unwrap().text,
+        "done"
+    );
+    assert_no_tool_errors(&app);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.agent.busy_delegated_worker_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
+    })
+    .await
+    .unwrap();
+    let skills = app.skills.clone();
+    let mut shell = InteractiveShell::test_shell();
+    // The live-reload pass must not poll raw terminal input in a test.
+    shell.cede_terminal_input();
+    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+
+    // Plain reload refuses a running worker and names the explicit opt-in.
+    let (next, applied) = reload_resources(app, &mut shell, &mut input).await.unwrap();
+    app = next;
+    assert!(!applied);
+    assert!(Arc::ptr_eq(&skills, &app.skills));
+    assert_eq!(app.agent.busy_delegated_worker_count(), 1);
+    let visible = shell.debug_snapshot();
+    assert!(
+        visible.contains("reload refused: 1 subagent worker(s)"),
+        "{visible}"
+    );
+    assert!(visible.contains("/reload --force"), "{visible}");
+
+    // `/reload --force` detaches the worker instead of refusing.
+    let mut supervisor = crate::reload::ReloadSupervisor::new(Default::default());
+    let plan = supervisor.force();
+    let mut pending_reexec = None;
+    let mut app = tokio::time::timeout(
+        Duration::from_secs(30),
+        apply_live_reload_plan(
+            app,
+            &mut shell,
+            &mut input,
+            &mut supervisor,
+            plan,
+            None,
+            &mut pending_reexec,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(pending_reexec.is_none());
+    assert!(!supervisor.is_in_flight());
+    assert!(
+        !Arc::ptr_eq(&skills, &app.skills),
+        "the forced pass rebuilt the App"
+    );
+    let visible = shell.debug_snapshot();
+    assert!(
+        visible.contains("detached 1 running subagent worker(s)"),
+        "{visible}"
+    );
+    // The detached worker's durable record survives for the rebuilt owner.
+    enable_native_delegation(&mut app, directory.path());
+    let roster = std::fs::read_dir(directory.path().join("delegation"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("fleet-"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect::<String>();
+    assert!(roster.contains("\"task_name\":\"runner\""), "{roster}");
+    assert!(roster.contains("\"state\":\"detached\""), "{roster}");
+    assert_eq!(root_turns.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(unix)]

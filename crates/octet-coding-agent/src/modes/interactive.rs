@@ -5543,6 +5543,10 @@ where
     if refuse_resource_reload(&app, shell) {
         return Ok((app, false));
     }
+    if let Err(notice) = park_workers_for_reload(&app).await {
+        shell.notice(notice);
+        return Ok((app, false));
+    }
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
@@ -5572,14 +5576,61 @@ where
 }
 
 fn refuse_resource_reload(app: &App, shell: &mut InteractiveShell) -> bool {
-    let count = active_subagent_workers(app);
+    let count = busy_subagent_workers(app);
     if count == 0 {
         return false;
     }
-    shell.notice(format!(
-        "reload refused: {count} host worker tasks remain attached; reload is unavailable while they are attached. Finish or stop the work, then exit and resume the session to replace the owning host. The current application and workers are unchanged"
-    ));
+    shell.notice(busy_worker_refusal(app, count));
     true
+}
+
+/// How long a forced reload waits for detached workers to park. Workers stop
+/// through their cancellation path, so this bounds an unwinding tool call, not
+/// ordinary settled workers, which park immediately.
+const WORKER_DETACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Hand parked workers back to the App that kept them after a reload did not
+/// replace their owner.
+fn reattach_kept_workers(app: &App, shell: &mut InteractiveShell) {
+    if let Err(error) = app.agent.reattach_delegated_workers() {
+        shell.notice(format!(
+            "reload: detached subagent workers could not be reattached yet ({error}); the next turn retries"
+        ));
+    }
+}
+
+fn busy_worker_refusal(app: &App, count: usize) -> String {
+    let detach = if app.agent.delegation_team_directory().is_some() {
+        ", or run /reload --force to detach them; their sessions are kept and can be continued"
+    } else {
+        ""
+    };
+    format!(
+        "reload refused: {count} subagent worker(s) are still running or have queued work. Wait for them to finish or stop them{detach}. The current application and workers are unchanged"
+    )
+}
+
+/// Park every delegated worker before a reload replaces their owner, so each
+/// record is durable and the fleet lease is free for the rebuilt agent.
+///
+/// Returns a refusal notice when a worker did not stop in time; the workers
+/// that did park are reattached so the current App keeps them.
+async fn park_workers_for_reload(app: &App) -> Result<(), String> {
+    if app.agent.active_delegated_worker_count() == 0 {
+        return Ok(());
+    }
+    let remaining = app
+        .agent
+        .detach_delegated_workers(WORKER_DETACH_TIMEOUT)
+        .await;
+    if remaining > 0 {
+        let _ = app.agent.reattach_delegated_workers();
+        return Err(format!(
+            "reload refused: {remaining} subagent worker(s) did not stop within {}s; the current application is unchanged",
+            WORKER_DETACH_TIMEOUT.as_secs()
+        ));
+    }
+    Ok(())
 }
 
 /// How one `/reload`-family caller wants the host layer handled.
@@ -5718,7 +5769,7 @@ where
     // exec, and the notice, and reports an update that is still in flight as its
     // own blocked notice instead of an opaque error.
     let observed = reexec.observe_generation();
-    let safety = live_reexec_inputs(active_subagent_workers(&app));
+    let safety = live_reexec_inputs(busy_subagent_workers(&app));
     // A typed `/reload --force` already carries the retarget consent;
     // every other host pass must ask before a
     // retargeted image is probed.
@@ -5731,8 +5782,9 @@ where
     ) {
         options = options.confirming_redirect();
     }
-    // Rebuilds cannot hand live tasks to a replacement owner. There is no
-    // detach opt-in: durable transcripts do not preserve running execution.
+    // Running execution cannot move into a replacement image. Busy workers
+    // were refused here or detached by `/reload --force` before this point;
+    // the durable-head hook parks the settled ones.
     let decision = loop {
         let (decision, events) =
             reexec_decision(&mut app, reexec, &observed, &safety, options).await;
@@ -5772,7 +5824,7 @@ where
         }
         crate::reexec::ReexecDecision::Ready(plan) => {
             // Imminent replacement is an occurrence, never deduplicated.
-            // Attached worker ownership is refused before this point.
+            // Busy workers were refused or detached before this point.
             shell.notice(plan.notice());
             shell.render();
             Ok((app, HostReloadResult::Ready(*plan)))
@@ -5793,14 +5845,21 @@ async fn reexec_decision(
     options: crate::reexec::ReexecOptions,
 ) -> (crate::reexec::ReexecDecision, Vec<String>) {
     let mut hooks = InteractiveReexecHooks {
-        session: app.agent.session(),
+        agent: &app.agent,
         extensions: &mut app.executable_extensions,
         discarded_requests: Vec::new(),
+        parked_workers: false,
     };
     let decision = reexec
         .reexec_if_changed(observed, safety, options, &mut hooks)
         .await;
-    (decision, hooks.discarded_requests)
+    let parked_workers = hooks.parked_workers;
+    let discarded_requests = hooks.discarded_requests;
+    if parked_workers && !matches!(decision, crate::reexec::ReexecDecision::Ready(_)) {
+        // The image was not replaced: this App keeps the workers it parked.
+        let _ = app.agent.reattach_delegated_workers();
+    }
+    (decision, discarded_requests)
 }
 
 /// Ask the user to confirm entering a replaced or moved binary.
@@ -5868,11 +5927,45 @@ async fn apply_live_reload_plan(
     let wants_resources = plan.contains(ReloadLayer::Resources);
     let wants_extensions = plan.contains(ReloadLayer::Extensions);
     let wants_host = plan.contains(ReloadLayer::Host);
-    let workers = active_subagent_workers(&app);
+    // Settled workers never block: replacing their owner parks them with
+    // their outcome and session retained. Busy workers block an automatic
+    // pass; `/reload --force` is the explicit decision to detach them.
+    let mut workers = busy_subagent_workers(&app);
+    let mut detached_workers = false;
+    let mut detach_notice = None;
+    // Only host-owned workers can be detached; a presentation-only count (no
+    // delegation binding) keeps refusing.
+    if workers > 0 && plan.is_forced() && app.agent.delegation_team_directory().is_some() {
+        match park_workers_for_reload(&app).await {
+            Ok(()) => {
+                // Reported after the pass: a rebuild rehydrates the transcript.
+                detach_notice = Some(format!(
+                    "reload: detached {workers} running subagent worker(s); their sessions and queued work are kept. Undelivered tasks resume on the next turn; continue interrupted work with subagent_continue"
+                ));
+                detached_workers = true;
+                workers = 0;
+            }
+            Err(notice) => {
+                for notice in reload.checked_problems(
+                    crate::reload::ReloadComponent::Workers,
+                    vec![notice],
+                    true,
+                ) {
+                    shell.notice(notice);
+                }
+                for layer in plan.layers() {
+                    plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
+                }
+                reload.finish(plan);
+                shell.render();
+                return Ok(app);
+            }
+        }
+    }
     if workers > 0 {
         for notice in reload.checked_problems(
             crate::reload::ReloadComponent::Workers,
-            vec![format!("reload refused: {} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host", workers)],
+            vec![busy_worker_refusal(&app, workers)],
             false,
         ) {
             shell.notice(notice);
@@ -5884,13 +5977,11 @@ async fn apply_live_reload_plan(
         shell.render();
         return Ok(app);
     }
-    if workers == 0 {
-        reload.checked_problems(
-            crate::reload::ReloadComponent::Workers,
-            Vec::new(),
-            plan.is_forced(),
-        );
-    }
+    reload.checked_problems(
+        crate::reload::ReloadComponent::Workers,
+        Vec::new(),
+        plan.is_forced(),
+    );
     // A forced pass is the user's explicit confirmation of whatever the
     // executable now is; an automatic host pass defers rather than asking for
     // consent to enter a retargeted image.
@@ -5929,15 +6020,6 @@ async fn apply_live_reload_plan(
                     ReloadLayer::Host,
                     LayerOutcome::Skipped(SkipReason::NoChange),
                 );
-                if workers > 0 {
-                    shell.notice("reload deferred: active background workers remain; no host replacement was selected and no worker teardown was authorized");
-                    for layer in [ReloadLayer::Resources, ReloadLayer::Extensions] {
-                        plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
-                    }
-                    reload.finish(plan);
-                    shell.render();
-                    return Ok(app);
-                }
             }
             HostReloadResult::Problem(problem) => {
                 for notice in reload.checked_problems(
@@ -5948,18 +6030,6 @@ async fn apply_live_reload_plan(
                     shell.notice(notice);
                 }
                 plan.record(ReloadLayer::Host, LayerOutcome::Failed);
-                if workers > 0 {
-                    for layer in [ReloadLayer::Resources, ReloadLayer::Extensions] {
-                        plan.record(layer, LayerOutcome::Skipped(SkipReason::NotSelected));
-                    }
-                    if let Some(report) = reload.finish(plan) {
-                        if report.forced {
-                            shell.notice(report.summary());
-                        }
-                    }
-                    shell.render();
-                    return Ok(app);
-                }
             }
         }
     }
@@ -5969,12 +6039,21 @@ async fn apply_live_reload_plan(
         let (next, applied) = reload_resources(app, shell, input).await?;
         app = next;
         if !applied {
+            if detached_workers {
+                reattach_kept_workers(&app, shell);
+            }
             plan.record(ReloadLayer::Resources, LayerOutcome::Failed);
             reload.finish(plan);
             return Ok(app);
         }
+        // The rebuilt agent restores the parked fleet from its durable roster.
+        detached_workers = false;
         request_extension_ui(shell, &mut app);
         plan.record_reload(ReloadLayer::Resources);
+    }
+    if detached_workers && pending_reexec.is_none() {
+        // No replacement took the detached workers over; this App still owns them.
+        reattach_kept_workers(&app, shell);
     }
 
     if wants_extensions && pending_reexec.is_none() {
@@ -6004,6 +6083,9 @@ async fn apply_live_reload_plan(
         request_extension_ui(shell, &mut app);
     }
 
+    if let Some(notice) = detach_notice {
+        shell.notice(notice);
+    }
     if let Some(report) = reload.finish(plan) {
         debug_assert!(
             report.boundary_idle || report.forced,
@@ -6105,18 +6187,20 @@ fn reload_interruption_preview(app: &App) -> Vec<String> {
     if requests > 0 {
         notices.push(format!("reload: possible interruption of {requests} pending extension host request(s) if their process is replaced"));
     }
-    let workers = active_subagent_workers(app);
+    let workers = busy_subagent_workers(app);
     if workers > 0 {
-        notices.push(format!("reload refused: {workers} host worker task(s) remain attached; finish or stop the work, then exit and resume to replace the owning host"));
+        notices.push(format!("reload: {workers} running subagent worker(s) will be detached by /reload --force; their sessions and queued work are kept"));
     }
     notices
 }
 
 /// The two caller-owned operations `crate::reexec` must not implement itself.
 struct InteractiveReexecHooks<'a> {
-    session: &'a Session,
+    agent: &'a octet_agent::Agent,
     extensions: &'a mut crate::extensions::ExecutableExtensions,
     discarded_requests: Vec<String>,
+    /// Whether settled workers were parked for the replacement image.
+    parked_workers: bool,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -6127,12 +6211,28 @@ impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
         // (`octet-agent/src/session_writer.rs`), so the durable head is made
         // recoverable by observing it rather than by writing a second store.
         // Re-opening replays the file with the same parser `--resume` will.
-        let head = self.session.head_ref().cloned();
-        let reopened = Session::open(self.session.path())?;
+        let session = self.agent.session();
+        let head = session.head_ref().cloned();
+        let reopened = Session::open(session.path())?;
         anyhow::ensure!(
             reopened.head_ref() == head.as_ref(),
             "the durable session head does not match the live head"
         );
+        // Busy workers were refused or detached before this point; settled
+        // workers still hold idle tasks. Park them through their cancellation
+        // path so each record is durable before the image is replaced, and the
+        // replacement restores them from the roster for later follow-ups.
+        if self.agent.active_delegated_worker_count() > 0 {
+            self.parked_workers = true;
+            let remaining = self
+                .agent
+                .detach_delegated_workers(WORKER_DETACH_TIMEOUT)
+                .await;
+            anyhow::ensure!(
+                remaining == 0,
+                "{remaining} subagent worker(s) did not park before the host replacement"
+            );
+        }
         Ok(())
     }
 
@@ -6168,13 +6268,20 @@ fn live_reexec_inputs(background_workers: usize) -> crate::reexec::LiveSafetyInp
     }
 }
 
-/// Observe host-owned tasks before replacing any App or extension owner.
-/// Presentation may be missing or stale, and idle workers retain live control
-/// receivers. Keep its count only as an additional conservative refusal signal.
-fn active_subagent_workers(app: &App) -> usize {
-    app.agent
-        .active_delegated_worker_count()
-        .max(app.executable_extensions.active_subagent_worker_count())
+/// Count delegated workers that replacing this App's owner would interrupt.
+///
+/// The host count is authoritative whenever delegation is enabled. Settled
+/// workers (finished, limit reached, failed, timed out, interrupted) keep a
+/// live task only to accept a later follow-up; a rebuild parks them with their
+/// outcome and durable session retained, so they never block a reload. The
+/// extension presentation is consulted only without a delegation binding, and
+/// only for workers it reports as pending or running.
+fn busy_subagent_workers(app: &App) -> usize {
+    if app.agent.delegation_team_directory().is_some() {
+        app.agent.busy_delegated_worker_count()
+    } else {
+        app.executable_extensions.busy_subagent_worker_count()
+    }
 }
 
 #[derive(Clone, Debug)]
