@@ -117,6 +117,7 @@ pub(super) fn message_visible_text(message: &Message) -> Option<String> {
                     .filter(|transcript| !transcript.trim().is_empty())
                     .or(Some("[audio]")),
                 UserPart::Media(Media::Image(_)) => Some("[image]"),
+                UserPart::Media(Media::Document(_)) => Some("[PDF]"),
                 UserPart::ToolResult(_) => None,
             })
             .collect::<Vec<_>>()
@@ -132,6 +133,7 @@ pub(super) fn message_visible_text(message: &Message) -> Option<String> {
                     .filter(|transcript| !transcript.trim().is_empty())
                     .or(Some("[generated audio]")),
                 AssistantPart::Media(Media::Image(_)) => Some("[generated image]"),
+                AssistantPart::Media(Media::Document(_)) => Some("[generated document]"),
                 AssistantPart::Reasoning(_)
                 | AssistantPart::ProviderMetadata(_)
                 | AssistantPart::ToolCall(_) => None,

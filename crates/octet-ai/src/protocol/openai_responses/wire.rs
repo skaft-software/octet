@@ -192,6 +192,11 @@ pub(super) enum ResponsesContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// An inline file (PDF) as a `data:` URL.
+    InputFile {
+        filename: String,
+        file_data: WireImageUrl,
+    },
 }
 
 #[derive(Serialize)]

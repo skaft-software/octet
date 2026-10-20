@@ -17,7 +17,9 @@ mod picker;
 
 pub use attachments::{file_kind_for_path, media_kind_for_path, Attachment, AttachmentLedger};
 #[cfg(test)]
-pub use attachments::{AttachmentPayload, FileKind, MediaKind, MAX_IMAGE_BYTES};
+pub use attachments::{
+    AttachError, AttachmentPayload, FileKind, MediaKind, MAX_IMAGE_BYTES, MAX_PDF_BYTES,
+};
 pub use composition::{compose, ComposedInput};
 #[cfg(test)]
 pub use paste::LARGE_PASTE_LINES;

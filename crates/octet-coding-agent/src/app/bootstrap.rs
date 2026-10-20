@@ -2077,6 +2077,8 @@ struct DiscoveredApiModel {
     display_name: Option<String>,
     vision: bool,
     audio: bool,
+    /// The inventory or pinned record lists PDF (or OpenRouter `file`) input.
+    pdf: bool,
     modalities_asserted: bool,
     structured_output: Option<bool>,
 }
@@ -2244,6 +2246,10 @@ fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
         if value == "audio" || value.contains("audio") {
             result = result.with(octet_ai::Modality::Audio);
         }
+        // models.dev says `pdf`; OpenRouter's architecture says `file`.
+        if value == "pdf" || value == "file" {
+            result = result.with(octet_ai::Modality::Pdf);
+        }
     }
     result
 }
@@ -2314,7 +2320,11 @@ fn api_models_from_response_for(
                 .map(input_modalities_from_entry)
                 .unwrap_or_else(octet_ai::ModalitySet::none);
             let mut modalities = asserted;
-            for candidate in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
+            for candidate in [
+                octet_ai::Modality::Image,
+                octet_ai::Modality::Audio,
+                octet_ai::Modality::Pdf,
+            ] {
                 if pinned.contains(candidate) {
                     modalities = modalities.with(candidate);
                 }
@@ -2378,6 +2388,7 @@ fn api_models_from_response_for(
             display_name: discovered_display_name(entry, id),
             vision,
             audio,
+            pdf: input_modalities.contains(octet_ai::Modality::Pdf),
             modalities_asserted,
             structured_output: discovered_structured_output(entry),
         });
@@ -2982,6 +2993,9 @@ pub(crate) fn register_openai_compatible_models_from_response(
         // Inventory audio requires an implemented input mapping on this route.
         if model.audio && !protocol.audio_input_formats().is_empty() {
             input_modalities = input_modalities.with(octet_ai::Modality::Audio);
+        }
+        if model.pdf && protocol.supports_document_input() {
+            input_modalities = input_modalities.with(octet_ai::Modality::Pdf);
         }
         crate::providers::register_discovered_model(
             catalog,

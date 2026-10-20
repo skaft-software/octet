@@ -1019,6 +1019,8 @@ pub enum ToolOutputMediaKind {
     Image,
     /// Audio that the model can hear or transcribe.
     Audio,
+    /// A PDF document.
+    Document,
 }
 
 impl ToolOutputMediaKind {
@@ -1026,6 +1028,7 @@ impl ToolOutputMediaKind {
         match media {
             Media::Image(_) => Self::Image,
             Media::Audio(_) => Self::Audio,
+            Media::Document(_) => Self::Document,
         }
     }
 }

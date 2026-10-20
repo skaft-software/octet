@@ -22,7 +22,7 @@ version-pinned publication channels and their recorded qualification.
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
 - [Inference measurements](inference-metrics.md)
-- [Images and audio](media.md)
+- [Images, audio and PDFs](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)
 - [Context and compaction](context.md)

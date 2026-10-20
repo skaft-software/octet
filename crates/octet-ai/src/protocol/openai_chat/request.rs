@@ -142,6 +142,10 @@ enum ChatContentPart {
     InputAudio {
         input_audio: ChatInputAudio,
     },
+    /// An inline file (PDF) as a `data:` URL.
+    File {
+        file: ChatFile,
+    },
     /// Mistral's replayable reasoning-content chunk.
     Thinking {
         thinking: Vec<ChatThinkingPart>,
@@ -152,6 +156,12 @@ enum ChatContentPart {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ChatThinkingPart {
     Text { text: String },
+}
+
+#[derive(Serialize)]
+struct ChatFile {
+    filename: String,
+    file_data: WireImageUrl,
 }
 
 #[derive(Serialize)]
@@ -444,6 +454,25 @@ pub(crate) fn build_request(
                                 input_audio: ChatInputAudio {
                                     data,
                                     format: format_str,
+                                },
+                            });
+                        }
+                        UserPart::Media(Media::Document(ref document)) => {
+                            if !model
+                                .spec
+                                .capabilities
+                                .input_modalities
+                                .contains(crate::types::Modality::Pdf)
+                            {
+                                continue;
+                            }
+                            parts.push(ChatContentPart::File {
+                                file: ChatFile {
+                                    filename: document.file_name().to_owned(),
+                                    file_data: WireImageUrl::Inline {
+                                        media_type: document.media_type.to_string(),
+                                        data: document.data.clone(),
+                                    },
                                 },
                             });
                         }
@@ -1025,6 +1054,7 @@ fn add_cache_control_to_instruction(
                 }
                 ChatContentPart::ImageUrl { .. }
                 | ChatContentPart::InputAudio { .. }
+                | ChatContentPart::File { .. }
                 | ChatContentPart::Thinking { .. } => None,
             })
         }

@@ -106,6 +106,29 @@ impl ProviderDeclaration {
     }
 }
 
+/// Whether a built-in model accepts PDF documents on its route.
+///
+/// The pinned record decides wherever one exists. Without one, the families
+/// whose provider documents PDF input for every model qualify: Gemini on the
+/// Gemini API or Vertex AI, and Claude through Bedrock Converse.
+pub(crate) fn pdf_input(provider_id: &str, api_name: &str, protocol: Protocol) -> bool {
+    if !protocol.supports_document_input() {
+        return false;
+    }
+    match octet_ai::model_metadata::model_capability_metadata(provider_id, api_name) {
+        Some(record) => record
+            .get("modalities")
+            .and_then(|modalities| modalities.get("input"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|inputs| inputs.iter().any(|input| input == "pdf")),
+        None => match protocol {
+            Protocol::GoogleGenerativeAi => api_name.starts_with("gemini-"),
+            Protocol::BedrockConverse => api_name.contains("anthropic.claude"),
+            _ => false,
+        },
+    }
+}
+
 /// The checked-in preset shape equivalent to one pinned reasoning record, so
 /// derived capabilities use exactly the encodings hand-written presets use.
 fn pinned_reasoning_preset(
@@ -357,6 +380,9 @@ fn register_static_model(
         if pinned.contains(modality) {
             capabilities.input_modalities = capabilities.input_modalities.with(modality);
         }
+    }
+    if pdf_input(declaration.id, model.id, route.protocol) {
+        capabilities.input_modalities = capabilities.input_modalities.with(octet_ai::Modality::Pdf);
     }
     catalog.register_model(ModelSpec {
         preset: octet_ai::ModelPreset {
@@ -628,6 +654,48 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn pdf_input_follows_the_pinned_record_or_the_documented_family() {
+        // Pinned records decide where they exist, in either direction.
+        assert!(pdf_input(
+            "anthropic",
+            "claude-opus-5-5",
+            Protocol::AnthropicMessages
+        ));
+        assert!(pdf_input("openai", "gpt-5.5", Protocol::OpenAiResponses));
+        assert!(!pdf_input("openai", "gpt-5", Protocol::OpenAiResponses));
+        assert!(pdf_input("xai", "grok-4.7", Protocol::OpenAiResponses));
+        assert!(pdf_input(
+            "opencode",
+            "gemini-4-argon",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(!pdf_input("opencode", "glm-5.2", Protocol::OpenAiChat));
+        // Without a record, only families documented for every model qualify.
+        assert!(pdf_input(
+            "google",
+            "gemini-2.5-flash",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(!pdf_input(
+            "google",
+            "gemma-3-27b-it",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(pdf_input(
+            "amazon-bedrock",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            Protocol::BedrockConverse
+        ));
+        assert!(!pdf_input("custom-chat", "local", Protocol::OpenAiChat));
+        // A route without a document encoder never qualifies.
+        assert!(!pdf_input(
+            "anthropic",
+            "claude-opus-5-5",
+            Protocol::MistralConversations
+        ));
+    }
 
     #[test]
     fn static_gemini_presets_advertise_audio_input_only() {

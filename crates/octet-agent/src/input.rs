@@ -98,6 +98,7 @@ impl UserInput {
                 InputPart::Text(text) => pieces.push(text.clone()),
                 InputPart::Media(Media::Image(_)) => pieces.push("[image]".into()),
                 InputPart::Media(Media::Audio(_)) => pieces.push("[audio]".into()),
+                InputPart::Media(Media::Document(_)) => pieces.push("[PDF]".into()),
             }
         }
         pieces.extend(self.custom_messages.iter().map(|message| message.text()));

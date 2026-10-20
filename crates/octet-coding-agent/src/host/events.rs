@@ -384,6 +384,15 @@ fn media_payload(index: usize, media: &Media) -> serde_json::Value {
                 "payload_omitted": true,
             })
         }
+        Media::Document(document) => serde_json::json!({
+            "index": index,
+            "kind": "document",
+            "media_type": document.media_type.to_string(),
+            "name": document.name,
+            "source": "inline",
+            "bytes": document.data.len(),
+            "payload_omitted": true,
+        }),
     }
 }
 

@@ -19,6 +19,9 @@ use super::paste::explicit_dropped_paths;
 pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 /// Attach-time size cap for inline audio.
 pub const MAX_AUDIO_BYTES: u64 = 20 * 1024 * 1024;
+/// Attach-time size cap for an inline PDF. Base64 grows it to about 13.3 MiB,
+/// inside every supported provider's inline request limit.
+pub const MAX_PDF_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Media classification of a file path, by extension (no content sniffing).
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +30,8 @@ pub enum MediaKind {
     Audio(AudioFormat),
 }
 
-/// Non-media file kinds represented as path references in the model prompt.
+/// Document kinds: sent as document bytes where the model accepts them, and
+/// otherwise represented by their path in the model prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
     Pdf,
@@ -77,6 +81,7 @@ pub enum AttachError {
     UnsupportedModality { modality: &'static str },
     UnsupportedAudioFormat(AudioFormat),
     UnsupportedMediaType(&'static str),
+    NotAPdf,
 }
 
 impl std::fmt::Display for AttachError {
@@ -97,6 +102,7 @@ impl std::fmt::Display for AttachError {
                 f,
                 "the active provider route does not accept {format:?} audio input (use WAV or MP3)",
             ),
+            Self::NotAPdf => write!(f, "file has a .pdf extension but is not a PDF"),
             Self::UnsupportedMediaType(kind) => write!(
                 f,
                 "unsupported {kind} input (native input supports images and route-compatible audio)",
@@ -151,22 +157,7 @@ fn prepare_media(
             return Err(AttachError::UnsupportedAudioFormat(*format));
         }
     }
-    let metadata = fs::metadata(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
-    if !metadata.is_file() {
-        return Err(AttachError::Unreadable("not a regular file".into()));
-    }
-    if metadata.len() > limit {
-        return Err(AttachError::TooLarge { limit_bytes: limit });
-    }
-    let file = std::fs::File::open(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
-    let mut limited = file.take(limit + 1);
-    let mut data = Vec::new();
-    limited
-        .read_to_end(&mut data)
-        .map_err(|e| AttachError::Unreadable(e.to_string()))?;
-    if data.len() as u64 > limit {
-        return Err(AttachError::TooLarge { limit_bytes: limit });
-    }
+    let data = read_capped(path, limit)?;
     let byte_len = data.len() as u64;
     let media = match kind {
         MediaKind::Image(mime) => Media::image_bytes(bytes::Bytes::from(data), mime),
@@ -182,6 +173,54 @@ fn prepare_media(
         // the display path rather than failing an otherwise valid attach.
         path: path.to_string_lossy().into_owned(),
     })
+}
+
+/// Read a PDF the active model accepts as a document. `Ok(None)` means the
+/// model does not accept PDFs, so the caller records a path reference.
+fn prepare_document(
+    path: &Path,
+    modalities: ModalitySet,
+) -> Result<Option<PreparedMedia>, AttachError> {
+    if !modalities.contains(Modality::Pdf) {
+        return Ok(None);
+    }
+    let data = read_capped(path, MAX_PDF_BYTES)?;
+    // The header may follow up to 1 KiB of leading junk (PDF 1.7, 7.5.2).
+    if !data[..data.len().min(1024)]
+        .windows(5)
+        .any(|window| window == b"%PDF-")
+    {
+        return Err(AttachError::NotAPdf);
+    }
+    let byte_len = data.len() as u64;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    Ok(Some(PreparedMedia {
+        label: "PDF",
+        media: Media::pdf_bytes(bytes::Bytes::from(data), name),
+        byte_len,
+        path: path.to_string_lossy().into_owned(),
+    }))
+}
+
+fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, AttachError> {
+    let metadata = fs::metadata(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    if !metadata.is_file() {
+        return Err(AttachError::Unreadable("not a regular file".into()));
+    }
+    if metadata.len() > limit {
+        return Err(AttachError::TooLarge { limit_bytes: limit });
+    }
+    let file = std::fs::File::open(path).map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    let mut data = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| AttachError::Unreadable(e.to_string()))?;
+    if data.len() as u64 > limit {
+        return Err(AttachError::TooLarge { limit_bytes: limit });
+    }
+    Ok(data)
 }
 
 /// What a chip stands for.
@@ -322,6 +361,8 @@ impl AttachmentLedger {
                     || unsupported_media_type_for_path(&dropped.path).is_some()
                 {
                     prepare_media(&dropped.path, modalities, audio_formats).map(Some)
+                } else if file_kind_for_path(&dropped.path).is_some() {
+                    prepare_document(&dropped.path, modalities)
                 } else {
                     Ok(None)
                 }
@@ -368,14 +409,20 @@ impl AttachmentLedger {
         Ok(Some(replaced))
     }
 
-    /// Record a PDF as a path reference. The provider boundary has image/audio
-    /// media types but no document variant, so the model receives the path as
-    /// text and can inspect it with its file tools.
-    pub fn attach_file_reference(&mut self, path: &Path) -> Result<String, AttachError> {
+    /// Attach a PDF: its bytes when the active model accepts PDF input,
+    /// otherwise a path reference the model can open with its own tools.
+    pub fn attach_file_reference(
+        &mut self,
+        path: &Path,
+        modalities: ModalitySet,
+    ) -> Result<String, AttachError> {
         let label = match file_kind_for_path(path) {
             Some(FileKind::Pdf) => "PDF",
             None => return Err(AttachError::Unreadable("unsupported file extension".into())),
         };
+        if let Some(prepared) = prepare_document(path, modalities)? {
+            return Ok(self.record_media(prepared));
+        }
         let path = path.to_string_lossy().into_owned();
         let id = self.next_id();
         let chip = format!("[{label} #{id}]");

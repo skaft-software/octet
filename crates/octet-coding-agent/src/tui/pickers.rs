@@ -1430,18 +1430,25 @@ fn native_model_detail(model: &octet_ai::ModelSpec) -> ModelPickerDetail {
     if caps.input_modalities.contains(Modality::Audio) {
         badges.push("audio".into());
     }
+    if caps.input_modalities.contains(Modality::Pdf) {
+        badges.push("pdf".into());
+    }
     if caps.tools {
         badges.push("tools".into());
     }
     if caps.structured_output {
         badges.push("structured output".into());
     }
-    let input = [(Modality::Image, "image"), (Modality::Audio, "audio")]
-        .into_iter()
-        .filter(|(modality, _)| caps.input_modalities.contains(*modality))
-        .map(|(_, label)| label)
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let input = [
+        (Modality::Image, "image"),
+        (Modality::Audio, "audio"),
+        (Modality::Pdf, "pdf"),
+    ]
+    .into_iter()
+    .filter(|(modality, _)| caps.input_modalities.contains(*modality))
+    .map(|(_, label)| label)
+    .collect::<Vec<_>>()
+    .join(" · ");
     let input = if input.is_empty() {
         "text".into()
     } else {

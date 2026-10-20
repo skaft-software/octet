@@ -9,6 +9,15 @@ slowest measured paths.
 
 ### Added
 
+- PDF attachments reach models that read PDFs as documents. A dropped or
+  `@`-selected PDF is sent as an Anthropic `document`, OpenAI Responses
+  `input_file`, Chat Completions `file`, Gemini `inlineData` or Bedrock
+  `document` on models whose pinned record lists PDF input (Claude, Grok, newer
+  GPT models, many OpenCode and OpenRouter models) and on Gemini and Bedrock
+  Claude. Up to 10 MiB per PDF; the picker shows a `pdf` badge. Other models
+  keep receiving the file's path, `read` explains that it does not decode PDFs
+  instead of returning compressed bytes as text, and switching to a model
+  without PDF input replaces earlier PDFs with a placeholder naming the file.
 - Custom registry providers can set `"api": "anthropic-messages"` or
   `"api": "openai-responses"` to reach an Anthropic- or Responses-compatible
   gateway (or a local benchmark mock) at their `base_url`; Chat Completions
@@ -24,6 +33,17 @@ slowest measured paths.
 
 ### Fixed
 
+- A dropped PDF reached the model as the bare label `[PDF #1]`. Prompt
+  composition rebuilt the model message from the transcript text, which keeps
+  the chip, and discarded the text that carried the PDF's path, so the model was
+  never told which file was attached. `/answer` likewise sent its `/answer`
+  display text instead of its answer-now directive.
+- Alacritty, WezTerm, Tern and other terminals hosting octet on Windows got the
+  plain-console profile: ASCII bullets, rules and tree lines, 256 colours and
+  no italics or links. A Windows console now gets the rich profile when its
+  terminal announces itself with `COLORTERM` or `TERM_PROGRAM`, as Windows
+  Terminal does with `WT_SESSION`; a bare conhost window keeps the conservative
+  profile.
 - Imported Pi sessions, extension-created sessions and sessions with
   cache-warming records were listed as "(unreadable session)" in the resume
   picker and `octet sessions list`, without a title, and were re-read on every

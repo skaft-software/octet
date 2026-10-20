@@ -131,6 +131,24 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 }
                             }
                         }
+                        UserPart::Media(Media::Document(document)) => {
+                            if model
+                                .spec
+                                .capabilities
+                                .input_modalities
+                                .contains(crate::types::Modality::Pdf)
+                            {
+                                parts.push(serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": document.media_type.as_ref(),
+                                        "data": base64::Engine::encode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            &document.data,
+                                        ),
+                                    }
+                                }));
+                            }
+                        }
                         UserPart::ToolResult(result) => {
                             let id =
                                 crate::protocol::normalize_tool_call_id(&result.tool_call_id.0);

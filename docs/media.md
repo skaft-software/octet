@@ -1,4 +1,4 @@
-# Images and audio
+# Images, audio and PDFs
 
 [Documentation](README.md) · [Providers](providers.md) · [Security](../SECURITY.md)
 
@@ -9,7 +9,7 @@ To ask about a sound and a screenshot:
 1. Pick a model whose route supports the media.
 2. Paste or drop each file path through the terminal, or select an `@` path
    completion.
-3. Check for `[Audio #N]` and `[Image #N]` chips before you send.
+3. Check for `[Audio #N]`, `[Image #N]` and `[PDF #N]` chips before you send.
 
 ```text
 Describe the sound in the audio. Compare the screenshot with this repository's
@@ -58,6 +58,36 @@ output and provider file references are not implemented. There's no automatic
 transcription or transcoding, and a provider may still reject a file octet
 accepted. The raw-byte safety cap is not a guarantee that a base64-encoded
 request fits the provider's total request limit.
+
+### PDFs
+
+A dropped or `@`-selected `.pdf` becomes a `[PDF #N]` chip. On a model that
+reads PDFs the file's bytes go with the prompt as a native document, next to a
+`[attached PDF: <path>]` line that names it:
+
+| Route | Wire form |
+| --- | --- |
+| Anthropic Messages | `document` block (base64) |
+| OpenAI Responses | `input_file` with a `data:` URL |
+| OpenAI Chat Completions | `file` part with a `data:` URL |
+| Gemini API, Vertex AI | `inlineData` (`application/pdf`) |
+| Bedrock Converse | `document` (`format: pdf`) |
+
+A model reads PDFs when its pinned models.dev record lists `pdf` input (Claude,
+Grok, many newer GPT models, and many OpenCode and OpenRouter models), or, without a
+record, when it is a `gemini-*` model on the Gemini API or Vertex AI, or Claude
+on Bedrock. The model picker shows a `pdf` badge. The cap is **10 MiB of raw
+PDF bytes**, which base64 grows to about 13.3 MiB, and the file must start like a
+PDF (a `%PDF-` header). Providers bill each page as text plus a page image;
+octet budgets about 3,000 tokens a page.
+
+On any other model, including Mistral and Pi-messages routes, the chip stands
+for the file's path instead, so the model is told which file you attached and
+can open it with its own tools. The built-in `read` tool does not decode PDFs: it
+says so and suggests attaching the file on a PDF-capable model or extracting the
+text with a shell tool such as `pdftotext`. Switching to a model that cannot
+read PDFs replaces earlier PDFs in the conversation with a placeholder naming
+the file. Tools cannot return documents.
 
 ### Oversized audio
 

@@ -74,6 +74,9 @@ pub(super) const ESTIMATED_IMAGE_TOKENS: u64 = 1_600;
 
 pub(super) const ESTIMATED_AUDIO_TOKENS: u64 = 8_000;
 
+/// Providers bill a PDF page as its extracted text plus a page image.
+pub(super) const ESTIMATED_DOCUMENT_PAGE_TOKENS: u64 = 3_000;
+
 pub(super) fn inline_media_payload_bytes(media: &Media) -> u64 {
     let raw_bytes = match media {
         Media::Image(image) => match &image.source {
@@ -86,6 +89,7 @@ pub(super) fn inline_media_payload_bytes(media: &Media) -> u64 {
             }
             AudioPayload::ProviderRef(_) => 0,
         },
+        Media::Document(document) => document.data.len() as u64,
     };
     // Inline media's serde representation is one padded base64 string. The
     // surrounding quotes and variant metadata remain in the structural byte
@@ -97,6 +101,9 @@ pub(super) fn media_tokens(media: &Media) -> u64 {
     match media {
         Media::Image(_) => ESTIMATED_IMAGE_TOKENS,
         Media::Audio(_) => ESTIMATED_AUDIO_TOKENS,
+        Media::Document(document) => document
+            .estimated_pages()
+            .saturating_mul(ESTIMATED_DOCUMENT_PAGE_TOKENS),
     }
 }
 

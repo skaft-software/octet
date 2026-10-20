@@ -296,6 +296,9 @@ pub enum UnsupportedError {
     /// Audio input is not supported.
     #[error("Audio input is unsupported")]
     Audio,
+    /// PDF document input is not supported by the model or protocol.
+    #[error("PDF input is unsupported")]
+    Document,
     /// Audio output is not supported.
     #[error("Audio output is unsupported")]
     AudioOutput,

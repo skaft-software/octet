@@ -17,6 +17,9 @@ const UNAVAILABLE_IMAGE_PLACEHOLDER: &str =
 const UNAVAILABLE_TOOL_IMAGE_PLACEHOLDER: &str =
     "(tool image omitted: provider media reference is unavailable)";
 const AUDIO_PLACEHOLDER: &str = "(audio omitted: model does not support audio)";
+const TOOL_DOCUMENT_PLACEHOLDER: &str = "(tool document omitted: no tool-result document mapping)";
+const ASSISTANT_DOCUMENT_PLACEHOLDER: &str =
+    "(assistant document omitted: documents are input only)";
 const TOOL_AUDIO_PLACEHOLDER: &str = "(tool audio omitted: model does not support audio)";
 const ASSISTANT_IMAGE_PLACEHOLDER: &str =
     "(assistant image omitted: target model cannot replay images)";
@@ -229,6 +232,13 @@ fn transform_user_part(part: &UserPart, target: &Model) -> UserPart {
                     UserPart::Text(audio_fallback_text(audio, AUDIO_PLACEHOLDER))
                 }
             }
+            Media::Document(document) => {
+                if document_is_replayable(target) {
+                    UserPart::Media(media.clone())
+                } else {
+                    UserPart::Text(document_placeholder(document))
+                }
+            }
         },
         UserPart::ToolResult(result) => UserPart::ToolResult(ToolResult {
             tool_call_id: normalize_id(&result.tool_call_id),
@@ -274,6 +284,13 @@ fn transform_user_part_owned(part: UserPart, target: &Model) -> UserPart {
                 UserPart::Text(fallback)
             }
         }
+        UserPart::Media(Media::Document(document)) => {
+            if document_is_replayable(target) {
+                UserPart::Media(Media::Document(document))
+            } else {
+                UserPart::Text(document_placeholder(&document))
+            }
+        }
         UserPart::ToolResult(result) => UserPart::ToolResult(ToolResult {
             tool_call_id: normalize_id_owned(result.tool_call_id),
             content: result
@@ -316,6 +333,7 @@ fn transform_tool_result_part(part: &ToolResultPart, target: &Model) -> ToolResu
             Media::Audio(audio) => {
                 ToolResultPart::Text(audio_fallback_text(audio, TOOL_AUDIO_PLACEHOLDER))
             }
+            Media::Document(_) => ToolResultPart::Text(TOOL_DOCUMENT_PLACEHOLDER.to_string()),
         },
     }
 }
@@ -349,7 +367,28 @@ fn transform_tool_result_part_owned(part: ToolResultPart, target: &Model) -> Too
             let fallback = audio_fallback_text(&audio, TOOL_AUDIO_PLACEHOLDER);
             ToolResultPart::Text(fallback)
         }
+        ToolResultPart::Media(Media::Document(_)) => {
+            ToolResultPart::Text(TOOL_DOCUMENT_PLACEHOLDER.to_string())
+        }
     }
+}
+
+/// Inline PDF bytes replay wherever the target route and model accept PDFs.
+fn document_is_replayable(target: &Model) -> bool {
+    target.spec.protocol.supports_document_input()
+        && target
+            .spec
+            .capabilities
+            .input_modalities
+            .contains(Modality::Pdf)
+}
+
+/// Name the omitted file so the model can still find it with its own tools.
+fn document_placeholder(document: &crate::types::DocumentMedia) -> String {
+    format!(
+        "(PDF {} omitted: model does not support PDF input)",
+        document.file_name()
+    )
 }
 
 fn transform_assistant_part(
@@ -398,6 +437,9 @@ fn transform_assistant_part(
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))
         }
+        AssistantPart::Media(Media::Document(_)) => Some(AssistantPart::Text(
+            ASSISTANT_DOCUMENT_PLACEHOLDER.to_string(),
+        )),
         AssistantPart::Media(Media::Audio(audio)) => {
             if assistant_audio_is_replayable(audio, target) {
                 Some(part.clone())
@@ -448,6 +490,9 @@ fn transform_assistant_part_owned(
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))
         }
+        AssistantPart::Media(Media::Document(_)) => Some(AssistantPart::Text(
+            ASSISTANT_DOCUMENT_PLACEHOLDER.to_string(),
+        )),
         AssistantPart::Media(Media::Audio(audio)) => {
             if assistant_audio_is_replayable(&audio, target) {
                 Some(AssistantPart::Media(Media::Audio(audio)))

@@ -44,11 +44,13 @@ This reopens the latest session in the current workspace. Use
 from an earlier message and `/clone` copies the current state. See
 [Sessions](sessions.md).
 
-## Images and audio
+## Images, audio and PDFs
 
 Explicitly paste/drop a path through the terminal paste mechanism, or select it
-with `@` completion. Check the image/audio chip before submitting; typed paths
-alone are not attachments. Native audio needs a compatible model and route:
+with `@` completion. Check the image/audio/PDF chip before submitting; typed paths
+alone are not attachments. A PDF goes to the model as a document when its model
+reads PDFs (the picker shows a `pdf` badge) and as its path otherwise; see
+[PDFs](media.md#pdfs). Native audio needs a compatible model and route:
 OpenAI Chat accepts WAV/MP3; Google `generateContent` accepts WAV/MP3/AAC/FLAC/Ogg
 Opus. See the [audio/image recipe, formats, limits, and privacy rules](media.md).
 

@@ -6288,7 +6288,11 @@ impl InteractiveShell {
                     }
                 }
             } else if composer::file_kind_for_path(&suggestion.path).is_some() {
-                match state.ledger.attach_file_reference(&suggestion.path) {
+                let modalities = state.input_modalities;
+                match state
+                    .ledger
+                    .attach_file_reference(&suggestion.path, modalities)
+                {
                     Ok(chip) => chip,
                     Err(error) => {
                         state.push_block(TranscriptBlock::Notice(error.to_string()));

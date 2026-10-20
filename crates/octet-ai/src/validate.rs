@@ -555,6 +555,21 @@ pub(crate) fn validate_request(
                                 }
                             }
                         }
+                        UserPart::Media(Media::Document(_)) => {
+                            let supported = protocol.supports_document_input()
+                                && caps.input_modalities.contains(crate::types::Modality::Pdf);
+                            if !supported {
+                                if mode == CompatibilityMode::Strict {
+                                    return Err(AiError::Unsupported(UnsupportedError::Document));
+                                }
+                                diagnostics.push(Diagnostic {
+                                    code: "dropped_document".to_string(),
+                                    message: format!(
+                                        "PDF input is unsupported by this model through {protocol:?}"
+                                    ),
+                                });
+                            }
+                        }
                         UserPart::ToolResult(ref tr) => {
                             for part in &tr.content {
                                 let supported = match part {
@@ -597,6 +612,9 @@ pub(crate) fn validate_request(
                                             matches!(&image.source, ImageSource::Inline(_))
                                         }
                                     },
+                                    // Documents travel in user content only; no tool-result
+                                    // document mapping is implemented yet.
+                                    ToolResultPart::Media(Media::Document(_)) => false,
                                     ToolResultPart::Media(Media::Audio(audio)) => {
                                         protocol == Protocol::GoogleGenerativeAi
                                             && caps

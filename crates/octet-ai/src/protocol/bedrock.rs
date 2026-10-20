@@ -181,6 +181,23 @@ pub(crate) fn build_request(
                             }));
                         }
                         UserPart::Media(Media::Audio(_)) => {}
+                        UserPart::Media(Media::Document(document)) => {
+                            if !model
+                                .spec
+                                .capabilities
+                                .input_modalities
+                                .contains(crate::types::Modality::Pdf)
+                            {
+                                continue;
+                            }
+                            content.push(json!({
+                                "document": {
+                                    "format": "pdf",
+                                    "name": bedrock_document_name(document.file_name()),
+                                    "source": {"bytes": Base64Bytes::from(&document.data)},
+                                }
+                            }));
+                        }
                         UserPart::ToolResult(result) => {
                             let tool_use_id = normalize_tool_call_id(&result.tool_call_id.0);
                             if synthetic_tool_results.contains(&tool_use_id) {
@@ -933,6 +950,35 @@ fn crc32(bytes: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// Converse document names allow only alphanumerics, single spaces, hyphens,
+/// parentheses and square brackets. The extension is dropped: `format` carries it.
+fn bedrock_document_name(file_name: &str) -> String {
+    let stem = file_name
+        .strip_suffix(".pdf")
+        .or_else(|| file_name.strip_suffix(".PDF"))
+        .unwrap_or(file_name);
+    let mut name = String::new();
+    for character in stem.chars() {
+        let character = if character.is_ascii_alphanumeric()
+            || matches!(character, '-' | '(' | ')' | '[' | ']')
+        {
+            character
+        } else {
+            ' '
+        };
+        if character == ' ' && (name.is_empty() || name.ends_with(' ')) {
+            continue;
+        }
+        name.push(character);
+    }
+    let name = name.trim_end().to_owned();
+    if name.is_empty() {
+        "document".to_owned()
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]

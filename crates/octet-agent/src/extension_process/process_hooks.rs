@@ -606,6 +606,12 @@ impl ExtensionProcess {
                         });
                         return None;
                     }
+                    ToolOutputContentPart::Media(Media::Document(_)) => {
+                        let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                            message: "Pi tool_result does not support document content".into(),
+                        });
+                        return None;
+                    }
                 }
             }
             payload["pi_content"] = content.into();
