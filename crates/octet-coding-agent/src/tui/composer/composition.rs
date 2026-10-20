@@ -22,6 +22,11 @@ pub struct ComposedInput {
     /// Text shown after submission. Pasted-text chips expand in place; media
     /// chips remain readable labels because their payload is non-textual.
     pub transcript_text: String,
+    /// Transcript text with file-reference chips expanded to their paths. This
+    /// is the text prompt composition rebuilds the model message from: a PDF
+    /// chip has no media payload, so its path is the only thing that tells the
+    /// model which file was attached.
+    pub model_text: String,
     pub parts: Vec<InputPart>,
     pub custom_messages: Vec<octet_agent::session::CustomMessage>,
     pub attachments: Vec<Attachment>,
@@ -35,7 +40,8 @@ impl ComposedInput {
             parts: vec![InputPart::Text(text.clone())],
             custom_messages: Vec::new(),
             display_text: text.clone(),
-            transcript_text: text,
+            transcript_text: text.clone(),
+            model_text: text,
             attachments: Vec::new(),
             answer_only: false,
         }
@@ -45,6 +51,7 @@ impl ComposedInput {
         let mut input = Self::from_text(model_text);
         input.display_text = display_text.clone();
         input.transcript_text = display_text;
+        input.model_text = input.parts_text();
         input.answer_only = true;
         input
     }
@@ -73,10 +80,29 @@ impl ComposedInput {
         self.display_text.push_str(&next.display_text);
         self.transcript_text.push_str(SEPARATOR);
         self.transcript_text.push_str(&next.transcript_text);
+        self.model_text.push_str(SEPARATOR);
+        self.model_text.push_str(&next.model_text);
         self.parts.push(InputPart::Text(SEPARATOR.to_owned()));
         self.parts.extend(next.parts);
         self.custom_messages.extend(next.custom_messages);
         self.attachments.extend(next.attachments);
+    }
+
+    /// Replace the readable and model-facing text together, for an input that
+    /// carries no file-reference chips (an extension transform or injection).
+    pub fn set_text(&mut self, text: String) {
+        self.model_text = text.clone();
+        self.transcript_text = text;
+    }
+
+    fn parts_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                InputPart::Text(text) => Some(text.as_str()),
+                InputPart::Media(_) => None,
+            })
+            .collect()
     }
 
     pub fn into_user_input(self) -> UserInput {
@@ -201,9 +227,16 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
     // right to left so byte offsets discovered in display_text stay valid.
     // Media chips intentionally survive as human-readable attachment labels.
     let mut transcript_text = display_text.clone();
+    let mut model_text = display_text.clone();
     for (at, entry) in found.iter().rev() {
-        if let AttachmentPayload::PastedText(pasted) = &entry.payload {
-            transcript_text.replace_range(*at..*at + entry.chip.len(), pasted);
+        let range = *at..*at + entry.chip.len();
+        match &entry.payload {
+            AttachmentPayload::PastedText(pasted) => {
+                transcript_text.replace_range(range.clone(), pasted);
+                model_text.replace_range(range, pasted);
+            }
+            AttachmentPayload::FileReference(path) => model_text.replace_range(range, path),
+            AttachmentPayload::Media { .. } => {}
         }
     }
 
@@ -211,6 +244,7 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
     ComposedInput {
         display_text,
         transcript_text,
+        model_text,
         parts,
         custom_messages: Vec::new(),
         attachments: matched,

@@ -13292,7 +13292,7 @@ async fn run_interactive_once(
                     prompt_wait_result(
                         app.executable_extensions
                             .process_input_with_frontend(
-                                composed.transcript_text.clone(),
+                                composed.model_text.clone(),
                                 (!input_images.is_empty()).then_some(input_images),
                                 if queued_submission {
                                     "extension"
@@ -13324,7 +13324,7 @@ async fn run_interactive_once(
                     }
                 };
                 if transformed.transformed {
-                    composed.transcript_text = transformed.text.clone();
+                    composed.set_text(transformed.text.clone());
                     composed.parts = vec![octet_agent::InputPart::Text(transformed.text)];
                     composed.parts.extend(
                         transformed
@@ -13336,11 +13336,11 @@ async fn run_interactive_once(
                 }
                 let model_prompt = match expand_skill_command(
                     app.skills.as_ref(),
-                    &composed.transcript_text,
+                    &composed.model_text,
                     &app.agent.registered_tool_names(),
                 ) {
                     Ok(Some(expanded)) => expanded,
-                    Ok(None) => composed.transcript_text.clone(),
+                    Ok(None) => composed.model_text.clone(),
                     Err(error) => {
                         shell.restore_composed(composed);
                         shell.error(format!("skill invocation failed: {error}"));

@@ -230,3 +230,60 @@ fn workspace_index_from(paths: Vec<String>) -> WorkspaceFileIndex {
     sorted.sort();
     WorkspaceFileIndex::from_paths(sorted)
 }
+
+#[test]
+fn prompt_composition_keeps_a_pdf_path_that_the_transcript_shows_as_a_chip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("Quarterly Report.pdf");
+    fs::write(&pdf, b"%PDF-1.4").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger.attach_file_reference(&pdf).expect("pdf reference");
+    let pasted = ledger.attach_pasted_text("line one\nline two".into());
+
+    let mut composed = compose(format!("read {chip} and {pasted}"), &mut ledger);
+    let path = pdf.to_string_lossy().into_owned();
+    assert_eq!(
+        composed.transcript_text,
+        format!("read {chip} and line one\nline two")
+    );
+    assert_eq!(
+        composed.model_text,
+        format!("read {path} and line one\nline two")
+    );
+
+    // Prompt composition rebuilds the model message from this text; the path
+    // is the only thing that tells the model which file the chip stood for.
+    composed.replace_model_text(composed.model_text.clone());
+    let text: String = composed
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            InputPart::Text(text) => Some(text.as_str()),
+            InputPart::Media(_) => None,
+        })
+        .collect();
+    assert!(text.contains(&path) && !text.contains(&chip), "{text:?}");
+}
+
+#[test]
+fn answer_input_composes_its_directive_not_its_command_display() {
+    let composed = ComposedInput::for_answer("/answer now".into(), "Answer now.".into());
+    assert_eq!(composed.transcript_text, "/answer now");
+    assert_eq!(composed.model_text, "Answer now.");
+}
+
+#[test]
+fn follow_up_batches_join_model_text_with_their_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("brief.pdf");
+    fs::write(&pdf, b"%PDF-1.4").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger.attach_file_reference(&pdf).expect("pdf reference");
+    let mut first = ComposedInput::from_text("first".into());
+    first.append_follow_up(compose(format!("then {chip}"), &mut ledger));
+    assert_eq!(
+        first.model_text,
+        format!("first\n\nthen {}", pdf.to_string_lossy())
+    );
+    assert_eq!(first.transcript_text, format!("first\n\nthen {chip}"));
+}
