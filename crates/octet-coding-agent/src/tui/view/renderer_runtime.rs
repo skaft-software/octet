@@ -1528,9 +1528,11 @@ impl Drop for RenderStateGuard<'_> {
         let Self::Private { owner, shared } = self else {
             return;
         };
-        let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
+        let owner = &mut **owner;
+        let mut geometry = super::renderer_geometry::RenderedGeometry::capture_with(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
+            &mut owner.copy_rows,
         );
         let mut state = shared.0.lock().expect("shell state mutex poisoned");
         // Every mutable semantic borrow advances this fence, including input,

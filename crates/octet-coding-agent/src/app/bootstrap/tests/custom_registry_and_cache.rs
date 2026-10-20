@@ -14,6 +14,7 @@ fn custom_registry_registers_labeled_providers_with_isolated_auth_and_models() {
     let store =
         crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
     let provider = |label: &str, base_url: &str, model_id: &str, auth| CustomProvider {
+        api: Default::default(),
         label: label.into(),
         credential: CustomCredential {
             base_url: base_url.into(),
@@ -766,4 +767,112 @@ fn negative_custom_cache_recovers_without_another_restart() {
         Some(CachedCustomInventory::Available(models))
             if models.len() == 1 && models[0].api_name == "recovered-local"
     ));
+}
+
+#[test]
+fn custom_registry_api_selects_the_protocol_and_presents_anthropic_keys_as_x_api_key() {
+    use crate::auth::custom::{
+        CustomAuthConfig, CustomCredential, CustomModel, CustomProvider, CustomProviderApi,
+        CustomRegistry,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
+    let provider = |api, auth| CustomProvider {
+        api,
+        label: String::new(),
+        credential: CustomCredential {
+            base_url: "http://127.0.0.1:8000/v1/".into(),
+            api_key: String::new(),
+            api_name: String::new(),
+            headers: Vec::new(),
+            models: vec![CustomModel {
+                api_name: "model".into(),
+                context_window_asserted: true,
+                discovered_context_window: Some(131_072),
+                ..Default::default()
+            }],
+            auto_discover: false,
+        },
+        auth,
+        api_key_env: None,
+        cache: None,
+        startup_timeout_secs: None,
+        lifecycle_feedback: false,
+    };
+    let mut registry = CustomRegistry::single(
+        "chat",
+        provider(
+            CustomProviderApi::OpenAiCompletions,
+            Some(CustomAuthConfig::None),
+        ),
+    );
+    registry.providers.insert(
+        "responses".into(),
+        provider(
+            CustomProviderApi::OpenAiResponses,
+            Some(CustomAuthConfig::BearerEnv {
+                var: "OCTET_TEST_RESPONSES_KEY".into(),
+            }),
+        ),
+    );
+    registry.providers.insert(
+        "messages".into(),
+        provider(
+            CustomProviderApi::AnthropicMessages,
+            Some(CustomAuthConfig::BearerEnv {
+                var: "OCTET_TEST_MESSAGES_KEY".into(),
+            }),
+        ),
+    );
+    store.save_registry(&registry).unwrap();
+    let saved = std::fs::read_to_string(directory.path().join("credentials/custom.json")).unwrap();
+    assert!(saved.contains(r#""api": "anthropic-messages""#), "{saved}");
+    assert!(saved.contains(r#""api": "openai-responses""#), "{saved}");
+    // The default is omitted, so existing registries round-trip unchanged.
+    assert_eq!(saved.matches(r#""api""#).count(), 2, "{saved}");
+
+    let mut catalog = ModelCatalog::default();
+    register_custom_openai_endpoints_from_store(&mut catalog, &store, true).unwrap();
+    let resolve = |provider: &str| {
+        catalog
+            .resolve(&ModelId(format!("custom/{provider}/model")))
+            .unwrap()
+    };
+    assert_eq!(resolve("chat").spec.protocol, Protocol::OpenAiChat);
+    let responses = resolve("responses");
+    assert_eq!(responses.spec.protocol, Protocol::OpenAiResponses);
+    assert!(matches!(
+        responses.endpoint.auth,
+        Auth::BearerEnv { ref var } if var == "OCTET_TEST_RESPONSES_KEY"
+    ));
+    let messages = resolve("messages");
+    assert_eq!(messages.spec.protocol, Protocol::AnthropicMessages);
+    assert!(matches!(
+        messages.endpoint.auth,
+        Auth::HeaderEnv { ref name, ref var }
+            if name.as_str() == "x-api-key" && var == "OCTET_TEST_MESSAGES_KEY"
+    ));
+}
+
+#[test]
+fn custom_provider_api_accepts_the_chat_alias_and_rejects_unknown_protocols() {
+    use crate::auth::custom::{CustomProvider, CustomProviderApi};
+    let parse = |api: &str| {
+        serde_json::from_value::<CustomProvider>(serde_json::json!({
+            "base_url": "http://127.0.0.1:8000/v1/",
+            "api": api,
+        }))
+        .map(|provider| provider.api)
+    };
+    assert_eq!(
+        parse("openai-chat").unwrap(),
+        CustomProviderApi::OpenAiCompletions
+    );
+    assert_eq!(
+        parse("anthropic-messages").unwrap(),
+        CustomProviderApi::AnthropicMessages
+    );
+    assert!(parse("google-generative-ai").is_err());
 }

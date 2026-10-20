@@ -409,32 +409,26 @@ fn coalesce_rpc_history(messages: Vec<RpcHistoryMessage>) -> Vec<RpcHistoryMessa
     output
 }
 
-fn rpc_history_messages(session: &Session) -> Vec<RpcHistoryMessage> {
+/// The entries the RPC history projects: the newest compaction on the active
+/// branch (whose summary opens the history), and the visible message and
+/// branch-summary entries after its boundary, newest first.
+fn rpc_history_source(session: &Session) -> (Option<&Entry>, Vec<&Entry>) {
     let mut newest_first = Vec::new();
-    let mut summary = None;
-    let mut boundary: Option<EntryId> = None;
-    let mut cursor = session.head();
+    let mut compaction = None;
+    let mut boundary: Option<&EntryId> = None;
+    let mut cursor = session.head_ref();
     while let Some(id) = cursor {
         let entry = session
-            .entry(&id)
+            .entry(id)
             .expect("session head and parent links refer to durable entries");
         match &entry.value {
             EntryValue::Message(_) | EntryValue::BranchSummary { .. } => {
-                newest_first.push(history_message(entry));
+                newest_first.push(entry);
             }
-            EntryValue::Compaction {
-                summary: compaction_summary,
-                snapcompact,
-                first_kept,
-                ..
-            } => {
+            EntryValue::Compaction { first_kept, .. } => {
                 if boundary.is_none() {
-                    summary = Some((
-                        compaction_summary.clone(),
-                        snapcompact.clone(),
-                        entry.timestamp_unix_ms,
-                    ));
-                    boundary = Some(first_kept.clone());
+                    compaction = Some(entry);
+                    boundary = Some(first_kept);
                 }
             }
             EntryValue::ResponsesReasoning { .. }
@@ -447,29 +441,135 @@ fn rpc_history_messages(session: &Session) -> Vec<RpcHistoryMessage> {
             | EntryValue::SkillResourceRead { .. }
             | EntryValue::SkillDeactivated { .. } => {}
         }
-        if boundary.as_ref() == Some(&id) {
+        if boundary == Some(id) {
             break;
         }
-        cursor = entry.parent.clone();
+        cursor = entry.parent.as_ref();
     }
+    (compaction, newest_first)
+}
 
+fn rpc_history_messages(session: &Session) -> Vec<RpcHistoryMessage> {
+    let (compaction, newest_first) = rpc_history_source(session);
     let mut messages = Vec::with_capacity(newest_first.len().saturating_add(1));
-    if let Some((summary, snapcompact, timestamp_unix_ms)) = summary {
+    if let Some(Entry {
+        value:
+            EntryValue::Compaction {
+                summary,
+                snapcompact,
+                ..
+            },
+        timestamp_unix_ms,
+        ..
+    }) = compaction
+    {
         let mut content = vec![UserPart::Text(format!(
             "[summary of earlier conversation]\n{summary}"
         ))];
         if let Some(snapcompact) = snapcompact {
-            content.extend(snapcompact.frames.into_iter().map(UserPart::Media));
+            content.extend(snapcompact.frames.iter().cloned().map(UserPart::Media));
         }
         messages.push(RpcHistoryMessage {
-            user_part_timestamps: vec![timestamp_unix_ms; content.len()],
+            user_part_timestamps: vec![*timestamp_unix_ms; content.len()],
             message: Message::User(UserMessage { content }),
-            timestamp_unix_ms,
+            timestamp_unix_ms: *timestamp_unix_ms,
             assistant_entry: None,
         });
     }
-    messages.extend(newest_first.into_iter().rev());
+    messages.extend(newest_first.into_iter().rev().map(history_message));
     coalesce_rpc_history(messages)
+}
+
+/// The shape of one user part, which is all the RPC message count depends on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RpcPartShape {
+    Text,
+    Media,
+    ToolResult,
+}
+
+/// `rpc_messages_from_session(session, _).len()` without projecting anything.
+///
+/// `get_state` reports only the count, and projecting a long resumed history
+/// to JSON (cloning every message) dominated its cost. This walks the same
+/// entries and applies the same tool-result coalescing and user-message
+/// splitting to part shapes instead of values.
+pub(super) fn rpc_message_count(session: &Session) -> usize {
+    use RpcPartShape::{Media as MediaPart, Text, ToolResult as ResultPart};
+    let (compaction, newest_first) = rpc_history_source(session);
+    // `None` is an assistant message; `Some(parts)` a user message.
+    let mut shapes: Vec<Option<Vec<RpcPartShape>>> = Vec::with_capacity(newest_first.len() + 1);
+    if let Some(Entry {
+        value: EntryValue::Compaction { snapcompact, .. },
+        ..
+    }) = compaction
+    {
+        let frames = snapcompact
+            .as_ref()
+            .map_or(0, |snapcompact| snapcompact.frames.len());
+        let mut parts = vec![Text];
+        parts.extend(std::iter::repeat_n(MediaPart, frames));
+        shapes.push(Some(parts));
+    }
+    let tool_result_turn = |parts: &[RpcPartShape]| {
+        parts.contains(&ResultPart) && parts.iter().all(|part| *part != Text)
+    };
+    for entry in newest_first.into_iter().rev() {
+        let shape = match &entry.value {
+            EntryValue::Message(Message::Assistant(_)) => None,
+            EntryValue::Message(Message::User(message)) => Some(
+                message
+                    .content
+                    .iter()
+                    .map(|part| match part {
+                        UserPart::Text(_) => Text,
+                        UserPart::Media(_) => MediaPart,
+                        UserPart::ToolResult(_) => ResultPart,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => Some(vec![Text]),
+        };
+        // Mirrors `coalesce_rpc_history`: consecutive tool-result turns merge,
+        // results before the previous turn's media and new media at the end.
+        if let (Some(current), Some(Some(previous))) = (&shape, shapes.last_mut()) {
+            if tool_result_turn(current) && tool_result_turn(previous) {
+                let media_start = previous
+                    .iter()
+                    .position(|part| *part == MediaPart)
+                    .unwrap_or(previous.len());
+                let results = current.iter().filter(|part| **part == ResultPart).count();
+                previous.splice(
+                    media_start..media_start,
+                    std::iter::repeat_n(ResultPart, results),
+                );
+                previous.extend(current.iter().filter(|part| **part == MediaPart));
+                continue;
+            }
+        }
+        shapes.push(shape);
+    }
+    shapes
+        .iter()
+        .map(|shape| match shape {
+            None => 1,
+            // Mirrors the user arm of `rpc_messages_from_session`: each tool
+            // result is a message, and each run of other parts is one more.
+            Some(parts) => {
+                let mut count = 0;
+                let mut ordinary = false;
+                for part in parts {
+                    if *part == ResultPart {
+                        count += usize::from(ordinary) + 1;
+                        ordinary = false;
+                    } else {
+                        ordinary = true;
+                    }
+                }
+                count + usize::from(ordinary)
+            }
+        })
+        .sum()
 }
 
 pub(super) fn rpc_messages(app: &App) -> Vec<Value> {

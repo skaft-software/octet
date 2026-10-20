@@ -517,3 +517,42 @@ fn append_session_record(path: &Path, record: &octet_agent::SessionRecord) {
     serde_json::to_writer(&mut file, record).unwrap();
     file.write_all(b"\n").unwrap();
 }
+
+#[test]
+fn header_and_cache_warm_records_keep_a_session_listed_and_cached() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(root.path(), workspace.path());
+    std::fs::create_dir_all(store.dir()).unwrap();
+    let path = store.dir().join("headed.jsonl");
+    // Imported and extension-created sessions open with a header record.
+    let mut session = Session::create(&path).unwrap();
+    session.initialize_header(workspace.path(), None).unwrap();
+    session
+        .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+            content: vec![UserPart::Text("headed title".into())],
+        })))
+        .unwrap();
+    drop(session);
+    // Cache warming appends status records between turns.
+    let warm = serde_json::json!({"type": "cache_warm", "record": octet_agent::CacheWarmRecord {
+        attempt: 1,
+        endpoint: octet_ai::EndpointId("anthropic".into()),
+        model: octet_ai::ModelId("claude".into()),
+        state: octet_agent::CacheWarmState::Started,
+        at_unix_ms: 1,
+        anchor: None,
+        extension_override: false,
+    }});
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(format!("{warm}\n").as_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    Session::open_read_only(&path).expect("the transcript itself is valid");
+
+    let listed = store.list();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].title, "headed title");
+    // A readable summary is cached, so the next picker open skips the file.
+    let catalog = crate::session_catalog::SessionCatalog::open(store.dir()).unwrap();
+    assert!(catalog.lookup("headed").unwrap().is_some());
+}

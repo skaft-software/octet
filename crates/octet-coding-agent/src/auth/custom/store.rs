@@ -89,6 +89,41 @@ pub enum CustomAuthConfig {
     },
 }
 
+/// Wire protocol a registry provider speaks at its `base_url`.
+///
+/// Chat Completions remains the default, so existing registries are unchanged.
+/// The other two let an Anthropic- or Responses-compatible gateway (or a local
+/// benchmark mock) be addressed without redirecting a built-in provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustomProviderApi {
+    /// OpenAI Chat Completions (`POST <base>/chat/completions`).
+    #[default]
+    #[serde(rename = "openai-completions", alias = "openai-chat")]
+    OpenAiCompletions,
+    /// OpenAI Responses (`POST <base>/responses`).
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    /// Anthropic Messages (`POST <base>/messages`); a key is sent as `x-api-key`.
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages,
+}
+
+impl CustomProviderApi {
+    /// Whether this is the default Chat Completions protocol.
+    pub fn is_default(&self) -> bool {
+        *self == Self::OpenAiCompletions
+    }
+
+    /// The model protocol requests to this provider use.
+    pub fn protocol(self) -> octet_ai::Protocol {
+        match self {
+            Self::OpenAiCompletions => octet_ai::Protocol::OpenAiChat,
+            Self::OpenAiResponses => octet_ai::Protocol::OpenAiResponses,
+            Self::AnthropicMessages => octet_ai::Protocol::AnthropicMessages,
+        }
+    }
+}
+
 /// One named provider in the custom endpoint registry.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CustomProvider {
@@ -98,6 +133,9 @@ pub struct CustomProvider {
     /// Core OpenAI-compatible endpoint configuration.
     #[serde(flatten)]
     pub credential: CustomCredential,
+    /// Wire protocol spoken at `base_url`; Chat Completions when omitted.
+    #[serde(default, skip_serializing_if = "CustomProviderApi::is_default")]
+    pub api: CustomProviderApi,
     /// Optional authentication strategy. When omitted, the compatibility
     /// `api_key` field is used if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +164,7 @@ impl CustomProvider {
         Self {
             label: String::new(),
             credential,
+            api: CustomProviderApi::default(),
             auth: None,
             api_key_env: None,
             cache: None,
@@ -141,6 +180,7 @@ impl fmt::Debug for CustomProvider {
             .debug_struct("CustomProvider")
             .field("label", &self.label)
             .field("credential", &self.credential)
+            .field("api", &self.api)
             .field("auth", &self.auth)
             .field("api_key_env", &self.api_key_env)
             .field("cache", &self.cache)
@@ -943,6 +983,7 @@ fn parse_registry(bytes: &[u8], path: &Path) -> Result<CustomRegistry> {
         let mut registry = CustomRegistry::single(
             LEGACY_PROVIDER_ID,
             CustomProvider {
+                api: Default::default(),
                 label: String::new(),
                 credential,
                 auth: None,
@@ -1230,6 +1271,7 @@ mod tests {
 
     fn provider_at(label: &str, base_url: &str) -> CustomProvider {
         CustomProvider {
+            api: Default::default(),
             label: label.into(),
             credential: CustomCredential {
                 base_url: base_url.into(),
@@ -1360,6 +1402,7 @@ mod tests {
         let store = CredentialStore::new(&path);
         let provider =
             |label: &str, base_url: &str, auth: Option<CustomAuthConfig>| CustomProvider {
+                api: Default::default(),
                 label: label.into(),
                 credential: CustomCredential {
                     base_url: base_url.into(),
