@@ -282,3 +282,37 @@ fn windows_terminal_profile_reaches_the_renderer_as_interactive() {
     // the host implements CSI 2026 (see windows.md for the visual checklist).
     assert!(renderer.synchronized_output);
 }
+
+#[test]
+fn windows_emulators_that_announce_themselves_get_the_rich_profile() {
+    // Alacritty exports COLORTERM and TERM; WezTerm also sets TERM_PROGRAM;
+    // Tern sets TERM_PROGRAM. None sets WT_SESSION, and none of them used to
+    // leave the conservative conhost profile, so the renderer drew ASCII.
+    let mut alacritty = windows_probe(false);
+    alacritty.term = Some("xterm-256color".into());
+    alacritty.colorterm = Some("truecolor".into());
+    let mut wezterm = windows_probe(false);
+    wezterm.term = Some("xterm-256color".into());
+    wezterm.colorterm = Some("truecolor".into());
+    wezterm.term_program = Some("WezTerm".into());
+    let mut tern = windows_probe(false);
+    tern.term_program = Some("tern".into());
+    for (name, probe) in [
+        ("alacritty", alacritty),
+        ("wezterm", wezterm),
+        ("tern", tern),
+    ] {
+        let caps = TerminalCapabilities::from_probe(ColorMode::Auto, probe);
+        assert!(caps.interactive, "{name}");
+        assert!(caps.unicode, "{name} renders the glyph set");
+        assert_eq!(caps.color, ColorDepth::TrueColor, "{name}");
+        assert!(caps.italics && caps.hyperlinks, "{name}");
+    }
+
+    // An empty TERM_PROGRAM announces nothing; bare conhost stays conservative.
+    let mut empty = windows_probe(false);
+    empty.term_program = Some(String::new());
+    let caps = TerminalCapabilities::from_probe(ColorMode::Auto, empty);
+    assert!(!caps.unicode);
+    assert_eq!(caps.color, ColorDepth::Ansi256);
+}
