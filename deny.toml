@@ -29,6 +29,15 @@ ignore = [
   # move both call sites to a safe-Rust YAML parser (serde-saphyr) after
   # 0.9.0, with Pi frontmatter fixtures pinning parity.
   "RUSTSEC-2024-0449",
+  # Dependency path: octet-ai -> tokio-tungstenite 0.29 (rustls-tls-webpki-roots)
+  # -> webpki-roots 0.26.11. That release is a semver shim whose only item is
+  # `pub use webpki_roots_1::TLS_SERVER_ROOTS`, so it serves the roots of the
+  # webpki-roots 1.x in Cargo.lock, which is at the fixed 1.0.10. No 0.26 release
+  # carries the fix and every tokio-tungstenite release requires ^0.26. The ID
+  # also covers 1.x, so scripts/tests/test_advisory_exceptions.py fails if the
+  # 1.x lock drops below 1.0.10 or the shim stops being the only 0.26 entry.
+  # Removal plan: drop when tokio-tungstenite depends on webpki-roots 1.
+  "RUSTSEC-2026-0381",
 ]
 
 [licenses]
