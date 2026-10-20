@@ -524,8 +524,9 @@ impl ForegroundEvents {
         let tty = self.tty.get_or_init(|| {
             let fd = Self::open_tty_notifier()?;
             // Polling runs on the frontend's I/O-enabled Tokio runtime.
-            // OwnedFd closes only after AsyncFd deregisters it.
-            AsyncFd::with_interest(fd, Interest::READABLE).ok()
+            // SAFETY: the AsyncFd owns this OwnedFd, which stays open and names
+            // the same descriptor until the AsyncFd deregisters and drops it.
+            unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }.ok()
         });
         let Some(tty) = tty else { return false };
         match Self::poll_tty_readiness(tty, cx) {
@@ -659,9 +660,14 @@ impl TerminalInput {
 
     #[cfg(all(test, unix))]
     pub(crate) fn from_terminal_file(file: std::fs::File) -> Self {
-        let notifier =
-            AsyncFd::with_interest(OwnedFd::from(file.try_clone().unwrap()), Interest::READABLE)
-                .unwrap();
+        // SAFETY: the AsyncFd owns the duplicated OwnedFd for its lifetime.
+        let notifier = unsafe {
+            AsyncFd::register_with_interest(
+                OwnedFd::from(file.try_clone().unwrap()),
+                Interest::READABLE,
+            )
+        }
+        .unwrap();
         Self::from_source(ForegroundEvents {
             raw: raw::RawReader::from_file(file),
             tty: std::sync::OnceLock::from(Some(notifier)),

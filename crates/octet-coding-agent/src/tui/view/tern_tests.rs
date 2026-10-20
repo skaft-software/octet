@@ -1008,7 +1008,11 @@ fn visible_ack_stall_is_slow_not_fatal_and_reconnects_after_the_window() {
         .flush(&shell.state)
         .expect("a three second ack delay is a slow terminal, not a renderer failure");
     assert_eq!(output.messages("f").len(), 1);
-    assert_eq!(output.messages("q").len(), queries, "no probe inside the window");
+    assert_eq!(
+        output.messages("q").len(),
+        queries,
+        "no probe inside the window"
+    );
     assert!(!surface.recovering);
     // Past the window the UI may be gone (last-window detach): probe with a
     // fresh hello instead of inventing credit or handing the pane to ANSI.

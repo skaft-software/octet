@@ -1,6 +1,6 @@
 # TypeScript / JavaScript extension SDKs
 
-The **0.9.5 source distributions** have two separate packages/wires. No npm
+The **0.9.6 source distributions** have two separate packages/wires. No npm
 publication or registry availability is asserted.
 
 ## Current API `0.4` process authoring
@@ -46,7 +46,7 @@ does not demonstrate a manifest, stdio process loop, dispatch, cancellation or
 shutdown. The retained dependency-free [API `0.3` minimal process](../../examples/extensions/api-v03-minimal/README.md)
 keeps its exact `=0.8.0` host pin, API `0.3`, and extension version `0.1.0`.
 
-The source distribution version `0.9.5` is independent of extension API `0.3`.
+The source distribution version `0.9.6` is independent of extension API `0.3`.
 Native octet publication does not publish this package to npm. Generated
 runtime/declarations have no registry dependencies. Generated files come from
 `protocol/extension-api-v0.3.schema.json`; **do not edit them directly**.

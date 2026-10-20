@@ -1,9 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.6] - Unreleased
 
-Slated for 0.9.6. Driven by the Buffon harness benchmarks: workloads that could
-not run against octet now can, and the slowest measured paths got faster.
+The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification
+boundaries and known limitations. Benchmark-driven work from the Buffon harness
+lets workloads that could not run against octet do so, and speeds up the
+slowest measured paths.
 
 ### Added
 
@@ -27,28 +29,6 @@ not run against octet now can, and the slowest measured paths got faster.
   picker and `octet sessions list`, without a title, and were re-read on every
   listing because unreadable summaries are never cached. Their first listing
   now reads them once; later listings come from the catalog.
-
-### Changed
-
-- Fullscreen TUI streaming re-aligned the copy/selection rows of every visible
-  block from its first row on every frame, so a long answer cost more per token
-  as it grew. Alignments are now kept between frames and only rows whose painted
-  text or copy text changed are redone. Extension theme sync rebuilt the whole
-  theme palette on every UI refresh; it now does so only when the theme changes.
-  Together these cut renderer instructions while streaming a long answer by
-  about a third, and CPU per streamed token by about a fifth.
-- RPC `get_state` counts history messages without projecting the whole history
-  to JSON, and the per-turn context breakdown serializes the history once instead
-  of twice. A resumed 1,000-turn session is ready over RPC about a third sooner
-  and answers its first turn about a quarter faster.
-- `--no-session` print and RPC runs no longer make a workspace marker or session
-  catalog durable inside their throwaway store, removing several fsyncs from
-  startup and exit.
-- Pi session import decodes records straight from the parsed JSON and validates
-  the converted transcript once, cutting a 1,000-turn import by about a third.
-
-### Fixed
-
 - Finished subagents no longer block `/reload`. A worker that completed, reached
   its turn limit, failed, timed out or was interrupted only waits for a
   follow-up, so a reload (including a host binary reload) parks it with its
@@ -73,23 +53,68 @@ not run against octet now can, and the slowest measured paths got faster.
   framing, which octet did not recognize: the hello timed out, rendering fell
   back to the terminal, and the reply appeared in the composer as
   `]877;tsp;r;{"r":"hello",…}\`.
-
-### Fixed
-
 - Gemini routes (Gemini API, Vertex AI, OpenCode Go and OpenCode Zen, including
   Gemini 4 Argon Contributor) no longer fail a request with `Media in tool
   results is unsupported` when the conversation holds an image or audio clip
   inside a tool result, for example a `read` made earlier on a Claude or GPT
   model. The media is sent as inline data after the turn's function responses.
-
-### Fixed
-
 - Transcript images no longer spill over the composer and status bar in
   Kitty-protocol terminals (Ghostty, Kitty, WezTerm). An image cut by the bottom
   of the transcript view, for example while scrolled back, was still placed at
   full height, and the terminal draws placements over text. A cut image is now
   placed only for its visible rows, and one whose top has scrolled above the
   view keeps showing its visible part instead of disappearing.
+- Native Tern no longer drops back to the ANSI renderer when the terminal
+  reports one error, and waits longer for a slow one. A terminal `error` event
+  reopens the surface and replays the retained tree; only a terminal that
+  rejects more than three replays within a minute still yields to ANSI, with the
+  existing notice. A visible surface left unacknowledged for five seconds (two
+  before) pauses and reconnects on a fresh hello, as a detached window does.
+
+### Changed
+
+- The native Tern composer is Tern's editor card, the container omp uses. The
+  editor, model and effort controls, working directory and Send share one inset,
+  and the context meter runs along the card's top edge; they sat on four
+  different distances from the pane edge, with uneven gaps between them. The
+  card is present from the first startup frame and shows a pending tone while a
+  turn runs. Mirrored Pi themes keep Pi's flat composer.
+- The welcome row groups its items (identity, release, access, tips) with a wider
+  gap between groups, wraps whole groups on narrow panes and no longer repeats
+  the `/ commands · @ files · ! shell` hints that the composer placeholder
+  shows. Panes under 56 columns use a short placeholder and show the hints in
+  the welcome row instead, so the placeholder never wraps and resizes the
+  composer.
+- Model picker rows show prices as `$in·out`; the price column truncated
+  `$0.35 · $0.75` to `$0.35 · $0…`. The preview pane keeps the readable form.
+- Fullscreen TUI streaming re-aligned the copy/selection rows of every visible
+  block from its first row on every frame, so a long answer cost more per token
+  as it grew. Alignments are now kept between frames and only rows whose painted
+  text or copy text changed are redone. Extension theme sync rebuilt the whole
+  theme palette on every UI refresh; it now does so only when the theme changes.
+  Together these cut renderer instructions while streaming a long answer by
+  about a third, and CPU per streamed token by about a fifth.
+- RPC `get_state` counts history messages without projecting the whole history
+  to JSON, and the per-turn context breakdown serializes the history once instead
+  of twice. A resumed 1,000-turn session is ready over RPC about a third sooner
+  and answers its first turn about a quarter faster.
+- `--no-session` print and RPC runs no longer make a workspace marker or session
+  catalog durable inside their throwaway store, removing several fsyncs from
+  startup and exit.
+- Pi session import decodes records straight from the parsed JSON and validates
+  the converted transcript once, cutting a 1,000-turn import by about a third.
+- Rust minor and patch dependency updates, including Tokio 1.53.3, whose
+  deprecated `AsyncFd::with_interest` is replaced by `register_with_interest`;
+  pinned GitHub Actions updates.
+
+### Known limitations
+
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- Closing and reopening a real shared Tern window, and transcript image
+  cropping in a real Ghostty or Kitty window, are attended RC checks.
+- The 0.9.5 and earlier known limitations below still apply.
 
 ## [0.9.5] - 2026-10-18
 

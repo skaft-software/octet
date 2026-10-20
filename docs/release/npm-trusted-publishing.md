@@ -1,6 +1,6 @@
 # npm trusted publishing
 
-**The octet 0.9.5 npm CLI is not published.** It is a planned channel for the
+**The octet 0.9.6 npm CLI is not published.** It is a planned channel for the
 source candidate; native GitHub releases and npm publication need independent
 approval and verification. See [installation](../installation.md) for the
 currently available source-build route. This maintainer reference describes packaging,
@@ -50,7 +50,7 @@ All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time
 snapshot and may still describe npm as unpublished. That historical publication
-does not qualify the 0.9.5 candidate. Do not rewrite or republish immutable 0.8.1
+does not qualify the 0.9.6 candidate. Do not rewrite or republish immutable 0.8.1
 packages to refresh docs; a later native release can carry updated documentation.
 Packing restores files that npm's ignore rules would omit before final checksums
 and provenance are computed; it never substitutes checkout documentation.
@@ -115,13 +115,13 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-The planned CLI is `@skaft/octet@0.9.5`; it is not published yet, and no 0.9.5
+The planned CLI is `@skaft/octet@0.9.6`; it is not published yet, and no 0.9.6
 registry provenance or public-install acceptance is established. See the
 [installation guide](../installation.md) for the source-build route. Only after
 verified publication, use the version-pinned install command:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.5
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.6
 ```
 
 `octet update` offers npm automatically only for a physically validated global

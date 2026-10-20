@@ -5,12 +5,12 @@ one Rust executable with the vendored `quickjs-wasi` 3.6.2 engine, Pi's
 `@earendil-works/pi-codemode` 1.0.0 prelude (MIT) and Octet's discovery
 implementation embedded at compile time. **No Node.js and no Python are
 required at runtime**, and no runtime JavaScript is read from the checkout.
-This API `0.4` bundle pins octet `0.9.5`.
+This API `0.4` bundle pins octet `0.9.6`.
 
 ## Install and enable
 
 This bundle joins `extensions/release-catalog.txt`; its release asset is
-`octet-codemode-0.9.5.tar.gz`. Once that asset is published:
+`octet-codemode-0.9.6.tar.gz`. Once that asset is published:
 
 ```sh
 octet extension install octet-codemode
@@ -138,9 +138,9 @@ round trip crosses the runner pipe plus this adapter's per-call bookkeeping
 lane removes the interpreter cost for callers who opt into it
 (`serve --engine native`: ~2.5 ms warm setup).
 
-Note on the reference: the shipped Node/Pi bundle rejects the 0.9.5 feature
+Note on the reference: the shipped Node/Pi bundle rejects the 0.9.6 feature
 offer (it requires the older key set), so it is measured on the offer it
-accepts, while this extension runs the real 0.9.5 offer. The bundled Pi runtime
+accepts, while this extension runs the real 0.9.6 offer. The bundled Pi runtime
 is the behaviour reference, not a claim of bit-identical ECMAScript output.
 
 ## Persistence, output and limits

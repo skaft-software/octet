@@ -265,6 +265,7 @@ text docs/releases/v0.9.2.md
 text docs/releases/v0.9.3.md
 text docs/releases/v0.9.4.md
 text docs/releases/v0.9.5.md
+text docs/releases/v0.9.6.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md
