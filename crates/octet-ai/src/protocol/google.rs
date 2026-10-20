@@ -104,6 +104,11 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
         match message {
             Message::User(user) => {
                 let mut parts = Vec::new();
+                // functionResponse carries text only. Tool-result media (from
+                // history recorded on a route with native tool-result media,
+                // or a hook replacement) follows the turn's function
+                // responses as `inlineData`, like agent-placed adjacent media.
+                let mut tool_result_media = Vec::new();
                 for part in &user.content {
                     match part {
                         UserPart::Text(text) => parts.push(text_part(text.clone(), None, false)),
@@ -143,9 +148,30 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 include_tool_call_id,
                             ));
                             pending_calls.retain(|pending| pending != &id);
+                            for part in &result.content {
+                                let media = match part {
+                                    ToolResultPart::Media(Media::Image(image))
+                                        if model
+                                            .spec
+                                            .capabilities
+                                            .input_modalities
+                                            .contains(crate::types::Modality::Image) =>
+                                    {
+                                        google_inline_image_part(image)
+                                    }
+                                    ToolResultPart::Media(Media::Audio(audio))
+                                        if model.spec.supports_audio_input(audio.format) =>
+                                    {
+                                        google_inline_audio_part(audio)
+                                    }
+                                    _ => None,
+                                };
+                                tool_result_media.extend(media);
+                            }
                         }
                     }
                 }
+                parts.extend(tool_result_media);
                 push_content(&mut contents, "user", parts);
             }
             Message::Assistant(assistant) => {
