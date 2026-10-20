@@ -25,7 +25,8 @@ not run against octet now can, and the slowest measured paths got faster.
 - Imported Pi sessions, extension-created sessions and sessions with
   cache-warming records were listed as "(unreadable session)" in the resume
   picker and `octet sessions list`, without a title, and were re-read on every
-  listing because unreadable summaries are never cached.
+  listing because unreadable summaries are never cached. Their first listing
+  now reads them once; later listings come from the catalog.
 
 ### Changed
 
@@ -34,16 +35,17 @@ not run against octet now can, and the slowest measured paths got faster.
   as it grew. Alignments are now kept between frames and only rows whose painted
   text or copy text changed are redone. Extension theme sync rebuilt the whole
   theme palette on every UI refresh; it now does so only when the theme changes.
-  Together these cut renderer work while streaming a long answer by about a third.
+  Together these cut renderer instructions while streaming a long answer by
+  about a third, and CPU per streamed token by about a fifth.
 - RPC `get_state` counts history messages without projecting the whole history
   to JSON, and the per-turn context breakdown serializes the history once instead
-  of twice. Resuming a 1,000-turn session over RPC is ready in roughly half the
-  time.
+  of twice. A resumed 1,000-turn session is ready over RPC about a third sooner
+  and answers its first turn about a quarter faster.
 - `--no-session` print and RPC runs no longer make a workspace marker or session
   catalog durable inside their throwaway store, removing several fsyncs from
   startup and exit.
 - Pi session import decodes records straight from the parsed JSON and validates
-  the converted transcript once, cutting large imports by about a fifth.
+  the converted transcript once, cutting a 1,000-turn import by about a third.
 
 ## [0.9.5] - 2026-10-18
 
