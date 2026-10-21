@@ -3717,10 +3717,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 34916,
+    "cache_read": 34641,
     "cache_write_5m": 0,
-    "input": 418992,
-    "output": 837984,
+    "input": 415686,
+    "output": 831372,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -4543,10 +4543,10 @@
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
-    "cache_read": 0,
+    "cache_read": 150000,
     "cache_write_5m": 0,
-    "input": 80000,
-    "output": 450000,
+    "input": 300000,
+    "output": 2400000,
     "reasoning": null
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b:free": {
@@ -5981,7 +5981,7 @@
     "cache_read": 228000,
     "cache_write_5m": 0,
     "input": 238000,
-    "output": 24000000,
+    "output": 16000000,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
