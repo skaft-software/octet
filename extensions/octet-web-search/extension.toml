@@ -14,6 +14,9 @@ command = "extension.py"
 filesystem = "unrestricted"
 process = false
 network = true
+# Windows resolves the home directory (Path.home()) from USERPROFILE; without
+# it the runtime cannot locate its configuration and fails before initialize.
+environment = ["APPDATA", "LOCALAPPDATA", "USERPROFILE"]
 
 [contributes]
 tools = ["web_search", "web_fetch", "web_find"]

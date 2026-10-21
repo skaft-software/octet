@@ -366,7 +366,9 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     descriptor: Optional[int] = None
     try:
         descriptor = os.open(str(temporary), flags, mode)
-        os.fchmod(descriptor, mode)
+        # Windows Python before 3.13 has no fchmod; ACLs govern access there.
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
         view = memoryview(data)
         written = 0
         while written < len(view):
@@ -427,7 +429,8 @@ def load_brave_api_key(path: Optional[Path] = None) -> str:
             raise ConfigError("Brave Search credential must be a regular file")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise ConfigError("Brave Search credential must be owned by the current user")
-        if info.st_mode & 0o077:
+        # POSIX permission bits do not describe Windows ACLs (st_mode is 0o666).
+        if os.name != "nt" and info.st_mode & 0o077:
             raise ConfigError("Brave Search credential must not be accessible by group or other users")
         if info.st_size > MAX_BRAVE_API_KEY_BYTES + 1:
             raise ConfigError("Brave Search credential exceeds 1024 bytes")
@@ -495,7 +498,7 @@ def _bounded_regular_file(path: Path) -> bytes:
             raise ConfigError("web search configuration must be a regular file")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise ConfigError("web search configuration must be owned by the current user")
-        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if os.name != "nt" and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise ConfigError(
                 "web search configuration cannot be group- or world-writable"
             )
