@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+const REAP_TIMEOUT: Duration = Duration::from_secs(3);
 const PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
@@ -83,8 +84,8 @@ fn loopback_provider() -> (u16, mpsc::Receiver<serde_json::Value>) {
 
 struct PtyOctet {
     child: Child,
-    master: File,
-    _slave: File,
+    master: Option<File>,
+    slave: Option<File>,
     root: TempDir,
     parser: vt100::Parser,
 }
@@ -168,7 +169,7 @@ impl PtyOctet {
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
         // SAFETY: the pre-exec callback uses only async-signal-safe Unix calls;
-        // the parent retains the slave until after its child exits.
+        // the parent retains the slave until teardown.
         unsafe {
             command.pre_exec(move || {
                 if libc::setsid() == -1
@@ -181,8 +182,8 @@ impl PtyOctet {
         }
         let mut pty = Self {
             child: command.spawn().expect("spawn offline octet under PTY"),
-            master,
-            _slave: slave,
+            master: Some(master),
+            slave: Some(slave),
             root,
             parser: vt100::Parser::new(30, 120, 0),
         };
@@ -199,14 +200,15 @@ impl PtyOctet {
 
     fn pump(&mut self) {
         let mut buffer = [0; 8192];
+        let master = self.master.as_mut().expect("open PTY master");
         loop {
-            match self.master.read(&mut buffer) {
+            match master.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(read) => {
                     let chunk = &buffer[..read];
                     // Answer the background-colour probe so startup never waits.
                     if chunk.windows(6).any(|window| window == b"\x1b]11;?") {
-                        let _ = self.master.write_all(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+                        let _ = master.write_all(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
                     }
                     self.parser.process(chunk);
                 }
@@ -234,8 +236,9 @@ impl PtyOctet {
     }
 
     fn send(&mut self, input: &[u8]) {
-        self.master.write_all(input).unwrap();
-        self.master.flush().unwrap();
+        let master = self.master.as_mut().expect("open PTY master");
+        master.write_all(input).unwrap();
+        master.flush().unwrap();
     }
 
     /// One terminal drop: the escaped path inside a single bracketed paste.
@@ -264,8 +267,27 @@ impl PtyOctet {
 
 impl Drop for PtyOctet {
     fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!(
+                "attachment-submit-pty screen at failure:\n{}",
+                self.screen()
+            );
+        }
+        // Close the parent-held PTY ends before reaping: on macOS a killed
+        // child with unread terminal output can otherwise never exit, and an
+        // unbounded wait then hides the assertion until the job times out.
+        drop(self.master.take());
+        drop(self.slave.take());
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("attachment-submit-pty: killed child did not reap within {REAP_TIMEOUT:?}");
+        assert!(thread::panicking(), "PTY child cleanup timed out");
     }
 }
 
