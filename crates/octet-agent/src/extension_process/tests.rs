@@ -8242,6 +8242,22 @@ fn python_script_detection_uses_the_extension_or_interpreter_line() {
     ));
 }
 
+#[test]
+fn windows_refusals_name_the_interpreter_a_script_asked_for() {
+    use super::spawn::shebang_interpreter;
+    assert_eq!(shebang_interpreter(b"#!/bin/sh").as_deref(), Some("sh"));
+    assert_eq!(
+        shebang_interpreter(b"#! /bin/bash -eu").as_deref(),
+        Some("bash")
+    );
+    assert_eq!(
+        shebang_interpreter(b"#!/usr/bin/env -S node --experimental").as_deref(),
+        Some("node")
+    );
+    assert_eq!(shebang_interpreter(b"MZ\x90\x00"), None);
+    assert_eq!(shebang_interpreter(b"#!"), None);
+}
+
 #[cfg(unix)]
 pub(super) fn write_executable_script(path: &Path, source: &str) {
     use std::os::unix::fs::PermissionsExt;

@@ -148,6 +148,9 @@ slowest measured paths.
 
 ### Known limitations
 
+- `octet-codemode` has no Windows build; on Windows its POSIX launcher is now
+  refused with "this extension has no Windows build" rather than "not a valid
+  Win32 application".
 - Pi compatibility remains experimental and unstable; the `octet-pi-compat`
   adapter does not ship (#587).
 - Windows remains a preview platform (#572, #588).

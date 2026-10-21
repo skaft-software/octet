@@ -357,8 +357,12 @@ Windows, because Windows cannot execute a script by its `#!` line. octet runs
 the script with the first interpreter found on `PATH`: the `py -3` launcher
 (installed by the python.org installer), then `python3.exe` or `python.exe`,
 with Microsoft Store app-execution aliases tried last. The extension otherwise
-starts, and is supervised, exactly as on other platforms. Dogfood codemode
-bundles instead contain native `bin/codemode.exe`; the Pi adapter uses Node
+starts, and is supervised, exactly as on other platforms.
+
+The official `octet-codemode` bundle has no Windows build in 0.9.6: its
+entrypoint is a POSIX shell script, so enabling it on Windows reports that the
+extension has no Windows build instead of starting. Dogfood codemode bundles
+from CI contain native `bin/codemode.exe`; the Pi adapter uses Node
 22.19+ and its bundled dependencies. Neither installation nor extraction enables
 an extension or authorizes Pi factory execution.
 

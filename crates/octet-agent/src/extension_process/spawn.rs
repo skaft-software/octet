@@ -828,6 +828,20 @@ pub(super) fn is_python_script(path: &Path, first_line: &[u8]) -> bool {
         || (first_line.starts_with(b"#!") && first_line.windows(6).any(|part| part == b"python"))
 }
 
+/// The interpreter a non-Python `#!` line names, for a clear Windows refusal:
+/// CreateProcess would otherwise report "not a valid Win32 application".
+pub(super) fn shebang_interpreter(first_line: &[u8]) -> Option<String> {
+    let line = std::str::from_utf8(first_line.strip_prefix(b"#!")?).ok()?;
+    let mut words = line.split_whitespace();
+    let program = words.next()?;
+    let program = if program.ends_with("/env") {
+        words.find(|word| !word.starts_with('-'))?
+    } else {
+        program
+    };
+    Some(program.rsplit('/').next().unwrap_or(program).to_owned())
+}
+
 /// Native-owned interpreter resolution for staged Python entrypoints.
 async fn python_script_launch(
     entrypoint: &Path,
@@ -841,6 +855,14 @@ async fn python_script_launch(
         first_line.truncate(end);
     }
     if !is_python_script(entrypoint, &first_line) {
+        if cfg!(windows) {
+            if let Some(interpreter) = shebang_interpreter(&first_line) {
+                return Err(std::io::Error::other(format!(
+                    "its entrypoint is a `{interpreter}` script, which Windows cannot run; \
+                     this extension has no Windows build"
+                )));
+            }
+        }
         return Ok(None);
     }
     python_runtime::resolve_script_python(runtime)
