@@ -849,7 +849,7 @@ fn pinned_metadata_enriches_discovered_display_only() {
     // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
     // 393,216 output) instead of the generic 128K/64K placeholder that used to
     // truncate this model. The endpoint still wins whenever it says anything.
-    assert_eq!(model.spec.limits.context_window, 1_000_000);
+    assert_eq!(model.spec.limits.context_window, 1_048_576);
     assert_eq!(model.spec.limits.max_output_tokens, 393_216);
     // The existing sparse tools default is independent of the supplement, and
     // every pinned field except the asserted input modalities and a documented
@@ -980,9 +980,9 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
         // Limits are independent of the reasoning assertion: the endpoint
         // publishes none, so the documented window applies and reasoning still
         // refuses to be invented from the snapshot.
-        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.context_window, Some(1_048_576));
         assert_eq!(model.max_output_tokens, Some(393_216));
-        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 393_216));
+        assert_eq!(deepseek_discovered_limits(&model), (1_048_576, 393_216));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -1386,14 +1386,14 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         // differ and must not be conflated.
         let (context, output, values, default) = if api_name == "deepseek-flash" {
             (
-                1_000_000,
+                1_048_576,
                 393_216,
                 vec!["none", "low", "high", "max"],
                 Some("high"),
             )
         } else {
             (
-                1_000_000,
+                1_048_576,
                 393_216,
                 vec!["none", "high", "xhigh"],
                 Some("high"),
