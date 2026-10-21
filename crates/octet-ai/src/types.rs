@@ -1140,9 +1140,9 @@ impl ModelSpec {
     /// protocol implementation.
     pub fn effective_input_modalities(&self) -> ModalitySet {
         let mut modalities = self.capabilities.input_modalities;
-        if !self
+        if self
             .audio_capabilities()
-            .is_some_and(|capabilities| !capabilities.input_formats.is_empty())
+            .is_none_or(|capabilities| capabilities.input_formats.is_empty())
         {
             modalities = modalities.without(Modality::Audio);
         }
