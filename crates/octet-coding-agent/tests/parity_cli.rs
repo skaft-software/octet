@@ -1025,8 +1025,8 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
     // Columns are provider, model, context, max-out, thinking, images.
     let fields: Vec<&str> = flash_row.split_whitespace().collect();
     assert!(
-        fields.contains(&"1000000"),
-        "the documented 1M context must be reported, not 128K: {flash_row}"
+        fields.contains(&"1048576"),
+        "the documented 1,048,576-token context must be reported, not 128K: {flash_row}"
     );
     assert!(
         fields.contains(&"393216"),
