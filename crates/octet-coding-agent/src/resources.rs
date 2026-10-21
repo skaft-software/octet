@@ -50,7 +50,7 @@ fn read_if_exists(path: &Path) -> anyhow::Result<Option<String>> {
 }
 
 fn prompt_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::presentation::tool_display::human_path(path).replace('\\', "/")
 }
 
 fn absolute_path(path: PathBuf) -> Option<PathBuf> {

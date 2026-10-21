@@ -2237,7 +2237,7 @@ pub(crate) fn status_text_with_metrics(
         pricing,
         context,
         context_window,
-        app.config.workspace.display(),
+        crate::presentation::tool_display::human_path(&app.config.workspace),
         session_id,
         active_branch_title(session),
         if session.has_uncertain_usage() || session.has_unpriced_usage() {

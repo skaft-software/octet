@@ -33,6 +33,18 @@ slowest measured paths.
 
 ### Fixed
 
+- `octet-web-search` starts on Windows. Its manifest forwarded no environment,
+  and Windows Python finds the home directory through `USERPROFILE`, so the
+  extension failed before initializing; saving its settings or Brave key also
+  failed there (no `os.fchmod`, POSIX permission bits). It now declares
+  `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` and skips POSIX-only checks on
+  Windows.
+- `/extensions status` and other one-shot summaries (`/pi status`, `/prompt`,
+  `/update`, extension output) no longer flash and vanish: the release of the
+  Enter that opened them, and terminal focus changes, closed them.
+- Windows workspaces are shown as `C:\project`, not `\\?\C:\project`, in the
+  footer, `/status`, session details, `octet doctor`, prompt templates and the
+  workspace line of the system prompt.
 - Pasting on Windows works in Windows Terminal, WezTerm, Alacritty and Tern. A
   paste arrived as one key per character, so each newline submitted the prompt,
   a large paste never collapsed into a chip, and a dropped file stayed typed

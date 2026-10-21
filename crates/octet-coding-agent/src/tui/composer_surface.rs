@@ -698,7 +698,7 @@ fn footer_workspace(
     let display = home
         .and_then(|home| path.strip_prefix(home).ok())
         .map_or_else(
-            || path.display().to_string(),
+            || crate::presentation::tool_display::human_path(path),
             |relative| {
                 if relative.as_os_str().is_empty() {
                     "~".to_owned()
@@ -1472,10 +1472,14 @@ mod tests {
                     footer_workspace(Path::new(project), Some(home), 80, unicode),
                     "~/projects/octet"
                 );
+                // Outside home the path keeps its spelling, minus the verbatim
+                // prefix (`C:\Users\...`, `\\server\...`).
                 let sibling = home.with_file_name("developer-other").join("octet");
+                let shown = footer_workspace(&sibling, Some(home), 80, unicode);
+                assert!(!shown.starts_with(r"\\?\"), "{shown}");
                 assert_eq!(
-                    footer_workspace(&sibling, Some(home), 80, unicode),
-                    sibling.display().to_string()
+                    shown,
+                    crate::presentation::tool_display::human_path(&sibling)
                 );
             }
         }

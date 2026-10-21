@@ -363,7 +363,7 @@ pub(crate) fn node(shell: &ShellState) -> Option<Node> {
         json!({"k":"Updated", "v":super::super::panel_render::session_age(target.modified, std::time::SystemTime::now())}),
     ];
     if let Some(workspace) = &target.workspace {
-        facts.push(json!({"k":"Workspace", "v":safe(&workspace.display().to_string())}));
+        facts.push(json!({"k":"Workspace", "v":safe(&crate::presentation::tool_display::human_path(workspace))}));
     }
     if let Some(parent) = &target.forked_from_session_id {
         facts.push(json!({"k":"Forked from", "v":safe(parent)}));

@@ -40,7 +40,7 @@ pub(super) fn decorate(
             json!({"k":"File","v":[{"t":safe(&session.path.display().to_string()),"s":"path mono"}]}),
         ];
         if let Some(workspace) = &session.workspace {
-            facts.push(json!({"k":"Workspace","v":[{"t":safe(&workspace.display().to_string()),"s":"path mono"}]}));
+            facts.push(json!({"k":"Workspace","v":[{"t":safe(&crate::presentation::tool_display::human_path(workspace)),"s":"path mono"}]}));
         }
         if let Some(parent) = &session.forked_from_session_id {
             facts.push(json!({"k":"Forked from","v":safe(parent)}));

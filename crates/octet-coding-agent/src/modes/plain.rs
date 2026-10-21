@@ -687,7 +687,9 @@ pub async fn run_plain(boot: Bootstrap, initial_prompt: Option<String>) -> anyho
     writeln!(
         output,
         "Workspace - {}\n",
-        safe_text(&app.config.workspace.display().to_string())
+        safe_text(&crate::presentation::tool_display::human_path(
+            &app.config.workspace
+        ))
     )?;
 
     if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {

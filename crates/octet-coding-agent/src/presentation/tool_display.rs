@@ -280,6 +280,24 @@ fn primary_arg_detail(args: &serde_json::Value) -> Option<String> {
     candidate.map(str::to_owned)
 }
 
+/// Spell a path the way people and models write it. Canonical Windows paths
+/// carry the verbatim prefix (`\\?\C:\...`, `\\?\UNC\server\...`), which is
+/// noise outside the filesystem APIs that need it; ordinary drive and UNC paths
+/// drop it. Comparisons keep using the canonical path itself.
+pub fn human_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return rest.to_owned();
+        }
+    }
+    text
+}
+
 /// Normalize a path only for presentation. Execution retains the raw model
 /// argument, while paths inside the configured workspace lose the host-specific
 /// absolute prefix.
@@ -420,6 +438,22 @@ pub fn concise_line(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_paths_drop_the_windows_verbatim_prefix_only_for_drive_and_unc_paths() {
+        for (canonical, human) in [
+            (r"\\?\C:\WYT-Studio", r"C:\WYT-Studio"),
+            (r"\\?\d:\work\octet", r"d:\work\octet"),
+            (r"\\?\UNC\server\share\project", r"\\server\share\project"),
+            // Device and volume-GUID paths have no plain spelling.
+            (r"\\?\Volume{0f1e}\data", r"\\?\Volume{0f1e}\data"),
+            (r"\\?\pipe", r"\\?\pipe"),
+            ("/home/user/project", "/home/user/project"),
+            (r"C:\already\plain", r"C:\already\plain"),
+        ] {
+            assert_eq!(human_path(Path::new(canonical)), human, "{canonical}");
+        }
+    }
 
     #[test]
     fn shell_tools_share_the_full_command_presentation() {
