@@ -45,13 +45,7 @@ slowest measured paths.
 - Windows workspaces are shown as `C:\project`, not `\\?\C:\project`, in the
   footer, `/status`, session details, `octet doctor`, prompt templates and the
   workspace line of the system prompt.
-- Pasting on Windows works in Windows Terminal, WezTerm, Alacritty and Tern. A
-  paste arrived as one key per character, so each newline submitted the prompt,
-  a large paste never collapsed into a chip, and a dropped file stayed typed
-  text instead of attaching. octet now reads Windows console input as VT input
-  and decodes it with the parser Unix uses, so bracketed pastes, mouse reports
-  and key sequences arrive whole; Shift+Enter and Ctrl+Enter still insert a
-  newline. A console that refuses VT input keeps the previous reader.
+
 - A dropped PDF reached the model as the bare label `[PDF #1]`. Prompt
   composition rebuilt the model message from the transcript text, which keeps
   the chip, and discarded the text that carried the PDF's path, so the model was
@@ -148,6 +142,9 @@ slowest measured paths.
 
 ### Known limitations
 
+- Pasting on Windows still arrives key by key: each newline in a paste submits
+  the prompt and a dropped file stays typed text. Paste one line at a time, or
+  attach files with an `@` mention.
 - `octet-codemode` has no Windows build; on Windows its POSIX launcher is now
   refused with "this extension has no Windows build" rather than "not a valid
   Win32 application".

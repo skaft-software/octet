@@ -116,12 +116,6 @@ impl Decoder {
         self.buffer.as_slice() == b"\x1b"
     }
 
-    /// No sequence (escape, paste) is partly decoded.
-    #[cfg(any(windows, test))]
-    pub(super) fn is_idle(&self) -> bool {
-        self.buffer.is_empty()
-    }
-
     /// Resolve a lone ESC once the raw reader's short continuation lookahead
     /// expires, retaining the exact spelling for input interception.
     pub(super) fn finish_pending_escape(&mut self) -> Option<Packet> {
