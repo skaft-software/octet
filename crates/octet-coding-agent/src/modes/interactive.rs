@@ -1352,6 +1352,10 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         return false;
     }
     if shell.has_overlay() {
+        // Pointer motion is not a dismissal, as in the idle and active loops.
+        if matches!(event, Event::Mouse(_)) {
+            return false;
+        }
         match shell.overlay_input(&event) {
             OverlayInputResult::Consumed => {}
             OverlayInputResult::Closed => shell.clear_error(),

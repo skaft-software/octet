@@ -7743,7 +7743,18 @@ impl InteractiveShell {
     /// Let a shared report retain navigation while preserving the legacy
     /// one-shot overlay dismissal semantics for every other transient overlay.
     pub(crate) fn overlay_input(&mut self, event: &crossterm::event::Event) -> OverlayInputResult {
+        // A key release (the Enter that ran the command arrives as one on
+        // Windows and kitty-protocol terminals) or a focus change is not a
+        // dismissal; treating it as one flashed the overlay and closed it.
+        let not_a_gesture = match event {
+            crossterm::event::Event::Key(key) => !crate::tui::keymap::accepts_key_event(key),
+            crossterm::event::Event::FocusGained | crossterm::event::Event::FocusLost => true,
+            _ => false,
+        };
         let mut state = self.state.borrow_mut();
+        if not_a_gesture && state.overlay.is_some() {
+            return OverlayInputResult::Consumed;
+        }
         if !matches!(state.overlay.as_ref(), Some(ShellOverlay::Report(_))) {
             return OverlayInputResult::Legacy;
         }
@@ -7755,10 +7766,6 @@ impl InteractiveShell {
                     | crossterm::event::KeyCode::PageUp | crossterm::event::KeyCode::PageDown
                     | crossterm::event::KeyCode::Home | crossterm::event::KeyCode::End));
         if !navigation {
-            if matches!(event, crossterm::event::Event::Key(key) if !crate::tui::keymap::accepts_key_event(key))
-            {
-                return OverlayInputResult::Consumed;
-            }
             drop(state);
             self.close_overlay();
             return OverlayInputResult::Closed;
