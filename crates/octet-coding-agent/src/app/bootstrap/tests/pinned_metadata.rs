@@ -849,7 +849,7 @@ fn pinned_metadata_enriches_discovered_display_only() {
     // supplies its documented window (DeepSeek V4.1 Flash is 1M context /
     // 393,216 output) instead of the generic 128K/64K placeholder that used to
     // truncate this model. The endpoint still wins whenever it says anything.
-    assert_eq!(model.spec.limits.context_window, 1_000_000);
+    assert_eq!(model.spec.limits.context_window, 1_048_576);
     assert_eq!(model.spec.limits.max_output_tokens, 393_216);
     // The existing sparse tools default is independent of the supplement, and
     // every pinned field except the asserted input modalities and a documented
@@ -980,9 +980,9 @@ fn pinned_metadata_preserves_endpoint_assertions_and_unknowns() {
         // Limits are independent of the reasoning assertion: the endpoint
         // publishes none, so the documented window applies and reasoning still
         // refuses to be invented from the snapshot.
-        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.context_window, Some(1_048_576));
         assert_eq!(model.max_output_tokens, Some(393_216));
-        assert_eq!(deepseek_discovered_limits(&model), (1_000_000, 393_216));
+        assert_eq!(deepseek_discovered_limits(&model), (1_048_576, 393_216));
     }
     for reasoning in [
         serde_json::json!("yes"),
@@ -1386,14 +1386,14 @@ fn pinned_metadata_production_deepseek_alias_follows_admitted_inventory_and_conf
         // differ and must not be conflated.
         let (context, output, values, default) = if api_name == "deepseek-flash" {
             (
-                1_000_000,
+                1_048_576,
                 393_216,
                 vec!["none", "low", "high", "max"],
                 Some("high"),
             )
         } else {
             (
-                1_000_000,
+                1_048_576,
                 393_216,
                 vec!["none", "high", "xhigh"],
                 Some("high"),
@@ -1854,4 +1854,189 @@ fn pinned_metadata_native_discovery_narrows_exact_choices_without_changing_codec
             }
         }
     }
+}
+
+fn opencode_fixture_catalog(declaration: &ProviderDeclaration) -> ModelCatalog {
+    let mut catalog = ModelCatalog::default();
+    for route in declaration.routes {
+        let id = EndpointId(route.endpoint_id.into());
+        if !catalog.has_endpoint(&id) {
+            catalog
+                .register_endpoint(Endpoint {
+                    id,
+                    base_url: url::Url::parse("https://fixture.invalid/").unwrap(),
+                    auth: Auth::None,
+                    default_headers: Default::default(),
+                    transport: route.transport,
+                    runtime: route.runtime,
+                    timeout: Duration::from_secs(5),
+                })
+                .unwrap();
+        }
+    }
+    catalog
+}
+
+/// OpenCode's inventory publishes identifiers only. Every discovered model
+/// without a hand-written preset takes its thinking levels and input
+/// modalities from the pinned provider record, on its own route's primitive.
+#[test]
+fn opencode_go_id_only_inventory_takes_thinking_and_modalities_from_pinned_records() {
+    use octet_ai::ReasoningEffort as E;
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "opencode-go")
+        .unwrap();
+    let ids = [
+        "glm-5.3",
+        "deepseek-v4.1-flash",
+        "gpt-6-luna",
+        "claude-haiku-5-5",
+        "qwen3.8-max",
+        "mimo-v2.6-pro",
+        "not-a-pinned-model",
+    ];
+    let mut catalog = opencode_fixture_catalog(declaration);
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data": ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()}),
+    )
+    .unwrap();
+    crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+    let resolve = |id: &str| {
+        catalog
+            .resolve(&ModelId(format!("opencode-go/{id}")))
+            .unwrap()
+            .spec
+            .clone()
+    };
+    let values = |spec: &ModelSpec| {
+        spec.capabilities
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.options.as_ref())
+            .map(|options| options.values.clone())
+    };
+
+    let glm = resolve("glm-5.3");
+    assert_eq!(glm.protocol, Protocol::OpenAiChat);
+    let reasoning = glm
+        .capabilities
+        .reasoning
+        .as_ref()
+        .expect("glm-5.3 reasons");
+    assert_eq!(reasoning.control, ReasoningControl::Effort);
+    assert_eq!(
+        (reasoning.min_effort, reasoning.max_effort),
+        (E::Low, E::Max)
+    );
+
+    let deepseek = resolve("deepseek-v4.1-flash");
+    let reasoning = deepseek.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        reasoning.openai_chat_mode,
+        OpenAiChatReasoningMode::DeepSeekThinking
+    );
+    assert_eq!(
+        (reasoning.min_effort, reasoning.max_effort),
+        (E::High, E::High)
+    );
+    assert!(deepseek
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+
+    let gpt = resolve("gpt-6-luna");
+    assert_eq!(gpt.protocol, Protocol::OpenAiResponses);
+    let reasoning = gpt.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        (reasoning.min_effort, reasoning.max_effort),
+        (E::Low, E::Max)
+    );
+
+    let claude = resolve("claude-haiku-5-5");
+    assert_eq!(claude.protocol, Protocol::AnthropicMessages);
+    assert_eq!(
+        values(&claude).unwrap(),
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+
+    let qwen = resolve("qwen3.8-max");
+    assert_eq!(qwen.protocol, Protocol::AnthropicMessages);
+    assert_eq!(
+        qwen.capabilities.reasoning.as_ref().unwrap().control,
+        ReasoningControl::TokenBudget
+    );
+
+    let mimo = resolve("mimo-v2.6-pro");
+    assert!(mimo.capabilities.reasoning.is_some());
+    for modality in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
+        assert!(
+            mimo.capabilities.input_modalities.contains(modality),
+            "{modality:?}"
+        );
+    }
+
+    // No pinned record: nothing is invented.
+    let unknown = resolve("not-a-pinned-model");
+    assert!(unknown.capabilities.reasoning.is_none());
+
+    // Hand-written presets keep their reasoning but never drop a documented
+    // input: MiMo V2.5 accepts audio on the pinned record.
+    let preset = resolve("mimo-v2.5");
+    assert!(preset
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Audio));
+}
+
+/// Guard for the snapshot refresh: every pinned OpenCode and OpenCode Go model
+/// that reasons registers with thinking controls, whether from a hand-written
+/// preset or derived from its record, and never with an invalid configuration.
+#[test]
+fn every_pinned_opencode_reasoning_model_registers_thinking_controls() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../octet-ai/models/models-dev-capabilities.json");
+    let records: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut checked = 0;
+    for provider in ["opencode", "opencode-go"] {
+        let declaration = BUILTIN_PROVIDER_DECLARATIONS
+            .iter()
+            .find(|d| d.id == provider)
+            .unwrap();
+        let ids = records
+            .iter()
+            .filter_map(|(key, record)| {
+                let id = key.strip_prefix(provider)?.strip_prefix('/')?;
+                (record["reasoning"] == true && declaration.route_for_model(id).is_some())
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        let mut catalog = opencode_fixture_catalog(declaration);
+        register_openai_compatible_models_from_response(
+            &mut catalog,
+            declaration,
+            ModelFilter::All,
+            &serde_json::json!({"data": ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()}),
+        )
+        .unwrap();
+        crate::providers::register_static_models(&mut catalog, declaration).unwrap();
+        for id in ids {
+            let model = catalog
+                .resolve(&ModelId(format!("{provider}/{id}")))
+                .unwrap_or_else(|error| panic!("{provider}/{id}: {error}"));
+            assert!(
+                model.spec.capabilities.reasoning.is_some(),
+                "{provider}/{id} reasons but offers only off"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 30,
+        "checked only {checked} pinned OpenCode models"
+    );
 }

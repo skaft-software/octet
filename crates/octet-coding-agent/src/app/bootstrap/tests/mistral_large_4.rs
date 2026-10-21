@@ -237,15 +237,15 @@ fn mistral_large_4_rates_and_display_name_are_pinned_for_every_route() {
 
     // Discovered routes without published rates fall back to the checked-in
     // models.dev projection.
-    for (provider, id) in [
-        ("openrouter", OPENROUTER_LEAF),
-        ("opencode", MISTRAL_LARGE_4),
+    for (provider, id, input, output, cache_read) in [
+        ("openrouter", OPENROUTER_LEAF, 1_360_000, 4_180_000, 140_000),
+        ("opencode", MISTRAL_LARGE_4, 680_000, 2_090_000, 70_000),
     ] {
         let pinned = octet_ai::model_metadata::model_pricing(provider, id)
             .unwrap_or_else(|| panic!("{provider}/{id} pinned rates"));
-        assert_eq!(pinned.input, TokenRate(680_000));
-        assert_eq!(pinned.output, TokenRate(2_090_000));
-        assert_eq!(pinned.cache_read, TokenRate(70_000));
+        assert_eq!(pinned.input, TokenRate(input));
+        assert_eq!(pinned.output, TokenRate(output));
+        assert_eq!(pinned.cache_read, TokenRate(cache_read));
     }
     assert_eq!(
         octet_ai::model_metadata::model_display_name("mistral/mistral-large-4").as_deref(),

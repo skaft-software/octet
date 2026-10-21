@@ -317,7 +317,7 @@ jobs:
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
@@ -350,7 +350,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
       - name: Verify release Rust compiler
@@ -407,7 +407,7 @@ jobs:
             echo "release archive contains a local-only asset" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: octet-core-${{ matrix.target }}
           path: ${{ runner.temp }}/octet-release/*.tar.gz
@@ -459,10 +459,10 @@ jobs:
         run: |
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
           if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
-          # Windows is a preview platform in 0.9.5. This rename-race test hit
+          # Windows is a preview platform in 0.9.6. This rename-race test hit
           # ERROR_SHARING_VIOLATION on the MSVC release runner (it passes in
           # Windows CI); skipped here at the maintainer's direction, tracked
-          # for repair after 0.9.5.
+          # for repair after 0.9.6.
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter --skip secure_fs::tests::windows_publication_stays_bound_to_original_parent
           if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
@@ -498,7 +498,7 @@ jobs:
           $env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --test windows_conpty -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Packaged MSVC ConPTY qualification failed' }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: octet-core-x86_64-pc-windows-msvc
           path: ${{ runner.temp }}/octet-release/*.zip
@@ -526,7 +526,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: octet-core-*
           path: release-assets
@@ -844,7 +844,7 @@ jobs:
         with:
           fetch-depth: 0
           path: source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
@@ -947,7 +947,7 @@ jobs:
             "$VERSION" \
             "$RUNNER_TEMP/npm-assets" \
             --json > "$RUNNER_TEMP/npm-verification.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: octet-npm
           path: ${{ runner.temp }}/npm-assets/*
@@ -970,7 +970,7 @@ jobs:
         with:
           fetch-depth: 0
           path: source
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
@@ -998,7 +998,7 @@ jobs:
             --no-fund \
             "$npm_cli_archive"
           test "$(npm --version)" = "11.5.1"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: octet-npm
           path: npm-assets
@@ -1206,10 +1206,10 @@ jobs:
     steps:
       - name: Check out immutable verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: octet-npm
           path: npm-assets
@@ -1295,7 +1295,7 @@ jobs:
           - os: macos-15
             target: macOS Apple silicon
     steps:
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22.13.0
       - name: Install the exact public launcher without lifecycle scripts

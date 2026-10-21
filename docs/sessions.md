@@ -18,6 +18,8 @@ octet --resume                # pick from a list
 octet --resume SESSION_ID
 octet --fork SESSION_ID       # new session from that head
 octet --fork                  # pick, then fork
+octet --session run.jsonl     # create this file once, resume it afterwards
+octet --session pi.jsonl      # import a Pi v3 session, then resume the copy
 ```
 
 Resume restores the model, reasoning, prompt identity, tool panels, branches and

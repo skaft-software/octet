@@ -669,3 +669,157 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         false
     );
 }
+
+#[test]
+fn inline_pdf_documents_use_each_protocol_s_native_document_shape() {
+    use base64::Engine as _;
+    let pdf = b"%PDF-1.4\n%%EOF\n";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(pdf);
+    let data_url = format!("data:application/pdf;base64,{encoded}");
+    let request = Request {
+        messages: vec![Message::User(UserMessage {
+            content: vec![
+                UserPart::Text("summarize".into()),
+                UserPart::Media(Media::pdf_bytes(
+                    bytes::Bytes::from_static(pdf),
+                    Some("Q3 Report (final).pdf".into()),
+                )),
+            ],
+        })],
+        ..base_request()
+    };
+    let pdf_model = |protocol| {
+        let mut model = make_model(protocol, true, false, false, false);
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.capabilities.input_modalities = spec.capabilities.input_modalities.with(Modality::Pdf);
+        model
+    };
+    let body = |protocol: Protocol| -> serde_json::Value {
+        let model = pdf_model(protocol);
+        let parts = match protocol {
+            Protocol::AnthropicMessages => {
+                crate::protocol::anthropic::build_request(&model, &request)
+            }
+            Protocol::OpenAiResponses => {
+                crate::protocol::openai_responses::build_request(&model, &request)
+            }
+            Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(&model, &request),
+            Protocol::GoogleGenerativeAi => {
+                crate::protocol::google::build_request(&model, &request)
+            }
+            Protocol::BedrockConverse => crate::protocol::bedrock::build_request(&model, &request),
+            other => panic!("{other:?} has no document encoder"),
+        }
+        .unwrap_or_else(|error| panic!("{protocol:?}: {error}"));
+        serde_json::from_slice(&parts.body).unwrap()
+    };
+
+    let anthropic = body(Protocol::AnthropicMessages);
+    assert_eq!(
+        anthropic["messages"][0]["content"][1],
+        serde_json::json!({
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": encoded},
+            "title": "Q3 Report (final).pdf",
+            // The final user block carries the conversation's cache breakpoint,
+            // so a document is cached like any other last block.
+            "cache_control": {"type": "ephemeral"},
+        })
+    );
+
+    let responses = body(Protocol::OpenAiResponses);
+    let content = responses["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["role"] == "user")
+        .unwrap()["content"]
+        .clone();
+    assert_eq!(
+        content[1],
+        serde_json::json!({
+            "type": "input_file",
+            "filename": "Q3 Report (final).pdf",
+            "file_data": data_url,
+        })
+    );
+
+    let chat = body(Protocol::OpenAiChat);
+    let user = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "user")
+        .unwrap();
+    assert_eq!(
+        user["content"][1],
+        serde_json::json!({
+            "type": "file",
+            "file": {"filename": "Q3 Report (final).pdf", "file_data": data_url},
+        })
+    );
+
+    let google = body(Protocol::GoogleGenerativeAi);
+    assert_eq!(
+        google["contents"][0]["parts"][1],
+        serde_json::json!({"inlineData": {"mimeType": "application/pdf", "data": encoded}})
+    );
+
+    let bedrock = body(Protocol::BedrockConverse);
+    assert_eq!(
+        bedrock["messages"][0]["content"][1],
+        serde_json::json!({
+            "document": {
+                "format": "pdf",
+                "name": "Q3 Report (final)",
+                "source": {"bytes": encoded},
+            }
+        })
+    );
+}
+
+#[test]
+fn pdf_documents_are_refused_where_the_model_or_route_cannot_read_them() {
+    let request = Request {
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Media(Media::pdf_bytes(
+                bytes::Bytes::from_static(b"%PDF-1.4"),
+                None,
+            ))],
+        })],
+        ..base_request()
+    };
+    // A vision model whose record does not list PDF input.
+    let model = make_model(Protocol::AnthropicMessages, true, false, false, false);
+    assert!(matches!(
+        crate::protocol::anthropic::build_request(&model, &request),
+        Err(crate::AiError::Unsupported(
+            crate::UnsupportedError::Document
+        ))
+    ));
+    // Routes with no document encoder refuse even a PDF-capable model.
+    for protocol in [Protocol::MistralConversations, Protocol::PiMessages] {
+        let mut model = make_model(protocol, true, false, false, false);
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.capabilities.input_modalities = spec.capabilities.input_modalities.with(Modality::Pdf);
+        let result = match protocol {
+            Protocol::MistralConversations => {
+                crate::protocol::mistral_conversations::build_request(&model, &request)
+            }
+            _ => crate::protocol::pi_messages::build_request(&model, &request),
+        };
+        assert!(
+            matches!(
+                result,
+                Err(crate::AiError::Unsupported(
+                    crate::UnsupportedError::Document
+                ))
+            ),
+            "{protocol:?}"
+        );
+        assert!(!model
+            .spec
+            .effective_input_modalities()
+            .contains(Modality::Pdf));
+    }
+}

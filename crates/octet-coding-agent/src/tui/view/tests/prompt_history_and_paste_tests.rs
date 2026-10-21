@@ -492,6 +492,7 @@ fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads(
                 octet_ai::AudioPayload::Inline(bytes) => bytes.as_ref(),
                 _ => panic!("expected inline audio"),
             },
+            octet_ai::Media::Document(document) => document.data.as_ref(),
         }
     }
     assert_eq!(inline_bytes(media[0]), b"first image bytes");

@@ -1,7 +1,7 @@
 name = "octet-web-search"
-version = "0.9.5"
+version = "0.9.6"
 api_version = "0.4"
-requires_octet = "=0.9.5"
+requires_octet = "=0.9.6"
 description = "Selectable Brave Search or SearXNG web search with bounded public-page retrieval and stable citations"
 
 [entrypoint]
@@ -14,6 +14,9 @@ command = "extension.py"
 filesystem = "unrestricted"
 process = false
 network = true
+# Windows resolves the home directory (Path.home()) from USERPROFILE; without
+# it the runtime cannot locate its configuration and fails before initialize.
+environment = ["APPDATA", "LOCALAPPDATA", "USERPROFILE"]
 
 [contributes]
 tools = ["web_search", "web_fetch", "web_find"]

@@ -230,3 +230,154 @@ fn workspace_index_from(paths: Vec<String>) -> WorkspaceFileIndex {
     sorted.sort();
     WorkspaceFileIndex::from_paths(sorted)
 }
+
+#[test]
+fn prompt_composition_keeps_a_pdf_path_that_the_transcript_shows_as_a_chip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("Quarterly Report.pdf");
+    fs::write(&pdf, b"%PDF-1.4").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger
+        .attach_file_reference(&pdf, ModalitySet::none())
+        .expect("pdf reference");
+    let pasted = ledger.attach_pasted_text("line one\nline two".into());
+
+    let mut composed = compose(format!("read {chip} and {pasted}"), &mut ledger);
+    let path = pdf.to_string_lossy().into_owned();
+    assert_eq!(
+        composed.transcript_text,
+        format!("read {chip} and line one\nline two")
+    );
+    assert_eq!(
+        composed.model_text,
+        format!("read {path} and line one\nline two")
+    );
+
+    // Prompt composition rebuilds the model message from this text; the path
+    // is the only thing that tells the model which file the chip stood for.
+    composed.replace_model_text(composed.model_text.clone());
+    let text: String = composed
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            InputPart::Text(text) => Some(text.as_str()),
+            InputPart::Media(_) => None,
+        })
+        .collect();
+    assert!(text.contains(&path) && !text.contains(&chip), "{text:?}");
+}
+
+#[test]
+fn answer_input_composes_its_directive_not_its_command_display() {
+    let composed = ComposedInput::for_answer("/answer now".into(), "Answer now.".into());
+    assert_eq!(composed.transcript_text, "/answer now");
+    assert_eq!(composed.model_text, "Answer now.");
+}
+
+#[test]
+fn follow_up_batches_join_model_text_with_their_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("brief.pdf");
+    fs::write(&pdf, b"%PDF-1.4").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger
+        .attach_file_reference(&pdf, ModalitySet::none())
+        .expect("pdf reference");
+    let mut first = ComposedInput::from_text("first".into());
+    first.append_follow_up(compose(format!("then {chip}"), &mut ledger));
+    assert_eq!(
+        first.model_text,
+        format!("first\n\nthen {}", pdf.to_string_lossy())
+    );
+    assert_eq!(first.transcript_text, format!("first\n\nthen {chip}"));
+}
+
+fn pdf_modalities() -> ModalitySet {
+    all_modalities().with(Modality::Pdf)
+}
+
+#[test]
+fn a_pdf_dropped_on_a_pdf_model_is_sent_as_its_document_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("Quarterly Report.pdf");
+    fs::write(&pdf, b"%PDF-1.7\nbody\n%%EOF\n").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+    let input = pdf.display().to_string().replace(' ', "\\ ");
+    let replaced = ledger
+        .attach_explicit_paths(
+            &input,
+            pdf_modalities(),
+            octet_ai::Protocol::OpenAiChat.audio_input_formats(),
+        )
+        .expect("path admission")
+        .expect("supported path payload");
+    assert_eq!(replaced, "[PDF #1]");
+
+    let composed = compose(format!("read {replaced}"), &mut ledger);
+    let path = pdf.to_string_lossy().into_owned();
+    // The chip stays readable; the annotation names the file next to its bytes.
+    assert_eq!(composed.transcript_text, "read [PDF #1]");
+    let InputPart::Text(annotation) = &composed.parts[1] else {
+        panic!("annotation precedes the document: {:?}", composed.parts);
+    };
+    assert_eq!(annotation, &format!("[attached PDF: {path}]"));
+    let InputPart::Media(octet_ai::Media::Document(document)) = &composed.parts[2] else {
+        panic!("document part: {:?}", composed.parts);
+    };
+    assert_eq!(&document.data[..], b"%PDF-1.7\nbody\n%%EOF\n");
+    assert_eq!(document.name.as_deref(), Some("Quarterly Report.pdf"));
+    assert_eq!(document.media_type, mime::APPLICATION_PDF);
+
+    // Prompt composition keeps the document and its annotation.
+    let mut replaced = composed.clone();
+    replaced.replace_model_text(composed.model_text.clone());
+    assert!(replaced
+        .parts
+        .iter()
+        .any(|part| matches!(part, InputPart::Media(octet_ai::Media::Document(_)))));
+    assert!(replaced.parts.iter().any(
+        |part| matches!(part, InputPart::Text(text) if text == &format!("[attached PDF: {path}]"))
+    ));
+}
+
+#[test]
+fn pdf_mentions_follow_the_model_and_refuse_impostors_and_oversized_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pdf = temp.path().join("brief.pdf");
+    fs::write(&pdf, b"%PDF-1.4").expect("write pdf");
+    let mut ledger = AttachmentLedger::default();
+
+    ledger
+        .attach_file_reference(&pdf, pdf_modalities())
+        .expect("document");
+    ledger
+        .attach_file_reference(&pdf, all_modalities())
+        .expect("path reference");
+    assert!(matches!(
+        ledger.entries[0].payload,
+        AttachmentPayload::Media {
+            media: octet_ai::Media::Document(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        ledger.entries[1].payload,
+        AttachmentPayload::FileReference(_)
+    ));
+
+    let impostor = temp.path().join("notes.pdf");
+    fs::write(&impostor, b"plain text").expect("write impostor");
+    assert!(matches!(
+        ledger.attach_file_reference(&impostor, pdf_modalities()),
+        Err(AttachError::NotAPdf)
+    ));
+
+    let large = temp.path().join("large.pdf");
+    let file = fs::File::create(&large).expect("create large pdf");
+    file.set_len(MAX_PDF_BYTES + 1).expect("size large pdf");
+    assert!(matches!(
+        ledger.attach_file_reference(&large, pdf_modalities()),
+        Err(AttachError::TooLarge { limit_bytes }) if limit_bytes == MAX_PDF_BYTES
+    ));
+    assert_eq!(ledger.entries.len(), 2, "refusals leave no partial chips");
+}

@@ -1,0 +1,7 @@
+# cargo-audit reads this file; cargo-deny reads deny.toml. Keep their
+# advisory exceptions identical, with the rationale recorded in deny.toml.
+[advisories]
+ignore = [
+  # webpki-roots 0.26.11 compatibility shim only; see deny.toml.
+  "RUSTSEC-2026-0381",
+]

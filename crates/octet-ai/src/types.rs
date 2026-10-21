@@ -432,6 +432,7 @@ impl ModalitySet {
         let bit = match m {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
+            Modality::Pdf => 1 << 2,
         };
         Self {
             bits: self.bits | bit,
@@ -443,6 +444,7 @@ impl ModalitySet {
         let bit = match m {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
+            Modality::Pdf => 1 << 2,
         };
         Self {
             bits: self.bits & !bit,
@@ -454,12 +456,13 @@ impl ModalitySet {
         let bit = match m {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
+            Modality::Pdf => 1 << 2,
         };
         (self.bits & bit) != 0
     }
 
     pub(crate) fn is_valid(self) -> bool {
-        self.bits & !0b11 == 0
+        self.bits & !0b111 == 0
     }
 }
 
@@ -471,6 +474,8 @@ pub enum Modality {
     Image,
     /// Audio input/output.
     Audio,
+    /// PDF document input, sent as the document's bytes.
+    Pdf,
 }
 
 /// Host-side collaboration protocol advertised for a model.
@@ -833,9 +838,24 @@ pub enum Media {
     Image(ImageMedia),
     /// Audio content.
     Audio(AudioMedia),
+    /// Document content (PDF input).
+    Document(DocumentMedia),
 }
 
 impl Media {
+    /// Creates PDF document media from inline bytes.
+    ///
+    /// `name` is the file name providers show the model; the protocols that
+    /// require one (OpenAI file inputs, Bedrock documents) fall back to a
+    /// neutral name when it is absent.
+    pub fn pdf_bytes(data: bytes::Bytes, name: Option<String>) -> Self {
+        Self::Document(DocumentMedia {
+            data,
+            media_type: mime::APPLICATION_PDF,
+            name,
+        })
+    }
+
     /// Creates an image media from a URL.
     pub fn image_url(url: url::Url, media_type: Option<mime::Mime>) -> Self {
         Self::Image(ImageMedia {
@@ -871,6 +891,63 @@ impl Media {
             transcript: None,
         })
     }
+}
+
+/// Document media container. Only `application/pdf` is constructed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DocumentMedia {
+    /// Inline document bytes.
+    #[serde(with = "base64_bytes")]
+    pub data: bytes::Bytes,
+    /// MIME type of the document.
+    #[serde(with = "mime_string")]
+    pub media_type: mime::Mime,
+    /// File name shown to the model, without any directory.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl DocumentMedia {
+    /// The file name to send where a protocol requires one.
+    pub fn file_name(&self) -> &str {
+        self.name.as_deref().unwrap_or("document.pdf")
+    }
+
+    /// A cheap page-count estimate for budgeting, never for validation.
+    ///
+    /// Counts uncompressed `/Type /Page` objects (not `/Pages`). PDFs that keep
+    /// their page tree in compressed object streams show none, so those fall
+    /// back to roughly 50 KiB per page.
+    pub fn estimated_pages(&self) -> u64 {
+        let data = &self.data[..];
+        let mut pages = 0u64;
+        let mut at = 0;
+        while let Some(found) = find(&data[at..], b"/Type") {
+            let mut cursor = at + found + b"/Type".len();
+            while data.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            if data[cursor..].starts_with(b"/Page")
+                && !data
+                    .get(cursor + b"/Page".len())
+                    .is_some_and(u8::is_ascii_alphanumeric)
+            {
+                pages += 1;
+            }
+            at = cursor;
+        }
+        if pages == 0 {
+            (data.len() as u64).div_ceil(50 * 1024).max(1)
+        } else {
+            pages
+        }
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Image media container.
@@ -988,6 +1065,19 @@ const OPENAI_CHAT_AUDIO_OUTPUT_FORMATS: &[AudioFormat] = &[
 ];
 
 impl Protocol {
+    /// Whether this wire codec encodes inline PDF documents in user content.
+    /// Model capability metadata must also list PDF input.
+    pub fn supports_document_input(self) -> bool {
+        matches!(
+            self,
+            Protocol::AnthropicMessages
+                | Protocol::OpenAiResponses
+                | Protocol::OpenAiChat
+                | Protocol::GoogleGenerativeAi
+                | Protocol::BedrockConverse
+        )
+    }
+
     /// Inline audio formats implemented by this wire codec. Model capability
     /// metadata must also opt in before any of these formats can be used.
     pub fn audio_input_formats(self) -> &'static [AudioFormat] {
@@ -1049,14 +1139,17 @@ impl ModelSpec {
     /// Returns the input modalities usable through both the model and selected
     /// protocol implementation.
     pub fn effective_input_modalities(&self) -> ModalitySet {
+        let mut modalities = self.capabilities.input_modalities;
         if self
             .audio_capabilities()
-            .is_some_and(|capabilities| !capabilities.input_formats.is_empty())
+            .is_none_or(|capabilities| capabilities.input_formats.is_empty())
         {
-            self.capabilities.input_modalities
-        } else {
-            self.capabilities.input_modalities.without(Modality::Audio)
+            modalities = modalities.without(Modality::Audio);
         }
+        if !self.protocol.supports_document_input() {
+            modalities = modalities.without(Modality::Pdf);
+        }
+        modalities
     }
 
     /// Returns the output modalities usable through both the model and selected
@@ -1409,6 +1502,26 @@ mod optional_mime {
                 .map_err(serde::de::Error::custom),
             None => Ok(None),
         }
+    }
+}
+
+mod mime_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(mime: &mime::Mime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(mime.as_ref())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<mime::Mime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        mime::Mime::from_str(&value).map_err(serde::de::Error::custom)
     }
 }
 

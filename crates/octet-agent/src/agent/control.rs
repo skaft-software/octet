@@ -199,6 +199,10 @@ pub(super) fn control_input_bytes(input: &UserInput) -> usize {
                         };
                         source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
                     }
+                    InputPart::Media(Media::Document(document)) => document
+                        .data
+                        .len()
+                        .saturating_add(document.name.as_ref().map_or(0, String::len)),
                 };
                 total.saturating_add(bytes)
             },

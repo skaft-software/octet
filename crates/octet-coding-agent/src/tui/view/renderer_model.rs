@@ -372,6 +372,8 @@ pub(super) struct RenderOwner {
     pub(super) geometry_fence: Option<super::renderer_geometry::GeometryFence>,
     root: SharedSequence<Arc<PublishedBlock>>,
     pub(super) revision: u64,
+    /// Copy-row alignments of visible blocks, reused across frames.
+    pub(super) copy_rows: super::transcript_selection::CopyRowsMemo,
 }
 impl RenderOwner {
     pub(super) fn new(theme: crate::tui::theme::OctetTheme) -> Self {
@@ -380,6 +382,7 @@ impl RenderOwner {
             geometry_fence: None,
             root: SharedSequence::default(),
             revision: 0,
+            copy_rows: Default::default(),
         }
     }
 

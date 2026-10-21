@@ -435,3 +435,50 @@ fn review_regression_google_metadata_debug_is_opaque_but_replay_is_exact() {
     let replay: AssistantMessage = serde_json::from_str(&encoded).unwrap();
     assert_eq!(serde_json::to_string(&replay).unwrap(), encoded);
 }
+
+#[test]
+fn pdf_documents_round_trip_through_session_serialization() {
+    let document = Media::pdf_bytes(
+        bytes::Bytes::from_static(b"%PDF-1.4\n%%EOF\n"),
+        Some("brief.pdf".into()),
+    );
+    let json = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"Document": {
+            "data": "JVBERi0xLjQKJSVFT0YK",
+            "media_type": "application/pdf",
+            "name": "brief.pdf",
+        }})
+    );
+    let Media::Document(back) = serde_json::from_value::<Media>(json).unwrap() else {
+        panic!("document")
+    };
+    assert_eq!(&back.data[..], b"%PDF-1.4\n%%EOF\n");
+    assert_eq!(back.media_type, mime::APPLICATION_PDF);
+    assert_eq!(back.file_name(), "brief.pdf");
+}
+
+#[test]
+fn pdf_page_estimates_count_page_objects_or_fall_back_to_size() {
+    let pages = |data: &'static [u8]| {
+        let Media::Document(document) = Media::pdf_bytes(bytes::Bytes::from_static(data), None)
+        else {
+            unreachable!()
+        };
+        document.estimated_pages()
+    };
+    assert_eq!(
+        pages(b"%PDF-1.4 <</Type /Pages /Kids [1 0 R 2 0 R]>> <</Type /Page>> <</Type/Page>>"),
+        2
+    );
+    assert_eq!(pages(b"%PDF-1.5 compressed object streams only"), 1);
+}
+
+#[test]
+fn modality_sets_hold_pdf_input_independently() {
+    let set = ModalitySet::none().with(Modality::Pdf);
+    assert!(set.contains(Modality::Pdf) && !set.contains(Modality::Image));
+    assert!(set.is_valid());
+    assert!(!set.without(Modality::Pdf).contains(Modality::Pdf));
+}

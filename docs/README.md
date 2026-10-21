@@ -3,7 +3,7 @@
 octet is a fast, small coding host for cloud and local models. Extensions add
 tools and bounded, host-shaped integrations. They don't promise Pi execution
 parity or an everything-as-extension platform. These docs describe the octet
-**0.9.5** release. [Installation](installation.md) separates source builds from
+**0.9.6** release. [Installation](installation.md) separates source builds from
 version-pinned publication channels and their recorded qualification.
 
 ## Getting started
@@ -22,7 +22,7 @@ version-pinned publication channels and their recorded qualification.
 - [Tools](tools.md)
 - [Models, providers and reasoning](providers.md)
 - [Inference measurements](inference-metrics.md)
-- [Images and audio](media.md)
+- [Images, audio and PDFs](media.md)
 - [Sessions and goals](sessions.md)
 - [Session file format](session-format.md)
 - [Context and compaction](context.md)
@@ -49,7 +49,7 @@ version-pinned publication channels and their recorded qualification.
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Pi extension adapter (source-only; not shipped in v0.9.5)](pi-compatibility.md)
+- [Pi extension adapter (source-only; not shipped in v0.9.6)](pi-compatibility.md)
 - [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 
 ## Development
@@ -74,7 +74,7 @@ version-pinned publication channels and their recorded qualification.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- Release notes: [0.9.5](releases/v0.9.5.md), [0.9.4](releases/v0.9.4.md), [0.9.3](releases/v0.9.3.md), [0.9.2](releases/v0.9.2.md), [0.9.1](releases/v0.9.1.md), [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
+- Release notes: [0.9.6](releases/v0.9.6.md), [0.9.5](releases/v0.9.5.md), [0.9.4](releases/v0.9.4.md), [0.9.3](releases/v0.9.3.md), [0.9.2](releases/v0.9.2.md), [0.9.1](releases/v0.9.1.md), [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
   [0.8.0](releases/v0.8.0.md), [0.7.6 hotfix](releases/v0.7.6.md),
   [0.7.5](releases/v0.7.5.md), [0.7.4 and its documentation
   correction](releases/v0.7.4.md), [0.7.3](releases/v0.7.3.md),

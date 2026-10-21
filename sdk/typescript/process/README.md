@@ -1,6 +1,6 @@
 # TypeScript / JavaScript process authoring
 
-`@skaft-software/octet-extension-sdk` is the dependency-free **0.9.5 source
+`@skaft-software/octet-extension-sdk` is the dependency-free **0.9.6 source
 package** for current extension **API `0.4`**. It is a separate local package,
 not a rename of the live generated canonical API `0.3` bindings one directory
 above. No npm publication or installed-host release qualification is implied.
@@ -17,7 +17,7 @@ Install from a reviewed checkout into your extension package:
 
 ```console
 npm pack /absolute/path/to/octet/sdk/typescript/process --pack-destination . --ignore-scripts
-npm install --offline --ignore-scripts ./skaft-software-octet-extension-sdk-0.9.5.tgz
+npm install --offline --ignore-scripts ./skaft-software-octet-extension-sdk-0.9.6.tgz
 ```
 
 Give the package `"type": "module"`. Save `extension.ts` (or the same code without

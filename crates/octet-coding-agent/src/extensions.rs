@@ -445,6 +445,8 @@ pub struct ExecutableExtensions {
     /// or active session changes. Read-only context snapshots answer from here
     /// so a shared process never discloses a stale per-session projection.
     host_state: Mutex<ExtensionHostState>,
+    /// Inputs of the palette last published as `host_state.theme`.
+    frontend_theme_key: Mutex<Option<crate::tui::view::ExtensionPaletteKey>>,
     /// Host working directory for the active session, captured at discovery.
     workspace: PathBuf,
     resource_owner: Option<String>,
@@ -540,6 +542,7 @@ impl Default for ExecutableExtensions {
             session_lifecycle_receiver: None,
             session_id: None,
             host_state: Mutex::new(ExtensionHostState::default()),
+            frontend_theme_key: Mutex::new(None),
             workspace: PathBuf::new(),
             resource_owner: None,
             session_started_at: Instant::now(),

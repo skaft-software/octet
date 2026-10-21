@@ -553,6 +553,28 @@ fn ordinary_report_contract_keeps_navigation_and_lifecycle_semantic() {
     );
     shell.close_overlay();
 
+    // `/extensions status` and every other one-shot overlay must survive the
+    // release of the Enter that opened it, and a focus change.
+    shell.show_overlay_text("extensions status".into());
+    for event in [
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Release,
+        )),
+        Event::FocusLost,
+        Event::FocusGained,
+    ] {
+        assert_eq!(shell.overlay_input(&event), OverlayInputResult::Consumed);
+        assert!(shell.has_overlay(), "{event:?} dismissed the overlay");
+    }
+    assert_eq!(
+        shell.overlay_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+        OverlayInputResult::Legacy,
+        "a real key still dismisses it"
+    );
+    shell.close_overlay();
+
     let mut lifecycle =
         OrdinarySurfaceMetadata::with_purpose("Cache", "Review session cache accounting");
     lifecycle.lifecycle = OrdinarySurfaceLifecycle::loading("collecting cache entries");

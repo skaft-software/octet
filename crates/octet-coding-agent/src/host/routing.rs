@@ -100,6 +100,9 @@ pub(crate) async fn emit_models(emitter: &mut Emitter<'_>, offline: bool) -> any
             if effective.contains(Modality::Audio) {
                 input_modalities.push("audio");
             }
+            if effective.contains(Modality::Pdf) {
+                input_modalities.push("pdf");
+            }
             serde_json::json!({
                 "id": model.id.0,
                 "provider": model.endpoint.0,

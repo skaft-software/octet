@@ -804,3 +804,35 @@ async fn invalid_args_are_a_tool_error() {
         .unwrap_err();
     assert!(err.message.contains("invalid arguments"), "{err}");
 }
+
+#[tokio::test]
+async fn pdf_reads_explain_how_to_reach_the_document_instead_of_decoding_it() {
+    let f = fixture();
+    std::fs::write(
+        f.workspace.join("report.pdf"),
+        b"%PDF-1.7\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n\x78\x9c\xff\x00\nendstream\n",
+    )
+    .unwrap();
+    let error = ReadTool
+        .execute(json!({"path": "report.pdf"}), &f.ctx())
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.contains("report.pdf: is a PDF"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("pdftotext"), "{}", error.message);
+
+    // Text that merely mentions the header stays ordinary text.
+    std::fs::write(f.workspace.join("notes.md"), "Files start with %PDF-1.7.\n").unwrap();
+    let notes = ReadTool
+        .execute(json!({"path": "notes.md"}), &f.ctx())
+        .await
+        .unwrap();
+    assert!(
+        notes.text.contains("1: Files start with %PDF-1.7."),
+        "{}",
+        notes.text
+    );
+}

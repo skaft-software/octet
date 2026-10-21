@@ -160,6 +160,7 @@ octet --continue  # -c also continues
 octet -r "prompt after choosing a session"  # boolean resume picker
 octet --resume [SESSION_ID]
 octet --fork [ID|PATH]
+octet --session FILE.jsonl
 octet --session-dir PATH
 
 octet sessions list [--query TEXT]
@@ -178,7 +179,11 @@ octet doctor
 `--fork` opens a picker. `--continue`, `--resume` and `--fork` can't be
 combined. Fork creates a new session before startup. Pi-style `-r` is a boolean
 picker flag and does not consume the following prompt; native `--resume ID`
-retains explicit-ID selection.
+retains explicit-ID selection. `--session FILE.jsonl` addresses a session by its
+file: the first run creates it there (and any missing parent directories) and
+later runs resume it, outside the workspace store. A Pi v3 session file is never
+modified: each launch imports it as a new session in this workspace (as `octet
+sessions import` does) and resumes that copy.
 
 `list` and `inspect` are read-only. `delete` moves to a recoverable trash.
 `repair` backs up first, then removes only a torn final append. `export` redacts
@@ -277,8 +282,8 @@ octet extension list
 ```
 
 The five executable bundles are pinned exactly to the
-running host: the published 0.9.5 bundles require `=0.9.5`. See the
-[0.9.5 release notes](releases/v0.9.5.md) and the version-pinned GitHub release
+running host: the published 0.9.6 bundles require `=0.9.6`. See the
+[0.9.6 release notes](releases/v0.9.6.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
 match the running host version:
 

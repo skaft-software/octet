@@ -124,6 +124,92 @@ fn unsupported_google_audio_is_rejected_or_diagnosed_and_omitted() {
     }
 }
 
+#[test]
+fn tool_result_media_follows_the_function_responses_as_inline_data() {
+    // History recorded on a route with native tool-result media (Claude,
+    // Responses) or a hook replacement can put an image or audio clip inside
+    // a tool result. functionResponse carries text only, so the codec sends
+    // the bytes after the turn's function responses instead of failing the
+    // request with "Media in tool results is unsupported".
+    use crate::types::{AudioFormat, Modality};
+    let mut model = model_with_api_name("gemini-4-argon-contributor");
+    std::sync::Arc::make_mut(&mut model.spec)
+        .capabilities
+        .input_modalities = ModalitySet::none()
+        .with(Modality::Image)
+        .with(Modality::Audio);
+    let call = |id: &str| {
+        AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
+            id: ToolCallId(id.into()),
+            name: "read".into(),
+            arguments_json: "{}".into(),
+            argument_error: None,
+        })
+    };
+    let result = |id: &str, media: Media| {
+        UserPart::ToolResult(ToolResult {
+            tool_call_id: ToolCallId(id.into()),
+            content: vec![
+                ToolResultPart::Text(format!("read {id}")),
+                ToolResultPart::Media(media),
+            ],
+            is_error: false,
+            added_tool_names: None,
+        })
+    };
+    let request = Request {
+        messages: vec![
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("look and listen".into())],
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![call("call_1"), call("call_2")],
+                model: ModelId("claude-test".into()),
+                protocol: Protocol::AnthropicMessages,
+            }),
+            Message::User(UserMessage {
+                content: vec![
+                    result(
+                        "call_1",
+                        Media::image_bytes(bytes::Bytes::from_static(b"png"), mime::IMAGE_PNG),
+                    ),
+                    result(
+                        "call_2",
+                        Media::audio_bytes(bytes::Bytes::from_static(b"sound"), AudioFormat::Mp3),
+                    ),
+                ],
+            }),
+        ],
+        ..base_request()
+    };
+    let parts = build_request(&model, &request).unwrap();
+    assert!(parts.diagnostics.is_empty(), "{:?}", parts.diagnostics);
+    let body: Value = serde_json::from_slice(&parts.body).unwrap();
+    let turn = &body["contents"][2]["parts"];
+    assert_eq!(
+        turn[0]["functionResponse"]["response"]["output"],
+        "read call_1"
+    );
+    assert_eq!(
+        turn[1]["functionResponse"]["response"]["output"],
+        "read call_2"
+    );
+    assert_eq!(
+        turn[2],
+        serde_json::json!({"inlineData": {"mimeType": "image/png", "data": "cG5n"}})
+    );
+    assert_eq!(
+        turn[3],
+        serde_json::json!({"inlineData": {"mimeType": "audio/mp3", "data": "c291bmQ="}})
+    );
+    assert_eq!(turn.as_array().unwrap().len(), 4);
+
+    // A route without the matching input modality still refuses in Strict.
+    let text_only = model_with_api_name("gemini-4-argon-contributor");
+    assert!(build_request(&text_only, &request).is_err());
+}
+
 fn model() -> Model {
     model_with_api_name("gemini-2.5-flash")
 }

@@ -425,3 +425,59 @@ fn existing_tool_result_prevents_synthetic_result() {
     );
     assert_eq!(transformed.len(), 2);
 }
+
+#[test]
+fn history_pdfs_replay_only_to_models_that_read_them() {
+    let pdf = Media::pdf_bytes(
+        bytes::Bytes::from_static(b"%PDF-1.4"),
+        Some("brief.pdf".into()),
+    );
+    let messages = vec![
+        Message::User(UserMessage {
+            content: vec![UserPart::Text("read".into()), UserPart::Media(pdf)],
+        }),
+        Message::Assistant(AssistantMessage {
+            model: ModelId("source".to_string()),
+            protocol: Protocol::AnthropicMessages,
+            content: vec![AssistantPart::Text("read it".to_string())],
+        }),
+    ];
+    let mut reader = model("reader", Protocol::OpenAiResponses, true);
+    let spec = Arc::make_mut(&mut reader.spec);
+    spec.capabilities.input_modalities = spec.capabilities.input_modalities.with(Modality::Pdf);
+
+    for transformed in [
+        transform_request_messages(&messages, &reader),
+        transform_request_messages_owned(messages.clone(), &reader),
+    ] {
+        let Message::User(user) = &transformed[0] else {
+            panic!("expected user")
+        };
+        assert!(matches!(
+            &user.content[1],
+            UserPart::Media(Media::Document(_))
+        ));
+    }
+    // A vision model without PDF input, and a PDF model on a route with no
+    // document encoder, both see a placeholder naming the omitted file.
+    // (Mistral's codec diagnoses or refuses unsupported media itself.)
+    let mut pi = model("pi", Protocol::PiMessages, true);
+    let spec = Arc::make_mut(&mut pi.spec);
+    spec.capabilities.input_modalities = spec.capabilities.input_modalities.with(Modality::Pdf);
+    for target in [model("vision", Protocol::OpenAiChat, true), pi] {
+        for transformed in [
+            transform_request_messages(&messages, &target),
+            transform_request_messages_owned(messages.clone(), &target),
+        ] {
+            let Message::User(user) = &transformed[0] else {
+                panic!("expected user")
+            };
+            assert!(
+                matches!(&user.content[1], UserPart::Text(text)
+                    if text == "(PDF brief.pdf omitted: model does not support PDF input)"),
+                "{:?}",
+                user.content[1]
+            );
+        }
+    }
+}

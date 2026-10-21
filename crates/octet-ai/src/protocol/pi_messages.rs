@@ -260,6 +260,16 @@ fn encode_context(
                         UserPart::Media(Media::Image(image)) => {
                             content.push(image_content(image)?);
                         }
+                        UserPart::Media(Media::Document(_)) => {
+                            if lossy {
+                                diagnostics.push(Diagnostic {
+                                    code: "dropped_document".to_owned(),
+                                    message: "Pi-messages: PDF input is unsupported; omitted in Lossy mode".to_owned(),
+                                });
+                            } else {
+                                return Err(UnsupportedError::Document.into());
+                            }
+                        }
                         UserPart::Media(Media::Audio(_)) => {
                             if lossy {
                                 diagnostics.push(Diagnostic {
@@ -284,7 +294,7 @@ fn encode_context(
                                     ToolResultPart::Media(Media::Image(image)) => {
                                         blocks.push(image_content(image)?);
                                     }
-                                    ToolResultPart::Media(Media::Audio(_)) => {
+                                    ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {
                                         if lossy {
                                             diagnostics.push(Diagnostic {
                                                 code: "dropped_tool_result_media".to_owned(),

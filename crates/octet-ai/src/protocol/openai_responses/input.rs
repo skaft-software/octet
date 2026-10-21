@@ -265,6 +265,23 @@ pub(super) fn map_user_input(
                 });
             }
             UserPart::Media(Media::Audio(_)) => {}
+            UserPart::Media(Media::Document(document)) => {
+                if !model
+                    .spec
+                    .capabilities
+                    .input_modalities
+                    .contains(crate::types::Modality::Pdf)
+                {
+                    continue;
+                }
+                content.push(ResponsesContentPart::InputFile {
+                    filename: document.file_name().to_owned(),
+                    file_data: WireImageUrl::Inline {
+                        media_type: document.media_type.to_string(),
+                        data: document.data.clone(),
+                    },
+                });
+            }
             UserPart::ToolResult(result) => {
                 if synthetic_tool_results.contains(&result.tool_call_id.0) {
                     continue;
@@ -309,7 +326,7 @@ pub(super) fn map_user_input(
                                 }
                             }
                         },
-                        ToolResultPart::Media(Media::Audio(_)) => {}
+                        ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {}
                     }
                 }
                 // Preserve canonical order: emit buffered user content before

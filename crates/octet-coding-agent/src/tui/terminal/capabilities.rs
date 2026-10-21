@@ -187,6 +187,9 @@ impl TerminalCapabilities {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
+        let truecolor_announced = probe.colorterm.as_deref().is_some_and(|value| {
+            value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
+        });
         let (known, console_input, windows_terminal, windows_default_term) = match probe.windows {
             None => (known_terminal(&term), true, false, false),
             Some(console) => {
@@ -196,10 +199,20 @@ impl TerminalCapabilities {
                 // look like terminals but cannot be driven as a console.
                 let default_term = term.is_empty();
                 let known = console.output_vt && (default_term || known_terminal(&term));
+                // Emulators hosting ConPTY announce themselves the way Windows
+                // Terminal does with WT_SESSION: Alacritty and WezTerm export
+                // COLORTERM, and WezTerm, Tern, VS Code and mintty set
+                // TERM_PROGRAM. A bare conhost window exports neither.
+                let emulator = console.windows_terminal
+                    || truecolor_announced
+                    || probe
+                        .term_program
+                        .as_deref()
+                        .is_some_and(|program| !program.is_empty());
                 (
                     known,
                     console.input_console,
-                    known && console.windows_terminal,
+                    known && emulator,
                     known && default_term,
                 )
             }
@@ -207,9 +220,10 @@ impl TerminalCapabilities {
         let interactive =
             probe.stdin_tty && probe.stdout_tty && known && console_input && !probe.explicit_plain;
         // Windows console output is written as UTF-16, so the locale does not
-        // decide encoding there. Windows Terminal renders the renderer's glyph
-        // set; a plain conhost font may not, so it keeps the ASCII profile
-        // unless the shell exported a UTF-8 locale.
+        // decide encoding there. Windows Terminal and the other emulators that
+        // announce themselves render the renderer's glyph set; a plain conhost
+        // font may not, so it keeps the ASCII profile unless the shell exported
+        // a UTF-8 locale.
         let unicode = !probe.explicit_plain
             && known
             && (windows_terminal
@@ -231,9 +245,8 @@ impl TerminalCapabilities {
             };
         let color = if !ansi_allowed {
             ColorDepth::None
-        } else if probe.colorterm.as_deref().is_some_and(|value| {
-            value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
-        }) || term.contains("ghostty")
+        } else if truecolor_announced
+            || term.contains("ghostty")
             || term.contains("kitty")
             || term.contains("wezterm")
             || windows_terminal

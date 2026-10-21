@@ -2051,6 +2051,52 @@ fn native_last_window_detach_reconnect_replays_and_accepts_fresh_input() {
 }
 
 #[test]
+fn native_outlasts_an_ack_stall_longer_than_the_old_two_second_timeout() {
+    let mut pty = NativePty::configured(
+        Options {
+            credits: 1,
+            ..Options::default()
+        },
+        |_, _, _| {},
+    );
+    pty.ready();
+    pty.settle();
+    pty.acknowledge = false;
+    pty.send(b"a");
+    pty.wait(|pty| pty.draft() == "a");
+    pty.send(b"b");
+    // The only credit is spent and Tern stays silent past the previous two
+    // second limit: a slow terminal, not a reason to hand the pane to ANSI.
+    let started = Instant::now();
+    pty.wait(|_| started.elapsed() >= Duration::from_millis(3000));
+    assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
+    pty.acknowledge = true;
+    for ack in std::mem::take(&mut pty.withheld) {
+        pty.event(ack);
+    }
+    pty.wait(|pty| pty.draft() == "ab");
+    assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
+    pty.close();
+}
+
+#[test]
+fn native_terminal_error_event_replays_the_surface_instead_of_falling_back() {
+    let mut pty = NativePty::spawn();
+    pty.ready();
+    pty.settle();
+    let opens = |pty: &NativePty| pty.messages.iter().filter(|(verb, _)| verb == "o").count();
+    let before = opens(&pty);
+    pty.event(json!({"ev":"error","sf":"octet.session","s":1,"op":0,"msg":"unknown parent"}));
+    pty.wait(|pty| opens(pty) == before + 1);
+    pty.wait(|pty| pty.nodes.contains_key("composer.bar"));
+    // Still native: a typed draft round-trips through the replayed surface.
+    pty.send(b"still native");
+    pty.wait(|pty| pty.draft() == "still native");
+    assert!(!String::from_utf8_lossy(&pty.output).contains("Native Tern rendering unavailable"));
+    pty.close();
+}
+
+#[test]
 fn native_surface_keeps_touchpad_and_selection_terminal_owned() {
     for args in [
         vec![],

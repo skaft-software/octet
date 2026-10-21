@@ -21,10 +21,13 @@ impl SyntheticEvents {
         let (reader, writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         writer.set_nonblocking(true).unwrap();
-        let notifier = AsyncFd::with_interest(
-            OwnedFd::from(reader.try_clone().unwrap()),
-            Interest::READABLE,
-        )
+        // SAFETY: the AsyncFd owns the duplicated OwnedFd for its lifetime.
+        let notifier = unsafe {
+            AsyncFd::register_with_interest(
+                OwnedFd::from(reader.try_clone().unwrap()),
+                Interest::READABLE,
+            )
+        }
         .unwrap();
         (
             Self {

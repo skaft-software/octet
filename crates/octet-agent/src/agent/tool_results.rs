@@ -367,6 +367,12 @@ pub(super) fn lower_tool_media_part(
                 adjacent_media.push(media.clone());
             }
         }
+        // Tool-result documents have no provider mapping; PDFs reach the model
+        // as user attachments.
+        Media::Document(document) => omissions.push(format!(
+            "[PDF {} omitted: tools cannot return documents]",
+            document.file_name()
+        )),
     }
 }
 

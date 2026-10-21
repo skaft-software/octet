@@ -70,7 +70,7 @@ configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
 [CLI alternatives](cli.md#provider-setup). This setup flow is part of the current
-0.9.5 source candidate; availability in older published versions differs.
+0.9.6 source candidate; availability in older published versions differs.
 
 ## Cloud setup
 
@@ -491,6 +491,23 @@ Set `auto_discover: false` with an explicit `models` list to pin the registry as
 truth when `GET /v1/models` isn't useful. Old single-object files are read as
 `custom-openai` without changing existing IDs. New files should use the
 versioned registry above.
+
+A provider speaks OpenAI Chat Completions unless it sets `api`. Use
+`"api": "anthropic-messages"` for an Anthropic-compatible gateway (`POST
+<base_url>messages`; a key is sent as `x-api-key`) or `"api": "openai-responses"`
+for a Responses-compatible one (`POST <base_url>responses`). These providers
+use only their declared `models`; `auto_discover` applies to Chat Completions.
+
+```json
+"gateway": {
+  "base_url": "http://127.0.0.1:4000/v1/",
+  "api": "anthropic-messages",
+  "auth": { "kind": "bearer_env", "var": "GATEWAY_API_KEY" },
+  "auto_discover": false,
+  "models": [{ "api_name": "claude-gateway", "context_window": 200000,
+               "max_output_tokens": 32000, "tools": true }]
+}
+```
 
 For providers with `auto_discover: true`, limits the endpoint asserts are
 authoritative, and the registry is a seed and fallback. Every other registry

@@ -414,7 +414,7 @@ impl ExecutableExtensions {
                             if let Some(content) = content {
                                 input.parts = content.input_parts();
                                 input.display_text = content.text();
-                                input.transcript_text = input.display_text.clone();
+                                input.set_text(input.display_text.clone());
                             }
                             crate::tui::view::PendingExtensionMessage {
                                 input,

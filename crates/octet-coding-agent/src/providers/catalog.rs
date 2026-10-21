@@ -42,6 +42,189 @@ impl ProviderDeclaration {
             .find(|model| model.id == api_name && model.protocol == protocol)
             .and_then(static_reasoning_capability)
     }
+
+    /// Reasoning for an OpenCode route that has no checked-in preset.
+    ///
+    /// OpenCode's `/models` inventory publishes identifiers only, so every
+    /// model without a hand-written preset used to register with thinking
+    /// `off`. The pinned, provider-scoped models.dev record states whether the
+    /// model reasons and which effort levels it accepts; this maps that record
+    /// onto the declared route's own wire primitive (Gemini `thinkingLevel`,
+    /// Anthropic adaptive or budget thinking, Chat/Responses effort). Records
+    /// that cannot be mapped exactly leave the model without a capability.
+    pub(crate) fn pinned_reasoning_for(
+        &self,
+        api_name: &str,
+        protocol: Protocol,
+    ) -> Option<ReasoningCapability> {
+        if self.compatibility != super::contract::CompatibilityProfile::OpenCode {
+            return None;
+        }
+        let record = octet_ai::model_metadata::model_capability_metadata(self.id, api_name)?;
+        // A budget table is sized from the documented output ceiling; the
+        // registration path still drops one that does not fit the route.
+        let max_output_tokens = record
+            .get("limit")
+            .and_then(|limit| limit.get("output"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|output| *output > 0)
+            .unwrap_or(32_768);
+        let preset = pinned_reasoning_preset(&record, api_name, protocol, max_output_tokens)?;
+        static_reasoning_capability(&preset)
+    }
+
+    /// Input modalities the pinned record documents for an OpenCode model,
+    /// limited to what the route can actually send.
+    pub(crate) fn pinned_input_modalities(
+        &self,
+        api_name: &str,
+        protocol: Protocol,
+    ) -> ModalitySet {
+        if self.compatibility != super::contract::CompatibilityProfile::OpenCode {
+            return ModalitySet::none();
+        }
+        let Some(record) = octet_ai::model_metadata::model_capability_metadata(self.id, api_name)
+        else {
+            return ModalitySet::none();
+        };
+        let inputs = record
+            .get("modalities")
+            .and_then(|modalities| modalities.get("input"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        let mut result = ModalitySet::none();
+        if inputs.contains(&"image") {
+            result = result.with(octet_ai::Modality::Image);
+        }
+        if inputs.contains(&"audio") && !protocol.audio_input_formats().is_empty() {
+            result = result.with(octet_ai::Modality::Audio);
+        }
+        result
+    }
+}
+
+/// Whether a built-in model accepts PDF documents on its route.
+///
+/// The pinned record decides wherever one exists. Without one, the families
+/// whose provider documents PDF input for every model qualify: Gemini on the
+/// Gemini API or Vertex AI, and Claude through Bedrock Converse.
+pub(crate) fn pdf_input(provider_id: &str, api_name: &str, protocol: Protocol) -> bool {
+    if !protocol.supports_document_input() {
+        return false;
+    }
+    match octet_ai::model_metadata::model_capability_metadata(provider_id, api_name) {
+        Some(record) => record
+            .get("modalities")
+            .and_then(|modalities| modalities.get("input"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|inputs| inputs.iter().any(|input| input == "pdf")),
+        None => match protocol {
+            Protocol::GoogleGenerativeAi => api_name.starts_with("gemini-"),
+            Protocol::BedrockConverse => api_name.contains("anthropic.claude"),
+            _ => false,
+        },
+    }
+}
+
+/// The checked-in preset shape equivalent to one pinned reasoning record, so
+/// derived capabilities use exactly the encodings hand-written presets use.
+fn pinned_reasoning_preset(
+    record: &serde_json::Value,
+    api_name: &str,
+    protocol: Protocol,
+    max_output_tokens: u64,
+) -> Option<StaticModelPreset> {
+    use super::models::{StaticOpenAiChatReasoningProfile as Profile, StaticReasoningMode as Mode};
+    use octet_ai::ReasoningEffort as E;
+    if record.get("reasoning").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let options = record
+        .get("reasoning_options")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let has = |kind: &str| options.iter().any(|option| option["type"] == kind);
+    let efforts = options
+        .iter()
+        .find(|option| option["type"] == "effort")
+        .and_then(|option| option["values"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let portable = efforts
+        .iter()
+        .filter_map(
+            |value| match octet_ai::ReasoningConfig::from_provider_value(value) {
+                Some(octet_ai::ReasoningConfig::Effort(effort)) => Some(effort),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut preset = StaticModelPreset {
+        id: "",
+        name: "",
+        protocol,
+        context_window: max_output_tokens,
+        max_output_tokens,
+        vision: false,
+        audio: false,
+        reasoning: true,
+        reasoning_mode: Mode::Effort,
+        min_reasoning_effort: portable.iter().copied().min().unwrap_or(E::Minimal),
+        max_reasoning_effort: portable.iter().copied().max().unwrap_or(E::High),
+        openai_chat_reasoning_profile: Profile::Standard,
+    };
+    match protocol {
+        Protocol::GoogleGenerativeAi => {
+            // `thinkingLevel` has exactly MINIMAL, LOW, MEDIUM and HIGH.
+            let levels = ["minimal", "low", "medium", "high"];
+            if !efforts.contains(&"low")
+                || !efforts.contains(&"high")
+                || efforts.iter().any(|value| !levels.contains(value))
+            {
+                return None;
+            }
+            preset.reasoning_mode = Mode::GoogleLevels {
+                minimal: efforts.contains(&"minimal"),
+                medium: efforts.contains(&"medium"),
+            };
+        }
+        Protocol::AnthropicMessages => {
+            let adaptive = api_name.starts_with("claude-")
+                && ["low", "medium", "high", "max"]
+                    .iter()
+                    .all(|level| efforts.contains(level));
+            preset.reasoning_mode = if adaptive {
+                Mode::Adaptive {
+                    off: has("toggle"),
+                    xhigh: efforts.contains(&"xhigh"),
+                }
+            } else if has("budget_tokens") || has("toggle") {
+                // The budget table spans the fixed Minimal..High efforts.
+                preset.min_reasoning_effort = E::Minimal;
+                preset.max_reasoning_effort = E::High;
+                Mode::Budget
+            } else {
+                return None;
+            };
+        }
+        Protocol::OpenAiChat => {
+            if api_name.starts_with("deepseek-") {
+                // DeepSeek's thinking map accepts only `high` (see presets).
+                preset.min_reasoning_effort = E::High;
+                preset.max_reasoning_effort = E::High;
+                preset.openai_chat_reasoning_profile = Profile::DeepSeekThinking;
+            }
+        }
+        Protocol::OpenAiResponses => {}
+        _ => return None,
+    }
+    Some(preset)
 }
 
 /// Register every unique route endpoint for an environment-authenticated
@@ -189,6 +372,18 @@ fn register_static_model(
             model.id
         );
     }
+    let mut capabilities = static_model_capabilities(model);
+    // A preset's hand-written modality flags lag the pinned record for routes
+    // whose inventory publishes identifiers only; never drop a documented input.
+    let pinned = declaration.pinned_input_modalities(model.id, route.protocol);
+    for modality in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
+        if pinned.contains(modality) {
+            capabilities.input_modalities = capabilities.input_modalities.with(modality);
+        }
+    }
+    if pdf_input(declaration.id, model.id, route.protocol) {
+        capabilities.input_modalities = capabilities.input_modalities.with(octet_ai::Modality::Pdf);
+    }
     catalog.register_model(ModelSpec {
         preset: octet_ai::ModelPreset {
             mistral_reasoning: match model.reasoning_mode {
@@ -210,7 +405,7 @@ fn register_static_model(
                 .unwrap_or_else(|| model.name.to_owned()),
         ),
         protocol: route.protocol,
-        capabilities: static_model_capabilities(model),
+        capabilities,
         limits: ModelLimits {
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
@@ -459,6 +654,48 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn pdf_input_follows_the_pinned_record_or_the_documented_family() {
+        // Pinned records decide where they exist, in either direction.
+        assert!(pdf_input(
+            "anthropic",
+            "claude-opus-5-5",
+            Protocol::AnthropicMessages
+        ));
+        assert!(pdf_input("openai", "gpt-5.5", Protocol::OpenAiResponses));
+        assert!(!pdf_input("openai", "gpt-5", Protocol::OpenAiResponses));
+        assert!(pdf_input("xai", "grok-4.7", Protocol::OpenAiResponses));
+        assert!(pdf_input(
+            "opencode",
+            "gemini-4-argon",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(!pdf_input("opencode", "glm-5.2", Protocol::OpenAiChat));
+        // Without a record, only families documented for every model qualify.
+        assert!(pdf_input(
+            "google",
+            "gemini-2.5-flash",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(!pdf_input(
+            "google",
+            "gemma-3-27b-it",
+            Protocol::GoogleGenerativeAi
+        ));
+        assert!(pdf_input(
+            "amazon-bedrock",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            Protocol::BedrockConverse
+        ));
+        assert!(!pdf_input("custom-chat", "local", Protocol::OpenAiChat));
+        // A route without a document encoder never qualifies.
+        assert!(!pdf_input(
+            "anthropic",
+            "claude-opus-5-5",
+            Protocol::MistralConversations
+        ));
+    }
 
     #[test]
     fn static_gemini_presets_advertise_audio_input_only() {

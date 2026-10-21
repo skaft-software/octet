@@ -22,7 +22,7 @@ not a second user manual.
 | <a id="built-in-tools"></a>Built-in tools | [Tools and permissions](tools.md#built-in-tools) |
 | <a id="provider-and-protocol-support"></a>Provider and protocol support | [Protocols, transport, and replay](providers.md#protocols-and-transport), [GPT-6 contracts and execution](providers.md#gpt-6-contracts-and-execution) |
 | <a id="reasoning-without-transcript-noise"></a>Reasoning | [Model-supported choices](providers.md#reasoning), [display](terminal.md#reasoning-and-progress), [workers](../extensions/octet-subagents/README.md) |
-| <a id="multimodal-prompts"></a>Multimodal prompts | [Images and audio](media.md#formats-and-limits) |
+| <a id="multimodal-prompts"></a>Multimodal prompts | [Images, audio and PDFs](media.md#formats-and-limits) |
 | <a id="durable-branchable-sessions"></a>Durable branchable sessions | [Resume and branch](sessions.md#resume-and-branch) |
 | <a id="context-and-compaction"></a>Context and compaction | [Request budgeting](context.md#request-budgeting) |
 | <a id="terminal-experience"></a>Terminal experience | [Scrolling and rendering](terminal.md#scrolling-and-rendering) |

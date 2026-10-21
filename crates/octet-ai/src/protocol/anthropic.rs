@@ -112,6 +112,14 @@ enum AnthropicContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// An inline PDF; the base64 source shape is shared with images.
+    Document {
+        source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -562,6 +570,24 @@ pub(crate) fn build_request(
                             });
                         }
                         UserPart::Media(Media::Audio(_)) => {}
+                        UserPart::Media(Media::Document(ref document)) => {
+                            if !model
+                                .spec
+                                .capabilities
+                                .input_modalities
+                                .contains(crate::types::Modality::Pdf)
+                            {
+                                continue;
+                            }
+                            blocks.push(AnthropicContentBlock::Document {
+                                source: AnthropicImageSource::Base64 {
+                                    media_type: document.media_type.to_string(),
+                                    data: Base64Bytes::from(&document.data),
+                                },
+                                title: document.name.clone(),
+                                cache_control: None,
+                            });
+                        }
                         UserPart::ToolResult(ref tr) => {
                             if synthetic_tool_results.contains(&tr.tool_call_id.0) {
                                 continue;
@@ -597,7 +623,8 @@ pub(crate) fn build_request(
                                                 .push(AnthropicToolResultBlock::Image { source });
                                         }
                                     }
-                                    ToolResultPart::Media(Media::Audio(_)) => {}
+                                    ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {
+                                    }
                                 }
                             }
                             blocks.push(AnthropicContentBlock::ToolResult {
@@ -1030,6 +1057,7 @@ fn set_content_cache_control(block: &mut AnthropicContentBlock, marker: CacheCon
     match block {
         AnthropicContentBlock::Text { cache_control, .. }
         | AnthropicContentBlock::Image { cache_control, .. }
+        | AnthropicContentBlock::Document { cache_control, .. }
         | AnthropicContentBlock::ToolResult { cache_control, .. } => {
             *cache_control = Some(marker);
         }

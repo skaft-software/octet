@@ -359,8 +359,22 @@ async fn read_local(
     })?;
     match validated_media_kind(&bytes, hinted_kind.as_ref(), &display_path)? {
         Some(kind) => media_output(display_path, bytes, kind),
+        // Decoded as text, a PDF's compressed streams are noise the model
+        // cannot use; say what will work instead.
+        None if is_pdf(&bytes) => Err(ToolError::new(format!(
+            "{display_path}: is a PDF; `read` returns text, images and audio only. \
+             Ask the user to attach it (drag it into the prompt or @-mention it) on a \
+             model with PDF input, or extract its text with a shell tool such as \
+             `pdftotext`."
+        ))),
         None => text_output(args, ctx, display_path, &bytes),
     }
+}
+
+/// Only a file that starts with the PDF header: readers tolerate leading
+/// junk, but a text file that merely mentions the header must stay readable.
+fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
 }
 
 fn parse_url_source(value: &str) -> Result<Option<reqwest::Url>, ToolError> {

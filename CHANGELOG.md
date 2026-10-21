@@ -1,6 +1,190 @@
 # Changelog
 
+## [0.9.6] - Unreleased
+
+The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification
+boundaries and known limitations. Benchmark-driven work from the Buffon harness
+lets workloads that could not run against octet do so, and speeds up the
+slowest measured paths.
+
+### Added
+
+- PDF attachments reach models that read PDFs as documents. A dropped or
+  `@`-selected PDF is sent as an Anthropic `document`, OpenAI Responses
+  `input_file`, Chat Completions `file`, Gemini `inlineData` or Bedrock
+  `document` on models whose pinned record lists PDF input (Claude, Grok, newer
+  GPT models, many OpenCode and OpenRouter models) and on Gemini and Bedrock
+  Claude. Up to 10 MiB per PDF; the picker shows a `pdf` badge. Other models
+  keep receiving the file's path, `read` explains that it does not decode PDFs
+  instead of returning compressed bytes as text, and switching to a model
+  without PDF input replaces earlier PDFs with a placeholder naming the file.
+- Custom registry providers can set `"api": "anthropic-messages"` or
+  `"api": "openai-responses"` to reach an Anthropic- or Responses-compatible
+  gateway (or a local benchmark mock) at their `base_url`; Chat Completions
+  remains the default. Anthropic keys are sent as `x-api-key`. These providers
+  use their declared models; `GET /models` discovery stays Chat-only.
+- `--session FILE.jsonl` addresses a session by its file: a missing file is
+  created there and later runs resume it. A Pi v3 session file is imported as a
+  new session in this workspace on each launch and that copy is resumed; the Pi
+  file is never modified. Only missing parent directories are created.
+- RPC `tool_execution_end` results and their `toolResult` messages carry Pi's
+  `details` (a Pi-compatible tool's own details, otherwise an extension tool's
+  metadata), `structuredContent`, and media parts, instead of text only.
+
+### Fixed
+
+- `octet-web-search` starts on Windows. Its manifest forwarded no environment,
+  and Windows Python finds the home directory through `USERPROFILE`, so the
+  extension failed before initializing; saving its settings or Brave key also
+  failed there (no `os.fchmod`, POSIX permission bits). It now declares
+  `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` and skips POSIX-only checks on
+  Windows.
+- `/extensions status` and other one-shot summaries (`/pi status`, `/prompt`,
+  `/update`, extension output) no longer flash and vanish: the release of the
+  Enter that opened them, and terminal focus changes, closed them.
+- Windows workspaces are shown as `C:\project`, not `\\?\C:\project`, in the
+  footer, `/status`, session details, `octet doctor`, prompt templates and the
+  workspace line of the system prompt.
+
+- A dropped PDF reached the model as the bare label `[PDF #1]`. Prompt
+  composition rebuilt the model message from the transcript text, which keeps
+  the chip, and discarded the text that carried the PDF's path, so the model was
+  never told which file was attached. `/answer` likewise sent its `/answer`
+  display text instead of its answer-now directive.
+- Alacritty, WezTerm, Tern and other terminals hosting octet on Windows got the
+  plain-console profile: ASCII bullets, rules and tree lines, 256 colours and
+  no italics or links. A Windows console now gets the rich profile when its
+  terminal announces itself with `COLORTERM` or `TERM_PROGRAM`, as Windows
+  Terminal does with `WT_SESSION`; a bare conhost window keeps the conservative
+  profile.
+- Imported Pi sessions, extension-created sessions and sessions with
+  cache-warming records were listed as "(unreadable session)" in the resume
+  picker and `octet sessions list`, without a title, and were re-read on every
+  listing because unreadable summaries are never cached. Their first listing
+  now reads them once; later listings come from the catalog.
+- Finished subagents no longer block `/reload`. A worker that completed, reached
+  its turn limit, failed, timed out or was interrupted only waits for a
+  follow-up, so a reload (including a host binary reload) parks it with its
+  result and session kept, and `subagent_continue` resumes it afterwards. A
+  turn-limited or detached worker used to block every reload until the session
+  was exited and resumed.
+- `/reload --force` now forces. A worker that is still running or has queued
+  work blocks plain and automatic reloads; `--force` detaches it through its
+  cancellation path, keeps its durable session and queued work, resumes
+  undelivered tasks on the next turn and never replays delivered work. It used
+  to refuse exactly like plain `/reload`. If the forced reload does not replace
+  the application, the parked workers are reattached immediately.
+- OpenCode Go and OpenCode Zen models without a hand-written preset offer their
+  thinking levels instead of only `off`. OpenCode's `/models` list carries IDs
+  only, so thinking now comes from each model's pinned models.dev record on its
+  own route (Gemini thinking levels, Claude adaptive thinking, Qwen budgets,
+  Chat and Responses effort). The 0.9.4 fix covered Gemini Argon alone.
+- OpenCode presets keep every input the pinned record documents: image input,
+  and audio where the route can send it, are no longer dropped by a stale
+  hand-written flag.
+- Native Tern rendering works on Windows. Tern answers there with OSC 877
+  framing, which octet did not recognize: the hello timed out, rendering fell
+  back to the terminal, and the reply appeared in the composer as
+  `]877;tsp;r;{"r":"hello",…}\`.
+- Gemini routes (Gemini API, Vertex AI, OpenCode Go and OpenCode Zen, including
+  Gemini 4 Argon Contributor) no longer fail a request with `Media in tool
+  results is unsupported` when the conversation holds an image or audio clip
+  inside a tool result, for example a `read` made earlier on a Claude or GPT
+  model. The media is sent as inline data after the turn's function responses.
+- Transcript images no longer spill over the composer and status bar in
+  Kitty-protocol terminals (Ghostty, Kitty, WezTerm). An image cut by the bottom
+  of the transcript view, for example while scrolled back, was still placed at
+  full height, and the terminal draws placements over text. A cut image is now
+  placed only for its visible rows, and one whose top has scrolled above the
+  view keeps showing its visible part instead of disappearing.
+- Native Tern no longer drops back to the ANSI renderer when the terminal
+  reports one error, and waits longer for a slow one. A terminal `error` event
+  reopens the surface and replays the retained tree; only a terminal that
+  rejects more than three replays within a minute still yields to ANSI, with the
+  existing notice. A visible surface left unacknowledged for five seconds (two
+  before) pauses and reconnects on a fresh hello, as a detached window does.
+
+### Changed
+
+- The native Tern composer is Tern's editor card, the container omp uses. The
+  editor, model and effort controls, working directory and Send share one inset,
+  and the context meter runs along the card's top edge; they sat on four
+  different distances from the pane edge, with uneven gaps between them. The
+  card is present from the first startup frame and shows a pending tone while a
+  turn runs. Mirrored Pi themes keep Pi's flat composer.
+- The welcome row groups its items (identity, release, access, tips) with a wider
+  gap between groups, wraps whole groups on narrow panes and no longer repeats
+  the `/ commands · @ files · ! shell` hints that the composer placeholder
+  shows. Panes under 56 columns use a short placeholder and show the hints in
+  the welcome row instead, so the placeholder never wraps and resizes the
+  composer.
+- Model picker rows show prices as `$in·out`; the price column truncated
+  `$0.35 · $0.75` to `$0.35 · $0…`. The preview pane keeps the readable form.
+- Fullscreen TUI streaming re-aligned the copy/selection rows of every visible
+  block from its first row on every frame, so a long answer cost more per token
+  as it grew. Alignments are now kept between frames and only rows whose painted
+  text or copy text changed are redone. Extension theme sync rebuilt the whole
+  theme palette on every UI refresh; it now does so only when the theme changes.
+  Together these cut renderer instructions while streaming a long answer by
+  about a third, and CPU per streamed token by about a fifth.
+- RPC `get_state` counts history messages without projecting the whole history
+  to JSON, and the per-turn context breakdown serializes the history once instead
+  of twice. A resumed 1,000-turn session is ready over RPC about a third sooner
+  and answers its first turn about a quarter faster.
+- `--no-session` print and RPC runs no longer make a workspace marker or session
+  catalog durable inside their throwaway store, removing several fsyncs from
+  startup and exit.
+- Pi session import decodes records straight from the parsed JSON and validates
+  the converted transcript once, cutting a 1,000-turn import by about a third.
+- Rust minor and patch dependency updates, including Tokio 1.53.3, whose
+  deprecated `AsyncFd::with_interest` is replaced by `register_with_interest`;
+  pinned GitHub Actions updates.
+
+### Known limitations
+
+- Pasting on Windows still arrives key by key: each newline in a paste submits
+  the prompt and a dropped file stays typed text. Paste one line at a time, or
+  attach files with an `@` mention.
+- `octet-codemode` has no Windows build; on Windows its POSIX launcher is now
+  refused with "this extension has no Windows build" rather than "not a valid
+  Win32 application".
+- Pi compatibility remains experimental and unstable; the `octet-pi-compat`
+  adapter does not ship (#587).
+- Windows remains a preview platform (#572, #588).
+- Closing and reopening a real shared Tern window, and transcript image
+  cropping in a real Ghostty or Kitty window, are attended RC checks.
+- The 0.9.5 and earlier known limitations below still apply.
+
 ## [0.9.5] - 2026-10-18
+
+### Changed
+
+- The native Tern composer is Tern's editor card, the container omp uses. The
+  editor, model and effort controls, working directory and Send share one inset,
+  and the context meter runs along the card's top edge; they sat on four
+  different distances from the pane edge, with uneven gaps between them. The
+  card is present from the first startup frame and shows a pending tone while a
+  turn runs. Mirrored Pi themes keep Pi's flat composer.
+- The welcome row groups its items (identity, release, access, tips) with a wider
+  gap between groups, wraps whole groups on narrow panes and no longer repeats
+  the `/ commands · @ files · ! shell` hints that the composer placeholder
+  shows. Panes under 56 columns use a short placeholder and show the hints in
+  the welcome row instead, so the placeholder never wraps and resizes the
+  composer.
+- Model picker rows show prices as `$in·out`; the price column truncated
+  `$0.35 · $0.75` to `$0.35 · $0…`. The preview pane keeps the readable form.
+
+### Fixed
+
+- Native Tern no longer drops back to the ANSI renderer for the rest of the
+  session when the terminal is merely slow or reports one error. A visible
+  surface left unacknowledged for five seconds has the missing acknowledgements
+  forgiven and keeps presenting, and a terminal `error` event reopens the surface
+  and replays the retained tree. Both ended native rendering after two seconds
+  or on the first event. Only a terminal that rejects more than three replays
+  within a minute still yields to ANSI, with the existing notice.
+
+## [0.9.5] - 2026-10-16
 
 The [release notes](docs/releases/v0.9.5.md) record shipped scope, qualification
 boundaries and known limitations.

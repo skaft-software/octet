@@ -16,7 +16,7 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
 # Explicitly promoted native release; SDK/registry publication stays independent.
-PUBLISHED_NATIVE_VERSION = "0.9.5"
+PUBLISHED_NATIVE_VERSION = "0.9.6"
 
 
 def load_script(name):

@@ -18,6 +18,8 @@ const PER_MESSAGE_OVERHEAD_TOKENS: u64 = 8;
 /// enforces the true limit.
 const IMAGE_TOKENS: u64 = 1_600;
 const AUDIO_TOKENS: u64 = 8_000;
+/// Providers bill a PDF page as its extracted text plus a page image.
+const DOCUMENT_PAGE_TOKENS: u64 = 3_000;
 
 /// Result of a best-effort compaction attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +41,9 @@ pub fn estimate_media_tokens(media: &Media) -> u64 {
     match media {
         Media::Image(_) => IMAGE_TOKENS,
         Media::Audio(_) => AUDIO_TOKENS,
+        Media::Document(document) => document
+            .estimated_pages()
+            .saturating_mul(DOCUMENT_PAGE_TOKENS),
     }
 }
 

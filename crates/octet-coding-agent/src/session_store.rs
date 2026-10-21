@@ -646,6 +646,11 @@ struct SummaryUsageRecord {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SummaryRecord {
+    /// Creation metadata (imported and extension-created sessions); not
+    /// listing state.
+    Header {},
+    /// Cache-warming status; never context, title, or usage.
+    CacheWarm {},
     Entry {
         id: EntryId,
         parent: Option<EntryId>,
@@ -1400,6 +1405,7 @@ fn summarize_session_with_usage(
             SummaryRecord::RootHead {} => {
                 head = None;
             }
+            SummaryRecord::Header {} | SummaryRecord::CacheWarm {} => {}
             SummaryRecord::Checkpoint {
                 prompt,
                 head: checkpoint_head,
@@ -1704,6 +1710,17 @@ pub fn begin_ephemeral_run(
         workspace,
         pending: None,
     });
+}
+
+/// Whether `session_dir` is the private transcript root of the active
+/// `--no-session` run. That store is removed when the run finishes, so nothing
+/// in it (a workspace marker, a catalog) needs to be made durable.
+pub fn is_ephemeral_transcript_root(session_dir: &Path) -> bool {
+    EPHEMERAL_RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|run| run.transcript_root == session_dir)
 }
 
 /// Persist all sessions in the active ephemeral invocation and discard conversations.

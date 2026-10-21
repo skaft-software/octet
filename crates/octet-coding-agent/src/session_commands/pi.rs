@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 type Converted = (Vec<Value>, SessionUserMetadata, String, Vec<String>);
+
+/// Source format name reported for a converted Pi session.
+pub(super) const FORMAT: &str = "pi-v3-jsonl";
 pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
     let header = &source[0];
     fields(
@@ -221,7 +224,7 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
     }
     warnings.sort();
     warnings.dedup();
-    Ok((out, metadata, "pi-v3-jsonl".into(), warnings))
+    Ok((out, metadata, FORMAT.into(), warnings))
 }
 
 fn empty_config() -> EntryValue {

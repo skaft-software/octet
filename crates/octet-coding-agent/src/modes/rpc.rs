@@ -73,8 +73,8 @@ use events::{RpcToolProgress, MAX_RPC_TOOL_PROGRESS_BYTES, PARTIAL_SNAPSHOTS};
 use projection::rpc_messages_from_session;
 use projection::{
     assistant_value, dollars, inferred_stop_reason, iso_timestamp, media_content, model_value,
-    rpc_commands, rpc_messages, tool_result_content, tool_result_value_at, user_content_at,
-    user_input_value,
+    rpc_commands, rpc_message_count, rpc_messages, tool_result_content, tool_result_value_at,
+    user_content_at, user_input_value,
 };
 #[cfg(test)]
 use projection::{protocol_name, user_value};
@@ -566,7 +566,7 @@ fn state_value(
         "sessionFile": app.agent.session().path(),
         "sessionId": id,
         "autoCompactionEnabled": app.config.compaction.mode != CompactionMode::Disabled,
-        "messageCount": message_count.unwrap_or_else(|| rpc_messages(app).len()),
+        "messageCount": message_count.unwrap_or_else(|| rpc_message_count(app.agent.session())),
         "pendingMessageCount": pending_messages
     });
     if let Some(name) = session_name {

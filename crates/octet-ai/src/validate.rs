@@ -555,6 +555,21 @@ pub(crate) fn validate_request(
                                 }
                             }
                         }
+                        UserPart::Media(Media::Document(_)) => {
+                            let supported = protocol.supports_document_input()
+                                && caps.input_modalities.contains(crate::types::Modality::Pdf);
+                            if !supported {
+                                if mode == CompatibilityMode::Strict {
+                                    return Err(AiError::Unsupported(UnsupportedError::Document));
+                                }
+                                diagnostics.push(Diagnostic {
+                                    code: "dropped_document".to_string(),
+                                    message: format!(
+                                        "PDF input is unsupported by this model through {protocol:?}"
+                                    ),
+                                });
+                            }
+                        }
                         UserPart::ToolResult(ref tr) => {
                             for part in &tr.content {
                                 let supported = match part {
@@ -576,10 +591,19 @@ pub(crate) fn validate_request(
                                                 ImageSource::Inline(_) | ImageSource::Url(_)
                                             )
                                         }
-                                        // Bedrock Converse and Gemini functionResponse have no
-                                        // documented tool-result media mapping.
-                                        Protocol::BedrockConverse
-                                        | Protocol::GoogleGenerativeAi => false,
+                                        // Gemini's functionResponse carries text only; the
+                                        // codec sends inline bytes as `inlineData` parts
+                                        // beside the turn's function responses, exactly as
+                                        // it sends agent-placed adjacent media.
+                                        Protocol::GoogleGenerativeAi => {
+                                            caps.input_modalities
+                                                .contains(crate::types::Modality::Image)
+                                                && image.media_type.is_some()
+                                                && matches!(&image.source, ImageSource::Inline(_))
+                                        }
+                                        // Bedrock Converse has no documented tool-result
+                                        // media mapping.
+                                        Protocol::BedrockConverse => false,
                                         // No evidenced native Conversations tool-result media schema.
                                         Protocol::MistralConversations => false,
                                         // Pi's `ImageContent` block carries inline bytes only;
@@ -588,7 +612,19 @@ pub(crate) fn validate_request(
                                             matches!(&image.source, ImageSource::Inline(_))
                                         }
                                     },
-                                    ToolResultPart::Media(Media::Audio(_)) => false,
+                                    // Documents travel in user content only; no tool-result
+                                    // document mapping is implemented yet.
+                                    ToolResultPart::Media(Media::Document(_)) => false,
+                                    ToolResultPart::Media(Media::Audio(audio)) => {
+                                        protocol == Protocol::GoogleGenerativeAi
+                                            && caps
+                                                .input_modalities
+                                                .contains(crate::types::Modality::Audio)
+                                            && protocol
+                                                .audio_input_formats()
+                                                .contains(&audio.format)
+                                            && matches!(audio.payload, AudioPayload::Inline(_))
+                                    }
                                 };
                                 if !supported {
                                     if mode == CompatibilityMode::Strict {

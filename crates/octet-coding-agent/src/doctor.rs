@@ -16,7 +16,10 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let catalog = model_catalog_with_offline(config.offline)?;
     let mut lines = vec![
         format!("octet doctor {}", env!("CARGO_PKG_VERSION")),
-        format!("workspace: {}", config.workspace.display()),
+        format!(
+            "workspace: {}",
+            crate::presentation::tool_display::human_path(&config.workspace)
+        ),
         format!("session directory: {}", config.session_dir.display()),
         format!(
             "provider discovery: {}",

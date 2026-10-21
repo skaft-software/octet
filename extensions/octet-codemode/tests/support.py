@@ -94,11 +94,11 @@ def text(result):
 
 
 def offer(optional=("tool_composition_v1", "request_progress", "artifacts")):
-    """The exact feature-negotiated API 0.4 offer the 0.9.5 host sends."""
+    """The exact feature-negotiated API 0.4 offer the 0.9.6 host sends."""
     return {
         "api_version": "0.4",
-        "octet_version": "0.9.5",
-        "extension": {"name": "octet-codemode", "version": "0.9.5"},
+        "octet_version": "0.9.6",
+        "extension": {"name": "octet-codemode", "version": "0.9.6"},
         "flag_values": [],
         "protocol": {
             "version": "0.4",

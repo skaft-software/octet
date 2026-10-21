@@ -2497,6 +2497,55 @@ fn request_estimator_counts_inline_media_semantically_not_as_base64_text() {
 }
 
 #[test]
+fn request_estimate_from_message_sizes_matches_whole_request_serialization() {
+    let image = Media::image_bytes(
+        bytes::Bytes::from(vec![7u8; 4096]),
+        "image/png".parse().unwrap(),
+    );
+    let tools = [ToolDef {
+        async_execution: false,
+        name: "read".into(),
+        description: "Read a \"quoted\" file".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        constrained_sampling: None,
+    }];
+    let conversations = [
+        Vec::new(),
+        vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("héllo \u{1F600} \"world\"\n".into())],
+        })],
+        vec![
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("look".into()), UserPart::Media(image)],
+            }),
+            Message::Assistant(octet_ai::AssistantMessage {
+                content: vec![AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
+                    id: octet_ai::ToolCallId("call_1".into()),
+                    name: "read".into(),
+                    arguments_json: r#"{"path":"a.rs"}"#.into(),
+                    argument_error: None,
+                })],
+                model: octet_ai::ModelId("m".into()),
+                protocol: Protocol::OpenAiChat,
+            }),
+        ],
+    ];
+    for messages in conversations {
+        let sizes = messages
+            .iter()
+            .map(|message| serde_json::to_vec(message).unwrap().len() as u64)
+            .collect::<Vec<_>>();
+        for (system, tools) in [("", &[][..]), ("system \"prompt\"", &tools[..])] {
+            assert_eq!(
+                estimate_request_tokens_from_message_bytes(system, &messages, &sizes, tools),
+                estimate_request_tokens(system, &messages, tools),
+            );
+        }
+    }
+}
+
+#[test]
 fn responses_capacity_estimates_only_new_opaque_items_and_rebuilds_on_compaction() {
     let directory = tempfile::tempdir().unwrap();
     let mut session = Session::create(directory.path().join("responses-capacity.jsonl")).unwrap();

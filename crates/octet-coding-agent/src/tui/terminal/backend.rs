@@ -31,6 +31,8 @@ struct EncodedImageKey {
     protocol: ImageProtocol,
     columns: u16,
     rows: u16,
+    /// Visible row window when a viewport cut the placement.
+    crop: Option<(u16, u16)>,
 }
 
 /// Bound on retained encoded payloads. A resize mints one new key per visible
@@ -446,6 +448,9 @@ impl<W: FrameSink> OctetTerminal<W> {
             protocol: anchor.protocol(),
             columns: layout.columns(),
             rows: layout.rows(),
+            crop: anchor
+                .crop()
+                .map(|crop| (crop.skip_rows(), crop.shown_rows())),
         };
         const LOG_MARKER: &[u8] = b"[terminal image omitted]";
         // A visible image is re-emitted on every frame that touches its row, and
@@ -465,9 +470,14 @@ impl<W: FrameSink> OctetTerminal<W> {
             }
             return;
         }
-        let Ok(command) = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default())
-            .encode_place(anchor.id(), &image, layout)
-        else {
+        let encoder = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default());
+        let command = match anchor.crop() {
+            // Only the rows inside the viewport: a full placement would be
+            // drawn over the composer and status bar below it.
+            Some(crop) => encoder.encode_place_cropped(anchor.id(), &image, layout, crop),
+            None => encoder.encode_place(anchor.id(), &image, layout),
+        };
+        let Ok(command) = command else {
             return;
         };
         // Reserve the complete opaque command and its fixed diagnostic marker

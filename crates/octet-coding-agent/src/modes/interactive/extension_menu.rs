@@ -2530,7 +2530,7 @@ mod tests {
             (
                 "octet-web-search".to_owned(),
                 State::Installed {
-                    version: "0.9.5".into(),
+                    version: "0.9.6".into(),
                 },
             ),
             (
@@ -2551,7 +2551,7 @@ mod tests {
             lines,
             [
                 format!("MCP           {}  ✓ already installed", "█".repeat(20)),
-                format!("Web search    {}  ✓ installed 0.9.5", "█".repeat(20)),
+                format!("Web search    {}  ✓ installed 0.9.6", "█".repeat(20)),
                 format!(
                     "Subagents     {}{}  installing 25%",
                     "█".repeat(5),

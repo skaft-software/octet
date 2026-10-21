@@ -732,7 +732,9 @@ fn octet_variable(
 ) -> Result<String, PromptError> {
     match variable {
         "prompt" => Ok(raw_prompt.to_owned()),
-        "workspace" => Ok(context.workspace.display().to_string()),
+        "workspace" => Ok(crate::presentation::tool_display::human_path(
+            context.workspace,
+        )),
         "selection" => Ok(context.selection.unwrap_or_default().to_owned()),
         _ if variable.starts_with("file:") => {
             let relative = variable["file:".len()..].trim();

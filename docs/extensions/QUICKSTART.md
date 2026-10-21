@@ -8,7 +8,7 @@ none requires a paid provider, registry publication or global SDK installation.
 
 ## Status and contract boundaries
 
-This guide targets feature-negotiated **extension API `0.4`** and the 0.9.5
+This guide targets feature-negotiated **extension API `0.4`** and the 0.9.6
 candidate source host. Extension version, SDK distribution version, host version
 and API version are independent. Read [the host guide](../extensions.md) for
 current admission rules and [the wire reference](PROTOCOL-REFERENCE.md) when
@@ -80,7 +80,7 @@ license and provenance. The generator accepts literal static tool declarations;
 extra modules/assets must be included deliberately. See the
 [Python SDK](../../sdk/python/README.md) and
 [single-file recipe](../../examples/extensions/python-single-file/README.md).
-The generator pins the actual workspace host version (`=0.9.5` here) and emits
+The generator pins the actual workspace host version (`=0.9.6` here) and emits
 relative executable `run-extension`. That launcher uses `OCTET_EXTENSION_DIR`
 when staged by the host, selects the vendored SDK and suppresses bytecode writes;
 no global SDK installation or original checkout path is needed.
@@ -89,7 +89,7 @@ Package this reviewed generated directory using the existing release packager:
 
 ```sh
 bash scripts/package-octet-extension-release.sh \
-  wait-extension /tmp/bundles v0.9.5 /tmp/my-extensions/wait-extension
+  wait-extension /tmp/bundles v0.9.6 /tmp/my-extensions/wait-extension
 # Check the exact produced archive and digest before installation.
 # Extract to a separate reviewed location, then run the provider-free smoke:
 env -u PYTHONPATH CARGO_TARGET_DIR=/tmp/python-single-file-host-target \
@@ -180,7 +180,7 @@ make -C sdk/cpp OCTET_ROOT="$PWD"
 ```
 
 Generated manifests live in `examples/extensions/native-hello/build/extensions/`
-and pin `requires_octet = "=0.9.5"`. Choose one language to avoid duplicate
+and pin `requires_octet = "=0.9.6"`. Choose one language to avoid duplicate
 `hello` tools. Rebuild/regenerate after moving the checkout. Native helpers
 support static tools and one text result/error only: no hooks, commands, UI,
 flags, dynamic catalogs, media, reverse host services, secrets, approvals,
@@ -236,7 +236,7 @@ existing packager takes the source explicitly:
 ```sh
 # Example placeholders: supply your reviewed source and exact host version.
 bash scripts/package-octet-extension-release.sh \
-  hello-tools /tmp/bundles v0.9.5 /absolute/path/to/hello-tools
+  hello-tools /tmp/bundles v0.9.6 /absolute/path/to/hello-tools
 # Use the actual produced archive path, not a guessed filename.
 octet extension install --path /absolute/path/to/reviewed-bundle.tar.gz
 octet extension list

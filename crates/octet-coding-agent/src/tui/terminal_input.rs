@@ -241,7 +241,16 @@ struct ApcFilter {
 
 impl ApcFilter {
     const PREFIX: &'static str = "\x1b_tsp;";
+    /// The same message framed as OSC 877. Windows consoles (ConPTY) do not
+    /// pass APC strings through, so Tern answers there with this framing; an
+    /// unrecognized reply would otherwise time out the hello and be typed into
+    /// the composer.
+    const OSC_PREFIX: &'static str = "\x1b]877;tsp;";
     const MAX_BYTES: usize = 1 << 20;
+
+    fn is_prefix(text: &str) -> bool {
+        Self::PREFIX.starts_with(text) || Self::OSC_PREFIX.starts_with(text)
+    }
 
     fn enabled(&self) -> bool {
         #[cfg(test)]
@@ -252,7 +261,9 @@ impl ApcFilter {
     }
 
     fn identified(&self) -> bool {
-        self.discarding || self.text.starts_with(Self::PREFIX)
+        self.discarding
+            || self.text.starts_with(Self::PREFIX)
+            || self.text.starts_with(Self::OSC_PREFIX)
     }
 
     fn push(&mut self, event: impl Into<Packet>, now: Instant) -> Vec<Packet> {
@@ -267,7 +278,7 @@ impl ApcFilter {
             }
         }
         if !self.active {
-            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_") {
+            if reply_fragment(&event).is_some_and(|s| s == "\x1b" || s == "\x1b_" || s == "\x1b]") {
                 self.active = true;
                 self.updated = Some(now);
                 self.text = reply_fragment(&event)
@@ -285,7 +296,7 @@ impl ApcFilter {
                 if !self.identified() {
                     self.held.push(event.clone());
                 }
-                if Self::PREFIX.starts_with(&self.text) {
+                if Self::is_prefix(&self.text) {
                     return Vec::new();
                 }
                 if !self.identified() {
@@ -308,6 +319,11 @@ impl ApcFilter {
                         format!("{}\x1b\\", self.text.trim_end_matches('\x07'))
                     } else {
                         std::mem::take(&mut self.text)
+                    };
+                    // One decoder: an OSC 877 frame carries the APC payload.
+                    let sequence = match sequence.strip_prefix(Self::OSC_PREFIX) {
+                        Some(rest) => format!("{}{rest}", Self::PREFIX),
+                        None => sequence,
                     };
                     let message = (!self.discarding)
                         .then(|| self.reader.feed(&sequence))
@@ -508,8 +524,9 @@ impl ForegroundEvents {
         let tty = self.tty.get_or_init(|| {
             let fd = Self::open_tty_notifier()?;
             // Polling runs on the frontend's I/O-enabled Tokio runtime.
-            // OwnedFd closes only after AsyncFd deregisters it.
-            AsyncFd::with_interest(fd, Interest::READABLE).ok()
+            // SAFETY: the AsyncFd owns this OwnedFd, which stays open and names
+            // the same descriptor until the AsyncFd deregisters and drops it.
+            unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }.ok()
         });
         let Some(tty) = tty else { return false };
         match Self::poll_tty_readiness(tty, cx) {
@@ -643,9 +660,14 @@ impl TerminalInput {
 
     #[cfg(all(test, unix))]
     pub(crate) fn from_terminal_file(file: std::fs::File) -> Self {
-        let notifier =
-            AsyncFd::with_interest(OwnedFd::from(file.try_clone().unwrap()), Interest::READABLE)
-                .unwrap();
+        // SAFETY: the AsyncFd owns the duplicated OwnedFd for its lifetime.
+        let notifier = unsafe {
+            AsyncFd::register_with_interest(
+                OwnedFd::from(file.try_clone().unwrap()),
+                Interest::READABLE,
+            )
+        }
+        .unwrap();
         Self::from_source(ForegroundEvents {
             raw: raw::RawReader::from_file(file),
             tty: std::sync::OnceLock::from(Some(notifier)),
@@ -909,6 +931,68 @@ mod tests {
             assert!(filter.text.is_empty());
             assert!(filter.held.is_empty());
         }
+    }
+
+    #[test]
+    fn native_osc_877_framing_is_routed_like_apc_and_never_reaches_the_draft() {
+        // Windows consoles do not pass APC strings, so Tern answers there as
+        // `ESC ] 877 ; tsp ; …`. That reply used to time out the native hello
+        // and then appear in the composer as `]877;tsp;r;{"r":"hello",…}\`.
+        for releases in [false, true] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = seen.clone();
+            let mut filter = ApcFilter {
+                force_enabled: true,
+                handler: Some(Arc::new(move |message| {
+                    captured.lock().unwrap().push(message);
+                    None
+                })),
+                ..Default::default()
+            };
+            let apc = octet_tern::frame::encode_json(
+                octet_tern::wire::Verb::Event,
+                &serde_json::json!({"ev":"ack","sf":"octet.session","s":3}),
+                65536,
+            )
+            .unwrap();
+            let wire = apc.replacen(ApcFilter::PREFIX, ApcFilter::OSC_PREFIX, 1);
+            let events = if releases {
+                windows_decoded(&wire)
+            } else {
+                decoded(&wire, true)
+            };
+            let mut now = Instant::now();
+            for event in events {
+                now += Duration::from_millis(20);
+                assert!(filter.expire(now).is_empty());
+                assert!(filter.push(event, now).is_empty(), "OSC 877 leaked");
+            }
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[octet_tern::frame::Incoming::Event(
+                    octet_tern::wire::Event::Ack {
+                        sf: "octet.session".into(),
+                        s: 3
+                    }
+                )]
+            );
+            assert!(!filter.active && filter.text.is_empty() && filter.held.is_empty());
+        }
+    }
+
+    #[test]
+    fn osc11_reply_still_reaches_its_filter_with_native_framing_enabled() {
+        let start = Instant::now();
+        let mut replies = BackgroundReplies::default();
+        replies.apc.force_enabled = true;
+        assert!(replies.begin_query(start));
+        let mut now = start;
+        for event in decoded("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\", true) {
+            now += Duration::from_millis(5);
+            replies.push_filtered(event, now);
+        }
+        assert!(replies.color.is_some(), "OSC 11 reply was not recognized");
+        assert!(replies.ready.is_empty(), "OSC 11 reply leaked as input");
     }
 
     #[test]

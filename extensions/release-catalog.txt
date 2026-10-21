@@ -9,6 +9,6 @@
 octet-codemode
 octet-computer-use
 octet-mcp
-# octet-pi-compat is experimental source-only work, excluded from v0.9.5.
+# octet-pi-compat is experimental source-only work, excluded from v0.9.6.
 octet-subagents
 octet-web-search

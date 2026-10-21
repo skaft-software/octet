@@ -14,13 +14,10 @@ use super::*;
 fn generated_registry_resolves_canonical_and_unique_leaf_ids() {
     assert!(model_display_name("openai/gpt-4o-mini").is_some());
     assert_eq!(
-        model_display_name("alibaba/qwen3.6-27b").as_deref(),
-        Some("Qwen3.6 27B")
+        model_display_name("alibaba/qwen-max").as_deref(),
+        Some("Qwen Max")
     );
-    assert_eq!(
-        model_display_name("qwen3.6-27b").as_deref(),
-        Some("Qwen3.6 27B")
-    );
+    assert_eq!(model_display_name("qwen-max").as_deref(), Some("Qwen Max"));
 }
 
 #[test]
@@ -30,13 +27,13 @@ fn generated_pricing_is_provider_scoped_and_integer_based() {
     assert_eq!(direct.output, TokenRate(10_000_000));
 
     // Golden values track the checked-in models.dev snapshot. OpenRouter
-    // quotes deepseek-v4-pro at 0.208800/0.417600 per million tokens; the
+    // quotes deepseek-v4-pro at 0.410640/0.821280 per million tokens; the
     // generator scales those to integer micro-units.
     let routed = model_pricing("openrouter", "deepseek/deepseek-v4-pro")
         .expect("provider-specific snapshot price");
-    assert_eq!(routed.input, TokenRate(208_800));
-    assert_eq!(routed.output, TokenRate(417_600));
-    assert_eq!(routed.cache_read, TokenRate(17_400));
+    assert_eq!(routed.input, TokenRate(410_640));
+    assert_eq!(routed.output, TokenRate(821_280));
+    assert_eq!(routed.cache_read, TokenRate(34_220));
     assert_eq!(routed.reasoning, None);
     assert!(model_pricing("openai", "gpt-5.6").is_none());
     assert!(model_pricing("openai", "gpt-5.6-sol").is_some());
@@ -47,7 +44,7 @@ fn generated_pricing_is_provider_scoped_and_integer_based() {
 fn generated_capabilities_keep_exact_provider_scoped_source_assertions() {
     let flash = model_capability_metadata("deepseek", "deepseek-flash").unwrap();
     assert_eq!(flash["name"], "DeepSeek V4.1 Flash 1017");
-    assert_eq!(flash["limit"]["context"], 1_000_000);
+    assert_eq!(flash["limit"]["context"], 1_048_576);
     assert_eq!(flash["limit"]["output"], 393_216);
     assert_eq!(
         flash["reasoning_options"][1]["values"],
