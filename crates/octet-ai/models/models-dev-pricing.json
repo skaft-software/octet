@@ -2638,6 +2638,13 @@
     "output": 0,
     "reasoning": null
   },
+  "opencode/flint-40b-free": {
+    "cache_read": 0,
+    "cache_write_5m": 0,
+    "input": 0,
+    "output": 0,
+    "reasoning": null
+  },
   "opencode/gemini-3-flash": {
     "cache_read": 50000,
     "cache_write_5m": 0,
@@ -2933,7 +2940,7 @@
     "reasoning": null
   },
   "opencode/gpt-6.1-sol": {
-    "cache_read": 200000,
+    "cache_read": 100000,
     "cache_write_5m": 2500000,
     "input": 2000000,
     "output": 10000000,
