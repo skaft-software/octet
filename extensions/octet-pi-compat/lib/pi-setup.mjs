@@ -451,12 +451,26 @@ function mergeSettings(base, overrides) {
   return merged;
 }
 
+function agentDirectory(agentDir, env) {
+  return resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+}
+
+// Pi's SettingsManager.getSettings(): global and trusted project settings.json
+// merged, no defaults filled in. Unreadable or non-object files contribute
+// nothing; the diagnostics say why.
+export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
+  const ctx = { diagnostics: [], projectTrusted: projectTrusted === true };
+  const global = settingsObject(join(agentDirectory(agentDir, env), 'settings.json'), 'settings.json', ctx) ?? {};
+  const project = ctx.projectTrusted ? settingsObject(join(resolve(cwd, '.pi'), 'settings.json'), 'project settings.json', ctx) ?? {} : {};
+  return { settings: mergeSettings(global, project), diagnostics: ctx.diagnostics };
+}
+
 // Contract: extensions and resource paths are exact enabled files, not roots
 // that a downstream loader could re-expand to excluded or linked resources.
 // projectTrusted defaults false, even for a reviewed global mirror. Callers
 // must pass the host's current project decision, never infer trust from opt-in.
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
-  const resolvedAgentDir = resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+  const resolvedAgentDir = agentDirectory(agentDir, env);
   const projectRoot = resolve(cwd, '.pi');
   const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);

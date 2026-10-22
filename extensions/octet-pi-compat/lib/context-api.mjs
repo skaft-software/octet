@@ -4,6 +4,7 @@ import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
+import { readPiSettings } from './pi-setup.mjs';
 
 function fact(runtime, store, key, api) {
   runtime.assertSessionOwner(store);
@@ -29,7 +30,12 @@ export function contextFacts(runtime, store) {
   };
 }
 export function getSettings(runtime, store) {
-  return plainJSON(fact(runtime, store, 'settings', 'pi.getSettings'), 'settings', 524288);
+  runtime.assertSessionOwner(store);
+  if (Object.hasOwn(store.state.host, 'settings')) return plainJSON(store.state.host.settings, 'settings', 524288);
+  // The user's own Pi settings, read the way Pi reads them. Project settings
+  // count only under the host's trust decision, never a Pi trust file.
+  const { settings } = readPiSettings({ agentDir: runtime.config.pi_agent_dir, cwd: store.state.workspace, projectTrusted: store.state.host.project_trusted === true });
+  return plainJSON(settings, 'settings', 524288);
 }
 
 function inputImages(images) {

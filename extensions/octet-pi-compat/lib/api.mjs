@@ -375,7 +375,11 @@ export function createContext(runtime, store, replaced = false) {
       if (host.model_view?.context_window) return { tokens: null, contextWindow: host.model_view.context_window, percent: null };
       return undefined;
     },
-    isIdle: () => snapshot(current().host, 'is_idle', 'ctx.isIdle'),
+    isIdle: () => {
+      const state = current();
+      if (Object.hasOwn(state.host, 'is_idle')) return state.host.is_idle;
+      return !state.runActive && !state.compacting;
+    },
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
     getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
     get signal() { return compactionCallbackStore(runtime, store).controller.signal; },

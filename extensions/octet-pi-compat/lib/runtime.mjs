@@ -958,6 +958,14 @@ export class Runtime {
   async notify(message) {
     const p = message.params;
     if (message.method === 'provider/cancel') { cancelProviderStream(this, p.stream_id); return; }
+    // Pi's isIdle: no agent run is active and nothing is compacting. Track it
+    // from the host's own lifecycle notifications as they arrive, before any
+    // queued delivery, so a hook running inside the run already sees it busy.
+    const activity = { 'turn/started': ['runActive', true], 'turn/settled': ['runActive', false], 'compaction/started': ['compacting', true], 'compaction/settled': ['compacting', false] }[message.method];
+    if (activity) {
+      const tracked = p?.resource_owner ? this.states.get(ownerKey(p.resource_owner)) : this.foreground;
+      if (tracked?.alive) tracked[activity[0]] = activity[1];
+    }
     // Advisory notifications cannot deliver a veto or a post-commit append
     // consumer. Actual Pi compaction callbacks now arrive as awaited hook/run.
     if (['compaction/started', 'compaction/settled'].includes(message.method)) return;
