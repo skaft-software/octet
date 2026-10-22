@@ -88,7 +88,7 @@ impl DelegationManager {
                         .as_ref()
                         .and_then(|p| p.resolved_model.as_ref())
                         .map(|m| m.model.clone())
-                        .unwrap_or_else(|| self.template.model.spec.id.0.clone()),
+                        .unwrap_or_else(|| self.template.model().spec.id.0.clone()),
                     state: record.status.label().to_owned(),
                     phase: if !record.active_tools.is_empty() {
                         "using_tool".to_owned()

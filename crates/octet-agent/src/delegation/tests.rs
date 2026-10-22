@@ -82,7 +82,7 @@ fn test_template(directory: &Path) -> DelegationTemplate {
     DelegationTemplate {
         model_resolver: RwLock::new(None),
         client: octet_ai::AiClient::new(),
-        model,
+        model: RwLock::new(model),
         base_system: RwLock::new("test".into()),
         sandbox: crate::SandboxConfig::new(directory),
         effect_broker: crate::EffectBroker::default(),
@@ -285,10 +285,10 @@ async fn configured_model_routes_spawn_and_continuation_and_pins_durable_policy(
             .expect(2).mount(&alternate_server).await;
     let mut manager = writable_manager_with_core_tools(&team);
     let inner = Arc::get_mut(&mut manager).unwrap();
-    Arc::make_mut(&mut inner.template.model.endpoint).base_url =
+    Arc::make_mut(&mut inner.template.model.get_mut().unwrap().endpoint).base_url =
         url::Url::parse(&format!("{}/", parent_server.uri())).unwrap();
-    let mut alternate = inner.template.model.clone();
-    Arc::make_mut(&mut inner.template.model.spec).pricing = None;
+    let mut alternate = inner.template.model();
+    Arc::make_mut(&mut inner.template.model.get_mut().unwrap().spec).pricing = None;
     let spec = Arc::make_mut(&mut alternate.spec);
     spec.id = octet_ai::ModelId("fixture-alternate".into());
     spec.api_name = "alternate-wire-model".into();
@@ -470,7 +470,7 @@ async fn configured_route_survives_fleet_reconstruction_with_a_different_parent(
             .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
                 .set_body_string("data: {\"choices\":[{\"delta\":{\"content\":\"route persisted\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
             .expect(2).mount(&alternate_server).await;
-    let mut alternate = test_template(&root).model;
+    let mut alternate = test_template(&root).model();
     Arc::make_mut(&mut alternate.spec).id = octet_ai::ModelId("saved-alternate".into());
     Arc::make_mut(&mut alternate.spec).api_name = "saved-wire-model".into();
     Arc::make_mut(&mut alternate.endpoint).base_url =
@@ -525,8 +525,9 @@ async fn configured_route_survives_fleet_reconstruction_with_a_different_parent(
     // parent binding and run the ordinary durable follow-up path.
     let mut manager = writable_manager_with_core_tools(&root);
     let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-    Arc::make_mut(&mut template.model.spec).id = octet_ai::ModelId("different-parent".into());
-    Arc::make_mut(&mut template.model.endpoint).base_url =
+    Arc::make_mut(&mut template.model.get_mut().unwrap().spec).id =
+        octet_ai::ModelId("different-parent".into());
+    Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).base_url =
         url::Url::parse(&format!("{}/", changed_parent_server.uri())).unwrap();
     *template.model_resolver.get_mut().unwrap() =
         Some(Arc::new(AlternateModelResolver { model: alternate }));
@@ -659,7 +660,7 @@ async fn delegated_astra_ultra_v2_child_uses_xhigh_wire_effort() {
             .get_mut()
             .unwrap()
             .max_output_tokens = model.spec.limits.max_output_tokens;
-        manager_mut.template.model = model;
+        *manager_mut.template.model.get_mut().unwrap() = model;
         *manager_mut.template.reasoning.get_mut().unwrap() =
             octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
     }
@@ -2038,7 +2039,7 @@ async fn reattached_follow_up_requires_a_free_execution_slot_before_acceptance()
 fn continuation_test_manager(directory: &Path, server: &MockServer) -> Arc<DelegationManager> {
     let mut manager = writable_manager_with_core_tools(directory);
     let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-    let endpoint = Arc::make_mut(&mut template.model.endpoint);
+    let endpoint = Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint);
     endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
     endpoint.auth = octet_ai::Auth::None;
     manager
@@ -2247,7 +2248,7 @@ async fn restart_reattaches_the_durable_worker_with_its_accounting_and_lifecycle
     let root = directory.path().canonicalize().unwrap();
     let session_path = root.join("reattach-child.jsonl");
     let mut child_session = Session::create(&session_path).unwrap();
-    let model = test_template(&root).model;
+    let model = test_template(&root).model();
     child_session
         .record_compaction_usage(
             model.endpoint.id.clone(),
@@ -3425,7 +3426,7 @@ fn extension_child_rejects_unpriced_model_before_session_creation() {
     let directory = tempfile::tempdir().unwrap();
     let mut manager = writable_manager_with_core_tools(directory.path());
     let manager_mut = Arc::get_mut(&mut manager).unwrap();
-    Arc::make_mut(&mut manager_mut.template.model.spec).pricing = None;
+    Arc::make_mut(&mut manager_mut.template.model.get_mut().unwrap().spec).pricing = None;
     let binding = manager.root_binding();
     let service = binding
         .extension_service("extension-policy", "parent-session", "root-owner")
@@ -3911,7 +3912,7 @@ async fn delegation_span_owns_the_child_run_and_nests_child_spans() {
         // Ultra tier like the wire-contract sibling test.
         *manager_mut.template.reasoning.get_mut().unwrap() =
             octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra);
-        manager_mut.template.model = model;
+        *manager_mut.template.model.get_mut().unwrap() = model;
     }
 
     let fixture = InMemoryTelemetryContext::default();
@@ -4680,9 +4681,9 @@ async fn assert_restart_follow_up_order(first: &str, second: &str) {
             .expect(2).mount(&server).await;
     let mut manager = writable_manager(root);
     let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-    Arc::make_mut(&mut template.model.endpoint).base_url =
+    Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).base_url =
         url::Url::parse(&format!("{}/", server.uri())).unwrap();
-    Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+    Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).auth = octet_ai::Auth::None;
     manager.restore_durable_fleet();
     // Exercise explicit resume, not automatic prepare_owning_run reattach.
     manager
@@ -4885,7 +4886,7 @@ fn restart_recovers_usage_and_uncertainty_from_child_ledger_not_stale_roster() {
             manager.persist_durable_fleet_locked(&mut state);
         }
         // This synced child commit deliberately occurs after the roster write.
-        let model = test_template(root).model;
+        let model = test_template(root).model();
         let usage = Usage {
             input_tokens: 29,
             output_tokens: 4,
@@ -5017,7 +5018,7 @@ async fn reattached_delivered_task_settles_and_explicit_follow_up_never_replays_
                 },
             )))
             .unwrap();
-        let model = test_template(root).model;
+        let model = test_template(root).model();
         session
             .append(crate::EntryValue::Message(octet_ai::Message::Assistant(
                 octet_ai::AssistantMessage {
@@ -5076,9 +5077,9 @@ async fn reattached_delivered_task_settles_and_explicit_follow_up_never_replays_
                 .expect(1).mount(&server).await;
         let mut manager = writable_manager_with_core_tools(root);
         let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-        Arc::make_mut(&mut template.model.endpoint).base_url =
+        Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).base_url =
             url::Url::parse(&format!("{}/", server.uri())).unwrap();
-        Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+        Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).auth = octet_ai::Auth::None;
         template.effect_broker = crate::EffectBroker::new(crate::EffectPolicy::UnsafeHost);
         manager.restore_durable_fleet();
         let before = std::fs::read(&session_path).unwrap();
@@ -5230,9 +5231,10 @@ async fn unreadable_session_authority_retains_work_until_explicit_or_auto_repair
                     .expect(expected_runs).mount(&server).await;
             let mut manager = writable_manager(root);
             let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-            Arc::make_mut(&mut template.model.endpoint).base_url =
+            Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).base_url =
                 url::Url::parse(&format!("{}/", server.uri())).unwrap();
-            Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+            Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).auth =
+                octet_ai::Auth::None;
             manager.restore_durable_fleet();
             manager.prepare_owning_run(&root_identity()).unwrap();
             assert!(!manager.state.lock().unwrap().records["agent-1"].live_task);
@@ -5356,9 +5358,9 @@ async fn unreadable_first_worker_does_not_strand_later_reattachment_plans() {
             .expect(1).mount(&server).await;
     let mut manager = writable_manager(root);
     let template = &mut Arc::get_mut(&mut manager).unwrap().template;
-    Arc::make_mut(&mut template.model.endpoint).base_url =
+    Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).base_url =
         url::Url::parse(&format!("{}/", server.uri())).unwrap();
-    Arc::make_mut(&mut template.model.endpoint).auth = octet_ai::Auth::None;
+    Arc::make_mut(&mut template.model.get_mut().unwrap().endpoint).auth = octet_ai::Auth::None;
     let missing = root.join("missing.jsonl");
     let healthy = root.join("healthy.jsonl");
     Session::create(&healthy).unwrap();
@@ -6282,7 +6284,7 @@ fn root_outage_limit_updates_bound_child_template() {
     let manager = writable_manager(directory.path());
     let mut root = Agent::new(AgentConfig {
         client: manager.template.client.clone(),
-        model: manager.template.model.clone(),
+        model: manager.template.model(),
         session: Session::create(directory.path().join("root-limit.jsonl")).unwrap(),
         system: "test".into(),
         sandbox: manager.template.sandbox.clone(),
@@ -6331,7 +6333,7 @@ fn child_uses_runtime_settings_updated_after_delegation_activation() {
     let directory = tempfile::tempdir().unwrap();
     let manager = writable_manager(directory.path());
     let binding = manager.root_binding();
-    let compaction_model = manager.template.model.clone();
+    let compaction_model = manager.template.model();
     let audio = octet_ai::OutputModalities::TextAndAudio(octet_ai::AudioOutputOptions {
         format: octet_ai::AudioFormat::Wav,
         voice: octet_ai::AudioVoice::Named("alloy".into()),
@@ -6529,8 +6531,8 @@ async fn roster_output_prefixes_preserve_full_child_sessions_after_reload() {
                     .append(crate::session::EntryValue::Message(
                         octet_ai::Message::Assistant(octet_ai::AssistantMessage {
                             content: vec![AssistantPart::Text(output.clone())],
-                            model: manager.template.model.spec.id.clone(),
-                            protocol: manager.template.model.spec.protocol,
+                            model: manager.template.model().spec.id.clone(),
+                            protocol: manager.template.model().spec.protocol,
                         }),
                     ))
                     .unwrap();
