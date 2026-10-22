@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -164,92 +165,25 @@ impl SessionCatalog {
 
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
+        // Every octet process opens the catalog briefly. Checkpointing on close
+        // made each one create the WAL anew and sync it, the directory and the
+        // database: four fsyncs per run for a disposable projection. Leave the
+        // WAL for the next process; SQLite's automatic checkpoint still bounds
+        // it, and `journal_size_limit` truncates it afterwards.
+        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
         connection.pragma_update(None, "temp_store", "FILE")?;
         connection.pragma_update(None, "cache_size", -CATALOG_CACHE_KIB)?;
         connection.pragma_update(None, "mmap_size", 0)?;
         connection.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         connection.pragma_update(None, "trusted_schema", false)?;
 
+        // The schema is installed once, ending with `user_version`; a catalog
+        // at the current version needs no DDL. Re-running the idempotent
+        // statements would still rewrite page 1 (`PRAGMA user_version`), so a
+        // read-only listing would commit a transaction and fsync every time.
         if schema_version < CATALOG_SCHEMA_VERSION {
-            connection.execute_batch(
-                "DROP TABLE IF EXISTS indexed_entry_gram_counts;
-                 DROP TABLE IF EXISTS indexed_entry_grams;
-                 DROP TABLE IF EXISTS indexed_entries;
-                 DROP TABLE IF EXISTS indexed_entry_sessions;
-                 DROP TABLE IF EXISTS sessions;
-                 CREATE TABLE sessions (
-                     id TEXT PRIMARY KEY NOT NULL,
-                     file_size INTEGER NOT NULL CHECK (file_size >= 0),
-                     modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
-                     status INTEGER NOT NULL CHECK (status IN (0, 1)),
-                     title TEXT,
-                     configured_model TEXT,
-                     configured_reasoning TEXT,
-                     message_count INTEGER NOT NULL CHECK (message_count >= 0)
-                 ) WITHOUT ROWID;",
-            )?;
-        } else {
-            connection.execute_batch(
-                "CREATE TABLE IF NOT EXISTS sessions (
-                     id TEXT PRIMARY KEY NOT NULL,
-                     file_size INTEGER NOT NULL CHECK (file_size >= 0),
-                     modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
-                     status INTEGER NOT NULL CHECK (status IN (0, 1)),
-                     title TEXT,
-                     configured_model TEXT,
-                     configured_reasoning TEXT,
-                     message_count INTEGER NOT NULL CHECK (message_count >= 0)
-                 ) WITHOUT ROWID;",
-            )?;
+            install_schema(&connection)?;
         }
-
-        // Entry-level search projection. It accelerates
-        // bounded incremental entry search and is rebuilt from JSONL whenever a
-        // session's fingerprint changes; it is still disposable.
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS indexed_entries (
-                 session_id TEXT NOT NULL,
-                 entry_id TEXT NOT NULL,
-                 ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-                 kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
-                 text TEXT NOT NULL,
-                 PRIMARY KEY (session_id, entry_id)
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS indexed_entries_order ON indexed_entries(session_id, ordinal);
-             CREATE TABLE IF NOT EXISTS indexed_entry_grams (
-                 gram TEXT NOT NULL,
-                 session_id TEXT NOT NULL,
-                 ordinal INTEGER NOT NULL,
-                 entry_id TEXT NOT NULL,
-                 PRIMARY KEY (gram, session_id, ordinal)
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS indexed_entry_grams_session ON indexed_entry_grams(session_id);
-             CREATE TABLE IF NOT EXISTS indexed_entry_sessions (
-                 session_id TEXT PRIMARY KEY NOT NULL,
-                 file_size INTEGER NOT NULL CHECK (file_size >= 0),
-                 modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
-                 postings_complete INTEGER NOT NULL CHECK (postings_complete IN (0, 1))
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS indexed_entry_fallback ON indexed_entry_sessions(postings_complete, session_id);
-             CREATE TABLE IF NOT EXISTS indexed_entry_gram_counts (
-                 gram TEXT PRIMARY KEY NOT NULL,
-                 postings INTEGER NOT NULL CHECK (postings > 0)
-             ) WITHOUT ROWID;
-             CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_insert AFTER INSERT ON indexed_entry_grams BEGIN
-                 INSERT INTO indexed_entry_gram_counts (gram, postings) VALUES (NEW.gram, 1)
-                 ON CONFLICT(gram) DO UPDATE SET postings = postings + 1;
-             END;
-             CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_delete AFTER DELETE ON indexed_entry_grams BEGIN
-                 DELETE FROM indexed_entry_gram_counts WHERE gram = OLD.gram AND postings = 1;
-                 UPDATE indexed_entry_gram_counts SET postings = postings - 1 WHERE gram = OLD.gram;
-             END;
-             CREATE TABLE IF NOT EXISTS catalog_meta (
-                 key TEXT PRIMARY KEY NOT NULL,
-                 value INTEGER NOT NULL
-             ) WITHOUT ROWID;
-             INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('entry_revision', 1);
-             PRAGMA user_version = 6;",
-        )?;
 
         Ok(Self {
             connection,
@@ -258,7 +192,7 @@ impl SessionCatalog {
         })
     }
 
-    #[cfg(test)]
+    /// Every cached row in one query; a full listing reads them all anyway.
     pub(crate) fn load(&self) -> anyhow::Result<HashMap<String, CachedSession>> {
         self.load_selected(None)
     }
@@ -657,6 +591,78 @@ impl SessionCatalog {
     pub(crate) fn path(workspace_store: &Path) -> std::path::PathBuf {
         workspace_store.join(CATALOG_DIRECTORY).join(CATALOG_FILE)
     }
+}
+
+/// Drop any older projection and install the current schema. `user_version`
+/// is written last, so a catalog that reports the current version has every
+/// table, index and trigger below.
+fn install_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS indexed_entry_gram_counts;
+         DROP TABLE IF EXISTS indexed_entry_grams;
+         DROP TABLE IF EXISTS indexed_entries;
+         DROP TABLE IF EXISTS indexed_entry_sessions;
+         DROP TABLE IF EXISTS sessions;
+         CREATE TABLE sessions (
+             id TEXT PRIMARY KEY NOT NULL,
+             file_size INTEGER NOT NULL CHECK (file_size >= 0),
+             modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
+             status INTEGER NOT NULL CHECK (status IN (0, 1)),
+             title TEXT,
+             configured_model TEXT,
+             configured_reasoning TEXT,
+             message_count INTEGER NOT NULL CHECK (message_count >= 0)
+         ) WITHOUT ROWID;",
+    )?;
+
+    // Entry-level search projection. It accelerates
+    // bounded incremental entry search and is rebuilt from JSONL whenever a
+    // session's fingerprint changes; it is still disposable.
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS indexed_entries (
+             session_id TEXT NOT NULL,
+             entry_id TEXT NOT NULL,
+             ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+             kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+             text TEXT NOT NULL,
+             PRIMARY KEY (session_id, entry_id)
+         ) WITHOUT ROWID;
+         CREATE INDEX IF NOT EXISTS indexed_entries_order ON indexed_entries(session_id, ordinal);
+         CREATE TABLE IF NOT EXISTS indexed_entry_grams (
+             gram TEXT NOT NULL,
+             session_id TEXT NOT NULL,
+             ordinal INTEGER NOT NULL,
+             entry_id TEXT NOT NULL,
+             PRIMARY KEY (gram, session_id, ordinal)
+         ) WITHOUT ROWID;
+         CREATE INDEX IF NOT EXISTS indexed_entry_grams_session ON indexed_entry_grams(session_id);
+         CREATE TABLE IF NOT EXISTS indexed_entry_sessions (
+             session_id TEXT PRIMARY KEY NOT NULL,
+             file_size INTEGER NOT NULL CHECK (file_size >= 0),
+             modified_ns INTEGER NOT NULL CHECK (modified_ns >= 0),
+             postings_complete INTEGER NOT NULL CHECK (postings_complete IN (0, 1))
+         ) WITHOUT ROWID;
+         CREATE INDEX IF NOT EXISTS indexed_entry_fallback ON indexed_entry_sessions(postings_complete, session_id);
+         CREATE TABLE IF NOT EXISTS indexed_entry_gram_counts (
+             gram TEXT PRIMARY KEY NOT NULL,
+             postings INTEGER NOT NULL CHECK (postings > 0)
+         ) WITHOUT ROWID;
+         CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_insert AFTER INSERT ON indexed_entry_grams BEGIN
+             INSERT INTO indexed_entry_gram_counts (gram, postings) VALUES (NEW.gram, 1)
+             ON CONFLICT(gram) DO UPDATE SET postings = postings + 1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS indexed_entry_gram_delete AFTER DELETE ON indexed_entry_grams BEGIN
+             DELETE FROM indexed_entry_gram_counts WHERE gram = OLD.gram AND postings = 1;
+             UPDATE indexed_entry_gram_counts SET postings = postings - 1 WHERE gram = OLD.gram;
+         END;
+         CREATE TABLE IF NOT EXISTS catalog_meta (
+             key TEXT PRIMARY KEY NOT NULL,
+             value INTEGER NOT NULL
+         ) WITHOUT ROWID;
+         INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('entry_revision', 1);
+         PRAGMA user_version = 6;",
+    )?;
+    Ok(())
 }
 
 /// Unique short n-grams bound temporary retention to one projected entry.

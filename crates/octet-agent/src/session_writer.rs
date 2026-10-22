@@ -2,16 +2,42 @@
 
 use std::fs::File;
 use std::io::{Seek, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use fs2::FileExt;
 
 use crate::session::SessionError;
 
+/// A directory whose sessions are deleted when this process's run finishes,
+/// such as an ephemeral `--no-session` transcript root.
+static VOLATILE_SESSION_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Mark `root` (or nothing) as the directory whose sessions are discarded at
+/// the end of the run. Sessions created or opened under it still write every
+/// record before an append returns, so they stay process-crash safe, but skip
+/// `sync_data`: power-loss durability is meaningless for a transcript that is
+/// removed moments later, and each sync is a disk flush.
+pub fn set_volatile_session_root(root: Option<PathBuf>) {
+    *VOLATILE_SESSION_ROOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = root;
+}
+
+fn is_volatile_session(path: &Path) -> bool {
+    path.is_absolute()
+        && VOLATILE_SESSION_ROOT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            .is_some_and(|root| path.starts_with(root))
+}
+
 #[derive(Debug)]
 pub(crate) struct SessionWriter {
     pub(crate) state: Mutex<WriterState>,
     writable: bool,
+    durable: bool,
     #[cfg(test)]
     fail_next_append: std::sync::atomic::AtomicBool,
 }
@@ -24,10 +50,11 @@ pub(crate) struct WriterState {
 }
 
 impl SessionWriter {
-    pub(crate) fn new(file: File, len: u64, records: usize, writable: bool) -> Self {
+    pub(crate) fn new(path: &Path, file: File, len: u64, records: usize, writable: bool) -> Self {
         Self {
             state: Mutex::new(WriterState { file, len, records }),
             writable,
+            durable: !is_volatile_session(path),
             #[cfg(test)]
             fail_next_append: std::sync::atomic::AtomicBool::new(false),
         }
@@ -81,7 +108,9 @@ impl SessionWriter {
                 }
                 state.file.seek(std::io::SeekFrom::End(0))?;
                 state.file.write_all(bytes)?;
-                state.file.sync_data()?;
+                if self.durable {
+                    state.file.sync_data()?;
+                }
                 state.len = len;
                 state.records = records;
                 Ok(())

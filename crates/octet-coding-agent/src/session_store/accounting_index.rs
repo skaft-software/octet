@@ -235,7 +235,10 @@ impl Index {
             Ok(index) => Ok(index),
             Err(error) if error.chain().any(|cause| matches!(cause.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::SqliteFailure(error, _)) if matches!(error.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))) => {
                 let path = directory.join(INDEX_FILE);
-                octet_agent::secure_fs::remove_regular_file_if_exists(&path.with_file_name(format!("{INDEX_FILE}-journal")))?;
+                // A WAL left beside a new database would be replayed into it.
+                for suffix in ["-journal", "-wal", "-shm"] {
+                    octet_agent::secure_fs::remove_regular_file_if_exists(&path.with_file_name(format!("{INDEX_FILE}{suffix}")))?;
+                }
                 octet_agent::secure_fs::remove_regular_file_if_exists(&path)?;
                 Self::open(directory)
             }
@@ -257,15 +260,28 @@ impl Index {
         if version > 1 {
             anyhow::bail!("unsupported ephemeral accounting index version");
         }
-        connection.pragma_update(None, "journal_mode", "DELETE")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
+        // WAL commits are atomic, so losing the newest one to power loss only
+        // leaves an older snapshot whose fingerprint no longer matches the
+        // synced ledger: the next append rebuilds, exactly as for a failed
+        // commit. That makes per-commit fsyncs (four per rollback-journal
+        // commit) and the close-time checkpoint unnecessary for this cache.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )?;
         connection.pragma_update(None, "cache_size", -1024)?;
         connection.pragma_update(None, "mmap_size", 0)?;
         connection.pragma_update(None, "temp_store", "FILE")?;
         connection.pragma_update(None, "trusted_schema", false)?;
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS ids (id TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL CHECK(offset >= 0), bytes INTEGER NOT NULL CHECK(bytes > 0)) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS snapshot (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), fingerprint TEXT NOT NULL);
-            PRAGMA user_version = 1;")?;
+        // `user_version` is written last, so version 1 has both tables. Rerunning
+        // the DDL would rewrite page 1 and commit (four fsyncs) on every append.
+        if version < 1 {
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS ids (id TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL CHECK(offset >= 0), bytes INTEGER NOT NULL CHECK(bytes > 0)) WITHOUT ROWID;
+                CREATE TABLE IF NOT EXISTS snapshot (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), fingerprint TEXT NOT NULL);
+                PRAGMA user_version = 1;")?;
+        }
         Ok(Self { connection })
     }
 
