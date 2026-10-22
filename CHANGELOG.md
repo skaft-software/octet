@@ -136,6 +136,26 @@ slowest measured paths.
   startup and exit.
 - Pi session import decodes records straight from the parsed JSON and validates
   the converted transcript once, cutting a 1,000-turn import by about a third.
+- Startup, session and round-trip paths measured against fx
+  (`benchmarks/versus`) do less work. Opening the session catalog or the
+  ephemeral accounting index no longer rewrites its schema version (a commit
+  and four fsyncs each time), the catalog keeps its WAL between processes
+  instead of checkpointing on every exit, the accounting index uses WAL, a
+  `--no-session` transcript skips `fdatasync`, and the partial-assistant
+  journal is no longer synced just before it is deleted. A saved round trip
+  makes 5 fsyncs instead of 10, a resumed one 4 instead of 13, a `--no-session`
+  one 5 instead of 18, and `sessions list` none instead of 4. A full listing
+  reads the catalog in one query instead of one per session.
+- Linux GNU builds link `octet` and `octet-host` as fixed-address executables:
+  the dynamic loader no longer applies about 58,000 relocations on every launch.
+  Libraries, heap, stacks and mappings stay randomized. `sessions`, `doctor`,
+  `--list-models`, `--help` and the startup benchmark run on a current-thread
+  runtime, a bare `octet` skips building the argument parser, `--help` and
+  `--list-models` build it once instead of twice, and `doctor` runs its ripgrep
+  probe while the catalog builds. On one Linux host, startup to dispatch fell
+  from 5.4 to 2.1 ms, `--list-models` from 7.1 to 3.6 ms, listing 1,000 sessions
+  from 34.5 to 14.6 ms, a `--no-session` round trip from 29.1 to 12.8 ms and
+  resuming a 200-turn session from 51.3 to 31.3 ms.
 - Rust minor and patch dependency updates, including Tokio 1.53.3, whose
   deprecated `AsyncFd::with_interest` is replaced by `register_with_interest`;
   pinned GitHub Actions updates.
