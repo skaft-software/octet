@@ -299,6 +299,24 @@ test('automatic mirror reuses its capture for an unchanged setup and recaptures 
   assert.ok(count() > before);
 });
 
+test('automatic mirror retries a missing dependency without a factory source change', async t => {
+  const f = fixture(t);
+  const dependent = put(join(f.agent, 'extensions/dependent.js'), `import {label} from 'fixture-dependency';
+    export default pi => pi.registerCommand('dependent',{description:label,handler(){}});`);
+  const options = { ...f.options, env: { ...f.env, OCTET_PI_COMPAT_CACHE: join(f.dir, 'mirror-cache') }, cache: true, overwrite: true };
+  const first = await configureMirror(options);
+  assert.deepEqual(first.config.extensions, [f.entry]);
+  assert.deepEqual(first.config.mirror_excluded.map(item => item.entry), [dependent]);
+  // No factory/settings edit: only the previously absent dependency appears.
+  const dependency = join(f.agent, 'node_modules/fixture-dependency');
+  put(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture-dependency', type: 'module', exports: './index.js' }));
+  put(join(dependency, 'index.js'), 'export const label="dependency ready";');
+  const second = await configureMirror(options);
+  assert.deepEqual([...second.config.extensions].sort(), [f.entry, dependent].sort());
+  assert.equal(second.config.mirror_excluded, undefined);
+  assert.equal(second.registrations.commands.find(command => command.name === 'dependent').description, 'dependency ready');
+});
+
 test('automatic mirror settles a mixed setup in one capture and names the factory it left out', async t => {
   const f = fixture(t);
   put(join(f.agent, 'extensions/broken.js'), 'export default () => { throw new Error("broken factory"); };');

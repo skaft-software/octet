@@ -120,6 +120,16 @@ command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 `v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
 license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
 runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
+Its native ESM imports finish sequentially before the synchronous overlays are
+published; an in-flight package graph is never read with `require()`. The shim
+precedence and denied-export boundaries are unchanged.
+
+Automatic-mirror catalog reuse does not retain exclusions caused by missing
+factory dependencies, unavailable installed-Pi modules or timed-out setup. Those
+factories are retried on the next launch, even if their sources did not change.
+Dependencies are never installed automatically. A cold capture still runs before
+the first interactive frame; a cached startup measurement does not qualify that
+cold path.
 
 ## Implemented surface
 

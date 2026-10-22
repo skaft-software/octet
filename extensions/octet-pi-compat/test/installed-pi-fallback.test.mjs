@@ -113,6 +113,40 @@ test('installed mode loads the gap from installed Pi while shim exports keep win
   assert.equal(describe(legacy.metadata, 'helper'), 'string');
 });
 
+test('installed mode awaits the native ESM package graph before exposing synchronous overlays', t => {
+  const env = fakeInstall(t);
+  const dir = join(env.OCTET_PI_AGENT_DIR, 'install/releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist');
+  // A pending native import cannot be read through require(), even when the
+  // overlay itself is CommonJS. Keep the dependency asynchronous so this
+  // regression is independent of filesystem speed or Node's module cache.
+  writeFileSync(join(dir, 'pending.mjs'), 'await new Promise(resolve => setTimeout(resolve, 20));\n');
+  writeFileSync(join(dir, 'index.js'), `import './pending.mjs';\n${readFileSync(join(dir, 'index.js'), 'utf8')}`);
+  const result = run([fixture('missing-export.ts')], { mode: 'installed', env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(describe(result.metadata, 'installed-probe'), `parsed={"fixture":"plain text"} version=${piVersion}`);
+});
+
+test('installed overlays preserve subclassable shim and admitted native constructors', t => {
+  const env = fakeInstall(t);
+  const tui = join(env.OCTET_PI_AGENT_DIR, 'install/releases/1.0.2/node_modules/@earendil-works/pi-tui/dist/index.js');
+  writeFileSync(tui, `${readFileSync(tui, 'utf8')}\nexport class HStack { render() { return 'native-stack'; } }\n`);
+  const dir = mkdtempSync(join(tmpdir(), 'octet-installed-subclass-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const entry = join(dir, 'subclass.ts');
+  writeFileSync(entry, `import { Container, HStack } from '@earendil-works/pi-tui';
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+class ChildContainer extends Container {}
+class ChildStack extends HStack {}
+class ChildEditor extends CustomEditor {}
+export default pi => pi.registerCommand('subclass-probe', {
+  description: [new ChildContainer() instanceof Container, new ChildStack().render(), Object.getPrototypeOf(ChildEditor.prototype) === CustomEditor.prototype].join(' '),
+  handler() {}
+});`);
+  const result = run([entry], { mode: 'installed', env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(describe(result.metadata, 'subclass-probe'), 'true native-stack true');
+});
+
 test('installed mode via bridge.json pi_runtime field', t => {
   const env = fakeInstall(t);
   const dir = mkdtempSync(join(tmpdir(), 'octet-bridge-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
