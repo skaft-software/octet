@@ -11,12 +11,11 @@
 // refused, and real names this build has not classified are refused too, so a
 // export from another Pi release cannot silently become live. This is a guard against
 // silent takeover, not a sandbox: a trusted factory keeps normal OS authority.
-import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { invalid, rpcError } from './errors.mjs';
 import { PI_MODULES, PI_PREFIXES, PI_VERSION, piModule } from './pi-modules.mjs';
 
@@ -194,7 +193,8 @@ export function installedPiAliases(env = process.env) {
 }
 // Installs the overlay registry. Shim namespaces are preloaded through the
 // runtime's jiti so they are the same module instances path A would use; real
-// Pi loads lazily, natively (outside jiti aliases), and only when imported.
+// Pi loads natively (outside jiti aliases) before publishing synchronous
+// overlays. require() cannot safely observe a pending native ESM graph.
 // The managed Pi package directory the overlay actually serves, or null on the
 // emulated path. Used by the Pi config helpers so a factory sees real Pi's own
 // package root whenever real Pi provides the module.
@@ -204,12 +204,17 @@ export async function activateInstalledPi(jiti, install) {
   activePackageDir = install.packages['coding-agent'].dir;
   const shims = {};
   for (const key of Object.keys(PACKAGES)) shims[key] = await jiti.import(shimPath(key));
-  const nativeRequire = createRequire(import.meta.url), cache = new Map();
+  const native = new Map(), cache = new Map();
+  // Complete each import sequentially: Pi's packages share an ESM graph that
+  // a factory's native dependency may already be evaluating. The CommonJS
+  // overlay must expose settled namespaces, not require() that in-flight graph.
+  for (const [key, pkg] of Object.entries(install.packages)) {
+    try { native.set(key, await import(pathToFileURL(pkg.entry).href)); }
+    catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+  }
   const namespace = key => {
     if (cache.has(key)) return cache.get(key);
-    const pkg = install.packages[key], shim = shims[key];
-    let real;
-    try { real = nativeRequire(pkg.entry); } catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+    const pkg = install.packages[key], shim = shims[key], real = native.get(key);
     const merged = { __esModule: true };
     for (const name of Object.keys(real)) {
       if (name === 'default') continue;

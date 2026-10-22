@@ -332,9 +332,11 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
     extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])),
     capturedRegistrations: reused?.registrations ?? (combined && !combined.skipped.size ? combined.registrations : undefined), captureCacheDir });
   const { config } = result;
-  // A factory that ran out of time may be waiting on something transient;
-  // never pin its exclusion, so the next start tries it again.
-  if (cached && !reused && !refused.some(item => /^setup did not finish within /.test(String(item.error)))) cached.write({ routed, registrations: result.capturedRegistrations });
+  // Timeouts, missing dependencies and unavailable installed-Pi graphs can
+  // recover without changing factory sources or the managed Pi version. Never
+  // pin those exclusions in the catalog cache; the next start must retry them.
+  const transientRefusal = refused.some(item => /^(setup did not finish within |installed_pi_unavailable\b)|\b(Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND)\b/.test(String(item.error)));
+  if (cached && !reused && !transientRefusal) cached.write({ routed, registrations: result.capturedRegistrations });
   if (reused) log('  Reused the captured catalog: the Pi setup and its factories are unchanged');
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
   for (const item of mirrorExcluded) log(`  excluded      ${label(item.entry)}: ${item.reason.slice(0, 160)}`);
