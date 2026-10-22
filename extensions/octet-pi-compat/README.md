@@ -214,7 +214,9 @@ deliberate differences from Pi's unbounded, blocking chain.
   and fullscreen Ctrl+G rescue remain reserved. Editor components occupy only the
   composer slot; native chrome and slash discovery stay visible. JS components,
   callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
-  cross the wire; Rust paints cached lines and never calls JS synchronously.
+  cross the wire; Rust paints cached lines and never calls JS synchronously. Oversized Pi render
+   snapshots are clipped to the existing row, per-line and aggregate wire bounds at UTF-8/SGR
+   boundaries, with an ellipsis; malformed escapes remain refused.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
   claim to reproduce octet's host theme; unknown roles are explicit errors.
