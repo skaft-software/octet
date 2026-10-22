@@ -47,7 +47,7 @@ impl Agent {
         let template = DelegationTemplate {
             model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
-            model: self.model.clone(),
+            model: std::sync::RwLock::new(self.model.clone()),
             base_system: std::sync::RwLock::new(self.system.clone()),
             sandbox: self.sandbox.clone(),
             effect_broker: self.effect_broker.clone(),

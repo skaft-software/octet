@@ -370,6 +370,17 @@ impl DelegationBinding {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = system;
         }
     }
+    pub(crate) fn update_model(&self, model: octet_ai::Model) {
+        if self.identity.id == ROOT_AGENT_ID {
+            *self
+                .manager
+                .template
+                .model
+                .write()
+                .unwrap_or_else(|p| p.into_inner()) = model;
+        }
+    }
+
     pub(crate) fn update_reasoning(&self, reasoning: octet_ai::ReasoningConfig) {
         if self.identity.id == ROOT_AGENT_ID {
             *self
