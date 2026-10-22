@@ -25,7 +25,11 @@ pub(crate) mod eval;
 mod extension_flags;
 pub(crate) mod parity;
 
-pub(crate) use extension_flags::{parse_with_extension_flags, uses_runtime_extension_flag_parser};
+#[cfg(test)]
+pub(crate) use extension_flags::uses_runtime_extension_flag_parser;
+pub(crate) use extension_flags::{
+    parse_static_invocation, parse_with_extension_flags, StaticInvocation,
+};
 
 use config_diagnostics::{
     read_layer, report_config_diagnostics, ConfigSourceKind, LoadedConfigLayer,

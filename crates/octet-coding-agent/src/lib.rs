@@ -54,7 +54,7 @@ mod session_tree;
 mod tui;
 mod update;
 
-use clap::Parser;
+use std::ffi::OsString;
 
 /// Build the multi-thread runtime that the `octet` and `octet-host` binaries run on.
 ///
@@ -71,6 +71,32 @@ pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .worker_threads(workers)
         .enable_all()
         .build()
+}
+
+/// Build the runtime one `octet` invocation needs.
+///
+/// Inventory commands (`sessions`, `doctor`, `--list-models`, `--help`) and the
+/// startup-bench boundary finish on the calling thread and never start an agent
+/// or an extension, so they run on a current-thread runtime instead of first
+/// spawning a worker per CPU. Every other invocation, including any this cheap
+/// check does not recognize, gets [`build_runtime`].
+pub fn build_runtime_for_invocation() -> std::io::Result<tokio::runtime::Runtime> {
+    if runs_on_calling_thread(&std::env::args_os().collect::<Vec<_>>()) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    } else {
+        build_runtime()
+    }
+}
+
+fn runs_on_calling_thread(args: &[OsString]) -> bool {
+    match args.get(1).and_then(|argument| argument.to_str()) {
+        None => std::env::var_os(STARTUP_BENCH_ENV).is_some(),
+        Some("--help" | "-h") => args.len() == 2,
+        Some("sessions" | "doctor" | "--list-models") => true,
+        _ => false,
+    }
 }
 
 /// With no arguments, exit once startup has dispatched to the interactive
@@ -115,14 +141,15 @@ async fn run() -> anyhow::Result<()> {
     octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
     let bench = args.len() <= 1 && std::env::var_os(STARTUP_BENCH_ENV).is_some();
-    let (mut cli, extension_flag_values, parsed_cwd) =
-        if cli::uses_runtime_extension_flag_parser(&args) {
+    let (mut cli, extension_flag_values, parsed_cwd) = match cli::parse_static_invocation(&args) {
+        cli::StaticInvocation::Parsed(cli) => (*cli, Default::default(), None),
+        cli::StaticInvocation::Runtime(command) => {
             let cwd = std::env::current_dir()?;
-            let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
+            let (cli, extension_flag_values) =
+                cli::parse_with_extension_flags(args, &cwd, command.map(|command| *command))?;
             (cli, extension_flag_values, Some(cwd))
-        } else {
-            (cli::Cli::parse(), Default::default(), None)
-        };
+        }
+    };
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;
@@ -361,4 +388,41 @@ pub fn supported_subscription_providers() -> Vec<&'static str> {
         .iter()
         .map(|flow| flow.login())
         .collect()
+}
+
+#[cfg(test)]
+mod runtime_selection_tests {
+    use super::runs_on_calling_thread;
+    use std::ffi::OsString;
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn inventory_commands_run_on_the_calling_thread() {
+        for invocation in [
+            &["octet", "sessions", "list"][..],
+            &["octet", "doctor"],
+            &["octet", "--list-models"],
+            &["octet", "--list-models", "sonnet"],
+            &["octet", "--help"],
+            &["octet", "-h"],
+        ] {
+            assert!(runs_on_calling_thread(&args(invocation)), "{invocation:?}");
+        }
+    }
+
+    #[test]
+    fn agent_invocations_keep_the_multi_thread_runtime() {
+        for invocation in [
+            &["octet", "-p", "hi"][..],
+            &["octet", "--model", "x", "sessions"],
+            &["octet", "--help", "--extension", "x"],
+            &["octet", "batch", "run"],
+            &["octet", "hello"],
+        ] {
+            assert!(!runs_on_calling_thread(&args(invocation)), "{invocation:?}");
+        }
+    }
 }
