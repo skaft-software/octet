@@ -98,6 +98,7 @@ pub mod secure_fs;
 pub mod session;
 pub mod session_leaf;
 mod session_writer;
+pub use session_writer::set_volatile_session_root;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
 pub mod skills;
 pub mod telemetry;

@@ -137,7 +137,15 @@ fn corrupt_catalog_falls_back_without_touching_transcripts() {
     drop(session);
     let authoritative_bytes = std::fs::read(&path).unwrap();
     assert_eq!(store.list().len(), 1);
-    std::fs::write(SessionCatalog::path(store.dir()), b"not a sqlite database").unwrap();
+    // The catalog keeps its WAL between processes, and SQLite would serve the
+    // listed rows from it. Corrupt a fully checkpointed catalog instead.
+    let catalog = SessionCatalog::path(store.dir());
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = catalog.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(sidecar);
+    }
+    std::fs::write(&catalog, b"not a sqlite database").unwrap();
 
     let scans = std::cell::Cell::new(0);
     let listed = store.discover_with_summarizer(store.candidates(), false, |path| {

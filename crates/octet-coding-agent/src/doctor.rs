@@ -6,13 +6,15 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 use crate::app::bootstrap::model_catalog_with_offline;
 use crate::config::Config;
 
 /// Print local prerequisites and provider/model visibility.
 pub fn run(config: &Config) -> anyhow::Result<()> {
+    // Start the ripgrep probe first so the child runs while the catalog builds.
+    let rg = spawn_rg_version();
     let catalog = model_catalog_with_offline(config.offline)?;
     let mut lines = vec![
         format!("octet doctor {}", env!("CARGO_PKG_VERSION")),
@@ -38,7 +40,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         ),
     ];
 
-    lines.push(search_diagnostic(rg_version().as_deref()));
+    lines.push(search_diagnostic(rg.and_then(rg_version).as_deref()));
 
     let mut endpoints: BTreeMap<String, EndpointSummary> = BTreeMap::new();
     for spec in catalog.models() {
@@ -136,8 +138,18 @@ fn search_diagnostic(rg_version: Option<&str>) -> String {
     }
 }
 
-fn rg_version() -> Option<String> {
-    let output = Command::new("rg").arg("--version").output().ok()?;
+fn spawn_rg_version() -> Option<Child> {
+    Command::new("rg")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
+
+fn rg_version(child: Child) -> Option<String> {
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }

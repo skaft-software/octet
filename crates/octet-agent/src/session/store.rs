@@ -59,12 +59,13 @@ impl Session {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
-        let writer = Arc::new(SessionWriter::new(file.try_clone()?, 0, 0, true));
+        let path = path.into();
+        let writer = Arc::new(SessionWriter::new(&path, file.try_clone()?, 0, 0, true));
         let invocations = Arc::new(DurableInvocationStore::with_journal(Arc::clone(&writer)));
         let deferred_runs = Arc::new(DeferredRunStore::with_journal(Arc::clone(&writer)));
         Ok(Self {
             header: None,
-            path: path.into(),
+            path,
             file,
             writer,
             invocations,
@@ -640,6 +641,7 @@ impl Session {
         let persisted_len = file.metadata()?.len();
         FileExt::unlock(&file)?;
         let writer = Arc::new(SessionWriter::new(
+            &path,
             file.try_clone()?,
             persisted_len,
             persisted_records,

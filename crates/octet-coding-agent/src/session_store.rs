@@ -1702,6 +1702,7 @@ pub fn begin_ephemeral_run(
     accounting_session_dir: PathBuf,
     workspace: PathBuf,
 ) {
+    octet_agent::set_volatile_session_root(Some(transcript_root.clone()));
     *EPHEMERAL_RUN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(EphemeralRun {
@@ -1739,6 +1740,7 @@ pub fn finish_ephemeral_run() -> anyhow::Result<Option<EphemeralAccountingRecord
     let result = finish_ephemeral_run_state(run);
     if result.is_ok() {
         *active = None;
+        octet_agent::set_volatile_session_root(None);
     }
     result
 }

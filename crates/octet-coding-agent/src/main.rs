@@ -6,7 +6,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    octet_sdk::build_runtime()
+    octet_sdk::build_runtime_for_invocation()
         .expect("build the octet runtime")
         .block_on(octet_sdk::run_cli())
 }

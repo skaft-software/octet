@@ -1124,9 +1124,24 @@ fn optimize_macos_executable_linking() {
     }
 }
 
+/// As a position-independent executable, octet made the dynamic loader apply
+/// about 58,000 relative relocations and dirty the whole 1 MiB `.data.rel.ro`
+/// on every launch, before `main` ran: more than half the instructions of
+/// `octet --version`. A fixed-address executable has them resolved at link
+/// time. Shared libraries, the heap, stacks and mmap regions stay randomized;
+/// only the executable image itself loses its randomized base.
+fn optimize_linux_executable_linking() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+    {
+        println!("cargo:rustc-link-arg-bins=-no-pie");
+    }
+}
+
 fn main() -> io::Result<()> {
     reserve_windows_main_thread_stack();
     optimize_macos_executable_linking();
+    optimize_linux_executable_linking();
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
             .expect("Cargo must provide CARGO_MANIFEST_DIR to the build script"),
