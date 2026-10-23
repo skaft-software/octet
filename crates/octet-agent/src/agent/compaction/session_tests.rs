@@ -13,6 +13,7 @@ impl SessionOperationInvocation for NativeReply {
 enum Action {
     Cancel,
     Replace,
+    RewindOnce,
     Observe,
 }
 struct Interceptor {
@@ -35,7 +36,26 @@ impl SessionOperationHook for Interceptor {
                         first_kept: first_kept.clone(),
                     },
                 },
-                Action::Observe => SessionOperationDecision::Continue,
+                Action::RewindOnce
+                    if self
+                        .seen
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|operation| {
+                            matches!(operation, SessionOperation::BeforeCompact { .. })
+                        })
+                        .count()
+                        == 1 =>
+                {
+                    SessionOperationDecision::ReplaceCompaction {
+                        replacement: SessionCompactionReplacement {
+                            summary: "earlier extension handoff".into(),
+                            first_kept: turn_starts(session)[0].clone(),
+                        },
+                    }
+                }
+                Action::RewindOnce | Action::Observe => SessionOperationDecision::Continue,
             },
             SessionOperation::BeforeTree { .. } if matches!(self.action, Action::Cancel) => {
                 SessionOperationDecision::Cancel
@@ -269,6 +289,241 @@ async fn overflow_veto_cannot_bypass_capacity_or_dispatch_provider() {
         .entries()
         .iter()
         .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+}
+
+/// A summary larger than the episode it replaces must not trigger another
+/// interruption in the same capacity pass, even if another cut is available.
+struct ExpandingSummaryProvider {
+    summaries: Arc<AtomicUsize>,
+    answers: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for ExpandingSummaryProvider {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: Request,
+        diagnostics: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, AiError> {
+        if request.system.as_deref() == Some(SUMMARIZATION_SYSTEM_PROMPT) {
+            // Fail deterministically rather than hanging if compaction repeats.
+            // The assistant cut needs one history and one turn-prefix call.
+            assert!(self.summaries.fetch_add(1, Ordering::Relaxed) < 2);
+            let response = octet_ai::Response {
+                message: AssistantMessage {
+                    content: vec![AssistantPart::Text("expanded handoff ".repeat(100))],
+                    model: model.id,
+                    protocol: model.protocol,
+                },
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                cost: Some(octet_ai::Cost::default()),
+                response_id: None,
+                responses_output: None,
+                deferred: None,
+                inference: None,
+                diagnostics: Vec::new(),
+            };
+            return Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(response)),
+            ])));
+        }
+        LocalProvider(self.answers.clone())
+            .stream(model, request, diagnostics)
+            .await
+    }
+}
+
+fn append_completed_episode(agent: &mut Agent, text: &str) {
+    agent
+        .session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text(text.into())],
+        })))
+        .unwrap();
+    agent
+        .session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            content: vec![AssistantPart::Text("episode reply".into())],
+            model: agent.model.spec.id.clone(),
+            protocol: agent.model.spec.protocol,
+        })))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn expanding_summary_stops_threshold_compaction_and_continues() {
+    let (mut agent, _, _, dir) = agent(Action::Observe);
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
+        .unwrap();
+    for _ in 0..3 {
+        append_completed_episode(&mut agent, "small episode");
+    }
+    let summaries = Arc::new(AtomicUsize::new(0));
+    let answers = Arc::new(AtomicUsize::new(0));
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(ExpandingSummaryProvider {
+            summaries: summaries.clone(),
+            answers: answers.clone(),
+        }),
+    );
+    agent.complete("next prompt").await.unwrap();
+    assert_eq!(summaries.load(Ordering::Relaxed), 2);
+    assert_eq!(answers.load(Ordering::Relaxed), 1);
+    assert_eq!(agent.session.usage_records().len(), 3);
+    drop(agent);
+    let reopened = Session::open(dir.path().join("session.jsonl")).unwrap();
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.value, EntryValue::Compaction { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn expanding_summary_stops_hard_overflow_without_dispatching_answer() {
+    let (mut agent, _, _, _dir) = agent(Action::Observe);
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
+        .unwrap();
+    for _ in 0..3 {
+        append_completed_episode(&mut agent, "small episode");
+    }
+    let mut summary_model = agent.model.clone();
+    Arc::make_mut(&mut summary_model.spec).limits.context_window = 128_000;
+    agent.set_compaction_model(Some(summary_model));
+    let summaries = Arc::new(AtomicUsize::new(0));
+    let answers = Arc::new(AtomicUsize::new(0));
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(ExpandingSummaryProvider {
+            summaries: summaries.clone(),
+            answers: answers.clone(),
+        }),
+    );
+    let error = agent
+        .complete("oversized history ".repeat(6000))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AgentError::ContextExceeded { estimate, budget } if estimate > budget));
+    assert_eq!(summaries.load(Ordering::Relaxed), 2);
+    assert_eq!(answers.load(Ordering::Relaxed), 0);
+    assert_eq!(agent.session.usage_records().len(), 2);
+}
+
+#[tokio::test]
+async fn reducing_summaries_can_advance_successive_distinct_boundaries() {
+    let (mut agent, seen, calls, _dir) = agent(Action::Observe);
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
+        .unwrap();
+    for _ in 0..4 {
+        append_completed_episode(&mut agent, &"older detail ".repeat(200));
+    }
+    // Leave room for the complete summary transcript on its separate route.
+    let mut summary_model = agent.model.clone();
+    Arc::make_mut(&mut summary_model.spec).limits.context_window = 128_000;
+    agent.set_compaction_model(Some(summary_model));
+    agent.complete("next prompt").await.unwrap();
+    let boundaries: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|operation| match operation {
+            SessionOperation::Compacted { entry, .. } => match &entry.value {
+                EntryValue::Compaction { first_kept, .. } => Some(first_kept.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boundaries.len(), 3);
+    assert_eq!(boundaries.iter().collect::<HashSet<_>>().len(), 3);
+    assert_eq!(calls.load(Ordering::Relaxed), 7); // history + prefix per cut, then answer
+}
+
+#[tokio::test]
+async fn rewritten_boundary_fallback_searches_past_attempted_candidate() {
+    let (mut agent, seen, _, _dir) = agent(Action::RewindOnce);
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
+        .unwrap();
+    for _ in 0..4 {
+        append_completed_episode(&mut agent, &"older detail ".repeat(200));
+    }
+    let original_boundaries = turn_starts(&agent.session);
+    let mut summary_model = agent.model.clone();
+    Arc::make_mut(&mut summary_model.spec).limits.context_window = 128_000;
+    agent.set_compaction_model(Some(summary_model));
+    agent.complete("next prompt").await.unwrap();
+    let seen = seen.lock().unwrap();
+    let requested: Vec<_> = seen
+        .iter()
+        .filter_map(|operation| match operation {
+            SessionOperation::BeforeCompact { first_kept, .. } => Some(first_kept),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requested[0], &original_boundaries[1]);
+    assert!(
+        requested.len() > 1,
+        "must scan beyond an attempted fallback"
+    );
+    assert_eq!(requested[1], &original_boundaries[2]);
+}
+
+struct FixedProjection(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl crate::extension::ProviderContextHook for FixedProjection {
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &crate::extension::ProviderContextProjectionContext,
+    ) -> Result<Option<crate::extension::ProviderContextProjection>, String> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(crate::extension::ProviderContextProjection {
+            system: None,
+            tools: None,
+            messages: vec![Message::User(UserMessage {
+                content: vec![UserPart::Text("fixed projected request".into())],
+            })],
+        }))
+    }
+}
+
+#[tokio::test]
+async fn unchanged_projection_stops_even_when_canonical_history_shrinks() {
+    let (mut agent, seen, calls, _dir) = agent(Action::Observe);
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
+        .unwrap();
+    for _ in 0..4 {
+        append_completed_episode(&mut agent, &"older detail ".repeat(200));
+    }
+    let mut summary_model = agent.model.clone();
+    Arc::make_mut(&mut summary_model.spec).limits.context_window = 128_000;
+    agent.set_compaction_model(Some(summary_model));
+    let projections = Arc::new(AtomicUsize::new(0));
+    agent
+        .extensions
+        .provider_context_hook(FixedProjection(projections.clone()));
+    agent.complete("next prompt").await.unwrap();
+    assert_eq!(projections.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 3); // history, prefix, answer
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| matches!(operation, SessionOperation::Compacted { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -772,8 +772,21 @@ impl CompactionContext<'_> {
         }
     }
 
-    pub(super) fn oldest_reducible_boundary(&self) -> Option<EntryId> {
-        turn_starts(self.session).get(1).cloned()
+    pub(super) fn oldest_reducible_boundary(
+        &self,
+        attempted: &HashSet<EntryId>,
+    ) -> Option<EntryId> {
+        let branch = active_branch_entries(self.session);
+        let previous_boundary = branch.iter().rev().find_map(|entry| match &entry.value {
+            EntryValue::Compaction { first_kept, .. } => Some(first_kept),
+            _ => None,
+        });
+        turn_starts(self.session)
+            .into_iter()
+            .skip(1)
+            .find(|candidate| {
+                Some(candidate) != previous_boundary && !attempted.contains(candidate)
+            })
     }
 
     pub(super) fn begin_compaction(
@@ -1201,6 +1214,8 @@ impl CompactionContext<'_> {
             }
         };
         let mut native_attempted = false;
+        let mut local_previous_estimate = None;
+        let mut local_attempted = HashSet::new();
         loop {
             let active_system = system.to_owned();
             // Hook preparation precedes every estimate, including after a
@@ -1289,18 +1304,32 @@ impl CompactionContext<'_> {
                 native_attempted = true;
                 continue;
             }
-            // `keep_recent_tokens` is a preference, not permission to sail past
-            // the configured threshold. If the retained episodes themselves
-            // are unusually large, compact the oldest reducible episode.
+            // A larger (or unchanged) summary must not start a cascade of
+            // interruptions. Re-estimate the actual projected request first:
+            // the soft threshold may be exceeded, but the hard budget may not.
+            if local_previous_estimate.is_some_and(|previous| estimate >= previous) {
+                if over_capacity {
+                    return Err(AgentError::ContextExceeded { estimate, budget });
+                }
+                return Ok(resolve(estimate, active_system, effective_request));
+            }
+            // `keep_recent_tokens` is a preference. Successive distinct cuts
+            // may still be needed when each summary reduces the request.
             let boundary = self
                 .preferred_boundary()?
-                .or_else(|| self.oldest_reducible_boundary());
+                .filter(|candidate| !local_attempted.contains(candidate))
+                .or_else(|| self.oldest_reducible_boundary(&local_attempted));
             if let Some(first_kept) = boundary {
                 match self
-                    .compact_boundary(first_kept, &active_system, tools, reason)
+                    .compact_boundary(first_kept.clone(), &active_system, tools, reason)
                     .await
                 {
-                    Ok(_) => continue,
+                    Ok(info) => {
+                        local_attempted.insert(first_kept);
+                        local_attempted.insert(info.first_kept);
+                        local_previous_estimate = Some(estimate);
+                        continue;
+                    }
                     Err(error) if is_compaction_veto(&error) => {
                         // A veto suppresses threshold compaction, not the host's
                         // hard context bound, and must not re-run the same hook.
@@ -1344,7 +1373,7 @@ impl CompactionContext<'_> {
         }
         let boundary = if self.mode == AgentCompactionMode::Local {
             self.preferred_boundary()?
-                .or_else(|| self.oldest_reducible_boundary())
+                .or_else(|| self.oldest_reducible_boundary(&HashSet::new()))
         } else {
             None
         };

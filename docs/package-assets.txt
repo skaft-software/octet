@@ -115,6 +115,8 @@ text docs/assets/octet/test_export.py
 text docs/benchmarks/README.md
 text docs/benchmarks/baseline-v0.6.2.md
 text docs/benchmarks/failure-report-v0.6.2-2026-08-28.md
+text docs/benchmarks/idle-model-switch-2026-10-22/README.md
+text docs/benchmarks/idle-model-switch-2026-10-22/samples.json
 text docs/benchmarks/runtime-footprint-2026-08-29.md
 text docs/benchmarks/runtime-footprint-2026-08-29/SHA256SUMS
 text docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-1.json
@@ -215,6 +217,7 @@ text docs/instructions.md
 text docs/linux.md
 text docs/maintainers/README.md
 text docs/maintainers/conventions.md
+text docs/maintainers/pi-v0.10-candidate.md
 text docs/maintainers/prompts/cl.md
 text docs/maintainers/prompts/is.md
 text docs/maintainers/prompts/pr.md
