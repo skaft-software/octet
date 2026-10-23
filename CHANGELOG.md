@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Managed extension updates (`octet extension update`) work on
+  Windows instead of failing with "atomic directory exchange is unavailable on
+  this platform". Validated candidates use locked, recoverable replacement;
+  failed publication restores the previous bundle, or retains its backup with
+  recovery instructions if Windows blocks restoration. Listing and global managed
+  discovery recover interrupted updates. Linux/macOS keep atomic exchange.
+
 ## [0.9.6] - Unreleased
 
 The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification

@@ -15,6 +15,11 @@ use fs2::FileExt;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(super) use windows::ensure_update_finished;
+
 pub(super) const RELEASE_REPOSITORY: &str = "https://github.com/skaft-software/octet";
 const DOWNLOAD_MAX_ATTEMPTS: usize = 3;
 const DOWNLOAD_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -44,7 +49,7 @@ pub enum ExtensionCommand {
     },
     /// List installed extension bundles.
     List,
-    /// Install the matching official release or a local replacement atomically.
+    /// Install a validated matching release, preserving the previous bundle on failure.
     Update {
         /// Official extension bundle name.
         #[arg(
@@ -103,9 +108,6 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
                         "{name:?} has no official update source; use 'octet extension update --path ARCHIVE'"
                     );
                 }
-                crate::extension_bundle::ensure_installed(&root, &name).with_context(|| {
-                    format!("{name} is not installed; run 'octet extension install {name}'")
-                })?;
                 let manifest =
                     crate::extension_bundle::install_official(&root, &name, true, &|_, _| {})
                         .await?;
@@ -193,6 +195,8 @@ fn resolve_local_archive_path(path: &Path) -> anyhow::Result<PathBuf> {
 pub(super) fn acquire_lock(root: &Path) -> anyhow::Result<PackageLock> {
     fs::create_dir_all(root)
         .with_context(|| format!("cannot create extension directory {}", root.display()))?;
+    #[cfg(windows)]
+    windows::directory_exists(root)?;
     let path = root.join(".package.lock");
     let file = OpenOptions::new()
         .create(true)
@@ -207,7 +211,20 @@ pub(super) fn acquire_lock(root: &Path) -> anyhow::Result<PackageLock> {
             path.display()
         )
     })?;
-    Ok(PackageLock(file))
+    let lock = PackageLock(file);
+    #[cfg(windows)]
+    windows::recover_updates(root)?;
+    Ok(lock)
+}
+
+/// Discovery and listing must not create a missing installation root. Existing
+/// Windows roots share the writer lock so they cannot observe the rename gap.
+#[cfg(windows)]
+pub(super) fn lock_existing(root: &Path) -> anyhow::Result<Option<PackageLock>> {
+    if !windows::directory_exists(root)? {
+        return Ok(None);
+    }
+    acquire_lock(root).map(Some)
 }
 
 pub(super) fn publish_staging(
@@ -229,21 +246,28 @@ pub(super) fn publish_staging(
         return Ok(());
     }
 
-    atomic_exchange_directories(staging, destination).with_context(|| {
-        format!(
-            "cannot atomically publish extension update from {} to {}; previous install remains active",
-            staging.display(),
-            destination.display()
-        )
-    })?;
-    sync_directory(root);
-    if let Err(error) = fs::remove_dir_all(staging) {
-        crate::output::stderr_line(format!(
-            "warning: extension updated, but previous package cleanup failed at {}: {error}",
-            staging.display()
-        ));
+    #[cfg(windows)]
+    {
+        windows::publish_update(root, staging, destination, _package_id)
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        atomic_exchange_directories(staging, destination).with_context(|| {
+            format!(
+                "cannot atomically publish extension update from {} to {}; previous install remains active",
+                staging.display(),
+                destination.display()
+            )
+        })?;
+        sync_directory(root);
+        if let Err(error) = fs::remove_dir_all(staging) {
+            crate::output::stderr_line(format!(
+                "warning: extension updated, but previous package cleanup failed at {}: {error}",
+                staging.display()
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -285,7 +309,7 @@ fn atomic_exchange_directories(left: &Path, right: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn atomic_exchange_directories(_left: &Path, _right: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

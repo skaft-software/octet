@@ -229,11 +229,13 @@ An explicit `--extension-dir` grants that reviewed source host authority even
 under `--safe-mode`; granted extension code runs with your OS permissions.
 Set `OCTET_CUA_CONFIRM=1` to approve each effectful computer-use action.
 
-**Current candidate limits.** Official 0.9.6 extension assets are unpublished.
-Replacing an installed extension (`extension update` or `install --replace`)
-is unsupported on Windows: atomic directory exchange is unavailable, and the
-previous installation stays active. Test a reviewed candidate with the explicit
-`--extension-dir` above instead of removing the existing installation.
+**Managed updates (unreleased).** Windows replacement (`octet extension update`)
+uses locked, recoverable publication rather than atomic
+directory exchange. Close programs using the bundle before updating; listing or
+global managed discovery recovers an interrupted replacement. See
+[Windows update recovery](../../docs/windows.md#managed-extension-updates-unreleased).
+The explicit `--extension-dir` above still lets you test a reviewed candidate
+without replacing an installed bundle.
 
 **Cursor feedback.** The direct runtime configures the model-colored agent
 cursor on Windows and verifies enablement, theme, and motion by live read-back.
