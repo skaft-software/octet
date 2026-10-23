@@ -445,17 +445,14 @@ pub enum Reconfig {
 }
 
 /// Apply one consuming configuration transition at an idle boundary.
-pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
+pub fn apply_reconfig(mut app: App, reconfig: Reconfig) -> anyhow::Result<App> {
     match reconfig {
         Reconfig::Model(id) => {
+            if try_apply_model_reconfig(&mut app, &id)? {
+                return Ok(app);
+            }
             let model = app.catalog.resolve(&id)?;
-            let reasoning = app
-                .model_scope
-                .as_ref()
-                .and_then(|scope| scope.iter().find(|entry| entry.id == id))
-                .and_then(|entry| entry.reasoning.as_deref())
-                .map(crate::config::parse_reasoning)
-                .transpose()?;
+            let reasoning = scoped_model_reasoning(&app, &id)?;
             bootstrap::rebuild_app(app, Some(model), reasoning, None, None)
         }
         Reconfig::Thinking(reasoning) => {
@@ -489,6 +486,24 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
             Some(bootstrap::SessionSelection::Forked(path)),
         ),
     }
+}
+
+fn scoped_model_reasoning(app: &App, id: &ModelId) -> anyhow::Result<Option<ReasoningConfig>> {
+    app.model_scope
+        .as_ref()
+        .and_then(|scope| scope.iter().find(|entry| &entry.id == id))
+        .and_then(|entry| entry.reasoning.as_deref())
+        .map(crate::config::parse_reasoning)
+        .transpose()
+}
+
+/// Commit a compatible idle selection without replacing the App or its fleet.
+/// False leaves the selection to the existing blocking rebuild path.
+pub(crate) fn try_apply_model_reconfig(app: &mut App, id: &ModelId) -> anyhow::Result<bool> {
+    app.synchronize_extension_provider_catalog();
+    let model = app.catalog.resolve(id)?;
+    let reasoning = scoped_model_reasoning(app, id)?;
+    bootstrap::try_select_model_at_idle(app, model, reasoning)
 }
 
 /// Mode-agnostic application state. TUI state and themes stay outside this type.

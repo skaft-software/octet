@@ -1,0 +1,44 @@
+{
+  "baseline_commit": "699ef867c194bf83fd69896ecede02b534b66a8b",
+  "candidate": "source change containing this record; no published candidate SHA supplied",
+  "unit": "microseconds",
+  "boundary": "Instant around consuming apply_reconfig(Model), including final trace emission",
+  "factory_count_boundary": "application startup through ten switches; excludes configure preflight",
+  "models": ["gpt-audio-1.5", "gpt-4o-mini"],
+  "trials_per_cell": 10,
+  "profile": "dev, CARGO_PROFILE_DEV_DEBUG=0, OCTET_STARTUP_TRACE=1",
+  "cells": [
+    {
+      "platform": "Windows 11 Home 10.0.26200, x86_64",
+      "node": "24.15.0",
+      "stage": "before",
+      "samples": [2813020, 2797540, 2879721, 2827820, 2821487, 2866977, 2872297, 2804946, 3085446, 2887247],
+      "factory_loads": 11,
+      "capture_sha256": "e21b277f688a604b01b14ddb8b142535cad802fba1b88983dbf74b9ea7acd20a"
+    },
+    {
+      "platform": "Windows 11 Home 10.0.26200, x86_64",
+      "node": "24.15.0",
+      "stage": "after",
+      "samples": [2116, 1672, 1609, 1248, 1410, 1235, 1198, 1319, 1205, 1382],
+      "factory_loads": 1,
+      "capture_sha256": "bf59e691757476b18febf2cf98e40e64d3f3e99f7096757f3fee1f3eb4bda937"
+    },
+    {
+      "platform": "Linux 6.18.33.2-microsoft-standard-WSL2, x86_64",
+      "node": "22.22.1",
+      "stage": "before",
+      "samples": [391639, 405496, 451358, 415933, 428731, 415170, 413089, 418199, 421561, 397169],
+      "factory_loads": 11,
+      "capture_sha256": "6823ab5f3ebcb911d00930bb10fb0f73aeae87d82244e22d2c5df47af4808c05"
+    },
+    {
+      "platform": "Linux 6.18.33.2-microsoft-standard-WSL2, x86_64",
+      "node": "22.22.1",
+      "stage": "after",
+      "samples": [3692, 3432, 2656, 3151, 3862, 3952, 3312, 3765, 3363, 4484],
+      "factory_loads": 1,
+      "capture_sha256": "8995a8f3ea0993ce12b4c44e75c973f946ec539ee63e5725747d03a4a359767c"
+    }
+  ]
+}

@@ -7534,18 +7534,37 @@ where
     // later rebuilds and stay authoritative over session-only resource
     // contributions (for example a mirrored Pi default model).
     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
-    let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
-        apply_reconfig(app, reconfig)
-    })
-    .await?;
+    let in_place = if let Reconfig::Model(id) = &reconfig {
+        match crate::app::try_apply_model_reconfig(&mut app, id) {
+            Ok(selected) => selected,
+            Err(error) => {
+                shell.error(format!("model unchanged: {error}"));
+                return Ok(app);
+            }
+        }
+    } else {
+        false
+    };
+    let mut app = if in_place {
+        app
+    } else {
+        run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
+            apply_reconfig(app, reconfig)
+        })
+        .await?
+    };
     if explicit_model_change {
         app.config.model_explicit = true;
     }
-    refresh_resource_paths(&mut app, shell, input).await?;
-    shell.hydrate(app.agent.session())?;
-    let session_id = herdr_session_id(&app);
-    if session_id != previous_session_id {
-        shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+    if !in_place {
+        refresh_resource_paths(&mut app, shell, input).await?;
+        shell.hydrate(app.agent.session())?;
+        let session_id = herdr_session_id(&app);
+        if session_id != previous_session_id {
+            shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+        }
+        app.executable_extensions
+            .activate_session_lifecycle_driver();
     }
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
@@ -7553,8 +7572,6 @@ where
     if had_fast && app.agent.service_tier().is_none() {
         shell.notice("Fast mode: off after the model/session change; use /fast on on a supported route to enable it again");
     }
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
     host_notification.publish(&mut app.executable_extensions);
     Ok(app)
 }
