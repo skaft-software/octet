@@ -296,10 +296,15 @@ octet extension remove NAME
 
 The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
 `octet-subagents` and `octet-web-search`. The experimental `octet-pi-compat`
-adapter does not ship in the catalog. Checksummed bundles install atomically
-under `~/.octet/extensions/<id>`, and a local update must match the managed
-package ID. `--all` (or `/extensions install` in the TUI) installs every catalog
-bundle that is not installed yet and leaves installed ones untouched. Nothing runs at install: no hook, dependency setup, activation,
+adapter does not ship in the catalog. Checksummed bundles are validated in staging
+before publication under `~/.octet/extensions/<id>`, and a local update must match
+the managed package ID. Linux/macOS updates use atomic directory exchange;
+Windows uses locked, recoverable replacement, not an atomic swap. Close programs
+using a Windows bundle before updating; after an interruption, `octet extension
+list` or global managed discovery recovers the pending update. See
+[Windows update recovery](windows.md#managed-extension-updates-unreleased).
+`--all` (or `/extensions install` in the TUI) installs every catalog bundle that
+is not installed yet and leaves installed ones untouched. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See
 [Extensions](extensions.md).
 

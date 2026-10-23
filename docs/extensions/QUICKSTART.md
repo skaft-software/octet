@@ -249,9 +249,8 @@ installable. In particular, TS's generated launcher/absolute paths are local,
 not a portable release bundle; Python's generated relative-launcher package has
 local release-format archive evidence, not publication qualification.
 The installer rejects links, special files, unsafe paths and mismatched
-API/host identity, records SHA-256, and atomically publishes a validated staged
-candidate. A hash detects byte changes; it does not establish authorship or
-safety. Do not claim catalog installation until matching assets are published
+API/host identity, records SHA-256, and publishes a validated staged candidate.
+A hash detects byte changes; it does not establish authorship or safety. Do not claim catalog installation until matching assets are published
 and verified. These commands are guidance, not actions performed by this guide.
 
 ## Test, upgrade and roll back the whole closure
@@ -283,10 +282,14 @@ referencing a mutable SDK checkout is not a closed rollback artifact.
 
 Disable before replacing files; inspect the candidate's closure and pin before
 `octet extension update --path /absolute/path/to/candidate.tar.gz`. Updates
-require the same managed ID, validate before swap and restore the old directory
-on publication failure. That automatic failure rollback is **not** behavioral
-rollback or reversal of external effects. Keep the prior reviewed compatible
-archive and its dependencies: an intentional restore uses the local update
+require the same managed ID and validate before replacement. Linux/macOS use
+atomic directory exchange. Windows uses locked, recoverable replacement: close
+programs using the bundle first. Publication failure restores the old directory;
+if Windows blocks restoration, the backup is retained with recovery instructions.
+After interruption, listing or global managed discovery recovers it. See
+[Windows update recovery](../windows.md#managed-extension-updates-unreleased).
+That failure recovery is **not** behavioral rollback or reversal of external
+effects. Keep the prior reviewed compatible archive and its dependencies: an intentional restore uses the local update
 path with that prior archive, subject to current host/API validation. A host
 version change may also require restoring the matching host; don't erase a pin
 to force admission. Re-enable only after review and repeat the smoke checks.

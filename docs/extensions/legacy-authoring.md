@@ -823,17 +823,23 @@ octet extension update --path ./my-extension-0.2.0.tar.gz
 ```
 
 Local update archives must have the same managed package ID and use the same
-validation, swap, and rollback rules. Official installs download the archive and
-release `SHA256SUMS` over HTTPS, then verify the digest. Local installs compute
+validation, publication, and recovery rules. Official installs download the
+archive and release `SHA256SUMS` over HTTPS, then verify the digest. Local installs compute
 and record SHA-256. The host rejects oversized archives, entries, manifests,
 paths, file counts, expanded data; non-UTF-8/non-portable paths; multiple roots;
 duplicates; links/devices/special entries; directory/manifest mismatch; API/exact
 octet incompatibility; and unsafe relative entrypoints.
 
 Regular files extract into a same-filesystem private staging directory and
-publish to `~/.octet/extensions/<id>/` by atomic rename. Update validates the
-complete candidate before moving the current package, rolling back that move on
-publication failure so the prior bundle remains usable.
+publish to `~/.octet/extensions/<id>/`. Update validates the complete candidate
+before moving the current package. Linux/macOS use atomic directory exchange.
+Windows uses locked, recoverable replacement, not an atomic swap or a power-loss
+durability guarantee: publication failure restores the prior bundle, or retains
+its backup with recovery instructions if restoration is blocked. Listing,
+package operations and global managed discovery recover after process
+interruption. Close programs using the bundle before updating on Windows; see
+[update recovery](../windows.md#managed-extension-updates-unreleased). Restoring
+an older bundle does not make its host pin compatible with a newer host.
 
 `install.json` records schema, ID, extension/API versions, exact octet requirement,
 official URL or canonical local source, archive digest, and installing octet

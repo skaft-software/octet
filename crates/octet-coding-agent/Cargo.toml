@@ -90,7 +90,7 @@ globset = "0.4"
 [target.'cfg(windows)'.dependencies]
 # Native console negotiation (VT output, delayed wrap, single-call frame
 # writes) and console control events. Already locked through octet-agent.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
