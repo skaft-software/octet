@@ -1475,14 +1475,23 @@ fn assert_model_switch_welcome(diagnostics: bool) {
             STARTUP_TIMEOUT,
         );
         if diagnostics {
-            // Lifecycle rebuilds rescan optional resources while the TUI owns
-            // raw output. Diagnostics must not move the renderer's cursor.
+            // Reload the edited resource explicitly. Compatible model changes
+            // retain the resource snapshot; they must preserve its diagnostics
+            // without moving the renderer's cursor or rescanning the filesystem.
             let invalid_skill = octet
                 ._root
                 .path()
                 .join("home/.octet/skills/invalid/SKILL.md");
             fs::create_dir_all(invalid_skill.parent().unwrap()).unwrap();
             fs::write(&invalid_skill, "---\nname: [broken\n---\ninvalid fixture\n").unwrap();
+            octet.pty.write_input(b"/reload\r");
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                "Invalid manifest",
+                STARTUP_TIMEOUT,
+            );
         }
         let switches_start = octet.pty.output.len();
         let mut settled_screens = Vec::new();
@@ -1513,7 +1522,7 @@ fn assert_model_switch_welcome(diagnostics: bool) {
         assert!(capture.termios_restored);
         for screen in settled_screens {
             assert_eq!(screen.contains("Invalid manifest"), diagnostics,
-                "diagnostics must survive completed model-switch hydration, not just appear in a fleeting frame\n{screen}");
+                "diagnostics must survive completed model selection, not just appear in a fleeting frame\n{screen}");
         }
         let output = &capture.output[..capture.shutdown_start];
         if let Some(directory) = std::env::var_os("OCTET_STARTUP_REDRAW_TRACE_DIR") {

@@ -306,6 +306,25 @@ the current app catalog. Neither step changes the active model without explicit
 selection. Provider/route readiness and actual latency still require a matched
 startup campaign.
 
+## Compatible idle model switching
+
+An explicit idle model selection reuses the live Agent, session, executable fleet,
+resources and interactive shell when tool capability and normalized reasoning
+mode remain compatible. Scoped effort, Ultra observation, explicit tool policy,
+service tier, native compaction replay/route affinity, output limits and prompt
+metadata still follow the selected route. Incompatible cases retain the blocking
+rebuild; missing inventory can still require foreground discovery. Model-selection
+notifications and foreground terminal-grant revocation remain in place. Resource
+edits are applied with `/reload`, not an implicit rescan on a compatible model
+selection; already-published resource diagnostics remain visible.
+
+`model.select.begin` / `model.select.complete` bracket the compatible selection,
+including its durable configuration append. The path does not rerun factories or
+hydrate unchanged history. The [local synthetic probe](../benchmarks/idle-model-switch-2026-10-22/README.md)
+records before/after samples and factory counts. It measures consuming in-process
+reconfiguration, not picker latency, physical input-to-paint, startup, populated Pi
+setup parity, or provider inference. No default fleet prefetch is introduced.
+
 ## Startup audit follow-up
 
 The opt-in phase trace now brackets the workspace marker (`session.marker`) and
