@@ -25,7 +25,11 @@ pub(crate) mod eval;
 mod extension_flags;
 pub(crate) mod parity;
 
-pub(crate) use extension_flags::{parse_with_extension_flags, uses_runtime_extension_flag_parser};
+#[cfg(test)]
+pub(crate) use extension_flags::uses_runtime_extension_flag_parser;
+pub(crate) use extension_flags::{
+    parse_static_invocation, parse_with_extension_flags, StaticInvocation,
+};
 
 use config_diagnostics::{
     read_layer, report_config_diagnostics, ConfigSourceKind, LoadedConfigLayer,
@@ -950,11 +954,19 @@ pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
 /// Persist a built-in selector or a resource name already validated and loaded
 /// by the interactive picker. Keep custom names case-sensitive for discovery.
 pub fn persist_theme_choice(choice: &str) -> anyhow::Result<()> {
+    persist_theme_selection(choice).map(|_| ())
+}
+
+/// Return the exact atomic preference write so an already-applied live palette
+/// does not trigger a resource rebuild that retires retained editor/footer mounts.
+pub(crate) fn persist_theme_selection(
+    choice: &str,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
     let key = theme_choice_key(choice)?;
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist theme: user home directory is unavailable")
     })?;
-    persist_key_to_path("theme", key, &path)
+    persist_keys_to_path(&[("theme", key)], &path, true)
 }
 
 fn theme_choice_key(choice: &str) -> anyhow::Result<&str> {

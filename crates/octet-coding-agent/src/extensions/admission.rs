@@ -167,6 +167,7 @@ pub(super) fn host_request_operation_name(operation: &HostRequestOperation) -> &
             ExtensionContextOperation::PendingMessages => "pending_messages",
             ExtensionContextOperation::SystemPrompt => "system_prompt",
             ExtensionContextOperation::Tools => "active_tools",
+            ExtensionContextOperation::Commands => "command_catalog",
         },
     }
 }
@@ -181,6 +182,9 @@ pub(super) fn host_request_feature(operation: &HostRequestOperation) -> &'static
         HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
         HostRequestOperation::RemoteUi { .. } => EXTENSION_FEATURE_REMOTE_UI,
+        HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Commands) => {
+            octet_agent::extension_process::EXTENSION_FEATURE_COMMAND_CATALOG
+        }
         HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools) => {
             EXTENSION_FEATURE_ACTIVE_TOOLS
         }

@@ -23,6 +23,19 @@ octet --mode rpc                            # JSONL for automation
 On native Windows, the console (Windows Terminal or conhost), not `TERM`, picks
 the frontend. See [Windows](windows.md#terminal).
 
+Tern's `TERM=stencil-term` is recognized on Unix and VT-enabled Windows
+consoles, so its own terminal identifier does not force the plain frontend.
+`TERM_PROGRAM=tern` then selects native surface negotiation; `--tern off` keeps
+the ordinary formatted ANSI UI. This detection support does not qualify every
+Tern version's native protocol or Windows terminal rendering.
+
+If a capable terminal unexpectedly shows plain output, check `TERM`, `NO_COLOR`,
+`OCTET_COLOR` and the `plain` configuration/`--plain` flag. `TERM=dumb`, unknown
+terminal identifiers and redirected input/output retain conservative fallback;
+forcing `--color always` does not enable cursor control. `NO_COLOR` suppresses
+styling without disabling the interactive layout. Preserve the terminal's real
+identifier rather than globally overriding `TERM` to hide a detection problem.
+
 The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
@@ -122,6 +135,9 @@ While octet works:
 Pi custom editors use the same native submission rules, including slash and
 extension commands. Their resolved Enter/follow-up keybindings are honored, and
 a rejected submission retains the genuine Pi Editor's draft, pastes and undo.
+Terminal bracketed paste into a Pi custom editor normalizes CR and CRLF line
+endings to newlines, without submitting the draft. The original byte bound and
+rejection of other terminal controls remain enforced.
 The custom editor occupies the composer slot, not the screen: Octet keeps the
 transcript, chrome, queue indicators and one native slash popup. Native, executable
 extension and Pi commands share that popup; later name collisions are owner-qualified

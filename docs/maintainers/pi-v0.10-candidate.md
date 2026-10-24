@@ -8,7 +8,16 @@ is necessary but does not qualify an existing Pi setup.
 
 ## Obtain and pin the candidate
 
-The maintainer must first supply a **published branch and full commit SHA**.
+The local candidate now identifies as 0.10.0 and its single release catalog
+includes Pi. Public 0.10.0 artifacts do not exist and are not qualified. The
+current dirty overlay supports diagnostic source archives only: preserve
+commit/tree plus overlay diff and complete source hashes, and do not call those
+bytes exact HEAD. Do not create a Git repository/commit in staging or bypass
+clean-tree packaging gates. Coherent release Git actions and any remote
+publication need separate authorization. Rebuild and replay original setups
+against settled source; historical guest/native results do not qualify it.
+
+For an exact-commit qualification checkout, the maintainer must first supply a **published branch and full commit SHA**.
 Do not substitute a moving branch, PR's older binary, or the installed release.
 For the performance integration branch (once published):
 
@@ -74,7 +83,7 @@ approval. `--offline` disables discovery, **not inference**: do not submit a
 prompt unless the endpoint and authorization are controlled.
 
 Use a scratch workspace outside the checkout and this checkout's binary. For
-source-only zero-step mirror activation, explicitly grant this source directory:
+local-source zero-step mirror activation, explicitly grant this source directory:
 
 ```sh
 OCTET_STARTUP_TRACE=1 /absolute/octet-v010-test/target/release/octet \

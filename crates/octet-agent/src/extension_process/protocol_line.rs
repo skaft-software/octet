@@ -1472,6 +1472,26 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     }
                 })?;
             }
+            "commands/snapshot" => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_COMMAND_CATALOG,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionContextOperation::Commands,
+                    }
+                })?;
+            }
             "tools/snapshot" => {
                 let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
                     state,

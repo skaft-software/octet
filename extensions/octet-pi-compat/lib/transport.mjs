@@ -286,7 +286,7 @@ export class Transport {
     });
   }
   requestSync(method, params, { parent, signal, onCancel, timeout = 30000 } = {}) {
-    if (!['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
+    if (!['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
     if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();

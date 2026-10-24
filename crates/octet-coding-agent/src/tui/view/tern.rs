@@ -1377,7 +1377,14 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             .expect("working row")
             .retain(|child| child.id != "work.elapsed");
     }
-    if let Some(working) = &shell.extension_ui.working {
+    // These frames are animated by the host, not by a remote component. Do not
+    // let them replace the static marker selected for reduced motion above.
+    if let Some(working) = shell
+        .extension_ui
+        .working
+        .as_ref()
+        .filter(|_| !reduce_motion && shell.theme.capabilities().animation)
+    {
         if let Some(frames) = &working.frames {
             let interval = working.interval_ms.filter(|value| *value > 0).unwrap_or(80);
             let frame = if frames.is_empty() {

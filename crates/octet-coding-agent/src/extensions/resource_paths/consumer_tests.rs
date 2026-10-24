@@ -157,7 +157,7 @@ commands = ["release-start"]
         &app.config,
         &app.skills,
         &app.prompts,
-        &extensions,
+        &mut extensions,
         &mut host,
         crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
     );

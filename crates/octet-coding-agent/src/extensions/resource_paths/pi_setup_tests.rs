@@ -641,6 +641,49 @@ async fn mirrored_pi_setup_reload_is_idempotent() {
     drop(app);
 }
 
+/// A narrowed native catalog can be completed while resolving a real mirrored
+/// resource default. That completion must also replace the pre-start facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mirrored_default_catalog_enrichment_republishes_headless_model_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let pi = fixture_pi_home(&root);
+    configure_mirror(&root, &pi, &workspace);
+    let mut app = app_for(&root, &workspace, true);
+    // Model the narrowed launch catalog: retain the real provider declaration,
+    // but force its catalog completion through apply_resource_defaults rather
+    // than letting the initial projection accidentally satisfy the assertion.
+    let contributed = app
+        .catalog
+        .models()
+        .find(|spec| spec.api_name == "pi-mirror-model")
+        .unwrap()
+        .clone();
+    assert!(app
+        .catalog
+        .remove_model_if_endpoint(&contributed.id, &contributed.endpoint));
+    app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["openai"]);
+    app.refresh_resource_paths_headless().await.unwrap();
+    assert_pi_setup_active(&app, &pi);
+    {
+        let state = app.executable_extensions.host_state.lock().unwrap();
+        let snapshot = state.pi_models.as_ref().unwrap();
+        assert!(snapshot["available_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| {
+                model["provider"] == "pi-mirror-provider" && model["id"] == "pi-mirror-model"
+            }));
+        assert_eq!(snapshot["scoped_models"], serde_json::json!([]));
+        assert!(snapshot.get("all_models").is_none());
+        assert_eq!(snapshot["provider_auth_status"]["status"], "unavailable");
+    }
+    app.executable_extensions.shutdown().await;
+}
+
 /// An explicit in-session model choice (the provenance `transition` records for
 /// `/model` and the picker) must stay authoritative over the mirrored default,
 /// and withdrawal must not undo it either.

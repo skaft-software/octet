@@ -1,6 +1,6 @@
 // Pi 1.0.2 context facts and raw-input transforms. Rust supplies every fact;
 // extension request cancellation is not a substitute for aborting the agent.
-import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
@@ -22,6 +22,25 @@ export function contextFacts(runtime, store) {
       const trusted = fact(runtime, store, 'project_trusted', 'ctx.isProjectTrusted');
       if (typeof trusted !== 'boolean') invalid('host project trust');
       return trusted;
+    },
+    getSystemPrompt() {
+      runtime.require('system_prompt_read');
+      if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+      runtime.assertOwner(store);
+      store.controller.signal.throwIfAborted();
+      if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live
+          || runtime.active.get(store.id)?.controller !== store.controller) {
+        throw rpcError(-32002, 'not_foreground_owner system prompt read requires a live request');
+      }
+      // Read the live Agent through its existing disclosure service. Never use
+      // ambient host state (which may retain an older provider preparation).
+      const result = runtime.transport.requestSync('context/system_prompt', {
+        parent_request_id: store.id, resource_owner: store.state.owner,
+      }, { parent: store.id, signal: store.controller.signal });
+      fields(result, ['text'], 'system prompt reply');
+      const text = bounded(result.text, 'system prompt text', 262144, { controls: true });
+      if (text.includes('\0')) invalid('system prompt text must not contain NUL');
+      return text;
     },
     getSystemPromptOptions() {
       if (store.method !== 'command/execute') unsupported('ctx.getSystemPromptOptions', 'command context only');

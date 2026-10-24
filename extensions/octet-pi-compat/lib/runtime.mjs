@@ -40,7 +40,7 @@ import { tracePhase } from './startup-trace.mjs';
 import { jitiCacheOptions } from './startup-cache.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials']);
-const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials']);
+const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -327,6 +327,7 @@ export class Runtime {
       if (!this.config.registrations || !this.config.entrypoint_sources) invalid('mirror static registrations require review; configure again');
       const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
+      this.commandSourceInfos = setup.sourceInfos;
       extensions = setup.extensions.map(entry => realpathSync(entry));
       // Factories the owner explicitly excluded at review stay unloaded; an
       // exclusion only narrows the reviewed grant and is reported each start.
@@ -430,9 +431,10 @@ export class Runtime {
             const add = api[method];
             if (typeof add === 'function') api[method] = (...args) => { this.assertFactory(factory); return add(...args); };
           }
-          // Mirror static surfaces cannot grow after review via retained APIs.
+          // Tools use the negotiated, native-acknowledged dynamic catalog path;
+          // the other mirror static surfaces cannot grow via retained APIs.
           // Resource callbacks remain dynamic and host-admitted.
-          if (this.mirrorPiSetup) for (const method of ['registerTool', 'registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
+          if (this.mirrorPiSetup) for (const method of ['registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
             const register = api[method];
             api[method] = (...args) => {
               if (this.loaded) invalid(`mirror ${method} changed static registrations; review and configure again`);

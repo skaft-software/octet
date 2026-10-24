@@ -130,7 +130,7 @@ use self::model_control::dispatch_model_control;
 pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 pub use resource_paths::{
     ExtensionDefaultModel, ExtensionResourceDiscoveryReason, ExtensionResourcePaths,
-    EXTENSION_FEATURE_RESOURCE_PATHS,
+    ExtensionSourceInfo, EXTENSION_FEATURE_COMMAND_CATALOG, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
 use session_control::{dispatch_session_compaction, dispatch_session_control};
 pub use session_control::{

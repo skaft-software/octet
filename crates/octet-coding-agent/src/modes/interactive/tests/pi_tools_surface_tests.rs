@@ -65,6 +65,66 @@ export default pi => {
     );
 }
 
+/// Both callbacks run under the native lifecycle guard. registerTool must get
+/// its real catalog ACK before either callback can settle, not time out or skip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_startup_and_resource_hooks_acknowledge_late_tool_registration() {
+    let (directory, mut app) = pi_app(
+        r#"
+import { appendFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+export default pi => {
+  const tool = name => ({name,label:name,description:name,parameters:{type:'object'},
+    async execute(){return {content:[{type:'text',text:name}]}}});
+  pi.on('session_start', () => {
+    appendFileSync(TRACE, 'start-entered\n');
+    pi.registerTool(tool('startup_late'));
+    if (!pi.getActiveTools().includes('startup_late')) throw Error('startup ACK not published');
+    appendFileSync(TRACE, 'start-acknowledged\n');
+  });
+  pi.on('resources_discover', () => {
+    pi.registerTool(tool('discovery_late'));
+    if (!pi.getAllTools().some(t => t.name === 'discovery_late')) throw Error('discovery ACK not published');
+    const prompt = join(realpathSync(dirname(TRACE)), 'late-catalog-prompt.md');
+    writeFileSync(prompt, '---\ndescription: Late catalog regression\n---\nActual resource after catalog ACK.\n');
+    appendFileSync(TRACE, 'resources-acknowledged\n');
+    return {promptPaths:[prompt]};
+  });
+  pi.registerCommand('probe', {handler: () => {
+    for (const name of ['startup_late','discovery_late']) {
+      if (!pi.getAllTools().some(t => t.name === name)) throw Error('missing admitted tool '+name);
+    }
+    appendFileSync(TRACE, 'command\n');
+  }});
+};
+"#,
+    );
+    assert!(app.resource_paths_pending());
+    assert!(app.executable_extensions.has_pending_session_starts());
+    let mut shell = InteractiveShell::test_shell();
+    let result = tokio::time::timeout(
+        Duration::from_secs(8),
+        command(&mut app, &mut shell, "probe"),
+    )
+    .await;
+    let resources_settled = !app.resource_paths_pending();
+    let starts_settled = !app.executable_extensions.has_pending_session_starts();
+    let prompt_loaded = app.prompts.contains("late-catalog-prompt");
+    let prompt_diagnostics = app.prompts.diagnostics();
+    app.executable_extensions.shutdown().await;
+    result
+        .expect("startup callback must receive its catalog ACK without waiting for its own lifecycle lock")
+        .unwrap();
+    assert!(resources_settled);
+    assert!(starts_settled);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),
+        "start-entered\nstart-acknowledged\nresources-acknowledged\ncommand\n",
+        "actual callbacks, resource discovery and command admission must settle in order"
+    );
+    assert!(prompt_loaded, "prompt diagnostics: {prompt_diagnostics:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_hook_can_read_and_select_tools_without_borrowing_the_agent() {
     let (directory, mut app) = pi_app(
@@ -409,4 +469,128 @@ export default pi => {
         reopened.entries().len(),
         app.agent.session().entries().len()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_command_catalog_availability_metadata_reload_and_withdrawal() {
+    let (directory, mut app) = pi_app(
+        r#"
+import {appendFileSync,writeFileSync,readFileSync,mkdirSync,existsSync,realpathSync,unlinkSync} from 'node:fs';
+import {dirname,join} from 'node:path';
+export default pi => {
+  const root=realpathSync(dirname(TRACE));
+  const record=stage=>appendFileSync(TRACE,JSON.stringify({stage,commands:pi.getCommands()})+'\n');
+  pi.on('session_start',()=>{
+    record('startup');
+    // This callback keeps the settled startup owner, not a later command's
+    // parent. The Rust test opens the gate only after each command returns.
+    setInterval(()=>{
+      const gate=join(root,'retained-gate');
+      if(!existsSync(gate))return;
+      const phase=readFileSync(gate,'utf8');unlinkSync(gate);
+      record('retained-'+phase);
+    },10);
+  });
+  pi.on('resources_discover',()=>{
+    const phase=existsSync(join(root,'phase'))?readFileSync(join(root,'phase'),'utf8'):'a';
+    if(phase==='empty')return {skillPaths:[],promptPaths:[]};
+    const skill=join(root,'resources',phase,'catalog-'+phase,'SKILL.md');
+    mkdirSync(dirname(skill),{recursive:true});
+    writeFileSync(skill,'---\nname: catalog-'+phase+'\ndescription: Available unactivated skill\n---\nBody');
+    const prompt=join(root,'resources',phase,'catalog-prompt-'+phase+'.md');
+    writeFileSync(prompt,'---\ndescription: Admitted template\n---\nPrompt body');
+    const broken=join(root,'resources',phase,'broken.md');writeFileSync(broken,'not a valid skill');
+    return {skillPaths:[skill,broken],promptPaths:[prompt]};
+  });
+  pi.registerCommand('reload',{handler(){}});
+  pi.registerCommand('probe',{description:'Catalog probe',handler:()=>record('command')});
+};
+"#,
+    );
+    async fn retained_snapshot(
+        app: &mut App,
+        shell: &mut InteractiveShell,
+        root: &std::path::Path,
+        phase: &str,
+    ) {
+        std::fs::write(root.join("retained-gate"), phase).unwrap();
+        let marker = format!("\"stage\":\"retained-{phase}\"");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                app.executable_extensions.drain_events_for_shell(shell);
+                if std::fs::read_to_string(root.join("trace.jsonl"))
+                    .unwrap()
+                    .contains(&marker)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("settled same-owner callback must read the live native catalog");
+    }
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "probe").await.unwrap();
+    retained_snapshot(&mut app, &mut shell, directory.path(), "a").await;
+    assert!(app
+        .agent
+        .session()
+        .resolve_active_skills(&app.agent.session().head().unwrap())
+        .unwrap()
+        .active_skills
+        .is_empty());
+    std::fs::write(directory.path().join("phase"), "b").unwrap();
+    app.mark_resource_paths_reload();
+    command(&mut app, &mut shell, "probe").await.unwrap();
+    retained_snapshot(&mut app, &mut shell, directory.path(), "b").await;
+    std::fs::write(directory.path().join("phase"), "empty").unwrap();
+    app.mark_resource_paths_reload();
+    command(&mut app, &mut shell, "probe").await.unwrap();
+    retained_snapshot(&mut app, &mut shell, directory.path(), "empty").await;
+    let rows: Vec<serde_json::Value> =
+        std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+    assert_eq!(rows.len(), 7);
+    let commands = |i: usize| rows[i]["commands"].as_array().unwrap();
+    assert!(commands(0).iter().all(|c| c["source"] == "extension"));
+    for (i, phase) in [(1, "a"), (2, "a"), (3, "b"), (4, "b")] {
+        let commands = commands(i);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|c| c["source"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["extension", "extension", "prompt", "skill"]
+        );
+        assert_eq!(commands[0]["name"], "octet-pi-compat:reload");
+        assert_eq!(commands[1]["name"], "probe");
+        assert_eq!(
+            commands[1]["sourceInfo"]["path"],
+            directory.path().join("probe.ts").to_str().unwrap()
+        );
+        assert_eq!(commands[2]["name"], format!("catalog-prompt-{phase}"));
+        assert_eq!(commands[3]["name"], format!("skill:catalog-{phase}"));
+        for c in &commands[2..] {
+            assert_eq!(c["sourceInfo"]["source"], "extension:probe");
+            assert_eq!(c["sourceInfo"]["scope"], "temporary");
+            assert_eq!(c["sourceInfo"]["origin"], "top-level");
+            assert_eq!(
+                c["sourceInfo"]["baseDir"],
+                directory.path().to_str().unwrap()
+            );
+        }
+    }
+    for i in [5, 6] {
+        assert!(commands(i).iter().all(|c| c["source"] == "extension"));
+    }
+    app.config.enabled_extensions.clear();
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    assert!(app.executable_extensions.command_suggestions().is_empty());
+    assert!(app.prompts.descriptors().is_empty());
+    assert!(app.skills.descriptors().is_empty());
+    app.executable_extensions.shutdown().await;
 }

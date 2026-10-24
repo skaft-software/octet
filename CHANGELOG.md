@@ -1,5 +1,74 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.10.0] - Release candidate
+
+Local unreleased source candidate, not a published release. Public 0.10.0
+artifacts do not exist; the [RC notes](docs/releases/v0.10.0.md) retain the
+partial contracts and remaining qualification gates.
+
+### Added
+
+- The one release catalog includes experimental `octet-pi-compat` among six
+  local candidate bundles, all at 0.10.0 with exact `=0.10.0` host pins and
+  unchanged API `0.4`. Use reviewed source or explicit local candidate archives,
+  not nonexistent public assets. Installation and discovery remain inert;
+  enabling the stock bridge automatically mirrors/runs enabled Pi factories
+  with OS permissions, without silently granting native credential disclosure.
+
+### Fixed
+
+- Theme preference commits acknowledge their exact applied write, avoiding the
+  redundant resource reload that retired composed Pi editor/footer mounts;
+  independent resource changes still reload and native TOML appearance remains.
+- Pi startup callbacks can await late-tool catalog acknowledgements without a
+  lifecycle-lock cycle; generation, reload and failed-ACK fences stay intact.
+- Live admitted commands read the actual native system prompt instead of a
+  missing cached snapshot. Retained/headless prompt access remains unqualified.
+- App-deferred headless startup receives credential-filtered model/scoped facts
+  and refreshed mirrored defaults; immediate pre-App/initialize-time starts
+  remain outside this repair, and unavailable facts still refuse explicitly.
+- Legacy raw `0x1f` matches Pi Ctrl+- undo; raw bytes are retained and explicit
+  Kitty Ctrl+7 stays distinct. Legacy bindings relying on that ambiguous byte
+  as Ctrl+7 change meaning. Original-editor guest replay remains open.
+
+### Fixed
+
+- Managed extension updates (`octet extension update`) work on
+  Windows instead of failing with "atomic directory exchange is unavailable on
+  this platform". Validated candidates use locked, recoverable replacement;
+  failed publication restores the previous bundle, or retains its backup with
+  recovery instructions if Windows blocks restoration. Listing and global managed
+  discovery recover interrupted updates. Linux/macOS keep atomic exchange.
+
+### Changed
+
+- Startup reuses the static CLI parser, and endpoint matching parses the selected
+  URL once before comparing builtin provider declarations.
+- Full session listings load cached catalog summaries in one query rather than
+  one per session. Latest-only lookup and transcript fingerprint checks remain.
+- Settling a disposable partial-assistant journal no longer syncs the file just
+  before reading and deleting it. Authoritative session appends retain their
+  existing durability; Linux executable ASLR is unchanged.
+
+### Known limitations
+
+- Focused native/fixture evidence does not qualify rebuilt original Pi setups,
+  composed theme/context/headless/undo guest journeys or final Windows artifacts.
+  Partial session/context/UI/provider/process/MCP contracts remain partial; see
+  the [27-row ledger](docs/pi-extension-api.md). No blanket Pi parity is claimed.
+- The dirty overlay supports diagnostic source archives only. Coherent release
+  Git actions require separate authorization; clean-tree packaging gates remain.
+  Complete final native/extension archives, isolated archive installation and
+  activation, supported-platform guest screenshots/recordings, workspace and
+  quality gates, live/model-quality acceptance, signing and public installation
+  remain outstanding. Historical receipts do not qualify changed source.
+- Product/installer and Python/TypeScript source identities now target 0.10.0;
+  independent Rust SDK 0.8.2, Pi 1.0.2, private adapter npm 0.1.0, API/schema and
+  example fixture versions stay unchanged. npm and other registries are not
+  published by this preparation.
+
 ## [0.9.6] - Unreleased
 
 The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification

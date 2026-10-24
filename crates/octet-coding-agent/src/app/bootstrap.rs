@@ -5039,8 +5039,18 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
 
 /// Whether two endpoint base URLs name the same HTTP(S) origin and path,
 /// ignoring case in the host, default ports and a trailing slash.
-fn same_endpoint_base(left: &str, right: &str) -> bool {
-    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+fn same_endpoint_base(left: &str, right: &url::Url) -> bool {
+    // A declared base URL spells its host out: parsing only lowercases ASCII
+    // domains, and no declaration is an IP literal or uppercase
+    // (`declared_endpoint_hosts_are_lowercase_domains`). Skip the parse for
+    // the declarations that cannot name this host.
+    if right
+        .host_str()
+        .is_some_and(|host| !left.contains(&host.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    let Ok(left) = url::Url::parse(left) else {
         return false;
     };
     matches!(left.scheme(), "http" | "https")
@@ -5064,12 +5074,15 @@ fn apply_declared_endpoint_catalog_limits(
     cred: &crate::auth::custom::CustomCredential,
     models: Vec<crate::auth::custom::CustomModel>,
 ) -> Vec<crate::auth::custom::CustomModel> {
+    let Ok(base_url) = url::Url::parse(&cred.base_url) else {
+        return models;
+    };
     let Some(declaration) =
         crate::providers::BUILTIN_PROVIDER_DECLARATIONS
             .iter()
             .find(|declaration| {
                 declaration.base_url_environment.is_empty()
-                    && same_endpoint_base(declaration.base_url, &cred.base_url)
+                    && same_endpoint_base(declaration.base_url, &base_url)
             })
     else {
         return models;
@@ -9060,7 +9073,7 @@ fn build_app_with_consumer(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );
@@ -9608,7 +9621,7 @@ pub fn rebuild_app(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );

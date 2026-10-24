@@ -172,9 +172,17 @@ class DocsTruthTests(unittest.TestCase):
                    if line.strip() and not line.lstrip().startswith("#")]
         table = re.findall(r"(?m)^\| `(octet-[a-z-]+)` \|", _read("docs/installation.md"))
         self.assertEqual(sorted(table), sorted(catalog))
-        self.assertNotIn("octet-pi-compat", catalog)
-        for name in ("README.md", "docs/releases/v0.9.6.md", "docs/pi-compatibility.md"):
-            self.assertRegex(_read(name), r"(?i)does not ship|not shipped")
+        self.assertIn("octet-pi-compat", catalog)
+        self.assertRegex(
+            _read("docs/releases/v0.9.6.md"),
+            r"`octet-pi-compat` adapter\s+does not ship in this release",
+        )
+        version = _workspace_version()
+        for name in ("README.md", "docs/pi-compatibility.md"):
+            text = " ".join(_read(name).split()).lower()
+            self.assertIn(f"local {version} candidate catalog includes pi", text)
+            self.assertIn(f"public {version} artifacts do not exist", text)
+            self.assertRegex(text, r"published v0\.9\.6 assets (?:do not|still exclude)")
 
     def test_removed_products_are_not_advertised(self):
         failures = {}

@@ -1,10 +1,12 @@
 # Pi extension compatibility: release status and merge notes
 
-> **Excluded from v0.9.6.** This ledger remains a development record, not a
-> qualification requirement or shipped capability of the native release.
-> The experimental adapter stays source-only and is not in the release catalog.
+> **Local 0.10.0 candidate catalog includes Pi.** Public 0.10.0 artifacts do not
+> exist and final qualification is incomplete. This ledger remains a development
+> record, not installed-Pi parity or release-artifact acceptance. Published v0.9.6
+> assets remain unchanged and exclude the adapter.
 
-Dated evidence for the Pi 1.0.2 compatibility work targeted at octet 0.9.6.
+Dated evidence for Pi 1.0.2 compatibility, retained during local octet 0.10.0
+release-candidate preparation.
 It records observed behaviour; it is not a frozen release or a publication approval. Row-level detail is in the [extension API
 ledger](pi-extension-api.md), and the user-facing scope is in
 [compatibility](pi-compatibility.md).
@@ -17,7 +19,7 @@ footer mutations in Tern. Discovery, registration, a synthetic host, or an old
 local receipt does not qualify that target. Original dependency-bearing setup
 and combination journeys must be checked against the rebuilt candidate.
 
-The frozen candidate `9477eebb52d2f0818ce54b3b0b29be581f917122` has failed
+The historical frozen candidate `9477eebb52d2f0818ce54b3b0b29be581f917122` failed
 hosted Linux and macOS tests despite successful quality and archive jobs.
 Observed blockers include native input/selection and activity-resize contracts,
 Pi session replacement, unstable RPC message timestamps, multiline path-led
@@ -26,7 +28,10 @@ These are being repaired; the records below do not qualify the repair tree.
 
 Release gates remain exact-head green PR CI, approved merge with valid required
 checks, green main CI, signed publication and fresh public-install smoke. The
-source candidate is not a published release.
+source candidate is not a published release. The current dirty overlay needs a
+separately authorized coherent Git freeze before exact-source packaging. New
+theme/catalog/context/headless/legacy-input fixes need rebuilt original-setup
+guest replay and visual evidence; older receipts below do not qualify them.
 
 ## Local qualification recorded 2026-10-09
 
@@ -82,8 +87,10 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   passed, 0 failed, 27 skipped**, exit 0 (2026-10-06, Node 25.9.0). The skips are
   the original-factory probes that require explicitly supplied reviewed
   entrypoints.
-- Native module evidence (real Rust host, scripted provider): the modules below
-  contain the listed number of test functions at this candidate. Run one with
+- Native module evidence (real Rust host, scripted provider): the table below
+  inventories test functions in the current local 0.10.0 candidate source, not a
+  rerun of the historical suite. Historical aggregate results stay unchanged.
+  Run one with
   `cargo test -p octet-coding-agent --lib --locked <module>`; the scripted local
   provider replaces inference only. The filtered run behind this table reported
   `155 passed; 1 failed; 1 ignored`, and the single failure is the interactive
@@ -92,18 +99,18 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | Module | Tests | Covers |
 | --- | --- | --- |
 | `pi_baseline_contract_tests` | 5 | baseline registration and lifecycle |
-| `pi_context_contract_tests` | 2 | context and prompt projections |
+| `pi_context_contract_tests` | 5 | context/prompt projections and live-command system-prompt reads/refusals |
 | `pi_exec_contract_tests` | 3 | exact argv, controlled-policy approval/refusal, timeout and cancellation |
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
 | `pi_messages_tests` | 9 | text/images, public message events, persistence/resume, delivery and tool pairing |
 | `pi_model_provider_tests` | 3 | model facts, scoped views, model/thinking selection |
 | `pi_session_replacement_tests` | 8 | replacement, busy-turn deferral, setup/parentSession, withSession and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
-| `pi_tools_surface_tests` | 5 | authoritative catalogs/selection, late registration, startup ordering, headless exactly-once startup and failed-worker admission refusal |
+| `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
 | `pi_ui_contract_tests` | 13 | dialogs, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
-| `resource_paths::pi_app_tests` | 4 | startup/reload, recoverable callback error, failed mutation and imported default theme |
+| `resource_paths::pi_app_tests` | 6 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
 | `mcp_native_tests` | 3 | registration/replacement, execution, removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | 1 (ignored) | original `pi-clm`, source unavailable here |
 

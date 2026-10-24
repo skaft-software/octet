@@ -131,15 +131,24 @@ test('known native gaps stay explicit: mixed durable identities, opaque replay, 
 });
 
 test('process provider-context preserves an untouched mixed media batch when a callback appends a message', async t => {
-  const peer = launch(t, [join(root, 'test/fixtures/provider-context.ts')]); await peer.init(['session_entries']); await peer.start();
+  const peer = launch(t, [join(root, 'test/fixtures/provider-context.ts')], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  await peer.start();
   const messages = [assistant, user([{ Text: 'before' }, image(), result(), { Text: 'after' }])];
-  const reply = await peer.request('hook/run', { hook: 'provider_context',
+  const request = peer.request('hook/run', { hook: 'provider_context',
     session_leaf: { grant_id: 'a'.repeat(64), activation_epoch: 4, operation_id: 'context:4', owner, expected_head: 'head' },
     context: peer.context({ session_name: 'throws', session_leaf_id: 'head', session_entries: [], session_branch: [] }),
     payload: { request: { system: 'real system', messages, tools: [] }, preparation: { resource_owner: owner.session_id, session_id: 'actual-session', head: 'head', tool_generation: 7 } },
-  }).response;
+  });
+  const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+  assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+  // The getter's host result must not fall back to the preparation's system.
+  peer.send({ jsonrpc: '2.0', id: read.id, result: { text: 'host-served prompt' } });
+  const reply = await request.response;
   assert.ok(reply.result, JSON.stringify(reply));
-  assert.deepEqual(reply.result.provider_context, { system: 'real system', messages: [...messages, user([{ Text: 'second:real system' }])] });
+  assert.deepEqual(reply.result.provider_context, { system: 'real system', messages: [...messages, user([{ Text: 'second:host-served prompt' }])] });
   await peer.close();
 });
 

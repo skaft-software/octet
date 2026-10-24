@@ -786,10 +786,67 @@ mod pi_catalog_fact_tests {
         assert_eq!(snapshot["all_models_status"]["status"], "unavailable");
         assert!(snapshot.get("all_models").is_none());
         assert_eq!(snapshot["provider_auth_status"]["status"], "unavailable");
+        assert_eq!(snapshot["scoped_models"], serde_json::json!([]));
         assert_eq!(snapshot["configured_auth"], serde_json::json!({}));
         assert_eq!(snapshot["provider_oauth"], serde_json::json!({}));
         assert!(snapshot.get("model_auth").is_none());
         assert_eq!(snapshot["available_models"][0]["provider"], "fixture");
         assert!(!snapshot.to_string().contains("catalog-fixture-secret"));
+    }
+
+    #[test]
+    fn unrepresentable_scopes_withdraw_old_facts_instead_of_inventing_empty_scope() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let current = catalog.resolve(&ModelId("gpt-6-astra".into())).unwrap();
+        let mut extensions = ExecutableExtensions::default();
+        for (id, reasoning) in [
+            ("gpt-6-astra", "on"),
+            ("gpt-6-astra", "ultra"),
+            ("gpt-6-astra", "budget=1337"),
+            ("missing/model", "high"),
+        ] {
+            extensions.refresh_pi_model_catalog(&catalog, None, &current);
+            let scope = [crate::cli::parity::ScopedModel {
+                id: ModelId(id.into()),
+                pattern: id.into(),
+                reasoning: Some(reasoning.into()),
+            }];
+            extensions.refresh_pi_model_catalog(&catalog, Some(&scope), &current);
+            let state = extensions.host_state.lock().unwrap();
+            let snapshot = state.pi_models.as_ref().unwrap();
+            assert!(snapshot.get("scoped_models").is_none(), "{id}:{reasoning}");
+            assert!(snapshot.get("available_models").is_some());
+            assert!(snapshot.get("all_models").is_none());
+        }
+    }
+
+    #[test]
+    fn overbudget_model_facts_withdraw_the_whole_snapshot_without_truncation() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let current = catalog.resolve(&ModelId("gpt-6-astra".into())).unwrap();
+        let mut extensions = ExecutableExtensions::default();
+        extensions.refresh_pi_model_catalog(&catalog, None, &current);
+        assert!(extensions.host_state.lock().unwrap().pi_models.is_some());
+        let scope = vec![
+            crate::cli::parity::ScopedModel {
+                id: current.spec.id.clone(),
+                pattern: "gpt-6-astra".into(),
+                reasoning: Some("high".into()),
+            };
+            2048
+        ];
+        extensions.refresh_pi_model_catalog(&catalog, Some(&scope), &current);
+        assert!(extensions.host_state.lock().unwrap().pi_models.is_none());
+        extensions.refresh_pi_model_catalog(&catalog, None, &current);
+        assert_eq!(
+            extensions
+                .host_state
+                .lock()
+                .unwrap()
+                .pi_models
+                .as_ref()
+                .unwrap()["scoped_models"],
+            serde_json::json!([])
+        );
     }
 }

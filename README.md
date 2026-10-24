@@ -6,7 +6,12 @@
 
 **A fast, native coding agent.**
 
-[![Release: 0.9.6](https://img.shields.io/badge/release-0.9.6-536dfe?style=flat-square)](docs/releases/v0.9.6.md)
+[![Candidate: 0.10.0](https://img.shields.io/badge/candidate-0.10.0-536dfe?style=flat-square)](docs/releases/v0.10.0.md)
+[Last published native release: 0.9.6](docs/releases/v0.9.6.md)
+
+**Local 0.10.0 RC preparation:** an unreleased source candidate, not a published
+release. Public 0.10.0 artifacts do not exist and final qualification is incomplete.
+See the [release-candidate notes](docs/releases/v0.10.0.md).
 
 octet reads code, edits files, and runs commands from your terminal. The core is
 native Rust: one process owns the agent loop, sessions, policy, persistence, the
@@ -17,10 +22,12 @@ in any language.
 MCP, web search, subagents, codemode and computer use are optional first-party
 integrations. Pi is Mario Zechner's coding agent and informs some design choices;
 the optional [octet-pi-compat](extensions/octet-pi-compat/README.md) adapter is
-**experimental and unstable** source-only work and **does not ship in v0.9.6**:
-full Pi backwards compatibility is not yet qualified. Several unchanged Pi extensions
-already run through it in the source preview, but no Pi extension parity or
-installed-Pi workflow acceptance is claimed.
+**experimental and unstable**. The local 0.10.0 candidate catalog includes Pi;
+the published v0.9.6 assets do not. Full Pi backwards compatibility and
+installed-Pi workflow acceptance remain unqualified. Installation and discovery
+are inert; enabling the stock bridge automatically mirrors and runs this
+machine's enabled Pi factories with your OS permissions, not a sandbox.
+Provider-credential disclosure requires a separate reviewed opt-in.
 
 **By default octet has full access and no sandbox.** Commands, file edits, and
 enabled extensions run with your operating-system permissions, and nothing asks
@@ -55,7 +62,7 @@ see [distribution](docs/distribution.md) for their actual availability.
 When moving from an older pre-rename installation, install octet afresh: older
 installations and data remain separate; no automatic migration is performed.
 
-**From source:** install Rust 1.88+, then run from this checkout.
+**From source (local 0.10.0 RC):** install Rust 1.88+, then run from this checkout.
 [ripgrep](https://github.com/BurntSushi/ripgrep) is the preferred optional search
 helper; octet uses `grep` when `rg` is unavailable:
 
@@ -72,7 +79,7 @@ Continue with [getting started](docs/getting-started.md).
 | Directory | Contents |
 | --- | --- |
 | `crates/` | Model clients, agent runtime, terminal interface, and native host |
-| `extensions/` | Shipped optional bundles: codemode, computer use, MCP, subagents, web search; Pi compat and snap-compact are source-only |
+| `extensions/` | Local candidate catalog: codemode, computer use, MCP, Pi compat, subagents, web search; snap-compact remains source-only |
 | `sdk/` | Integration libraries and protocol types |
 | `examples/` | Extensions, skills, and prompt templates |
 | `docs/` | Guides, API reference, and architecture |

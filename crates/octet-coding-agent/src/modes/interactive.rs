@@ -5555,7 +5555,8 @@ where
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
-    let background = shell.theme().background();
+    let current_theme = shell.theme();
+    let background = current_theme.background();
     let mut app = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
@@ -5565,8 +5566,19 @@ where
         Ok(app)
     })
     .await?;
-    let problems = resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
-    shell.set_theme(load_theme_for_background(&app.config, background));
+    let mut problems =
+        resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
+    let (theme, problem) = crate::tui::theme::retain_invalid_file_theme(
+        &app.config,
+        &current_theme,
+        load_theme_for_background(&app.config, background),
+    );
+    if let Some(problem) = problem {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+    shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     app.executable_extensions
@@ -8841,7 +8853,11 @@ async fn apply_pending_actions(
                 app.config.theme_explicit = true;
                 if let Err(error) =
                     persist_configuration(Some(&mut app.executable_extensions), || {
-                        crate::cli::persist_theme_choice(&selector)
+                        let receipt = crate::cli::persist_theme_selection(&selector)?;
+                        if let Some(receipt) = receipt {
+                            reload.acknowledge_applied_write(&receipt);
+                        }
+                        Ok(())
                     })
                     .await
                 {
@@ -10052,6 +10068,7 @@ async fn apply_settings_command(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     sub: commands::SettingsCommand,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<()> {
     use commands::SettingsCommand as Sub;
     let sub = if sub == Sub::Menu {
@@ -10097,6 +10114,7 @@ async fn apply_settings_command(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10730,6 +10748,7 @@ async fn run_idle_command_inner(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10824,7 +10843,7 @@ async fn run_idle_command_inner(
             apply_idle_goal_command(&app, shell, goal, goal_deadline)?;
         }
         Command::Settings(sub) => {
-            apply_settings_command(&mut app, shell, input, sub).await?;
+            apply_settings_command(&mut app, shell, input, sub, reload).await?;
         }
         Command::Pi(sub) => {
             app = Box::new(apply_pi_command(*app, shell, input, sub).await?);
@@ -11508,6 +11527,7 @@ async fn configure_terminal_theme<S, E: Into<crate::tui::terminal::InputPacket>>
     requested: Option<String>,
     onboarding: bool,
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+    reload: Option<&mut crate::reload::ReloadSupervisor>,
 ) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<E>> + Unpin,
@@ -11565,7 +11585,16 @@ where
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
-        crate::cli::persist_theme_choice(choice.key())
+        let Some(reload) = reload else {
+            return crate::cli::persist_theme_choice(choice.key());
+        };
+        let receipt = crate::cli::persist_theme_selection(choice.key())?;
+        if let Some(receipt) = receipt {
+            // The live palette is already installed. Acknowledge only this
+            // exact atomic write, not unrelated/queued resource changes.
+            reload.acknowledge_applied_write(&receipt);
+        }
+        Ok(())
     })
     .await
     {
@@ -11736,6 +11765,7 @@ async fn run_interactive_without_model(
                         &mut boot.config,
                         requested,
                         false,
+                        None,
                         None,
                     )
                     .await?;
@@ -12799,7 +12829,8 @@ async fn run_interactive_once(
         && shell.theme().capabilities().interactive
         && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None, None)
+            .await?;
         if shell.close_requested() {
             shell.leave();
             return Ok(InteractiveExit::Finished);

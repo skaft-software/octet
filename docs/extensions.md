@@ -48,9 +48,11 @@ shape). The rules are under [CLI flags](#api-04-cli-flags).
 This guide mixes two kinds of extension work. **First-party** material — the
 octet SDK, generated bindings and the shipped bundles listed in
 `extensions/release-catalog.txt` — is built
-and tested with octet. **Community compatibility** material — the optional Pi
-adapter, retained legacy API examples and generic single-file helpers — is
-third-party work that octet loads or exports without owning it.
+and tested with octet. **Community compatibility** material — the Pi factories loaded by the optional
+first-party adapter, retained legacy API examples and generic single-file
+helpers — has its own narrower compatibility boundaries. The local 0.10.0
+candidate catalog includes the Pi adapter, but no public 0.10.0 assets exist
+and final installed-bundle qualification remains incomplete.
 
 Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
 for single-file Python/JS/TS tools, narrow Rust/C/C++ helpers, reviewed local
@@ -59,7 +61,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for **octet 0.9.6**: the
+only the contributions you need. It's a source recipe for the **local octet 0.10.0 RC**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact
@@ -208,11 +210,16 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and five shipped executable
-bundles have distribution version **0.9.6**. That doesn't select an extension
-API or publish SDK registries. Catalog installation needs version-matched
-published assets: see [installation](installation.md) and the [release
-notes](releases/v0.9.6.md).
+names or imports. The local host, Python/TypeScript source SDKs and six candidate
+executable bundles have distribution version **0.10.0** (the independent Rust
+SDK remains 0.8.2). That doesn't select an extension API or publish SDK registries.
+Use reviewed source or an explicit local archive; public 0.10.0 artifacts do not
+exist. See [installation](installation.md) and the [RC notes](releases/v0.10.0.md).
+
+Installation and discovery of Pi are inert. Enabling the stock bridge automatically
+mirrors/runs enabled Pi factories with OS permissions. It does not silently opt
+into native credential disclosure or disable independent native TOML appearance.
+The [27-row ledger](pi-extension-api.md) remains the partial compatibility contract.
 
 Declare the entrypoint and the tools you actually supply. Return the complete
 tool and command catalogs and the selected protocol features from

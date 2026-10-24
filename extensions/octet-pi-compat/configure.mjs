@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './lib/runtime-prerequisites.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -6,15 +7,16 @@ import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { hookEvents } from './lib/api.mjs';
-import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
-import { locateInstalledPi } from './lib/installed-pi.mjs';
-import { PI_VERSION } from './lib/pi-modules.mjs';
-import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } from './lib/pi-setup.mjs';
-import { readPiTheme } from './lib/theme-palette.mjs';
-import { reviewedSourceHashes } from './lib/runtime.mjs';
-import { startupCacheDirectory } from './lib/startup-cache.mjs';
-import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
+// Delay linking adapter dependencies until the runtime prerequisite has passed.
+const { hookEvents } = await import('./lib/api.mjs');
+const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
+const { locateInstalledPi } = await import('./lib/installed-pi.mjs');
+const { PI_VERSION } = await import('./lib/pi-modules.mjs');
+const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
+const { readPiTheme } = await import('./lib/theme-palette.mjs');
+const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
+const { startupCacheDirectory } = await import('./lib/startup-cache.mjs');
+const { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } = await import('./lib/theme-import.mjs');
 
 // Importing a factory executes arbitrary user code. Never perform implicit
 // discovery or change host trust/enablement. The caller must explicitly review

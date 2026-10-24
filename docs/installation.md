@@ -4,6 +4,15 @@
 
 <a id="binary-availability"></a>
 
+## Local 0.10.0 release candidate
+
+This checkout targets **0.10.0**, an unreleased source candidate. Public 0.10.0
+artifacts do not exist; native, installed-bundle and guest qualification remain
+incomplete. Build from this checkout or use explicitly reviewed local candidate
+files, never a guessed v0.10.0 download URL. The checked-in installer targets
+0.10.0 preparation; it is not the published installer below. See the
+[RC notes](releases/v0.10.0.md).
+
 ## Install native binaries
 
 Native v0.9.6 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
@@ -12,7 +21,8 @@ and Windows x86-64 (MSVC, preview). Use the version-pinned
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
 The [v0.9.6 notes](releases/v0.9.6.md) separate shipped scope from unqualified
-acceptance. The experimental Pi compatibility extension is not shipped.
+acceptance. The experimental Pi compatibility extension was not shipped in v0.9.6; the
+local 0.10.0 candidate catalog now includes it.
 
 Windows support is a preview. On Windows x86-64, download the version-matched `install-octet.ps1` from that
 release and run it in PowerShell. It checks the ZIP against the checksum manifest,
@@ -109,7 +119,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.9.6. Check `octet --version`, and use matching
+This checkout targets octet 0.10.0 (local release candidate). Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -135,13 +145,14 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles are pinned to
-the host version. After publication, install assets matching octet `0.9.6` from
-its version-pinned release. Until then, run reviewed source extensions from this
-checkout with `--extension-dir ./extensions`. The 0.8.0 bundles need their 0.8.0 host.
+the host version. The local 0.10.0 candidate catalog includes six bundles,
+including Pi. No public 0.10.0 artifacts exist and these bundles are not yet
+qualified. Run reviewed source extensions with this checkout's built host and
+`--extension-dir ./extensions`, or use a separately prepared local archive. The 0.8.0 bundles need their 0.8.0 host.
 
 ```sh
-octet extension install octet-web-search
-octet extension list
+./target/release/octet extension install --path /absolute/local-candidate/octet-web-search-0.10.0.tar.gz
+./target/release/octet extension list
 ```
 
 For a reviewed local archive instead, use
@@ -168,15 +179,23 @@ reference](cli.md#packages).
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), one Rust executable with the embedded QuickJS/WASM engine; no Node.js or Python is required. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
+| `octet-pi-compat` | [Experimental Pi 1.0.2 adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
-The five shipped executable-bundle manifests declare API `0.4`, distribution version
-`0.9.6`, and require octet `=0.9.6`. Older bundles stay pinned to their host.
+The six local candidate executable-bundle manifests declare API `0.4`, distribution
+version `0.10.0`, and require octet `=0.10.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.
-Generated contract bindings alone aren't a process runtime. `octet-pi-compat`
-is source-only experimental work and is excluded from the v0.9.6 catalog;
-previously installed experimental copies are not automatically removed.
+Generated contract bindings alone aren't a process runtime. Pi installation
+and discovery are inert; separate enablement of the stock bridge automatically
+mirrors/runs enabled Pi factories. It does not silently opt into native provider
+credential disclosure. Native TOML appearance remains independent; the
+[27-row ledger](pi-extension-api.md) retains partial contracts. Previously
+installed experimental copies are not automatically removed.
+
+Python-script adapters need Python >=3.11 with `venv` and `ensurepip`, or explicit
+private-runtime setup; this is not a prerequisite for every native Octet launch.
+Pi needs Node >=22.19.0; Codemode needs neither Python nor Node at runtime.
 
 ## Container
 

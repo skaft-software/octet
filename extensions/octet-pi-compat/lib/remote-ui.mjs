@@ -589,7 +589,11 @@ export class RemoteUI {
         if (surface.placement !== 'editor') invalid('ui/editor-text without an editor mount');
         const editor = surface.editor;
         if (!editor || surface.closed) return;
-        const text = bounded(params.text, 'editor text', 262144);
+        // Terminals (including Apple Terminal) paste CR or CRLF line endings.
+        // Bound the original bytes first; normalize only paste newlines before
+        // applying the unchanged control-free editor text grammar.
+        const raw = bounded(params.text, 'editor text', 262144, { controls: true });
+        const text = bounded(params.paste ? raw.replace(/\r\n?/g, '\n') : raw, 'editor text', 262144);
         // The genuine component keeps pastes and undo: the host decision is a
         // replacement, not a rebuild of local editor state.
         editor.mutating++;

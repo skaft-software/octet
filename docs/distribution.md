@@ -3,10 +3,16 @@
 The octet 0.9.6 release's [version-pinned GitHub page](https://github.com/skaft-software/octet/releases/tag/v0.9.6)
 records immutable native assets, signatures, exact-source qualification and
 actual channel availability. The [release notes](releases/v0.9.6.md) distinguish
-shipped scope from unrun acceptance. Pi compatibility is excluded: the release
-catalog contains five optional executable bundles, not the experimental adapter.
+shipped scope from unrun acceptance. Those published assets exclude Pi.
 
-The planned npm channel is `@skaft/octet@0.9.6` (launcher plus four signed platform
+The local **0.10.0 release candidate** is a source candidate, not a published release.
+Its one `extensions/release-catalog.txt` now includes Pi among six optional
+bundles. Public 0.10.0 artifacts do not exist and final artifact/guest qualification
+is incomplete. This dirty overlay supports diagnostic source archives only;
+exact-HEAD packaging requires a separately authorized coherent Git freeze.
+Do not weaken clean-tree gates or label overlay bytes as the current HEAD.
+
+The planned npm channel is `@skaft/octet@0.10.0` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels. Native publication does not publish them.
 
@@ -17,8 +23,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-This release's distribution target is **0.9.6**. The distribution version does not
-change independent API and schema versions. The [0.7.6
+The local candidate's distribution target is **0.10.0**. The distribution version does not change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
 
@@ -29,21 +34,24 @@ channel evidence.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents`, `octet-web-search` |
+| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, SDK and five shipped executable-bundle distribution versions | `0.9.6`; installed compatibility `requires_octet = "=0.9.6"` |
+| Product, Python/TypeScript SDK source and six candidate bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the five shipped executable-bundle manifests target API
+Current extension authoring and the six local candidate bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
 runtime. The minimal canonical process example and independent Aider adapter
 keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter remains
-experimental source-only work; neither its stock bundle nor configured local
-bridge is shipped in v0.9.6. Renaming
+experimental; local candidate catalog inclusion does not establish delivery or
+parity. Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
+Installation/discovery are inert. Enabling the stock bridge automatically mirrors
+and runs enabled Pi factories with OS permissions; native credential disclosure
+requires separate reviewed opt-in, and native TOML appearance stays independent. Renaming
 first-party wire fields such as `octet_version` doesn't renumber APIs or keep
 old-name aliases. Historical releases, measurements, upstream copyrights, Pi
 pins, independent example versions and mismatch fixtures keep their original
@@ -56,7 +64,7 @@ The release workflows don't publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
-| Five executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
+| Six candidate executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives; public 0.10.0 assets do not exist. Install and update never enable them or persist trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
@@ -80,11 +88,11 @@ aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.9.6 is not published to npm.** Only
+and registry provenance verification. **0.10.0 is not published to npm.** Only
 after verified publication, pin the version to reproduce one exact release:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.6
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.0
 ```
 
 `npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
@@ -107,7 +115,8 @@ Select the run for the exact reviewed commit, require its gating checks to
 succeed, and compare `BUILD-INFO.json` with that commit and target. Unix artifacts
 contain the native archive plus `extension-bundles/`; Windows artifacts contain
 `octet.exe`, `octet-host.exe`, extracted `extensions/`, and the same bundle
-archives. All five official extensions are included; Pi compatibility is not.
+archives. The local catalog selects all six candidate extensions, including Pi. No fresh
+0.10.0 artifact set has been qualified or published.
 Codemode ships a target-native executable, including `bin/codemode.exe` on
 Windows. Python adapters require Python, and optional drivers and integrations
 require separately consented setup.
@@ -122,8 +131,8 @@ grants trust, imports Pi configuration, or authorizes factory execution.
 These are dogfood artifacts, not stable qualification. Windows multiline paste,
 live-provider metric accuracy and attended rendering/driver journeys remain
 unqualified unless recorded separately on the release page. The Windows workspace baseline
-is explicitly informational, not a gating full-suite pass. Pi setup parity is
-outside this release. See [Windows testing](windows.md).
+is explicitly informational, not a gating full-suite pass. Pi setup parity remains
+unqualified; catalog inclusion does not close any partial API or workflow gate. See [Windows testing](windows.md).
 
 ## Reviewed model metadata
 
@@ -205,9 +214,9 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 ## Other channels
 
-The planned v0.9.6 version-pinned shell installer targets macOS arm64 and x64 and
+The checked-in local v0.10.0 candidate shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
-Windows x86-64 and would publish as `@skaft/octet@0.9.6`. See the [npm release
+Windows x86-64 and would publish as `@skaft/octet@0.10.0`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

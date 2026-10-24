@@ -5,6 +5,7 @@ import { canonicalToPi, piToCanonical, projectContext } from '../lib/provider-co
 import { Runtime } from '../lib/runtime.mjs';
 import { launch, owner, root } from './helper.mjs';
 const fixture = join(root, 'test/fixtures/provider-context.ts');
+const systemPrompt = 'host-served prompt';
 const grant = { grant_id: 'a'.repeat(64), activation_epoch: 4, operation_id: 'provider-context:4', owner, expected_head: 'old-head' };
 const user = text => ({ User: { content: [{ Text: text }] } });
 const contextParams = (peer, mode = 'replace') => ({ hook: 'provider_context', session_leaf: grant,
@@ -13,9 +14,21 @@ const contextParams = (peer, mode = 'replace') => ({ hook: 'provider_context', s
     preparation: { resource_owner: owner.session_id, session_id: 'actual-session', head: 'old-head', tool_generation: 7 } } });
 
 for (const mode of ['replace', 'in-place', 'throws']) test(`real process context ${mode}: ordered callbacks project only canonical messages and preserve real system`, async t => {
-  const peer = launch(t, [fixture]); await peer.init();
-  const reply = await peer.request('hook/run', contextParams(peer, mode)).response;
-  assert.deepEqual(reply.result.provider_context, { messages: [user(mode === 'replace' ? 'projected' : mode === 'in-place' ? 'mutated' : 'original'), user('second:real system')], system: 'real system' });
+  const peer = launch(t, [fixture], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  // Disclosure also requires the real foreground lifecycle binding.
+  await peer.start();
+  const request = peer.request('hook/run', contextParams(peer, mode));
+  const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+  assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+  // Distinct from preparation.request.system: only the native read may supply
+  // the synchronous getter, while the projected provider system stays intact.
+  peer.send({ jsonrpc: '2.0', id: read.id, result: { text: systemPrompt } });
+  const reply = await request.response;
+  assert.ok(reply.result, JSON.stringify(reply));
+  assert.deepEqual(reply.result.provider_context, { messages: [user(mode === 'replace' ? 'projected' : mode === 'in-place' ? 'mutated' : 'original'), user(`second:${systemPrompt}`)], system: 'real system' });
   assert.equal(reply.result.provider_context.tools, undefined);
   if (mode === 'throws') {
     const issue = peer.seen.find(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]');
@@ -219,19 +232,31 @@ test('context replay refuses opaque state before parsing its kind; observations 
 });
 
 test('process context validates opaque reasoning before callbacks and permits ordinary context filtering', async t => {
-  const peer = launch(t, [fixture]); await peer.init();
+  const peer = launch(t, [fixture], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  await peer.start();
   const state = { protocol: 'open_ai_responses', model: 'model',
     kind: { OpenAiReasoning: { item_id: 'rs_1', encrypted_content: 'gAAAA' } } };
   for (const reasoning of [{ text: 'thinking', state: { kind: 'opaque' } }, { text: null, state }, { text: 'plan', state }]) {
     const params = contextParams(peer, 'replace');
     params.payload.request.messages = [{ Assistant: { model: 'model', protocol: 'open_ai_responses', content: [{ Reasoning: reasoning }] } }];
-    const reply = await peer.request('hook/run', params).response;
+    const request = peer.request('hook/run', params);
     if (reasoning.state === state) {
-      assert.deepEqual(reply.result.provider_context.messages, [user('projected'), user('second:real system')]);
+      const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+      assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+      assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+      peer.send({ jsonrpc: '2.0', id: read.id, result: { text: systemPrompt } });
+    }
+    const reply = await request.response;
+    if (reasoning.state === state) {
+      assert.ok(reply.result, JSON.stringify(reply));
+      assert.deepEqual(reply.result.provider_context.messages, [user('projected'), user(`second:${systemPrompt}`)]);
     } else {
       assert.equal(reply.error?.code, -32602);
       assert.match(reply.error.message, /invalid_request reasoning state kind/);
       assert.equal(reply.result, undefined);
+      assert.ok(!peer.seen.some(frame => frame.method === 'context/system_prompt' && frame.params.parent_request_id === request.id));
     }
   }
   await peer.close();

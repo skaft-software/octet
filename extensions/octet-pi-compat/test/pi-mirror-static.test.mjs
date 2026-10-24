@@ -148,6 +148,24 @@ test('environment-dependent static definitions and late registrations cannot exp
   await p.close();
 });
 
+test('dynamic tool negotiation does not unfreeze mirror commands, shortcuts, flags or renderer declarations', async t => {
+  const f = fixture(t, `export default pi => pi.registerCommand('late',{handler(method){
+    if(method==='registerCommand') pi.registerCommand('added',{handler(){}});
+    if(method==='registerShortcut') pi.registerShortcut('ctrl+y',{handler(){}});
+    if(method==='registerFlag') pi.registerFlag('added',{type:'boolean',default:false});
+    if(method==='registerMessageRenderer') pi.registerMessageRenderer('added',()=>({render:()=>[]}));
+    if(method==='registerEntryRenderer') pi.registerEntryRenderer('added',()=>({render:()=>[]}));
+  }});`);
+  const captured = await configureMirror(f.options), p = peer(t, f, captured);
+  assert.ok((await initialize(p, captured)).result);
+  for (const method of ['registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
+    assert.match((await p.command('late', [method], { has_ui: false }).response).error.message,
+      new RegExp(`mirror ${method} changed static registrations; review and configure again`));
+  }
+  assert.equal(p.seen.some(frame => ['tools/register', 'shortcut/register'].includes(frame.method)), false);
+  await p.close();
+});
+
 test('present but disabled first-party manifests do not discard a factory; active collisions refuse the review', async t => {
   const f = fixture(t, `export default pi => { ${tool('web_search')} pi.registerCommand('unrelated',{handler(){}}); };`);
   const nativeRoot = join(f.dir, 'native');

@@ -10,47 +10,59 @@ pub(super) async fn run_catalog_updates(
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        let mut committed_catalog = None;
-        let result = match wait_for_dynamic_registration(&inner).await {
-            Err(message) => Err(message),
-            Ok(registration) => {
-                let _reload = inner.reload_guard.lock().await;
-                let process = ExtensionProcess {
-                    inner: Arc::clone(&inner),
-                };
-                let active = read_std_lock(&inner.connection).clone();
-                let active_request = active.generation == update.generation
-                    && Arc::ptr_eq(&active.tool_catalog, &update.catalog)
-                    && !active.draining.load(Ordering::Acquire);
-                if !active_request {
-                    Err(
-                        "tool catalog request belongs to an inactive extension generation"
-                            .to_owned(),
-                    )
-                } else {
-                    let mut next = read_std_lock(&update.catalog).clone();
-                    match update.mutation {
-                        CatalogMutation::Register(definitions) => {
-                            for definition in definitions {
-                                if inner.config.withheld_tools.contains(&definition.name) {
-                                    continue;
-                                }
-                                if let Some(existing) = next
-                                    .iter_mut()
-                                    .find(|existing| existing.name == definition.name)
-                                {
-                                    *existing = definition;
-                                } else {
-                                    next.push(definition);
+        let registration = wait_for_dynamic_registration(&inner).await;
+        let terminate = {
+            // Lifecycle callbacks (including replacement session_start) may wait
+            // synchronously for this ACK while holding reload_guard. Fence only
+            // the synchronous catalog transaction with the active connection read
+            // lock: reload takes its write lock to drain/cut over generations.
+            // Keep publication, ACK admission and failed-ACK withdrawal together;
+            // never hold a standard lock across an await.
+            let active_connection = read_std_lock(&inner.connection);
+            let mut terminate = None;
+            let mut committed_catalog = None;
+            let result = match registration {
+                Err(message) => Err(message),
+                Ok(registration) => {
+                    let process = ExtensionProcess {
+                        inner: Arc::clone(&inner),
+                    };
+                    let active = Arc::clone(&active_connection);
+                    let active_request = active.generation == update.generation
+                        && Arc::ptr_eq(&active.tool_catalog, &update.catalog)
+                        && !active.draining.load(Ordering::Acquire);
+                    if !active_request {
+                        Err(
+                            "tool catalog request belongs to an inactive extension generation"
+                                .to_owned(),
+                        )
+                    } else {
+                        let mut next = read_std_lock(&update.catalog).clone();
+                        match update.mutation {
+                            CatalogMutation::Register(definitions) => {
+                                for definition in definitions {
+                                    if inner.config.withheld_tools.contains(&definition.name) {
+                                        continue;
+                                    }
+                                    if let Some(existing) = next
+                                        .iter_mut()
+                                        .find(|existing| existing.name == definition.name)
+                                    {
+                                        *existing = definition;
+                                    } else {
+                                        next.push(definition);
+                                    }
                                 }
                             }
+                            CatalogMutation::Unregister(names) => {
+                                let removed = names.into_iter().collect::<BTreeSet<_>>();
+                                next.retain(|definition| !removed.contains(&definition.name));
+                            }
                         }
-                        CatalogMutation::Unregister(names) => {
-                            let removed = names.into_iter().collect::<BTreeSet<_>>();
-                            next.retain(|definition| !removed.contains(&definition.name));
-                        }
-                    }
-                    validate_tool_definitions_for_protocol(&next, &read_std_lock(&active.protocol))
+                        validate_tool_definitions_for_protocol(
+                            &next,
+                            &read_std_lock(&active.protocol),
+                        )
                         .map_err(|error| error.to_string())
                         .and_then(|()| {
                             let process_tools = process.process_tools(Arc::clone(&active), &next);
@@ -81,46 +93,51 @@ pub(super) async fn run_catalog_updates(
                                 tools: next.into_iter().map(|definition| definition.name).collect(),
                             })
                         })
+                    }
+                }
+            };
+            let response = match result {
+                Ok(result) => serde_json::json!({
+                    "jsonrpc":"2.0",
+                    "id":update.request_id,
+                    "result":result,
+                }),
+                Err(message) => serde_json::json!({
+                    "jsonrpc":"2.0",
+                    "id":update.request_id,
+                    "error":{"code":-32602,"message":message},
+                }),
+            };
+            let delivery = try_queue_child_response(
+                &update.child_requests,
+                &update.request_id,
+                &update.writer,
+                update.max_message_bytes,
+                response,
+            );
+            if !matches!(delivery, Ok(ChildResponseAdmission::Queued)) {
+                if let Some((registration, connection)) = committed_catalog {
+                    registration.remove();
+                    {
+                        let _catalog = write_std_lock(&connection.catalog_guard);
+                        write_std_lock(&connection.tool_catalog).clear();
+                    }
+                    update_health(
+                        &connection.health,
+                        ExtensionHealthState::Crashed,
+                        Some("dynamic tool catalog acknowledgement was not delivered".to_owned()),
+                    );
+                    terminate = Some(connection);
                 }
             }
-        };
-        let response = match result {
-            Ok(result) => serde_json::json!({
-                "jsonrpc":"2.0",
-                "id":update.request_id,
-                "result":result,
-            }),
-            Err(message) => serde_json::json!({
-                "jsonrpc":"2.0",
-                "id":update.request_id,
-                "error":{"code":-32602,"message":message},
-            }),
-        };
-        let delivery = try_queue_child_response(
-            &update.child_requests,
-            &update.request_id,
-            &update.writer,
-            update.max_message_bytes,
-            response,
-        );
-        if !matches!(delivery, Ok(ChildResponseAdmission::Queued)) {
-            if let Some((registration, connection)) = committed_catalog {
-                registration.remove();
-                {
-                    let _catalog = write_std_lock(&connection.catalog_guard);
-                    write_std_lock(&connection.tool_catalog).clear();
-                }
-                update_health(
-                    &connection.health,
-                    ExtensionHealthState::Crashed,
-                    Some("dynamic tool catalog acknowledgement was not delivered".to_owned()),
-                );
-                connection.terminate().await;
+            if let Err(message) = delivery {
+                let _ = inner.events.send(ExtensionEvent::Diagnostic { message });
+                settle_child_request(&update.child_requests, &update.request_id);
             }
-        }
-        if let Err(message) = delivery {
-            let _ = inner.events.send(ExtensionEvent::Diagnostic { message });
-            settle_child_request(&update.child_requests, &update.request_id);
+            terminate
+        };
+        if let Some(connection) = terminate {
+            connection.terminate().await;
         }
     }
 }

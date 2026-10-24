@@ -5,16 +5,17 @@ one Rust executable with the vendored `quickjs-wasi` 3.6.2 engine, Pi's
 `@earendil-works/pi-codemode` 1.0.0 prelude (MIT) and Octet's discovery
 implementation embedded at compile time. **No Node.js and no Python are
 required at runtime**, and no runtime JavaScript is read from the checkout.
-This API `0.4` bundle pins octet `0.9.6`.
+This API `0.4` bundle pins octet `0.10.0`.
 
 ## Install and enable
 
 This bundle joins `extensions/release-catalog.txt`; its release asset is
-`octet-codemode-0.9.6.tar.gz`. Once that asset is published:
+`octet-codemode-0.10.0.tar.gz`. Public 0.10.0 artifacts do not exist and the
+local candidate is not qualified. Given a separately prepared, reviewed local archive:
 
 ```sh
-octet extension install octet-codemode
-octet --enable-extension octet-codemode --codemode-mode on
+./target/release/octet extension install --path /absolute/local-candidate/octet-codemode-0.10.0.tar.gz
+./target/release/octet --enable-extension octet-codemode --codemode-mode on
 ```
 
 For an unpublished source checkout, copy this complete directory to

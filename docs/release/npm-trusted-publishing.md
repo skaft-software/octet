@@ -1,26 +1,28 @@
 # npm trusted publishing
 
-**The octet 0.9.6 npm CLI is not published.** It is a planned channel for the
+**The octet 0.10.0 npm CLI is not published.** Public 0.10.0 native artifacts do
+not exist either; this is local release-candidate preparation, not qualification. It is a planned channel for the
 source candidate; native GitHub releases and npm publication need independent
 approval and verification. See [installation](../installation.md) for the
 currently available source-build route. This maintainer reference describes packaging,
-protected publication, and recovery for the four immutable packages. The
+protected publication, and recovery for the five immutable packages. The
 source/release repository is `skaft-software/octet`; future npm releases use
 trusted publishers for that identity. The already-published native v0.7.0
 signatures retain `skaft-software/ygg`.
 
-The source contract defines four immutable packages:
+The source contract defines five immutable packages:
 
-- `@skaft/octet`: a shell-only launcher.
-- `@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`, and
-  `@skaft/octet-linux-x64-gnu`: the native runtime and packaged docs.
+- `@skaft/octet`: a Node launcher with no network or lifecycle hooks.
+- `@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`,
+  `@skaft/octet-linux-x64-gnu`, and `@skaft/octet-win32-x64`: the native runtime
+  and packaged docs.
 
 The npm scope remains `@skaft`. The GitHub repository rename does not change
 these package names or the Rust CLI crate (`octet-coding-agent`).
 
-All four versions must equal the canonical `vX.Y.Z` release tag's version. The
+All five versions must equal the canonical `vX.Y.Z` release tag's version. The
 launcher has no npm lifecycle hook. It resolves only the installed optional
-platform package before `exec`-ing `octet` or `octet-host`; it never downloads a
+platform package before spawning `octet` or `octet-host`; it never downloads a
 runtime. Linux musl and unsupported CPUs fail closed. Bun is unqualified.
 
 ## Local release gate
@@ -50,7 +52,7 @@ All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time
 snapshot and may still describe npm as unpublished. That historical publication
-does not qualify the 0.9.6 candidate. Do not rewrite or republish immutable 0.8.1
+does not qualify the 0.10.0 candidate. Do not rewrite or republish immutable 0.8.1
 packages to refresh docs; a later native release can carry updated documentation.
 Packing restores files that npm's ignore rules would omit before final checksums
 and provenance are computed; it never substitutes checkout documentation.
@@ -69,7 +71,7 @@ alone is insufficient.
 
 ## Protected publication
 
-Trusted publishers for all four packages must target the repository's
+Trusted publishers for all five packages must target the repository's
 `release-octet.yml` workflow and `stable-release-publish` environment. The
 workflow uses GitHub OIDC with `npm publish --provenance`, never `NPM_TOKEN`,
 `NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another long-lived registry
@@ -88,14 +90,14 @@ The publication job pins npm CLI `11.5.1` (or a later explicitly reviewed versio
 supporting trusted publishing) before requesting OIDC provenance. It:
 
 1. verifies the signed GitHub binary release and published installer smoke;
-2. verifies immutable release metadata and builds/validates all four tarballs in
+2. verifies immutable release metadata and builds/validates all five tarballs in
    an unprivileged job;
 3. preflights each `name@version` and continues only if an existing package's
    integrity matches exactly;
-4. publishes all three platform packages before the launcher, with provenance
+4. publishes all four platform packages before the launcher, with provenance
    and scripts disabled; and
 5. verifies registry integrity and provenance, then runs version/help/host
-   handshake/uninstall smokes on GNU/Linux, macOS Intel, and Apple silicon.
+   handshake/uninstall smokes on GNU/Linux, macOS Intel, Apple silicon, and Windows x86-64.
 
 npm versions are immutable. After an upload timeout, inspect
 `npm view name@version dist.integrity` and the provenance field. Never blindly
@@ -109,19 +111,19 @@ name/version. Never use `npm unpublish` as automatic repair or reuse the version
 
 An authorized maintainer should deprecate the affected version with a short
 failure message, record the registry response, and cut a new canonical octet
-patch release. Publish platform-first, verify all four packages, and announce
+patch release. Publish platform-first, verify all five packages, and announce
 the replacement. Leave a pending GitHub/npm release untouched until its
 provenance is understood; revocation or closure is an explicit maintainer action.
 
 ## Installation and updates
 
-The planned CLI is `@skaft/octet@0.9.6`; it is not published yet, and no 0.9.6
+The planned CLI is `@skaft/octet@0.10.0`; it is not published yet, and no 0.10.0
 registry provenance or public-install acceptance is established. See the
 [installation guide](../installation.md) for the source-build route. Only after
 verified publication, use the version-pinned install command:
 
 ```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.9.6
+npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.0
 ```
 
 `octet update` offers npm automatically only for a physically validated global

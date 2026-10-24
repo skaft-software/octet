@@ -144,6 +144,37 @@ fn pi_working_spinner_advances_without_label_shimmer_and_stops_on_settlement() {
 }
 
 #[test]
+fn pi_extension_working_frames_honor_disabled_host_animation() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../extensions/octet-pi-compat/test/fixtures/pi-native-layout.toml"
+    ));
+    for animation in [true, false] {
+        let mut capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+        capabilities.animation = animation;
+        let theme = crate::tui::theme::test_theme_source_with(
+            source,
+            capabilities,
+            TerminalBackground::Dark,
+        );
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.begin_run("test");
+        shell.set_extension_ui(ShellExtensionUi {
+            working: Some(ShellExtensionWorking {
+                frames: Some(vec!["X".into(), "Y".into()]),
+                interval_ms: Some(60_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let rows =
+            strip_terminal_sequences(&shell.state.borrow_mut().rendered_transcript(80).join("\n"));
+        assert!(rows.contains("Working"), "{rows}");
+        assert_eq!(rows.contains("X Working"), animation, "{rows}");
+    }
+}
+
+#[test]
 fn pi_palette_keeps_exact_accent_and_explicit_default_backgrounds_after_model_changes() {
     for mut theme in themes() {
         let accent = theme.role_rgb("model_accent");

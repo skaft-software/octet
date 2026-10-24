@@ -1847,6 +1847,49 @@ pub(crate) fn load_theme_for_background(
     }
 }
 
+/// Retain a validated active file when a reload fell back because its current
+/// contents are invalid. Discovery must still select the same source: a missing,
+/// withdrawn or shadowed resource cannot keep a retired palette alive.
+pub(crate) fn retain_invalid_file_theme(
+    config: &Config,
+    current: &OctetTheme,
+    candidate: OctetTheme,
+) -> (OctetTheme, Option<String>) {
+    let Some(path) = current.source_path() else {
+        return (candidate, None);
+    };
+    if !candidate.is_compiled_default() {
+        return (candidate, None);
+    }
+    let Some(name) = config.theme.as_deref() else {
+        return (candidate, None);
+    };
+    let Ok((resolver, resource)) = resolved_theme_resource(name, config) else {
+        return (candidate, None);
+    };
+    if resource.path != path {
+        return (candidate, None);
+    }
+    match resolver.read_text(&resource).and_then(|source| {
+        load_resolved_theme_for(
+            &resource.path,
+            &source,
+            current.capabilities(),
+            current.background(),
+        )
+    }) {
+        Ok(theme) => (theme, None),
+        Err(error) => {
+            let diagnostic = format!("theme {name:?}: {error:#}; previous theme retained")
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(4096)
+                .collect();
+            (current.clone(), Some(diagnostic))
+        }
+    }
+}
+
 /// Load the startup theme. Missing or malformed files intentionally fall back
 /// to octet's default token set instead of affecting launch/print mode.
 pub fn load_theme(config: &Config) -> OctetTheme {

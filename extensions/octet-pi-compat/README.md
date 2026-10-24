@@ -1,8 +1,9 @@
 # Optional Pi factory compatibility
 
-> **Experimental and unstable source-only work; excluded from v0.9.6.** No Pi compatibility
-> bundle is shipped or offered in this release's catalog. Instructions below
-> describe development setup, not a qualified release integration.
+> **Experimental and unstable; local 0.10.0 candidate catalog includes Pi.**
+> Public 0.10.0 artifacts do not exist and final qualification is incomplete.
+> Published v0.9.6 assets remain unchanged and exclude this adapter. Catalog
+> inclusion is preparation, not Pi parity or installed-bundle acceptance.
 
 One optional Node/Bun process loads unchanged Pi extension factories after explicit
 review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
@@ -15,9 +16,23 @@ parity.
 
 ## Local setup and configuration
 
-Requires Node 22.19+ or Bun. Source dependency setup uses npm; release bundles
-include the dependencies. Nothing executes during extension discovery, and
-neither helper enables an extension or writes host configuration/trust:
+Requires Node **22.19.0 or newer**. Entrypoints reject older Node versions before
+loading adapter dependencies or factories. Bun's existing path is retained but
+separately unqualified. Source dependency setup uses npm; complete candidate
+archives must include locked production dependencies. Installation/discovery
+are inert. Enabling the stock candidate bundle automatically mirrors this
+machine's enabled Pi setup and runs its factories with OS permissions. Native
+provider-credential disclosure remains a separate reviewed opt-in, and native
+TOML appearance is independent. Use a built 0.10.0 host with an explicit local file:
+
+```sh
+./target/release/octet extension install --path /absolute/local-candidate/octet-pi-compat-0.10.0.tar.gz
+# Only after reviewing this machine's enabled Pi factories and imports:
+./target/release/octet --enable-extension octet-pi-compat
+```
+
+No public 0.10.0 archive is available. The commands below instead generate a
+separate reviewed bridge; neither helper enables it or writes host configuration/trust:
 
 ```sh
 node extensions/octet-pi-compat/setup.mjs
@@ -39,8 +54,8 @@ ownership and fresh review, refusing a partial setup rather than silently droppi
 other commands. Installed native manifests alone do not prove active ownership;
 only explicit host-active tools conflict. Reviewed builtin tool replacements require
 exact manifest grants and negotiated native `builtin_tool_overrides_v1` admission.
-For a manual list, replace `--from-pi` with absolute entrypoint paths. Replace
-`node` with `bun` to reuse Bun; configure records that executable. A load pass
+For a manual list, replace `--from-pi` with absolute entrypoint paths. Configure
+records the executable; selecting Bun does not qualify that runtime. A load pass
 does not qualify commands, hooks or UI behavior.
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
@@ -88,9 +103,9 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The release catalog now includes this adapter with locked npm dependencies and
-an empty factory configuration. Publication is still a separate gate. When using
-an installed bundle, generate configuration in a separate directory rather than
+The local 0.10.0 candidate release catalog includes this adapter. Locked-dependency
+archive installation/activation, final artifact qualification and publication
+remain open gates. For an installed bundle, generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
 The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
@@ -107,10 +122,13 @@ skips a changed factory. Late tools use the negotiated host-acknowledged catalog
 Static shortcut declarations stay reserved when a factory is
 skipped, but their missing handlers refuse execution; reconfigure to remove them.
 These hashes are change detection, not a sandbox or
-an integrity claim over an extension's entire import graph. The shipped config
-is empty and does not discover/import any Pi user installation.
+an integrity claim over an extension's entire import graph. The stock `bridge.json`
+is empty, but its manifest sets `OCTET_PI_AUTO_MIRROR=1`: explicit enablement
+prepares a private session catalog and discovers/runs enabled Pi factories.
+An empty config therefore does not mean stock activation is inert. Installation
+and discovery alone still execute nothing and never import credentials.
 
-octet 0.9.6 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
+The local octet 0.10.0 candidate is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
 1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
 Imports resolve through the same module table as Pi 1.0.2's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
@@ -199,6 +217,15 @@ cold path.
   Declaring either field, even empty, requires the feature. Limits: 1024 UTF-8 bytes
   per string, at most 16 guidelines, C0/C1 forbidden except newline/tab. Pi projection
   trimming and aggregate catalog-budget enforcement remain native responsibilities.
+- Synchronous `pi.getCommands()` requires native `command_catalog_v1`: resolved
+  extension commands, then admitted prompts, then **available**, not activated,
+  skills named `skill:<name>`, with original Pi `sourceInfo` where imported.
+  Built-in slash commands are excluded. Membership comes only from native
+  registries; the adapter restores its own factory provenance without adding
+  entries. Retained same-owner callbacks request a fresh snapshot; unbound,
+  retired, cancelled, draining or unsettled-resource contexts refuse rather than
+  inventing an empty catalog. Complete results are bounded to 512 KiB. See the
+  [native contract](../../docs/extensions/resource-paths.md#available-command-catalog).
 - Adapter-side `resources_discover` behind `resource_paths_v1`: ordered awaited
   factory callbacks, normalized filesystem roots and the dedicated native reply.
   Native activation must remain off without the complete App consumer described
@@ -339,7 +366,7 @@ original shell quoting.
 
 A synchronous reverse request that the host drops (it cancels the hook together
 with the child request it issued) no longer takes the extension down. A dropped
-*read-only* request (`tools/snapshot`, `composition/context`) is terminal
+*read-only* request (`commands/snapshot`, `tools/snapshot`, `composition/context`) is terminal
 cancellation: the factory thread is woken with `request cancelled` instead of
 waiting on a reply that will never arrive. A durable or effectful request keeps
 waiting for its native outcome, because only that outcome decides whether the

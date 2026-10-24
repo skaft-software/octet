@@ -505,6 +505,11 @@ pub(super) async fn spawn_connection(
         }
     }
     if offered_host_services.resource_paths
+        && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
+    {
+        optional_features.push(EXTENSION_FEATURE_COMMAND_CATALOG.to_owned());
+    }
+    if offered_host_services.resource_paths
         && descriptor
             .manifest
             .contributes
