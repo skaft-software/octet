@@ -579,6 +579,8 @@ export default pi => {
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
     assert_eq!(rows.len(), 7);
+    // macOS exposes /var through /private/var; imported provenance is canonical.
+    let source_root = directory.path().canonicalize().unwrap();
     let commands = |i: usize| rows[i]["commands"].as_array().unwrap();
     assert!(commands(0).iter().all(|c| c["source"] == "extension"));
     for (i, phase) in [(1, "a"), (2, "a"), (3, "b"), (4, "b")] {
@@ -594,7 +596,7 @@ export default pi => {
         assert_eq!(commands[1]["name"], "probe");
         assert_eq!(
             commands[1]["sourceInfo"]["path"],
-            directory.path().join("probe.ts").to_str().unwrap()
+            source_root.join("probe.ts").to_str().unwrap()
         );
         assert_eq!(commands[2]["name"], format!("catalog-prompt-{phase}"));
         assert_eq!(commands[3]["name"], format!("skill:catalog-{phase}"));
@@ -602,10 +604,7 @@ export default pi => {
             assert_eq!(c["sourceInfo"]["source"], "extension:probe");
             assert_eq!(c["sourceInfo"]["scope"], "temporary");
             assert_eq!(c["sourceInfo"]["origin"], "top-level");
-            assert_eq!(
-                c["sourceInfo"]["baseDir"],
-                directory.path().to_str().unwrap()
-            );
+            assert_eq!(c["sourceInfo"]["baseDir"], source_root.to_str().unwrap());
         }
     }
     for i in [5, 6] {
