@@ -2,14 +2,15 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
-> **Preview platform in v0.9.6.** The native MSVC archive is published and passes
-> automated release checks, but attended desktop use is unqualified and known
+> **Preview platform in v0.10.0.** Native MSVC artifact availability and automated
+> release qualification are recorded on the release page. Attended desktop use
+> remains unqualified, and known
 > issues such as [#572](https://github.com/skaft-software/octet/issues/572)
 > remain open.
 
 octet builds and runs as a native Windows x64 program (`octet.exe` and
 `octet-host.exe`); WSL is not used or required. The
-[v0.9.6 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.6)
+[v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
 records actual MSVC artifact availability and qualification. Pull requests
 produce unsigned GNU test builds, described below; these do not qualify the
 MSVC release archive. Automated terminal checks are not physical-display or
@@ -107,9 +108,9 @@ The artifact contains:
 | `extensions/octet-computer-use/` | The version-matched source computer-use bundle, for the [attended procedure](../extensions/octet-computer-use/README.md#windows) |
 
 Manually dispatched [dogfood candidates](distribution.md#unsigned-dogfood-candidates)
-also include all five official extension bundles and extracted payloads.
-The experimental Pi compatibility adapter is not shipped in v0.9.6. Their
-root checksum manifest covers those extracted files as well as the binaries,
+also include the six version-matched first-party extension bundles and extracted
+payloads, including the experimental Pi compatibility adapter. Their root
+checksum manifest covers those extracted files as well as the binaries,
 metadata and archives; verify it before running the extracted extensions.
 
 Ordinary PR builds are unsigned and are **not releases**: they are not published,
