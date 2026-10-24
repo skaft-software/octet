@@ -66,6 +66,8 @@ enum MouseMode {
     Default,
     Auto,
     App,
+    Terminal,
+    Off,
 }
 
 impl MouseMode {
@@ -74,6 +76,8 @@ impl MouseMode {
             Self::Default => None,
             Self::Auto => Some("auto"),
             Self::App => Some("app"),
+            Self::Terminal => Some("terminal"),
+            Self::Off => Some("off"),
         }
     }
 }
@@ -553,6 +557,10 @@ impl PtyOctet {
                     .unwrap();
                     fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
                 }
+                // Copy regressions must not replace the test runner's clipboard.
+                let copier = bin.join("pbcopy");
+                fs::write(&copier, "#!/bin/sh\ncat > \"$HOME/clipboard-copy\"\n").unwrap();
+                fs::set_permissions(&copier, fs::Permissions::from_mode(0o700)).unwrap();
                 command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
             }
             StartupFixture::Changelog { model, initial } => {

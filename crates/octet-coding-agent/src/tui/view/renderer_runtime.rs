@@ -160,6 +160,10 @@ impl SharedState {
             state.painted_report = Some(report.clone());
         }
         if geometry.is_current(&state) {
+            state
+                .transcript_navigation
+                .borrow_mut()
+                .accept_rendered_frame(geometry.navigation_frame);
             if let Some(top) = native_viewport_top.filter(|_| !state.application_viewport_requested)
             {
                 // A historical repair may move the physical seam backwards.
@@ -604,14 +608,54 @@ impl InteractiveShell {
     /// or shell state. Re-entering the renderer restores the retained transcript
     /// and draft using the selected screen policy.
     pub(crate) fn set_tui_fullscreen(&mut self, enabled: bool) -> anyhow::Result<()> {
-        let previous = self.state.set_fullscreen(enabled);
-        if previous == enabled || self.render_thread.is_none() || super::tern::enabled_cached() {
+        let previous = self.state.fullscreen();
+        let previous_capture = self.capture_mouse;
+        let capture = self
+            .runtime_config
+            .as_ref()
+            .map_or(previous_capture, |config| {
+                config.mouse.captures_mouse_on(if enabled {
+                    crate::config::TuiMode::Fullscreen
+                } else {
+                    crate::config::TuiMode::Inline
+                })
+            });
+        if previous == enabled && previous_capture == capture {
             return Ok(());
         }
 
-        self.suspend_renderer();
+        let restart = self.render_thread.is_some() && !super::tern::enabled_cached();
+        if restart {
+            self.suspend_renderer();
+        }
+        let previous_viewport = {
+            let mut state = self.state.borrow_mut();
+            let previous_viewport = state.application_viewport_requested;
+            if previous_capture != capture {
+                // Auto follows the live surface, not the surface at launch.
+                // App/terminal/off retain their explicit ownership policy.
+                state.application_viewport_requested = capture;
+            }
+            state.render_geometry = None;
+            state.painted_geometry = None;
+            state.pending_selection_anchor = None;
+            state.selection_pointer_cell = None;
+            state.selection_dragging = false;
+            state.deferred_pointer_press = None;
+            state.pending_link_press = None;
+            state.reset_transcript_navigation_pointer();
+            previous_viewport
+        };
+        self.state.set_fullscreen(enabled);
+        self.capture_mouse = capture;
+        if !restart {
+            // Native Tern continues to own its gestures without ANSI capture.
+            return Ok(());
+        }
         if let Err(error) = self.resume() {
             self.state.set_fullscreen(previous);
+            self.capture_mouse = previous_capture;
+            self.state.borrow_mut().application_viewport_requested = previous_viewport;
             if let Err(restore_error) = self.resume() {
                 return Err(anyhow::anyhow!(
                     "could not apply fullscreen mode ({error:#}) or restore the previous renderer ({restore_error:#})"
@@ -1698,6 +1742,65 @@ mod commit_metadata_tests {
             }
         }
         shell
+    }
+
+    #[test]
+    fn painted_scrollbar_survives_non_layout_revision_during_render() {
+        let mut shell = history_shell(80);
+        shell.tui = None;
+        shell.state.borrow_mut().render_threaded = true;
+        shell.set_size(80, 24);
+        shell.set_transcript_scrollbar(
+            super::super::transcript_navigation::TranscriptScrollbar::Always,
+        );
+        let component = ShellComponent::isolated(shell.state.clone(), true);
+        {
+            let rendered = component.borrow_for_render();
+            render_shell_viewport_at(&rendered, 80, Instant::now());
+            // Background admission may borrow mutably without changing the
+            // layout. It must not discard the frame's scrollbar hit targets.
+            drop(shell.state.borrow_mut());
+        }
+        shell.state.frame_written();
+        assert!(
+            shell.intercept_transcript_input(&crossterm::event::Event::Mouse(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left
+                    ),
+                    column: 79,
+                    row: 0,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }
+            ))
+        );
+        assert!(shell.state.borrow().scroll_from_bottom.get() > 0);
+        assert!(!shell.state.borrow().follow_tail);
+    }
+
+    #[test]
+    fn painted_scrollbar_does_not_override_newer_scroll_intent() {
+        let mut shell = history_shell(80);
+        shell.tui = None;
+        shell.state.borrow_mut().render_threaded = true;
+        shell.set_transcript_scrollbar(
+            super::super::transcript_navigation::TranscriptScrollbar::Always,
+        );
+        let component = ShellComponent::isolated(shell.state.clone(), true);
+        {
+            let rendered = component.borrow_for_render();
+            render_shell_viewport_at(&rendered, 80, Instant::now());
+            shell.scroll_lines(-3);
+        }
+        shell.state.frame_written();
+        let state = shell.state.borrow();
+        assert_eq!(state.scroll_from_bottom.get(), 3);
+        assert!(state
+            .transcript_navigation
+            .borrow()
+            .rendered_frame()
+            .is_none());
+        assert!(state.pointer_render_geometry().is_none());
     }
 
     fn advance_live_shell(shell: &mut InteractiveShell, tick: usize) {

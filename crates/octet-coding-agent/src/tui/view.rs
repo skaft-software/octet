@@ -1894,6 +1894,9 @@ pub(crate) struct ShellState {
     /// movement clears any prior selection; the first drag event promotes
     /// this anchor into `transcript_selection`.
     pending_selection_anchor: Option<TranscriptPosition>,
+    /// Last press/drag cell. A stationary release keeps the semantic endpoint
+    /// even when intervening layout moves different content under that cell.
+    selection_pointer_cell: Option<(u16, u16)>,
     /// A web link under a stationary press; dragging or a layout change revokes it.
     pending_link_press: Option<TranscriptLinkPress>,
     /// A press whose frame was on screen before its geometry was recorded.
@@ -2285,6 +2288,7 @@ impl ShellState {
             new_output_count: Default::default(),
             transcript_selection: Default::default(),
             pending_selection_anchor: Default::default(),
+            selection_pointer_cell: Default::default(),
             pending_link_press: Default::default(),
             deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
@@ -7282,6 +7286,7 @@ impl InteractiveShell {
             .then(|| self.transcript_link_at_screen_cell(row, col))
             .flatten();
         let mut state = self.state.borrow_mut();
+        state.selection_pointer_cell = Some((row, col));
         state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
@@ -7339,6 +7344,7 @@ impl InteractiveShell {
         //
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
+        state.selection_pointer_cell = Some((row, col));
         if state
             .pending_link_press
             .as_ref()
@@ -7418,6 +7424,7 @@ impl InteractiveShell {
     fn end_transcript_selection_with(&mut self, row: u16, col: u16, open: impl FnOnce(&str)) {
         let mut state = self.state.borrow_mut();
         let pressed_link = state.pending_link_press.take();
+        let last_cell = state.selection_pointer_cell.take();
         Self::resolve_deferred_pointer_press(&mut state);
         state.deferred_pointer_press = None;
         if !state.selection_dragging && state.pending_selection_anchor.is_none() {
@@ -7430,10 +7437,13 @@ impl InteractiveShell {
         // composer, and footer never enter the payload. The retained buffer
         // remains available even when OSC 52 transport is unavailable.
         //
-        // Release coordinates are also movement evidence: terminals can coalesce
-        // all intermediate motion events. Promote the pending anchor before
-        // deciding whether this was a stationary click.
-        self.extend_transcript_selection(row, col);
+        // Terminals can coalesce motion into a displaced release. A release
+        // at the last observed cell is not new motion: remapping it after
+        // reflow would replace the semantic endpoint the reader highlighted.
+        if last_cell != Some((row, col)) {
+            self.extend_transcript_selection(row, col);
+            self.state.borrow_mut().selection_pointer_cell = None;
+        }
         let had_pending = self.state.borrow().pending_selection_anchor.is_some();
         if had_pending {
             // Clear any previous selection and discard the pending anchor.

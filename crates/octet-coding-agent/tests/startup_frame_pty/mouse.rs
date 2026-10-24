@@ -161,6 +161,174 @@ fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
     assert!(capture.termios_restored);
 }
 
+/// Exercise all four ordinary fullscreen gestures through the real process,
+/// without manually enabling the semantic viewport in a test shell.
+fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consumed: &mut usize) {
+    let (columns, rows) = (INITIAL_COLUMNS, INITIAL_ROWS);
+    octet.pty.write_input(b"fullscreen-draft");
+    await_screen(octet, parser, consumed, "fullscreen-draft", STARTUP_TIMEOUT);
+    settle(octet, parser, consumed);
+    assert!(!parser.screen().contents().contains("rows back"));
+    octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
+    await_screen(octet, parser, consumed, "12 rows back", STARTUP_TIMEOUT);
+    // The VT parser exposes partial synchronized frames; hit-test only after
+    // the completed frame/geometry receipt, as the terminal presents it.
+    settle(octet, parser, consumed);
+
+    // Press the top of the scrollbar track, then drag the captured thumb back
+    // to the live tail. Crossing the composer must not turn it into selection.
+    octet.pty.write_input(&sgr(0, columns - 1, 0, false));
+    await_screen(octet, parser, consumed, "MOUSE-BEGIN", STARTUP_TIMEOUT);
+    octet
+        .pty
+        .write_input(&sgr(32, columns - 1, rows - 1, false));
+    octet.pty.write_input(&sgr(0, columns - 1, rows - 1, true));
+    await_screen(octet, parser, consumed, "MOUSE-END", STARTUP_TIMEOUT);
+    settle(octet, parser, consumed);
+    assert!(!parser.screen().contents().contains("rows back"));
+
+    let (row, column) = (1..rows - 5)
+        .find_map(|row| {
+            row_text(parser, row, columns)
+                .find("MOUSE-")
+                .map(|column| (row, column as u16))
+        })
+        .expect("visible transcript text, not chrome");
+    let before = octet.pty.output.len();
+    octet.pty.write_input(&sgr(0, column, row, false));
+    octet.pty.write_input(&sgr(32, column + 5, row, false));
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        settle(octet, parser, consumed);
+        // Notices can move the selected source after the gesture. Check its
+        // semantic highlight, not the earlier screen row; copy below still
+        // requires the exact five selected bytes.
+        let highlighted = (0..rows - 5).any(|row| {
+            row_text(parser, row, columns)
+                .match_indices("MOUSE-")
+                .any(|(column, _)| {
+                    (column..column + 5)
+                        .all(|column| parser.screen().cell(row, column as u16).unwrap().inverse())
+                })
+        });
+        if highlighted {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "drag did not highlight text: {}",
+            parser.screen().contents()
+        );
+    }
+    assert!(clipboard(&octet.pty.output[before..]).is_none());
+    octet.pty.write_input(&sgr(0, column + 5, row, true));
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        clipboard(&bytes[before..]).is_some()
+    });
+    assert_eq!(
+        clipboard(&octet.pty.output[before..]).as_deref(),
+        Some("MOUSE")
+    );
+    settle(octet, parser, consumed);
+    assert!(parser.screen().contents().contains("fullscreen-draft"));
+    octet.pty.write_input(b"\x03"); // Clear the draft, never submit provider input.
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        settle(octet, parser, consumed);
+        if !parser.screen().contents().contains("fullscreen-draft") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Ctrl-C did not clear the draft");
+    }
+}
+
+#[test]
+fn fullscreen_mouse_policy_follows_live_screen_switches() {
+    let _lock = pty_test_lock().lock().unwrap();
+    for mode in [
+        MouseMode::Default,
+        MouseMode::App,
+        MouseMode::Terminal,
+        MouseMode::Off,
+    ] {
+        let mut octet = PtyOctet::spawn_at(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            mode,
+            None,
+            true,
+            (INITIAL_COLUMNS, INITIAL_ROWS),
+            (2, false, false),
+            StartupFixture::MouseHistory,
+        );
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
+        let mut consumed = 0;
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "MOUSE-END",
+            STARTUP_TIMEOUT,
+        );
+        for fullscreen in [true, false, true] {
+            let surface = if fullscreen { "fullscreen" } else { "inline" };
+            eprintln!("live screen transition: {mode:?} -> {surface}");
+            assert_ne!(parser.screen().alternate_screen(), fullscreen);
+            let expected = mode == MouseMode::App || (mode == MouseMode::Default && fullscreen);
+            octet
+                .pty
+                .write_input(format!("/settings tui {surface}\r").as_bytes());
+            // Fence each command by its actual terminal-mode transition, not
+            // a transient notice whose older copies can leave the viewport.
+            let deadline = Instant::now() + STARTUP_TIMEOUT;
+            loop {
+                settle(&mut octet, &mut parser, &mut consumed);
+                let captured =
+                    parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+                if parser.screen().alternate_screen() == fullscreen && captured == expected {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "terminal modes did not switch: {mode:?} -> {surface}; screen: {}",
+                    parser.screen().contents()
+                );
+            }
+            assert_eq!(parser.screen().alternate_screen(), fullscreen);
+            let captured = parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+            assert_eq!(captured, expected, "{mode:?} on {surface}");
+            if fullscreen && expected {
+                fullscreen_gestures(&mut octet, &mut parser, &mut consumed);
+            }
+        }
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+    }
+}
+
+#[test]
+fn default_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
+    let _lock = pty_test_lock().lock().unwrap();
+    let mut octet = PtyOctet::spawn_default_fullscreen(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Default,
+        StartupFixture::MouseHistory,
+    );
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
+    let mut consumed = 0;
+    await_screen(
+        &mut octet,
+        &mut parser,
+        &mut consumed,
+        "MOUSE-END",
+        STARTUP_TIMEOUT,
+    );
+    fullscreen_gestures(&mut octet, &mut parser, &mut consumed);
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+}
+
 #[test]
 fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
     let _lock = pty_test_lock().lock().unwrap();

@@ -12,15 +12,14 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 ## Terminal guarantees
 
-- The interactive frontend renders on the primary screen. `auto` (the default),
-  `terminal`, and `off` use the complete logical-frame renderer: the first frame writes
-  every materialized row and pure appends flow naturally into terminal scrollback.
-  Dimension changes and canonical mutations above the old viewport clear and
-  replay the complete canonical frame, keeping saved and live rows complete.
-  Ordinary appends and addressable changed-row diffs retain their existing paths.
-  PageUp transfers rendering to the bounded, application-owned semantic viewport
-  for the rest of that shell. Explicit `--mouse app` selects that viewport from
-  startup; this viewport is separate from complete native history.
+- The interactive frontend defaults to fullscreen (alternate screen), with
+  `auto` mouse capture and a bounded semantic viewport. Inline is an explicit
+  primary-screen surface: uncaptured inline sessions use the complete logical-frame
+  renderer, whose first frame writes every materialized row and whose pure appends
+  flow naturally into terminal scrollback. Dimension changes and canonical mutations
+  above that viewport clear and replay the complete canonical frame. PageUp transfers
+  inline rendering to the bounded application-owned viewport; explicit `--mouse app`
+  selects it from startup. That viewport is separate from complete native history.
 - Auto, Light, and Dark use the compiled default layout. Auto adapts to the
   detected terminal background; Light and Dark explicitly select contrast. All
   retain model-aware accents and semantic status colours. Named file loading
@@ -32,10 +31,11 @@ vocabulary that uses that hierarchy without adding a second TUI.
   backend still uses the markers to batch each frame into one flush. octet's
   composer uses a positioned hardware cursor; every renderer construction
   explicitly keeps that cursor visible.
-- `auto`, `terminal`, and `off` disable mouse reporting, preserving native drag
-  selection and wheel scrolling. `--mouse app` enables capture for semantic
-  wheel navigation and selection, but keyboard viewport ownership does not depend
-  on capture. Capture resets inherited 1016 pixel and 1007 alternate-scroll modes
+- `auto` captures fullscreen wheel navigation and selection, but leaves inline
+  gestures terminal-owned. `terminal` and `off` never capture; `app` always does.
+  Live screen switches reapply that policy and revoke old pointer geometry and
+  gestures. Native Tern keeps ANSI capture off. Keyboard viewport ownership does
+  not depend on capture. Capture resets inherited 1016 pixel and 1007 alternate-scroll modes
   before enabling 1000/1002/1003/1006 cell reports. Touchpad bursts retain every
   decoded event; no second mouse parser or per-frame wheel replacement exists.
   Portable protocols do not report a user's native scrollback offset, so
@@ -198,6 +198,11 @@ size, disclosure, chrome and viewport intent, not visual-to-semantic anchor
 representation; anchor promotion without input feedback cannot invalidate the
 same painted cells. The scroll-delta fence is rebased only when semantic feedback
 is accepted, so unrelated input cannot discard a valid receipt after tail growth.
+Scrollbar and search-button hit targets travel with that completed-frame receipt,
+not the broader semantic render revision; an unrelated mutable borrow cannot
+lose a painted scrollbar. Search visibility also fences the layout. Search-result
+feedback retains the full input/render revision fence so newer query or navigation
+intent cannot flow backwards.
 Selection highlighting is a renderer-only inverse-video
 projection over those source offsets. A release copies only a transcript-owned
 press/drag, so chrome cannot recopy a stale selection. OSC 52 encodes once after

@@ -169,7 +169,10 @@ the height of the content, not a fixed full-screen composer and footer; it loads
 the complete resumed branch and appends to native scrollback. Explicit
 `--mouse app` (or `mouse = "app"` in configuration) opts inline sessions into the
 bounded semantic viewport as well, and lets a resumed session load newest-first.
-Explicit CLI choices take precedence over configured mouse policy.
+Explicit CLI choices take precedence over configured mouse policy. Switching
+surfaces with `/settings tui fullscreen` or `/settings tui inline` immediately
+reapplies that policy: `auto` starts or stops capture with the surface, while
+`app`, `terminal`, and `off` keep their explicit ownership.
 
 A `pi` theme changes presentation, not viewport ownership. Native Tern surfaces
 negotiate their own inline layout and leave ANSI mouse reporting off, including
@@ -181,7 +184,9 @@ report overlays do not change the ordinary ANSI launch default.
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release
-copies it, or use Ctrl+Shift+C to copy the current selection again; Ctrl+C keeps
+copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
+a stationary pointer does not expand the selected range on release; a displaced
+release still counts as movement when terminals coalesce drag events. Ctrl+C keeps
 its draft-clear/interrupt meaning. Composer, footer and separator rows are not
 transcript text. Shift+drag remains your terminal's native selection override
 where the terminal supports it.

@@ -79,6 +79,23 @@ typing, backspace, and bracketed paste. After the edit, a 2.35-second observatio
 window must have no decorative frames and no `CSI 2J`/`CSI 3J` replay. The normal
 resize contract above requires synchronized canonical clear/replay.
 
+## Fullscreen mouse regression
+
+The same harness also qualifies fullscreen gestures through the real binary:
+
+```sh
+cargo test --locked -p octet-coding-agent --test startup_frame_pty fullscreen
+```
+
+It checks proportional wheel bursts, scrollbar track presses and captured drags,
+visible text highlighting, copy-on-release via OSC 52, draft preservation, and
+terminal restoration. Coverage includes a fresh default fullscreen launch and
+inline → fullscreen → inline → fullscreen transitions. Live transitions must
+recompute `auto` capture, retain explicit `app` capture, and never capture for
+`terminal` or `off`. A fixture clipboard helper prevents macOS tests from
+replacing the user's local clipboard. These are byte/VT regressions, not physical
+mouse/touchpad or terminal clipboard-permission acceptance.
+
 ## Isolation and safety
 
 Each real-binary run creates a disposable HOME, workspace, and session store,
