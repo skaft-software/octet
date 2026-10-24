@@ -171,6 +171,18 @@ remain unchanged. These are exact aggregator-route quotes, not direct-provider
 tariffs or live inference acceptance. The retained response and complete delta
 remain local evidence; final-source freshness and hosted CI are still required.
 
+The subsequent pre-push check caught one further supported quote change:
+OpenRouter `~z-ai/glm-flash-latest` input is $0.0509/M, replacing $0.0511/M;
+output and cache-read rates are unchanged. All four outputs were regenerated
+from the retained 5,912,831-byte response with SHA-256
+`722da062bebc86d8bab3fe074d481a133657b483e2cc02c6c9a9a101f22cc13f`.
+The response also changes unsupported Kilo and NanoGPT records, outside these
+projections. The 919 pricing routes, 379 names and 940 capability routes remain
+unchanged in membership; names and capabilities are byte-identical. Extraction
+policy and the direct DeepSeek exclusion are unchanged. This remains a reviewed
+aggregator quote, not a direct tariff or live acceptance claim; the retained raw
+response and complete delta remain local evidence, and hosted freshness is required.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

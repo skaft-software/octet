@@ -5714,7 +5714,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "cache_read": 30000,
     "cache_write_5m": 0,
-    "input": 51100,
+    "input": 50900,
     "output": 70200,
     "reasoning": null
   },
