@@ -146,6 +146,20 @@ assertion grants tools, reasoning or structured-output support, adds a provider
 inventory, or proves live model acceptance. Final-source freshness and hosted CI
 remain release gates.
 
+### Hosted CI freshness follow-up
+
+PR #639's freshness gate caught two changed OpenRouter quotes. All four outputs
+were regenerated together from the retained 5,912,818-byte public response,
+SHA-256 `28a029b0922f297af9be73d13ffcf6371b08bfa8ebb0f4316cfa2e87af14663d`.
+DeepSeek V4 Pro now quotes $0.2088/$0.4176/$0.0174 per million
+input/output/cache-read tokens, superseding that route's quote above.
+`~z-ai/glm-flash-latest` input changes from $0.0512 to $0.0511/M; its output
+and cache-read quotes are unchanged. Record counts, names and capabilities are
+unchanged, as are generator policy, exclusions and endpoint precedence. Direct
+DeepSeek schedule pricing remains unverified and excluded. These are exact
+aggregator-route quotes, not direct-provider tariffs or live acceptance evidence.
+The matching raw response and complete delta remain local qualification evidence.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

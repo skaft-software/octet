@@ -3381,10 +3381,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 18009,
+    "cache_read": 17400,
     "cache_write_5m": 0,
-    "input": 216108,
-    "output": 432216,
+    "input": 208800,
+    "output": 417600,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -5714,7 +5714,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "cache_read": 30000,
     "cache_write_5m": 0,
-    "input": 51200,
+    "input": 51100,
     "output": 70200,
     "reasoning": null
   },
