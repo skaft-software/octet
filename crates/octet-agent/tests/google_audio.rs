@@ -10,7 +10,6 @@ use std::sync::{
 use std::time::Duration;
 
 use base64::Engine;
-use futures_util::StreamExt;
 use octet_agent::{
     Agent, AgentConfig, AgentEvent, CoreTools, EffectBroker, EffectPolicy, ExtensionHost,
     FinishReason, SandboxConfig, Session,
