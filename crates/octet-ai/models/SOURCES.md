@@ -110,6 +110,42 @@ built-in data. Live records are consumed exactly like snapshot records: the
 precedence rules above are unchanged, and a failed refresh leaves the metadata
 in use as it was.
 
+## Reviewed metadata refresh (v0.10.0)
+
+The release freshness gate required a refresh of all four outputs from the
+retained 5,912,824-byte public response with SHA-256
+`3c64f9cb34b8238388f7f7afd6ea49a3838b479157eff0eb01f8217ec3f8c181`.
+The matching response and complete projection diff remain local qualification
+evidence, not bundled artifacts. Reproduce with the unchanged generator's
+`--source FILE` and verify all four outputs with `--source FILE --check`.
+
+Relative to the preceding candidate:
+
+| Snapshot | Records | Added | Removed | Changed |
+| --- | ---: | ---: | ---: | ---: |
+| Provider-scoped pricing | 919 | 14 | 63 | 23 |
+| Canonical names | 379 | 4 | 76 | 0 |
+| Capability routes | 940 | 14 | 65 | 9 |
+
+Additions include Kimi K3.1 Pro, MiniMax M3.1 Flash and Fireworks spot-route
+metadata. Most removals are NVIDIA entries absent from this response; removal
+from a metadata projection is not evidence that an endpoint retired a model.
+The 23 price changes cover 21 OpenRouter quotes and two OpenCode Kimi K3
+cache-write quotes. For example, OpenRouter DeepSeek V4 Pro now quotes
+$0.216108/$0.432216/$0.018009 per million input/output/cache-read tokens.
+These are exact aggregator-route quotes, not direct-provider tariffs.
+
+Eight capability changes concern output limits, including OpenRouter Beam's
+reduction to 131,072 and MiniMax M2.5's increase to 131,072. NVIDIA Qwen Image
+loses its source image-input assertion. Existing names are unchanged. The
+source's zero-price records are retained as assertions, not independent proof
+of free service. Generator policy, provider mappings, exclusions, subscription
+allowlists, Baseten text-only corrections and endpoint precedence are unchanged;
+direct DeepSeek schedule pricing remains unverified and excluded. No snapshot
+assertion grants tools, reasoning or structured-output support, adds a provider
+inventory, or proves live model acceptance. Final-source freshness and hosted CI
+remain release gates.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

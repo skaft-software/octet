@@ -1,9 +1,9 @@
 # Pi extension compatibility: release status and merge notes
 
-> **Local 0.10.0 candidate catalog includes Pi.** Public 0.10.0 artifacts do not
-> exist and final qualification is incomplete. This ledger remains a development
-> record, not installed-Pi parity or release-artifact acceptance. Published v0.9.6
-> assets remain unchanged and exclude the adapter.
+This is a **dated development-evidence record**, not current artifact status.
+See the [v0.10.0 release notes](releases/v0.10.0.md) for the community launch,
+the [Pi guide](pi-compatibility.md) for setup, and the versioned release page for
+actual downloads and qualification. Historical results below retain their scope.
 
 Dated evidence for Pi 1.0.2 compatibility, retained during local octet 0.10.0
 release-candidate preparation.
@@ -11,27 +11,27 @@ It records observed behaviour; it is not a frozen release or a publication appro
 ledger](pi-extension-api.md), and the user-facing scope is in
 [compatibility](pi-compatibility.md).
 
-## Active completion and release gates
+## Release checks and follow-up acceptance
 
-The installed-setup acceptance target includes enabled package selection,
+The broader installed-setup acceptance target includes enabled package selection,
 settings and slash commands, configuration precedence, and extension UI/editor/
 footer mutations in Tern. Discovery, registration, a synthetic host, or an old
 local receipt does not qualify that target. Original dependency-bearing setup
-and combination journeys must be checked against the rebuilt candidate.
+and combination journeys need exact-source evidence. The exhaustive setup/platform
+matrix is follow-up work, not a prerequisite for the experimental community launch.
 
 The historical frozen candidate `9477eebb52d2f0818ce54b3b0b29be581f917122` failed
 hosted Linux and macOS tests despite successful quality and archive jobs.
 Observed blockers include native input/selection and activity-resize contracts,
 Pi session replacement, unstable RPC message timestamps, multiline path-led
 prompt classification, and the absence of an actionable Settings mirror flow.
-These are being repaired; the records below do not qualify the repair tree.
+These historical results do not qualify later trees or establish current failures.
 
 Release gates remain exact-head green PR CI, approved merge with valid required
-checks, green main CI, signed publication and fresh public-install smoke. The
-source candidate is not a published release. The current dirty overlay needs a
-separately authorized coherent Git freeze before exact-source packaging. New
-theme/catalog/context/headless/legacy-input fixes need rebuilt original-setup
-guest replay and visual evidence; older receipts below do not qualify them.
+checks, green main CI, signed publication and fresh public-install smoke.
+Clean-tree packaging remains mandatory. Historical receipts below never qualify
+changed source; broader original-setup replay and visual comparisons remain
+separate follow-up evidence.
 
 ## Local qualification recorded 2026-10-09
 

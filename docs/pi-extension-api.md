@@ -1,8 +1,8 @@
 # Pi 1.0.2 extension API ledger
 
-> **Local 0.10.0 candidate catalog includes Pi.** Public 0.10.0 artifacts do not
-> exist and are not qualified. These are development API receipts, not a promise
-> of installed-Pi parity or final release-artifact acceptance.
+Pi compatibility starts with octet 0.10.0. This ledger records individual API
+coverage and development evidence. For installation and launch scope, see
+[Pi compatibility](pi-compatibility.md) and the [release notes](releases/v0.10.0.md).
 
 Target: Pi 1.0.2 (`200387122ca450d6387f033949423114a270b96c`),
 `packages/coding-agent/src/core/extensions/types.ts` and `docs/extensions.md`.

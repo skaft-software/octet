@@ -1,6 +1,8 @@
 # v0.10 Pi candidate: isolated Mac qualification
 
-This is a **source-candidate test recipe**, not release or parity approval.
+This is a **historical source-candidate test recipe**, not current release status.
+Its pre-launch availability and authorization notes below describe that earlier
+checkpoint. See the [v0.10.0 release notes](../releases/v0.10.0.md) for launch scope.
 The v0.9.6 release remains independent. See the [compatibility contract](../pi-compatibility.md),
 [API ledger](../pi-extension-api.md), [release gates](../pi-compat-release-status.md),
 and [measurement contract](../design/performance.md). Passing synthetic suites

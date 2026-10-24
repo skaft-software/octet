@@ -7,14 +7,12 @@ defines version policy and the distinct canonical API `0.3` models. Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
-**Identity boundary:** octet 0.10.0 candidate source uses only octet first-party names,
+**Identity boundary:** octet 0.10.0 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The Python/TypeScript source SDK distributions and six local candidate bundles
+The Python/TypeScript source SDK distributions and six bundles
 are version `0.10.0`; the independent Rust SDK stays `0.8.2` and examples keep
-their own versions. Public 0.10.0 artifacts do not exist; use reviewed source or
-matching local archives. Final candidate qualification remains incomplete. Native publication
-does not publish SDK registries; see
+their own versions. Native publication does not publish SDK registries; see
 [installation and availability](../installation.md).
 
 The [legacy protocol reference](PROTOCOL-REFERENCE.md) retains complete API
@@ -769,10 +767,8 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.10.0 candidate availability and remaining qualification, consult the
-[candidate record](../releases/v0.10.0.md) and [installation](../installation.md).
-0.10.0 assets are not published. Use reviewed source or a matching local archive
-until publication is approved and version-matched assets are verified.
+octet 0.10.0 availability, consult the
+[release notes](../releases/v0.10.0.md) and [installation](../installation.md).
 
 Executable bundles use runtime `extension.toml`. An archive has exactly one root
 named for the extension, all regular
@@ -804,10 +800,9 @@ requires_octet = "=0.10.0"
 present. Installed bundles require an exact match to the running octet version.
 The first-party catalog is `octet-codemode`,
 `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, and `octet-web-search`.
-The six local candidate manifests declare API `0.4`; their exact host pins still
-apply. This source metadata is not evidence of a published 0.10.0 bundle.
+The six manifests declare API `0.4`; their exact host pins still apply.
 
-After matching publication is verified:
+For catalog installation:
 
 ```console
 octet extension install octet-web-search

@@ -50,9 +50,8 @@ octet SDK, generated bindings and the shipped bundles listed in
 `extensions/release-catalog.txt` — is built
 and tested with octet. **Community compatibility** material — the Pi factories loaded by the optional
 first-party adapter, retained legacy API examples and generic single-file
-helpers — has its own narrower compatibility boundaries. The local 0.10.0
-candidate catalog includes the Pi adapter, but no public 0.10.0 assets exist
-and final installed-bundle qualification remains incomplete.
+helpers — has its own compatibility boundaries. The 0.10.0 release catalog
+includes the Pi adapter; see [Pi compatibility](pi-compatibility.md) for setup.
 
 Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
 for single-file Python/JS/TS tools, narrow Rust/C/C++ helpers, reviewed local
@@ -61,7 +60,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for the **local octet 0.10.0 RC**: the
+only the contributions you need. It's a source recipe for the **octet 0.10.0 source SDK**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact

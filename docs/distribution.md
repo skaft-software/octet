@@ -1,16 +1,10 @@
 # Distribution channels
 
-The octet 0.9.6 release's [version-pinned GitHub page](https://github.com/skaft-software/octet/releases/tag/v0.9.6)
-records immutable native assets, signatures, exact-source qualification and
-actual channel availability. The [release notes](releases/v0.9.6.md) distinguish
-shipped scope from unrun acceptance. Those published assets exclude Pi.
-
-The local **0.10.0 release candidate** is a source candidate, not a published release.
-Its one `extensions/release-catalog.txt` now includes Pi among six optional
-bundles. Public 0.10.0 artifacts do not exist and final artifact/guest qualification
-is incomplete. This dirty overlay supports diagnostic source archives only;
-exact-HEAD packaging requires a separately authorized coherent Git freeze.
-Do not weaken clean-tree gates or label overlay bytes as the current HEAD.
+The [version-pinned v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+records actual channel availability, immutable assets, signatures and source
+qualification. The [release notes](releases/v0.10.0.md) describe octet's first
+Pi-compatible launch. Native binaries and the six optional extension bundles
+are separate downloads; installation never enables an extension.
 
 The planned npm channel is `@skaft/octet@0.10.0` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
@@ -23,7 +17,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-The local candidate's distribution target is **0.10.0**. The distribution version does not change independent API and schema versions. The [0.7.6
+The distribution target is **0.10.0**. The distribution version does not change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
 
@@ -36,19 +30,18 @@ channel evidence.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, Python/TypeScript SDK source and six candidate bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
+| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the six local candidate bundle manifests target API
+Current extension authoring and the six bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
 runtime. The minimal canonical process example and independent Aider adapter
-keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter remains
-experimental; local candidate catalog inclusion does not establish delivery or
-parity. Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
+keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter targets its documented public API;
+individual coverage is recorded in the [API ledger](pi-extension-api.md). Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
 Installation/discovery are inert. Enabling the stock bridge automatically mirrors
 and runs enabled Pi factories with OS permissions; native credential disclosure
 requires separate reviewed opt-in, and native TOML appearance stays independent. Renaming
@@ -64,7 +57,7 @@ The release workflows don't publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
-| Six candidate executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives; public 0.10.0 assets do not exist. Install and update never enable them or persist trust grants. |
+| Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
@@ -79,10 +72,10 @@ Cargo can build the published canonical tag's exact source (Rust 1.88+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.9.6 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.0 --bins octet-coding-agent
 ```
 
-Use this command only after the canonical `v0.9.6` tag is published.
+The canonical tag pins the exact source.
 `cargo install octet` and registry-based `cargo install octet-coding-agent`
 aren't the supported Cargo path.
 
@@ -115,8 +108,8 @@ Select the run for the exact reviewed commit, require its gating checks to
 succeed, and compare `BUILD-INFO.json` with that commit and target. Unix artifacts
 contain the native archive plus `extension-bundles/`; Windows artifacts contain
 `octet.exe`, `octet-host.exe`, extracted `extensions/`, and the same bundle
-archives. The local catalog selects all six candidate extensions, including Pi. No fresh
-0.10.0 artifact set has been qualified or published.
+archives. The catalog selects all six extensions, including Pi. Check the run's exact
+source and results rather than treating artifact existence as qualification.
 Codemode ships a target-native executable, including `bin/codemode.exe` on
 Windows. Python adapters require Python, and optional drivers and integrations
 require separately consented setup.
@@ -214,7 +207,7 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 ## Other channels
 
-The checked-in local v0.10.0 candidate shell installer targets macOS arm64 and x64 and
+The version-pinned v0.10.0 shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
 Windows x86-64 and would publish as `@skaft/octet@0.10.0`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and

@@ -49,7 +49,7 @@ version-pinned publication channels and their recorded qualification.
 - [Web search](../extensions/octet-web-search/README.md)
 - [MCP](../extensions/octet-mcp/README.md)
 - [Pi import and restore](pi-migration.md)
-- [Pi extension adapter (local candidate catalog; unqualified)](pi-compatibility.md)
+- [Pi compatibility](pi-compatibility.md)
 - [Pi extension compatibility: release status and merge notes](pi-compat-release-status.md)
 
 ## Development

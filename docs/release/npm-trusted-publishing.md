@@ -1,10 +1,8 @@
 # npm trusted publishing
 
-**The octet 0.10.0 npm CLI is not published.** Public 0.10.0 native artifacts do
-not exist either; this is local release-candidate preparation, not qualification. It is a planned channel for the
-source candidate; native GitHub releases and npm publication need independent
-approval and verification. See [installation](../installation.md) for the
-currently available source-build route. This maintainer reference describes packaging,
+**The octet 0.10.0 npm CLI is not published.** npm is a separate channel from
+native GitHub releases and needs its own approval and provenance verification.
+See [installation](../installation.md) for native and source-build routes. This maintainer reference describes packaging,
 protected publication, and recovery for the five immutable packages. The
 source/release repository is `skaft-software/octet`; future npm releases use
 trusted publishers for that identity. The already-published native v0.7.0

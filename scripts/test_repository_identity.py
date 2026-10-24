@@ -15,8 +15,9 @@ from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, 
 
 SCRIPTS = Path(__file__).resolve().parent
 LEGACY_REPOSITORY = "skaft-software/ygg"
-# Explicitly promoted native release; SDK/registry publication stays independent.
-PUBLISHED_NATIVE_VERSION = "0.9.6"
+# Version targeted by native download docs; these offline checks cannot prove
+# publication. SDK/registry channels remain independent.
+NATIVE_DOWNLOAD_VERSION = "0.10.0"
 
 
 def load_script(name):
@@ -220,7 +221,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
             self.assertGreater(len(releases), 1)
             install_version = releases[1]
             self.assertIn("unreleased source candidate", normalized)
-            self.assertEqual(install_version, PUBLISHED_NATIVE_VERSION)
+            self.assertEqual(install_version, NATIVE_DOWNLOAD_VERSION)
         for name in ("README.md", "docs/installation.md"):
             with self.subTest(path=name):
                 guide = (root / name).read_text()
@@ -234,7 +235,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
         text = (SCRIPTS.parent / "docs/distribution.md").read_text()
         version = re.search(r'^version = "([^"]+)"$',
                             (SCRIPTS.parent / "Cargo.toml").read_text(), re.MULTILINE).group(1)
-        self.assertIn(f"/releases/tag/v{PUBLISHED_NATIVE_VERSION}", text)
+        self.assertIn(f"/releases/tag/v{NATIVE_DOWNLOAD_VERSION}", text)
         self.assertIn(f"distribution target is **{version}**", text)
         changelog = (SCRIPTS.parent / "CHANGELOG.md").read_text()
         candidate = f"## [{version}] - Release candidate" in changelog.splitlines()
@@ -242,7 +243,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
             self.assertIn("source candidate, not a published release", text)
         else:
             self.assertNotIn("source candidate, not a published release", text)
-            self.assertIn("Pi compatibility is excluded", text)
+            self.assertIn("`octet-pi-compat`", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
         self.assertIn(f"planned npm channel is `@skaft/octet@{version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
         self.assertIn(f"**{version} is not published to npm.**", text)

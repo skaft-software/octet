@@ -4,25 +4,19 @@
 
 <a id="binary-availability"></a>
 
-## Local 0.10.0 release candidate
+## octet 0.10.0
 
-This checkout targets **0.10.0**, an unreleased source candidate. Public 0.10.0
-artifacts do not exist; native, installed-bundle and guest qualification remain
-incomplete. Build from this checkout or use explicitly reviewed local candidate
-files, never a guessed v0.10.0 download URL. The checked-in installer targets
-0.10.0 preparation; it is not the published installer below. See the
-[RC notes](releases/v0.10.0.md).
+The first Pi-compatible octet release. Install the native agent below, then
+[enable the optional Pi adapter](pi-compatibility.md). The
+[release notes](releases/v0.10.0.md) describe launch scope and known boundaries.
 
 ## Install native binaries
 
-Native v0.9.6 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
+Native v0.10.0 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
 and Windows x86-64 (MSVC, preview). Use the version-pinned
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.9.6)
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
-The [v0.9.6 notes](releases/v0.9.6.md) separate shipped scope from unqualified
-acceptance. The experimental Pi compatibility extension was not shipped in v0.9.6; the
-local 0.10.0 candidate catalog now includes it.
 
 Windows support is a preview. On Windows x86-64, download the version-matched `install-octet.ps1` from that
 release and run it in PowerShell. It checks the ZIP against the checksum manifest,
@@ -31,8 +25,8 @@ qualification is separate from GNU test builds.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.9.6/install-octet.sh | sh
-octet --version   # octet 0.9.6
+  https://github.com/skaft-software/octet/releases/download/v0.10.0/install-octet.sh | sh
+octet --version   # octet 0.10.0
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data stay
@@ -43,14 +37,14 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
-**v0.9.6 is not yet published to npm.**
+**v0.10.0 is not yet published to npm.**
 
 After approved npm publication, Node.js can install the same signed platform
 package on macOS Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64:
 
 ```sh
-npm install -g @skaft/octet@0.9.6
-octet --version   # octet 0.9.6
+npm install -g @skaft/octet@0.10.0
+octet --version   # octet 0.10.0
 ```
 
 This installs the `@skaft/octet` launcher plus the matching platform package
@@ -59,9 +53,9 @@ This installs the `@skaft/octet` launcher plus the matching platform package
 from the same verified
 release assets as the native installer. The launcher has no install-time
 lifecycle scripts. To pin an exact version instead of tracking `latest`, use
-`npm install -g @skaft/octet@0.9.6` ([distribution](distribution.md)). npm
+`npm install -g @skaft/octet@0.10.0` ([distribution](distribution.md)). npm
 publication is separate from native publication; do not use this command until
-v0.9.6 registry publication and provenance are recorded on the release page.
+v0.10.0 registry publication and provenance are recorded on the release page.
 See [Windows](windows.md) for native versus unsigned test-build boundaries. [Distribution channels](distribution.md) has the exact
 boundaries. The [historical Ygg
 instructions](reference/historical-installation.md) describe older releases, not
@@ -119,7 +113,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.10.0 (local release candidate). Check `octet --version`, and use matching
+This checkout targets octet 0.10.0. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -144,15 +138,13 @@ need Git for Windows or another Bash-compatible shell.
 
 ## Optional packages
 
-Executable extension bundles are pinned to
-the host version. The local 0.10.0 candidate catalog includes six bundles,
-including Pi. No public 0.10.0 artifacts exist and these bundles are not yet
-qualified. Run reviewed source extensions with this checkout's built host and
-`--extension-dir ./extensions`, or use a separately prepared local archive. The 0.8.0 bundles need their 0.8.0 host.
+Executable extension bundles are pinned to the host version. The 0.10.0 catalog
+includes six optional bundles, including Pi. Older bundles need their matching
+host; do not reuse a 0.9.6 bundle with octet 0.10.0.
 
 ```sh
-./target/release/octet extension install --path /absolute/local-candidate/octet-web-search-0.10.0.tar.gz
-./target/release/octet extension list
+octet extension install octet-web-search
+octet extension list
 ```
 
 For a reviewed local archive instead, use
@@ -179,9 +171,9 @@ reference](cli.md#packages).
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), one Rust executable with the embedded QuickJS/WASM engine; no Node.js or Python is required. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
-| `octet-pi-compat` | [Experimental Pi 1.0.2 adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
+| `octet-pi-compat` | [Pi 1.0.2 compatibility adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
-The six local candidate executable-bundle manifests declare API `0.4`, distribution
+The six executable-bundle manifests declare API `0.4`, distribution
 version `0.10.0`, and require octet `=0.10.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
