@@ -7307,8 +7307,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"
@@ -9491,8 +9490,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"
@@ -9525,8 +9523,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"

@@ -183,6 +183,18 @@ policy and the direct DeepSeek exclusion are unchanged. This remains a reviewed
 aggregator quote, not a direct tariff or live acceptance claim; the retained raw
 response and complete delta remain local evidence, and hosted freshness is required.
 
+A later freshness check caught removal of the PDF input assertion for OpenCode
+`glm-5.3-flash` and `glm-5.3-flash-free`, and OpenCode Go `glm-5.3-flash`.
+Their text, image and video inputs are unchanged. All four outputs were
+regenerated from the retained 5,912,807-byte public response with SHA-256
+`85e9fb36d78edf12eb2194501aa7e5d95e8a19571be23fe59cd527266790ee75`.
+Pricing, canonical names and route membership are unchanged; the counts remain
+919 pricing routes, 379 names and 940 capability routes. The only other raw
+change is the same modality removal for unsupported Ollama Cloud, outside these
+projections. Generator policy, endpoint precedence and the direct DeepSeek
+exclusion are unchanged. These source assertions do not prove live acceptance;
+the retained response and delta support review, not a freshness waiver.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
