@@ -309,7 +309,7 @@ impl ToolPolicy {
     pub fn only(names: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
         let mut enabled = BTreeSet::new();
         for name in names {
-            let name = name.trim().to_ascii_lowercase();
+            let name = name.trim().to_owned();
             if !valid_tool_name(&name) {
                 anyhow::bail!(
                     "invalid tool name {name:?}; built-ins: {}",
@@ -328,7 +328,7 @@ impl ToolPolicy {
 
     /// Remove one validated tool name.
     pub fn exclude(&mut self, name: &str) -> anyhow::Result<()> {
-        let name = name.trim().to_ascii_lowercase();
+        let name = name.trim().to_owned();
         if !valid_tool_name(&name) {
             anyhow::bail!(
                 "invalid tool name {name:?}; built-ins: {}",
@@ -347,7 +347,7 @@ impl ToolPolicy {
     /// leaves `requested` untouched so an additive grant is never reported as
     /// an `--tools` allowlist request.
     pub fn include(&mut self, name: &str) -> anyhow::Result<()> {
-        let name = name.trim().to_ascii_lowercase();
+        let name = name.trim().to_owned();
         if !valid_tool_name(&name) {
             anyhow::bail!(
                 "invalid tool name {name:?}; built-ins: {}",
@@ -386,9 +386,7 @@ fn valid_tool_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name.chars().all(|character| {
-            character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || matches!(character, '_' | '-' | '.')
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
         })
 }
 
@@ -936,6 +934,47 @@ mod tests {
         assert!(extension_policy.enabled("git_status"));
         assert!(!extension_policy.enabled("another_extension_tool"));
         assert!(ToolPolicy::only(["not a tool".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn tool_policy_preserves_case_sensitive_extension_identities() {
+        let mut defaults = ToolPolicy::default();
+        assert!(defaults.enabled("mcpScript"));
+        defaults.exclude(" mcpScript ").unwrap();
+        assert!(!defaults.enabled("mcpScript"));
+        assert!(defaults.enabled("mcpscript"));
+        defaults.include("mcpScript").unwrap();
+        assert!(defaults.enabled("mcpScript"));
+
+        assert!(defaults.enabled("Read"));
+        defaults.exclude("Read").unwrap();
+        assert!(!defaults.enabled("Read"));
+        assert!(defaults.enabled("read"));
+        defaults.include("Read").unwrap();
+        defaults.exclude("read").unwrap();
+        assert!(defaults.enabled("Read"));
+        assert!(!defaults.enabled("read"));
+        let exact = ToolPolicy::only(["Read".into()]).unwrap();
+        assert!(exact.enabled("Read"));
+        assert!(!exact.enabled("read"));
+
+        let mut explicit = ToolPolicy::only([" mcpScript ".into(), "read".into()]).unwrap();
+        assert!(explicit.enabled("mcpScript"));
+        assert!(!explicit.enabled("mcpscript"));
+        assert!(explicit.enabled("read"));
+        assert_eq!(
+            explicit.explicit_names().unwrap().collect::<Vec<_>>(),
+            ["mcpScript", "read"]
+        );
+        explicit.exclude("mcpScript").unwrap();
+        assert!(!explicit.enabled("mcpScript"));
+        explicit.include("lateTool").unwrap();
+        assert!(explicit.enabled("lateTool"));
+        assert!(!explicit.enabled("latetool"));
+        for invalid in ["", "not a tool", "tool/name", "töol", "tool\nname"] {
+            assert!(!defaults.enabled(invalid));
+            assert!(ToolPolicy::only([invalid.into()]).is_err());
+        }
     }
 
     #[test]

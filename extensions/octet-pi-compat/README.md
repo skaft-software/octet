@@ -1,38 +1,34 @@
-# Optional Pi factory compatibility
+# Pi extension compatibility
 
-> **Experimental and unstable; local 0.10.0 candidate catalog includes Pi.**
-> Public 0.10.0 artifacts do not exist and final qualification is incomplete.
-> Published v0.9.6 assets remain unchanged and exclude this adapter. Catalog
-> inclusion is preparation, not Pi parity or installed-bundle acceptance.
+**The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
+Import your existing Pi 1.0.2 setup or select extension entrypoints manually.
+One Node process loads unchanged extension factories; Rust owns the agent,
+sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
+fallback loads helpers in that process, not a second Pi agent.
 
-One optional Node/Bun process loads unchanged Pi extension factories after explicit
-review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
-still owns octet's agent, sessions, approvals, terminal, keyboard focus and
-shutdown. The installed-Pi fallback loads helpers inside this process, not a
-second Pi CLI or agent loop. It is not an OS sandbox or universal Pi compatibility claim.
-Full stable Pi 1.0.2 compatibility remains the target; this source preview does
-not qualify that target, and new generic resource APIs do not substitute for Pi
-parity.
+See [getting started](../../docs/pi-compatibility.md) and the
+[API coverage ledger](../../docs/pi-extension-api.md). Extension execution uses
+your OS permissions; it is not a sandbox.
 
 ## Local setup and configuration
 
 Requires Node **22.19.0 or newer**. Entrypoints reject older Node versions before
 loading adapter dependencies or factories. Bun's existing path is retained but
-separately unqualified. Source dependency setup uses npm; complete candidate
-archives must include locked production dependencies. Installation/discovery
-are inert. Enabling the stock candidate bundle automatically mirrors this
+separately unqualified. Source dependency setup uses npm; release archives
+include locked production dependencies. Installation/discovery are inert.
+Enabling the stock bundle automatically mirrors this
 machine's enabled Pi setup and runs its factories with OS permissions. Native
 provider-credential disclosure remains a separate reviewed opt-in, and native
-TOML appearance is independent. Use a built 0.10.0 host with an explicit local file:
+TOML appearance is independent. With octet 0.10.0 or later:
 
 ```sh
-./target/release/octet extension install --path /absolute/local-candidate/octet-pi-compat-0.10.0.tar.gz
+octet extension install octet-pi-compat
 # Only after reviewing this machine's enabled Pi factories and imports:
-./target/release/octet --enable-extension octet-pi-compat
+octet --enable-extension octet-pi-compat
 ```
 
-No public 0.10.0 archive is available. The commands below instead generate a
-separate reviewed bridge; neither helper enables it or writes host configuration/trust:
+For source development, the commands below generate a separate reviewed bridge;
+neither helper enables it or writes host configuration/trust:
 
 ```sh
 node extensions/octet-pi-compat/setup.mjs
@@ -103,9 +99,8 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The local 0.10.0 candidate release catalog includes this adapter. Locked-dependency
-archive installation/activation, final artifact qualification and publication
-remain open gates. For an installed bundle, generate configuration in a separate directory rather than
+The 0.10.0 release catalog includes this adapter. For an installed bundle,
+generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
 The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
@@ -128,7 +123,7 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-The local octet 0.10.0 candidate is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
+octet 0.10.0 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
 1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
 Imports resolve through the same module table as Pi 1.0.2's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`

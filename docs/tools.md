@@ -55,6 +55,10 @@ run one at a time, and results reach the model in the order it asked.
 | Block commands | `--no-process` or `--no-shell` |
 | Turn off every tool | `--no-tools` |
 
+Tool names in `--tools` and `--exclude-tools` are case-sensitive, including
+extension names: `mcpScript` and `mcpscript` select different tools. Use the
+advertised spelling; builtin names are lowercase (`read`, not `Read`).
+
 The `edit` tool accepts LF or CRLF old/new text using the file's first line-ending
 convention (LF if it has no newline). Inserted lines use that convention; unmatched
 bytes, including a UTF-8 BOM and existing mixed endings, stay untouched. A mixed-ending

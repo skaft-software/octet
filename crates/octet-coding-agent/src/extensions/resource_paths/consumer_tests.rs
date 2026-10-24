@@ -266,10 +266,11 @@ async fn actual_app_publishes_pi_json_theme_and_withdraws_after_empty_reply() {
     assert!(app.resource_paths_pending());
 }
 
-async fn complete(app: &mut App) -> Result<octet_agent::RunOutput, octet_agent::AgentError> {
+async fn complete(app: &mut App) -> Result<octet_agent::RunOutput, Box<octet_agent::AgentError>> {
     tokio::time::timeout(Duration::from_secs(10), app.agent.complete("hello"))
         .await
         .unwrap()
+        .map_err(Box::new)
 }
 fn render(
     app: &App,

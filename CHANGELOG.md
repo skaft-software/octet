@@ -2,23 +2,27 @@
 
 ## [Unreleased]
 
-## [0.10.0] - Release candidate
+## [0.10.0]
 
-Local unreleased source candidate, not a published release. Public 0.10.0
-artifacts do not exist; the [RC notes](docs/releases/v0.10.0.md) retain the
-partial contracts and remaining qualification gates.
+**The first Pi-compatible octet release.** Bring your Pi extensions, skills,
+prompts, themes and custom UI to a native, open-source coding agent.
+See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries.
 
 ### Added
 
-- The one release catalog includes experimental `octet-pi-compat` among six
-  local candidate bundles, all at 0.10.0 with exact `=0.10.0` host pins and
-  unchanged API `0.4`. Use reviewed source or explicit local candidate archives,
-  not nonexistent public assets. Installation and discovery remain inert;
-  enabling the stock bridge automatically mirrors/runs enabled Pi factories
-  with OS permissions, without silently granting native credential disclosure.
+- The release catalog includes `octet-pi-compat` among six optional bundles,
+  all at 0.10.0 with exact `=0.10.0` host pins and API `0.4`. Installation and
+  discovery remain inert; enabling the stock bridge imports/runs enabled Pi
+  factories with OS permissions, without granting native credential disclosure.
+- Native command catalogs and resource provenance stay bound to the current
+  owner across reloads; metadata never grants execution authority.
 
 ### Fixed
 
+- Pi startup publishes real model/scoped-model facts before callbacks run.
+- CamelCase extension tools such as `mcpScript` retain their exact spelling.
+  Tool allowlists and exclusions are consistently case-sensitive, including
+  builtin names (`read`, not `Read`).
 - Theme preference commits acknowledge their exact applied write, avoiding the
   redundant resource reload that retired composed Pi editor/footer mounts;
   independent resource changes still reload and native TOML appearance remains.
@@ -54,20 +58,14 @@ partial contracts and remaining qualification gates.
 
 ### Known limitations
 
-- Focused native/fixture evidence does not qualify rebuilt original Pi setups,
-  composed theme/context/headless/undo guest journeys or final Windows artifacts.
-  Partial session/context/UI/provider/process/MCP contracts remain partial; see
-  the [27-row ledger](docs/pi-extension-api.md). No blanket Pi parity is claimed.
-- The dirty overlay supports diagnostic source archives only. Coherent release
-  Git actions require separate authorization; clean-tree packaging gates remain.
-  Complete final native/extension archives, isolated archive installation and
-  activation, supported-platform guest screenshots/recordings, workspace and
-  quality gates, live/model-quality acceptance, signing and public installation
-  remain outstanding. Historical receipts do not qualify changed source.
-- Product/installer and Python/TypeScript source identities now target 0.10.0;
+- Individual API gaps are recorded in the [API ledger](docs/pi-extension-api.md).
+  Compatibility targets Pi 1.0.2's public extension API, not its private internals
+  or complete CLI. Windows remains preview; Bun is unqualified.
+- Live provider/audio and model-quality acceptance are not part of this launch.
+  The versioned release page records actual distribution-channel availability.
+- Product/installer and Python/TypeScript source identities target 0.10.0;
   independent Rust SDK 0.8.2, Pi 1.0.2, private adapter npm 0.1.0, API/schema and
-  example fixture versions stay unchanged. npm and other registries are not
-  published by this preparation.
+  example fixture versions stay unchanged.
 
 ## [0.9.6] - Unreleased
 

@@ -185,7 +185,7 @@ async fn assert_custom_lifecycle(app: &App) {
         expected.len() * 2,
         "exactly one pair per durable commit: {events:#?}"
     );
-    for (pair, (id, message)) in events.chunks_exact(2).zip(expected) {
+    for (pair, (id, message)) in events.as_chunks::<2>().0.iter().zip(expected) {
         for (event, kind) in pair.iter().zip(["message_start", "message_end"]) {
             assert_eq!(
                 event,

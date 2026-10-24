@@ -15,49 +15,70 @@ export default pi => {
     parameters:{type:'object'},defaultActive,outputSchema:{type:'object'},
     annotations:{readOnlyHint:true},namespace:{name:'fixture',description:'Fixture tools'},
     async execute(){return {content:[{type:'text',text:name}],structuredContent:{name},details:{name}}}});
-  pi.registerTool(tool('listed'));
+  pi.registerTool(tool('mcpScript'));
   pi.registerTool(tool('optional', false));
+  pi.registerTool(tool('deniedTool'));
+  pi.registerTool(tool('deniedtool'));
   let started = false;
   pi.on('session_start', () => { started = true; });
   pi.registerCommand('probe', {handler: () => {
     if (!started) throw new Error('command admitted before session_start');
     const initial = pi.getActiveTools();
-    if (!initial.includes('listed') || initial.includes('optional')) throw new Error('defaultActive not applied');
+    if (!initial.includes('mcpScript') || initial.includes('optional')) throw new Error('defaultActive not applied');
+    if (initial.includes('deniedTool') || !initial.includes('deniedtool')) throw new Error('case-sensitive exclusion not applied');
     const all = pi.getAllTools();
     const optional = all.find(t => t.name === 'optional');
     if (!optional || !optional.annotations.readOnlyHint || optional.namespace.name !== 'fixture' || !optional.parameters) throw new Error('registered tool facts missing');
     pi.setActiveTools(['optional','unknown','optional']);
     const selected = pi.getActiveTools();
     if (JSON.stringify(selected) !== JSON.stringify(['optional'])) throw new Error('selection not authoritative: '+JSON.stringify(selected));
-    pi.registerTool(tool('late'));
+    pi.registerTool(tool('lateTool'));
     const late = pi.getActiveTools();
-    if (!late.includes('late') || !late.includes('optional') || late.includes('listed')) throw new Error('late activation not applied');
-    pi.registerTool({...tool('late'),description:'Replacement'});
-    if (pi.getAllTools().find(t => t.name === 'late').description !== 'Replacement') throw new Error('replacement not applied');
+    if (!late.includes('lateTool') || !late.includes('optional') || late.includes('mcpScript')) throw new Error('late activation not applied');
+    pi.registerTool({...tool('lateTool'),description:'Replacement'});
+    if (pi.getAllTools().find(t => t.name === 'lateTool').description !== 'Replacement') throw new Error('replacement not applied');
+    try { pi.registerTool(tool('deniedTool')); } catch {}
+    if (pi.getAllTools().some(t => t.name === 'deniedTool')) throw new Error('late registration bypassed exclusion');
     appendFileSync(TRACE, JSON.stringify({initial,selected,late})+'\n');
   }});
 };
 "#,
     );
+    app.config.tools.exclude("deniedTool").unwrap();
+    // Apply the production host policy, rather than only the fixture registry.
+    app = rebuild_app(app, None, None, None, None).unwrap();
     assert!(app.executable_extensions.has_resource_consumer_processes());
     assert!(app.resource_paths_pending());
     assert!(app.executable_extensions.has_pending_session_starts());
     let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "probe").await.unwrap();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let (mut app, reloaded) = tokio::time::timeout(
+        Duration::from_secs(20),
+        reload_resources_announcing(app, &mut shell, &mut input, true),
+    )
+    .await
+    .expect("Pi tool catalog reload must settle")
+    .unwrap();
+    assert!(reloaded);
     let result = command(&mut app, &mut shell, "probe").await;
     app.executable_extensions.shutdown().await;
     result.unwrap();
-    let trace: serde_json::Value = serde_json::from_str(
+    let traces: Vec<serde_json::Value> =
         std::fs::read_to_string(directory.path().join("trace.jsonl"))
             .unwrap()
-            .trim(),
-    )
-    .unwrap();
-    assert_eq!(trace["selected"], serde_json::json!(["optional"]));
-    assert!(trace["late"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|name| name == "late"));
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(traces.len(), 2, "both initial and reloaded owners must run");
+    for trace in traces {
+        assert_eq!(trace["selected"], serde_json::json!(["optional"]));
+        assert!(trace["late"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "lateTool"));
+    }
     let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
     assert_eq!(
         reopened.entries().len(),
@@ -292,7 +313,7 @@ async fn native_pi_tool_context_outcomes_and_partial_details_media() {
     let capture = requests.clone();
     let first = [
         json!({"type":"message_start","message":{"id":"tools-unit","usage":{"input_tokens":1,"output_tokens":0}}}),
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"native-outer","name":"outer"}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"native-outer","name":"outerTool"}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
@@ -319,22 +340,22 @@ async fn native_pi_tool_context_outcomes_and_partial_details_media() {
 import {appendFileSync} from 'node:fs';
 export default pi => {
   const image={type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='};
-  pi.registerTool({name:'leaf',label:'Leaf',description:'Leaf tool',parameters:{type:'object',properties:{count:{type:'integer',minimum:1},mode:{type:'string'}},required:['count'],additionalProperties:false},
+  pi.registerTool({name:'leafTool',label:'Leaf',description:'Leaf tool',parameters:{type:'object',properties:{count:{type:'integer',minimum:1},mode:{type:'string'}},required:['count'],additionalProperties:false},
     prepareArguments:raw=>({...raw,count:Number(raw.count)}),
     async execute(id,args,signal,update){
       update({content:[image],details:{where:'leaf',count:args.count},structuredContent:null});
       return {content:[{type:'text',text:'leaf-private'},image],details:{count:args.count},
         ...(args.mode==='omit'?{}:{structuredContent:null}),isError:args.mode==='error'};
     }});
-  pi.registerTool({name:'outer',label:'Outer',description:'Outer tool',parameters:{type:'object'},
+  pi.registerTool({name:'outerTool',label:'Outer',description:'Outer tool',parameters:{type:'object'},
     async execute(id,args,signal,update,ctx){
       const tools=ctx.tools;
-      if(!tools.some(t=>t.name==='leaf')||!tools.some(t=>t.name==='read')||!tools.find(t=>t.name==='leaf').parameters)throw Error('native frozen tools missing');
+      if(!tools.some(t=>t.name==='leafTool')||!tools.some(t=>t.name==='read')||!tools.find(t=>t.name==='leafTool').parameters)throw Error('native frozen tools missing');
       update({content:[image],details:{where:'outer'},structuredContent:null});
       const updates=[];
-      const success=await ctx.executeTool('leaf',{count:'2'}, {onUpdate:value=>updates.push(value)});
-      const omitted=await ctx.executeTool('leaf',{count:'3',mode:'omit'});
-      const error=await ctx.executeTool('leaf',{count:'4',mode:'error'});
+      const success=await ctx.executeTool('leafTool',{count:'2'}, {onUpdate:value=>updates.push(value)});
+      const omitted=await ctx.executeTool('leafTool',{count:'3',mode:'omit'});
+      const error=await ctx.executeTool('leafTool',{count:'4',mode:'error'});
       const unknown=await ctx.executeTool('absent',{});
       if(updates.length!==1||updates[0].content[0].type!=='image'||updates[0].details.where!=='leaf'||updates[0].structuredContent!==null)throw Error('native partial callback lost');
       if(success.isError||success.result.details.count!==2||success.result.content[1].type!=='image'||success.result.structuredContent!==null)throw Error('native result lost');
@@ -464,6 +485,9 @@ export default pi => {
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(!requests[1].to_string().contains("leaf-private"));
+    assert!(std::fs::read_to_string(app.agent.session().path())
+        .unwrap()
+        .contains("\"outerTool\""));
     let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
     assert_eq!(
         reopened.entries().len(),

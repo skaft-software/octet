@@ -22,7 +22,7 @@ pub(crate) enum RunRequestOutcome {
 
 pub(crate) async fn drive_idle_cache_warming(
     app: Option<&mut crate::app::App>,
-) -> Result<(), octet_agent::AgentError> {
+) -> Result<(), Box<octet_agent::AgentError>> {
     let Some(app) = app else {
         return std::future::pending().await;
     };
