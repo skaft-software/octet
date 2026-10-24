@@ -160,6 +160,17 @@ DeepSeek schedule pricing remains unverified and excluded. These are exact
 aggregator-route quotes, not direct-provider tariffs or live acceptance evidence.
 The matching raw response and complete delta remain local qualification evidence.
 
+The next hosted check caught two further OpenRouter quote changes. The retained
+5,912,830-byte response has SHA-256
+`9e0b92fb8d63726015e6c3838878595b1b82e82dc06b968363c3c648db327742`.
+All four outputs were regenerated together. `tencent/hy3` now quotes
+$0.0825/$0.33/$0.020625 per million input/output/cache-read tokens;
+`tencent/hy4-preview` quotes $0.7506/$2.2509/$0.0378. Counts, names,
+capabilities, extraction policy and the unverified direct DeepSeek exclusion
+remain unchanged. These are exact aggregator-route quotes, not direct-provider
+tariffs or live inference acceptance. The retained response and complete delta
+remain local evidence; final-source freshness and hosted CI are still required.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

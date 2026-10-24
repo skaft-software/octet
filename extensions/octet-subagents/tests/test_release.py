@@ -24,10 +24,12 @@ class ReleaseTests(unittest.TestCase):
     def test_manifest_is_exact_api_02_bundle_metadata_without_package_toml(self):
         self.assertIsNotNone(tomllib)
         manifest = tomllib.loads((ROOT / "extension.toml").read_text(encoding="utf-8"))
+        workspace = tomllib.loads((REPOSITORY / "Cargo.toml").read_text(encoding="utf-8"))
+        version = workspace["workspace"]["package"]["version"]
         self.assertEqual(manifest["name"], "octet-subagents")
-        self.assertEqual(manifest["version"], "0.9.6")
+        self.assertEqual(manifest["version"], version)
         self.assertEqual(manifest["api_version"], "0.4")
-        self.assertEqual(manifest["requires_octet"], "=0.9.6")
+        self.assertEqual(manifest["requires_octet"], f"={version}")
         self.assertEqual(manifest["entrypoint"]["command"], "octet-subagents")
         self.assertEqual(manifest["capabilities"]["filesystem"], "none")
         self.assertFalse(manifest["capabilities"]["process"])

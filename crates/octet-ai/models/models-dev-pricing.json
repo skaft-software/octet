@@ -5271,10 +5271,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy3": {
-    "cache_read": 33000,
+    "cache_read": 20625,
     "cache_write_5m": 0,
-    "input": 132000,
-    "output": 528000,
+    "input": 82500,
+    "output": 330000,
     "reasoning": null
   },
   "openrouter/tencent/hy3-preview": {
@@ -5285,10 +5285,10 @@
     "reasoning": null
   },
   "openrouter/tencent/hy4-preview": {
-    "cache_read": 42000,
+    "cache_read": 37800,
     "cache_write_5m": 0,
-    "input": 834000,
-    "output": 2501000,
+    "input": 750600,
+    "output": 2250900,
     "reasoning": null
   },
   "openrouter/thedrummer/cydonia-24b-v4.1": {
