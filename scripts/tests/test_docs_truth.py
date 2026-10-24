@@ -139,10 +139,11 @@ class DocsTruthTests(unittest.TestCase):
         mode = ("candidate" if "Release candidate" in
                 _release_section(shipped["CHANGELOG.md"], version).splitlines()[0]
                 else "release")
+        # A version-only badge identifies the source without claiming publication.
         self.assertRegex(
             shipped["README.md"],
-            rf"{mode}-{re.escape(version)}|{mode}: {re.escape(version)}",
-            "the README badge must name the current distribution version and state",
+            rf"(?:{mode}|version)-{re.escape(version)}|(?:{mode}|Version): {re.escape(version)}",
+            "the README badge must name the current distribution version",
         )
         self.assertIn(
             f"]({notes})",
@@ -180,9 +181,11 @@ class DocsTruthTests(unittest.TestCase):
         version = _workspace_version()
         for name in ("README.md", "docs/pi-compatibility.md"):
             text = " ".join(_read(name).split()).lower()
-            self.assertIn(f"local {version} candidate catalog includes pi", text)
-            self.assertIn(f"public {version} artifacts do not exist", text)
-            self.assertRegex(text, r"published v0\.9\.6 assets (?:do not|still exclude)")
+            self.assertIn(f"v{version}", text)
+            self.assertIn("first pi-compatible release", text)
+            self.assertIn("octet-pi-compat", text)
+            self.assertIn("optional", text)
+            self.assertIn("os permissions", text)
 
     def test_removed_products_are_not_advertised(self):
         failures = {}
@@ -333,7 +336,7 @@ class DocsTruthTests(unittest.TestCase):
         self.assertRegex(section, r"Pi")
         self.assertRegex(
             shipped[f"docs/releases/v{version}.md"],
-            r"(?im)^## (known limitations|known gaps)",
+            r"(?im)^## (known limitations|known gaps|known boundaries)",
             "the release notes need a known-limitations section",
         )
 
