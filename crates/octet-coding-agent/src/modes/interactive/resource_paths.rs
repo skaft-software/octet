@@ -110,6 +110,14 @@ where
         return Ok(Vec::new());
     }
 
+    // Scheduling starts spawns work on other runtime workers. Publish the real
+    // model facts before releasing them: pump()'s first UI refresh is too late
+    // for a session_start callback that immediately reads or spreads Pi's ctx.
+    app.executable_extensions.refresh_pi_model_catalog(
+        &app.catalog,
+        app.model_scope.as_deref(),
+        &app.model,
+    );
     let starts = match app.executable_extensions.resource_session_starts() {
         Ok(work) => pump(shell, input, app, async move { Ok(work.await) }).await?,
         Err(error) => Err(error),

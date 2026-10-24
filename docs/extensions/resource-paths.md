@@ -13,8 +13,13 @@ The host invokes `hook/run` with `hook: "resources_discover"`, payload
 `{cwd: <host workspace>, reason: "startup" | "reload"}`, and its current
 owner-bound execution context. It must wait for `session_start`, including any
 deferred interactive hook, and keep the frontend servicing reverse/UI requests.
-This is not a factory/initialize/preflight hook. The dedicated native process
-method pins one connection; the generic `run_hook` method refuses this hook.
+This is not a factory/initialize/preflight hook. Both App frontends publish the
+native model catalog and invocation scope before releasing deferred
+`session_start` hooks, including after interactive reload. Pi callbacks may read
+or spread their context immediately; unavailable or unrepresentable facts still
+refuse rather than becoming fabricated empty snapshots. The dedicated native
+process method pins one connection; the generic `run_hook` method refuses this
+hook.
 
 Response (not the generic hook disposition envelope):
 

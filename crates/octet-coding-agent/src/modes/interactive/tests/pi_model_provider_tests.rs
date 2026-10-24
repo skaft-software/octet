@@ -250,6 +250,104 @@ async fn pi_model_facts_follow_the_real_host_and_invocation_scope() {
     assert_eq!(app.config.reasoning, default_reasoning);
 }
 
+const STARTUP_FACTS: &str = r#"
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  pi.on('session_start', (_, ctx) => {
+    let row;
+    try {
+      // pi-subagents snapshots ctx this way before doing any reverse/UI work.
+      const snapshot = { ...ctx };
+      row = { scoped: snapshot.scopedModels, available: snapshot.modelRegistry.getAvailable() };
+    } catch (error) {
+      row = { code: error.code, error: String(error.message) };
+    }
+    appendFileSync(TRACE, JSON.stringify(row) + '\n');
+  });
+};
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_interactive_model_facts_precede_startup_and_reload() {
+    for level in [None, Some("off"), Some("on")] {
+        let (directory, mut app) = pi_app(STARTUP_FACTS);
+        let model_id = app.model.spec.api_name.clone();
+        let expected_available = app
+            .catalog
+            .models()
+            .filter(|spec| {
+                app.catalog
+                    .resolve(&spec.id)
+                    .is_ok_and(|model| model.endpoint.auth.is_configured())
+            })
+            .count();
+        let patterns = level.map(|level| format!("{}:{level}", app.model.spec.id.0));
+        app.set_model_scope_patterns(patterns.as_deref()).unwrap();
+        let scope = app.model_scope.clone();
+        let mut shell = InteractiveShell::test_shell();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        assert!(app.executable_extensions.has_pending_session_starts());
+        // Do not prewarm with request_extension_ui: the product resource phase
+        // must publish model facts before spawning its deferred startup tasks.
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("trace.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        let (mut app, reloaded) = tokio::time::timeout(
+            Duration::from_secs(20),
+            reload_resources_announcing(app, &mut shell, &mut input, true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reloaded);
+        let rows = std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2, "exactly one start per native binding");
+        for row in rows {
+            if level == Some("on") {
+                // Native On is not a portable Pi thinking level. Publishing
+                // facts early must not fabricate an empty scope for it.
+                assert_eq!(row["code"], -32601, "{row}");
+                assert!(row["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unsupported_feature ctx.scopedModels"));
+                assert!(row.get("scoped").is_none(), "{row}");
+                continue;
+            }
+            assert!(row.get("error").is_none(), "{row}");
+            assert_eq!(
+                row["available"].as_array().unwrap().len(),
+                expected_available
+            );
+            if level.is_some() {
+                assert_eq!(row["scoped"].as_array().unwrap().len(), 1, "{row}");
+                assert_eq!(row["scoped"][0]["model"]["id"], model_id);
+                assert_eq!(row["scoped"][0]["thinkingLevel"], "off");
+            } else {
+                assert_eq!(row["scoped"], serde_json::json!([]));
+            }
+        }
+        assert_eq!(app.model_scope, scope);
+        assert!(app.agent.session().usage_records().is_empty());
+        app.executable_extensions.shutdown().await;
+    }
+}
+
 const SETTERS: &str = r#"
 import { appendFileSync } from 'node:fs';
 export default pi => {
