@@ -96,6 +96,15 @@ Gemini's provider allowance. Gemini documents **20 MB for the entire inline
 request**, including base64 expansion and the rest of the prompt. A file below
 octet's cap may therefore still exceed the provider's limit.
 
+Earlier audio reads remain in history and are re-sent: an album can exceed the
+request-byte limit even when every track fits individually and token context
+remains. A `413 request too large for AI studio` through OpenRouter is this
+upstream payload boundary, not a promise that a larger context window will help.
+[OpenRouter audio](https://openrouter.ai/docs/guides/overview/multimodal/audio)
+requires inline base64, not audio URLs; its workspace Files API is not a Gemini
+audio-upload transport. Use fresh-session batches with explicit per-track notes
+or deliberately compressed copies. octet does not silently remove earlier tracks.
+
 High sample-rate/bit-depth WAVs can be much larger than compressed audio. A
 73,608,392-byte WAV and a 22,542,626-byte WAV both exceed the same 20 MiB audio
 cap; lowering the sample rate or bit depth alone does not guarantee a fit.

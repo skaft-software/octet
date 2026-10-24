@@ -16299,24 +16299,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/gpt-3.5-turbo": {
-    "limit": {
-      "context": 16385,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-3.5-turbo",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/openai/gpt-3.5-turbo-0613": {
     "limit": {
       "context": 4095,
@@ -16352,24 +16334,6 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
-  },
-  "openrouter/openai/gpt-3.5-turbo-instruct": {
-    "limit": {
-      "context": 4095,
-      "output": 3685
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-3.5 Turbo Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
   },
   "openrouter/openai/gpt-4": {
     "limit": {

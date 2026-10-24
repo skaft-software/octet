@@ -195,6 +195,20 @@ projections. Generator policy, endpoint precedence and the direct DeepSeek
 exclusion are unchanged. These source assertions do not prove live acceptance;
 the retained response and delta support review, not a freshness waiver.
 
+The next pre-push check detected two changed OpenRouter quotes and two absent
+routes. All four outputs were regenerated from the retained 5,910,702-byte
+response, SHA-256
+`11ba5653f679b4ca4e34f64722546ca0ece44ecba309b54f5a134864bce615bf`.
+OpenRouter `z-ai/glm-5.3` input/output/cache-read are now
+$0.0908/$1.61/$0.0897 per million; `~z-ai/glm-flash-latest` input is
+$0.0507/M, with output/cache-read unchanged. OpenRouter `openai/gpt-3.5-turbo`
+and `openai/gpt-3.5-turbo-instruct` are absent from pricing/capability
+projections; this does not prove endpoint retirement. Counts are 917 pricing
+routes, 379 unchanged names and 938 capability routes. Other raw changes concern
+unsupported providers outside these projections. Mapping, exclusions, endpoint
+precedence and unverified direct DeepSeek pricing are unchanged. Saved-source
+reproduction and offline tooling passed; hosted freshness remains required.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

@@ -4283,13 +4283,6 @@
     "output": 0,
     "reasoning": null
   },
-  "openrouter/openai/gpt-3.5-turbo": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 500000,
-    "output": 1500000,
-    "reasoning": null
-  },
   "openrouter/openai/gpt-3.5-turbo-0613": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -4302,13 +4295,6 @@
     "cache_write_5m": 0,
     "input": 3000000,
     "output": 4000000,
-    "reasoning": null
-  },
-  "openrouter/openai/gpt-3.5-turbo-instruct": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 1500000,
-    "output": 2000000,
     "reasoning": null
   },
   "openrouter/openai/gpt-4": {
@@ -5558,10 +5544,10 @@
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3": {
-    "cache_read": 78000,
+    "cache_read": 89700,
     "cache_write_5m": 0,
-    "input": 79000,
-    "output": 1400000,
+    "input": 90800,
+    "output": 1610000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flash": {
@@ -5714,7 +5700,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "cache_read": 30000,
     "cache_write_5m": 0,
-    "input": 50900,
+    "input": 50700,
     "output": 70200,
     "reasoning": null
   },
