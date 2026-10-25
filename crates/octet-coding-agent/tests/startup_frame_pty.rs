@@ -39,13 +39,10 @@ const DRAIN_TIME: Duration = Duration::from_millis(35);
 /// (1s) and debounces for a further 200ms before it applies a pass at an idle
 /// boundary, so a freshly written prompt cannot appear on the first look. This
 /// deliberately does not reuse `STARTUP_TIMEOUT`: that is a single-frame
-/// budget, and spending it here would leave the retry loop below with less time
-/// than one of its own iterations can take, so the loop could never retry.
+/// budget, not the filesystem poll/debounce and resource application budget.
 const RELOAD_TIMEOUT: Duration = Duration::from_secs(15);
-/// Per-attempt slice of `RELOAD_TIMEOUT`.
-///
-/// Kept well below the outer budget so several `/prompt` round trips fit
-/// inside it, which is the whole point of the retry loop.
+/// Budget for one catalog observation, also capped by the remaining reload
+/// deadline after an external change. Commands are never retried during reload.
 const RELOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_BEGIN: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
@@ -237,8 +234,11 @@ enum StartupFixture<'a> {
     Session(&'a [&'a str]),
     /// Long Markdown history for raw mouse/clipboard acceptance.
     MouseHistory,
+    MouseHistoryWithoutOsc8,
     /// A persisted selection, resolved through the real registry with no auth.
-    ConfiguredGemma,
+    ConfiguredGemma {
+        reload: bool,
+    },
     /// Empty inventory and no appearance preference: both onboarding owners run.
     Setup,
     Changelog {
@@ -376,7 +376,7 @@ impl PtyOctet {
                 });
                 fs::write(&credential, record.to_string()).expect("loopback provider fixture");
             }
-            StartupFixture::ConfiguredGemma => {
+            StartupFixture::ConfiguredGemma { reload } => {
                 let record = serde_json::json!({
                     "version": 1,
                     "providers": {"cerebras": {
@@ -391,7 +391,7 @@ impl PtyOctet {
                 fs::write(&credential, record.to_string()).expect("offline Cerebras/Gemma fixture");
                 fs::write(
                     home.join(".octet/config.toml"),
-                    "model = \"custom/cerebras/gemma-4-31b\"\ntheme = \"dark\"\n",
+                    format!("model = \"custom/cerebras/gemma-4-31b\"\ntheme = \"dark\"\nreload = {reload}\n"),
                 )
                 .expect("persisted model and appearance fixture");
             }
@@ -409,7 +409,9 @@ impl PtyOctet {
                 )
                 .unwrap();
             }
-            StartupFixture::Session(_) | StartupFixture::MouseHistory => {
+            StartupFixture::Session(_)
+            | StartupFixture::MouseHistory
+            | StartupFixture::MouseHistoryWithoutOsc8 => {
                 // The on-disk session store uses the workspace's stable FNV-1a key.
                 let mut key = 0xcbf2_9ce4_8422_2325u64;
                 for byte in workspace.to_string_lossy().as_bytes() {
@@ -426,7 +428,10 @@ impl PtyOctet {
                         },
                     )))
                     .unwrap();
-                if matches!(fixture, StartupFixture::MouseHistory) {
+                if matches!(
+                    fixture,
+                    StartupFixture::MouseHistory | StartupFixture::MouseHistoryWithoutOsc8
+                ) {
                     let mut text = String::from("MOUSE-BEGIN\n");
                     for index in 1..=400 {
                         text.push_str(&format!(
@@ -481,7 +486,7 @@ impl PtyOctet {
                 "--color",
                 if !color {
                     "never"
-                } else if matches!(fixture, StartupFixture::ConfiguredGemma) {
+                } else if matches!(fixture, StartupFixture::ConfiguredGemma { .. }) {
                     "auto"
                 } else {
                     "always"
@@ -539,11 +544,14 @@ impl PtyOctet {
                     .args(["--model", "custom/probe", "--theme", "dark"])
                     .args(args);
             }
-            StartupFixture::MouseHistory => {
+            StartupFixture::MouseHistory | StartupFixture::MouseHistoryWithoutOsc8 => {
                 command.args(["--model", "custom/probe", "--theme", "dark", "--continue"]);
                 command.env("SSH_CONNECTION", "192.0.2.1 12345 192.0.2.2 22");
-                // Exercise rendered OSC 8 links under a link-capable profile.
-                command.env("TERM", "xterm-ghostty");
+                if matches!(fixture, StartupFixture::MouseHistoryWithoutOsc8) {
+                    command.env("TERM_PROGRAM", "Apple_Terminal");
+                } else {
+                    command.env("TERM", "xterm-ghostty");
+                }
                 // Observe browser handoff without opening a real page or changing
                 // the test runner's environment. Clipboard transport remains OSC 52.
                 let bin = home.join("bin");
@@ -572,7 +580,7 @@ impl PtyOctet {
                     command.arg(initial);
                 }
             }
-            StartupFixture::ConfiguredGemma | StartupFixture::Setup => {
+            StartupFixture::ConfiguredGemma { .. } | StartupFixture::Setup => {
                 // SSH is transport, not evidence of limited terminal colour.
                 command
                     .env("TERM_PROGRAM", "ghostty")
@@ -1189,39 +1197,64 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
         visible_bytes(&octet.pty.output)
     );
 
+    let completed_screen_after = |output: &[u8], offset: usize| {
+        let end = frame_ranges(output)
+            .into_iter()
+            .rev()
+            .find(|frame| frame.start >= offset)?
+            .end;
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 0);
+        parser.process(&output[..end]);
+        Some(parser.screen().contents())
+    };
+    // Open the empty catalog before the external mutation. Its dismissal is
+    // observable evidence of resource hydration, not a reload success notice.
+    // Lifecycle work deliberately keeps drafts instead of admitting commands;
+    // never send Enter into that owner and expect a deferred submission.
+    let before = octet.pty.output.len();
+    octet.pty.write_input(b"/prompt\r");
+    octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
+        completed_screen_after(output, before)
+            .is_some_and(|screen| screen.contains("Prompt templates:"))
+    });
+    assert!(!completed_screen_after(&octet.pty.output, before)
+        .unwrap()
+        .contains("/reload-probe"));
+
+    let before = octet.pty.output.len();
+    let deadline = Instant::now() + RELOAD_TIMEOUT;
     let prompts = octet._root.path().join("home/.octet/prompts");
     fs::create_dir_all(&prompts).unwrap();
     fs::write(prompts.join("reload-probe.md"), "A local reload fixture.\n").unwrap();
-    // Prove the resource actually became available, not merely that no notice
-    // was printed. /prompt only inspects the loaded catalog; it never reloads
-    // resources or submits a provider request. Close it between observations so
-    // the watcher can apply its pass at the idle prompt.
-    let deadline = Instant::now() + RELOAD_TIMEOUT;
-    loop {
-        octet.pty.drain_for(Duration::from_millis(350));
-        let before = octet.pty.output.len();
-        octet.pty.write_input(b"/prompt\r");
-        // An automatic reload pass may be applying at the idle prompt; the
-        // typed command must still complete, so wait out the overall budget
-        // rather than one short attempt.
-        octet.wait_until(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(RELOAD_ATTEMPT_TIMEOUT),
-            |output| contains_bytes(&output[before..], b"Prompt templates:"),
-        );
-        octet.pty.drain_for(DRAIN_TIME);
-        let loaded = contains_bytes(&octet.pty.output[before..], b"/reload-probe");
-        octet.pty.write_input(b"\x1b");
-        octet.pty.drain_for(Duration::from_millis(100));
-        if loaded {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "automatic reload did not load the prompt"
-        );
-    }
+    // No input until the automatic resource pass has hydrated the shell and
+    // painted its normal idle composer. The watcher runs with the report open.
+    octet.wait_until(
+        deadline.saturating_duration_since(Instant::now()),
+        |output| {
+            completed_screen_after(output, before).is_some_and(|screen| {
+                !screen.contains("Prompt templates:")
+                    && screen.contains("custom/probe")
+                    && !screen.contains("reloading")
+            })
+        },
+    );
+    let before = octet.pty.output.len();
+    octet.pty.write_input(b"/prompt\r");
+    octet.wait_until(
+        RELOAD_ATTEMPT_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+        |output| {
+            completed_screen_after(output, before).is_some_and(|screen| {
+                screen.contains("Prompt templates:") && screen.contains("/reload-probe")
+            })
+        },
+    );
+    let before = octet.pty.output.len();
+    octet.pty.write_input(b"\x1b");
+    octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
+        completed_screen_after(output, before).is_some_and(|screen| {
+            !screen.contains("Prompt templates:") && screen.contains("custom/probe")
+        })
+    });
     for noise in [
         "live reload armed",
         "changed path(s)",
@@ -1242,16 +1275,20 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
     let before = octet.pty.output.len();
     octet.pty.write_input(b"/reload\r");
     octet.wait_until(STARTUP_TIMEOUT, |output| {
-        contains_bytes(&output[before..], b"reload succeeded")
+        completed_screen_after(output, before)
+            .is_some_and(|screen| screen.contains("reload succeeded"))
     });
     assert!(
         !contains_bytes(&octet.pty.output[before..], b"resources reloaded"),
         "explicit reload must not print the old multi-part summary: {}",
         visible_bytes(&octet.pty.output[before..])
     );
+    let before = octet.pty.output.len();
     octet.pty.write_input(b"/reload --dry-run\r");
     octet.wait_until(STARTUP_TIMEOUT, |output| {
-        contains_bytes(output, b"poll 1000 ms") && contains_bytes(output, b"reload preview")
+        completed_screen_after(output, before).is_some_and(|screen| {
+            screen.contains("poll 1000 ms") && screen.contains("reload preview")
+        })
     });
     let capture = octet.shutdown();
     assert!(capture.status.success());
@@ -1430,7 +1467,7 @@ fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
             true,
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (7, false, false),
-            StartupFixture::ConfiguredGemma,
+            StartupFixture::ConfiguredGemma { reload: true },
         );
         octet.wait_until(STARTUP_TIMEOUT, |output| {
             synchronized_frame_end_containing(output, b"Gemma 4 31B").is_some()
@@ -1471,7 +1508,9 @@ fn assert_model_switch_welcome(diagnostics: bool) {
             true,
             (columns, rows),
             (17, true, true),
-            StartupFixture::ConfiguredGemma,
+            // This case owns its explicit reload. A background resource reload
+            // rehydrates the transcript independently of compatible model changes.
+            StartupFixture::ConfiguredGemma { reload: false },
         );
         let mut parser = vt100::Parser::new(rows, columns, 512);
         let mut consumed = 0;
@@ -1526,12 +1565,6 @@ fn assert_model_switch_welcome(diagnostics: bool) {
         // Shut down before asserting captured frames, so a failed visual
         // assertion cannot leave a child blocked on a full PTY output buffer.
         let capture = octet.shutdown();
-        assert!(capture.status.success());
-        assert!(capture.termios_restored);
-        for screen in settled_screens {
-            assert_eq!(screen.contains("Invalid manifest"), diagnostics,
-                "diagnostics must survive completed model selection, not just appear in a fleeting frame\n{screen}");
-        }
         let output = &capture.output[..capture.shutdown_start];
         if let Some(directory) = std::env::var_os("OCTET_STARTUP_REDRAW_TRACE_DIR") {
             fs::write(
@@ -1541,6 +1574,12 @@ fn assert_model_switch_welcome(diagnostics: bool) {
                 output,
             )
             .unwrap();
+        }
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        for screen in settled_screens {
+            assert_eq!(screen.contains("Invalid manifest"), diagnostics,
+                "diagnostics must survive completed model selection, not just appear in a fleeting frame\n{screen}");
         }
         let mut parser = vt100::Parser::new(rows, columns, 512);
         let mut consumed = 0;
@@ -2327,8 +2366,10 @@ fn await_screen(
         }
         assert!(
             Instant::now() < deadline,
-            "screen did not show {text:?} within {budget:?}: {}",
-            parser.screen().contents()
+            "screen did not show {text:?} within {budget:?}: {}; output_bytes={}; tail: {}",
+            parser.screen().contents(),
+            octet.pty.output.len(),
+            visible_bytes(&octet.pty.output[octet.pty.output.len().saturating_sub(4096)..])
         );
         assert!(
             octet.child.try_wait().unwrap().is_none(),

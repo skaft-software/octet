@@ -100,6 +100,8 @@ pub(super) fn looks_like_context_error(error: &AiError) -> bool {
     if veto.is_permanent() {
         return false;
     }
+    // Generic request_too_large can mean an encoded media/HTTP byte limit,
+    // not token overflow. Only context/token-specific evidence may compact.
     let text = error.to_string().to_ascii_lowercase();
     [
         "context window exceeded",
@@ -110,7 +112,6 @@ pub(super) fn looks_like_context_error(error: &AiError) -> bool {
         "maximum context length",
         "exceeds the context window",
         "exceeds model's maximum context length",
-        "request_too_large",
         "too many tokens",
         "token limit",
         "prompt is too long",

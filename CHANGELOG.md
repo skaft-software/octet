@@ -19,6 +19,16 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 
 ### Fixed
 
+- Captured transcript links retain their click targets on terminals without
+  OSC 8 support, including Apple Terminal, without emitting unsupported controls
+  or changing the HTTP(S)-only activation and stale-geometry fences.
+- Successful live `/settings tui` switches acknowledge their exact preference
+  writes, avoiding redundant reloads that reset the transcript viewport. Active
+  runs retain ordered receipts for idle ownership; failed switches and external
+  edits still participate in normal reload.
+- HTTP 413 includes recovery advice for accumulated native media. Generic
+  `request_too_large` errors no longer trigger token compaction; failed requests
+  retain native audio in history without silent removal or provider switching.
 - Google streaming preserves signed assistant text/reasoning boundaries across tool
   calls and chunk-position changes, including signatures on empty final text
   chunks. Signatures stay attached to their original parts during replay.

@@ -196,7 +196,9 @@ an available system browser on release, without Shift or Ctrl. Dragging a link
 selects/copies instead; moving away and back does not activate it. Resize,
 scrolling, focus changes and intervening input cancel the pending click. Octet
 never launches local-file or application-protocol links this way. With capture
-off, including native Tern, link gestures remain terminal-owned.
+off, including native Tern, link gestures remain terminal-owned. Captured clicks
+also work without terminal OSC 8 support; unsupported hyperlink controls are
+omitted from terminal output, not from Octet's retained hit targets.
 
 Copy writes to an available local clipboard helper and emits OSC 52 to the
 terminal, so SSH/remote sessions can reach the client clipboard. The terminal must

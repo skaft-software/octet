@@ -35,6 +35,9 @@ its first paint preserves the pre-existing viewport in native history rather
 than clearing saved lines, that shortening the transient fixture removes its
 visible rows, and that it also avoids alternate-screen mode.
 
+Screen-wait failures include the rendered screen, byte count, and a bounded raw
+terminal tail. The startup and shutdown budgets are unchanged.
+
 The expected normalized contracts and row fixtures are in
 `crates/octet-coding-agent/tests/fixtures/startup-frame-pty/`. The harness is
 `crates/octet-coding-agent/tests/startup_frame_pty.rs`.
@@ -92,9 +95,37 @@ visible text highlighting, copy-on-release via OSC 52, draft preservation, and
 terminal restoration. Coverage includes a fresh default fullscreen launch and
 inline → fullscreen → inline → fullscreen transitions. Live transitions must
 recompute `auto` capture, retain explicit `app` capture, and never capture for
-`terminal` or `off`. A fixture clipboard helper prevents macOS tests from
-replacing the user's local clipboard. These are byte/VT regressions, not physical
+`terminal` or `off`. The transition fence requires the resumed renderer's
+completed synchronized frame as well as the intended terminal modes: leaving
+fullscreen during suspension alone does not establish that input is ready.
+The live-switch fixture keeps automatic reload enabled: a successfully applied
+`/settings tui` write must not trigger redundant transcript hydration and reset
+its viewport. Idle application acknowledges the exact checked write; active-run
+application retains each receipt in order until idle ownership returns. Failed
+switches and independent external edits remain visible to normal reload. These
+receipt boundaries also have isolated persistence/idle/active unit regressions.
+A fixture clipboard helper prevents macOS tests from replacing the user's local
+clipboard. These are byte/VT regressions, not physical
 mouse/touchpad or terminal clipboard-permission acceptance.
+
+Link-click coverage runs both fullscreen and captured inline surfaces with an
+OSC 8-capable profile and an Apple Terminal profile without OSC 8 support. It
+requires one HTTP(S) opener handoff on stationary release, drag-copy instead of
+activation, and no unsupported OSC 8 controls on the latter profile's wire.
+The opener and clipboard helpers remain inert local fixtures, not native browser
+or clipboard acceptance.
+
+## Quiet automatic reload
+
+The reload-details fixture opens the empty prompt catalog before writing its
+external prompt. It sends no command during lifecycle ownership: resource
+hydration dismisses the report, and a completed idle frame gates the next single
+catalog request. The original 15-second reload deadline includes the loaded
+catalog observation, capped at the original two-second request budget. There
+are no command retries or deadline extensions. Explicit reload/details retain
+their five-second budgets and use fresh completed-frame observations.
+The existing 1.3-second initial observation remains a time-based baseline wait,
+not a protocol receipt proving the first watcher scan completed.
 
 ## Isolation and safety
 
@@ -104,6 +135,14 @@ with no inherited credentials. Ordinary startup cases use an empty API key,
 URL. They run with `--offline`, `--no-context-files`, and `--no-tools`, submitting
 no prompt. API-wait/plain-prompt cases use a gated loopback chat fixture instead
 of a live model.
+
+Model-switch cases explicitly set `reload = false`: they test preservation of an
+explicitly loaded resource diagnostic across compatible model changes, not across
+an unrelated background resource reload that rehydrates the transcript. The
+configured-model startup case and dedicated live-reload cases keep the watcher
+enabled. This isolation does not qualify diagnostic retention across automatic
+resource reloads. Optional model-switch traces are saved before visual assertions,
+so a failed assertion does not discard the captured terminal stream.
 
 Only the discovery cases omit `--offline` and enable `auto_discover` against the
 gated loopback fixture. After discovery resolves, the successful case submits

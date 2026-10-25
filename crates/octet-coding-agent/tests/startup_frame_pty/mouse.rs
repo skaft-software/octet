@@ -3,6 +3,15 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 fn history(mode: MouseMode, columns: u16, rows: u16) -> (PtyOctet, vt100::Parser, usize) {
+    history_with_links(mode, columns, rows, true)
+}
+
+fn history_with_links(
+    mode: MouseMode,
+    columns: u16,
+    rows: u16,
+    hyperlinks: bool,
+) -> (PtyOctet, vt100::Parser, usize) {
     let mut octet = PtyOctet::spawn_at(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         mode,
@@ -10,7 +19,11 @@ fn history(mode: MouseMode, columns: u16, rows: u16) -> (PtyOctet, vt100::Parser
         true,
         (columns, rows),
         (2, false, false),
-        StartupFixture::MouseHistory,
+        if hyperlinks {
+            StartupFixture::MouseHistory
+        } else {
+            StartupFixture::MouseHistoryWithoutOsc8
+        },
     );
     let mut parser = vt100::Parser::new(rows, columns, 1024);
     let mut consumed = 0;
@@ -242,6 +255,24 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     }
 }
 
+fn renderer_reentered(output: &[u8]) -> bool {
+    // Leaving fullscreen also changes the modes during suspension. The next
+    // renderer enables bracketed paste anew; only its completed paint is ready
+    // for another command, after raw mode has been restored.
+    find_subsequence(output, b"\x1b[?2004h", 0)
+        .is_some_and(|start| nth_frame_end(&output[start..], 1).is_some())
+}
+
+#[test]
+fn surface_transition_fence_waits_for_the_resumed_renderer() {
+    let mut output = b"\x1b[?2026hfinal old frame\x1b[?2026l\x1b[?1049l\x1b[?1000l".to_vec();
+    assert!(!renderer_reentered(&output), "suspension is not reentry");
+    output.extend_from_slice(b"\x1b[?2004h\x1b[?2026hnew frame");
+    assert!(!renderer_reentered(&output), "partial paint is not ready");
+    output.extend_from_slice(b"\x1b[?2026l");
+    assert!(renderer_reentered(&output));
+}
+
 #[test]
 fn fullscreen_mouse_policy_follows_live_screen_switches() {
     let _lock = pty_test_lock().lock().unwrap();
@@ -274,23 +305,31 @@ fn fullscreen_mouse_policy_follows_live_screen_switches() {
             eprintln!("live screen transition: {mode:?} -> {surface}");
             assert_ne!(parser.screen().alternate_screen(), fullscreen);
             let expected = mode == MouseMode::App || (mode == MouseMode::Default && fullscreen);
+            let before = octet.pty.output.len();
             octet
                 .pty
                 .write_input(format!("/settings tui {surface}\r").as_bytes());
-            // Fence each command by its actual terminal-mode transition, not
-            // a transient notice whose older copies can leave the viewport.
+            // Modes also change during suspension. Fence by the resumed
+            // renderer's completed frame AND the intended terminal modes,
+            // not a transient notice or the old renderer's shutdown.
             let deadline = Instant::now() + STARTUP_TIMEOUT;
             loop {
                 settle(&mut octet, &mut parser, &mut consumed);
                 let captured =
                     parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None;
-                if parser.screen().alternate_screen() == fullscreen && captured == expected {
+                if renderer_reentered(&octet.pty.output[before..])
+                    && parser.screen().alternate_screen() == fullscreen
+                    && captured == expected
+                {
                     break;
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "terminal modes did not switch: {mode:?} -> {surface}; screen: {}",
-                    parser.screen().contents()
+                    "terminal modes did not switch: {mode:?} -> {surface}; reentered={} alternate={} captured={captured}; screen: {}; tail: {}",
+                    renderer_reentered(&octet.pty.output[before..]),
+                    parser.screen().alternate_screen(),
+                    parser.screen().contents(),
+                    visible_bytes(&octet.pty.output[octet.pty.output.len().saturating_sub(4096)..])
                 );
             }
             assert_eq!(parser.screen().alternate_screen(), fullscreen);
@@ -332,19 +371,23 @@ fn default_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
 #[test]
 fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
     let _lock = pty_test_lock().lock().unwrap();
-    for fullscreen in [true, false] {
+    for (fullscreen, hyperlinks) in [(true, true), (true, false), (false, true), (false, false)] {
         let (mut octet, mut parser, mut consumed) = if fullscreen {
             (
                 PtyOctet::spawn_default_fullscreen(
                     Path::new(env!("CARGO_BIN_EXE_octet")),
                     MouseMode::Default,
-                    StartupFixture::MouseHistory,
+                    if hyperlinks {
+                        StartupFixture::MouseHistory
+                    } else {
+                        StartupFixture::MouseHistoryWithoutOsc8
+                    },
                 ),
                 vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024),
                 0,
             )
         } else {
-            history(MouseMode::App, INITIAL_COLUMNS, INITIAL_ROWS)
+            history_with_links(MouseMode::App, INITIAL_COLUMNS, INITIAL_ROWS, hyperlinks)
         };
         await_screen(
             &mut octet,
@@ -401,6 +444,7 @@ fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
         settle(&mut octet, &mut parser, &mut consumed);
         assert_eq!(fs::read_to_string(log).unwrap(), expected);
         assert!(parser.screen().contents().contains("link-draft-kept"));
+        assert_eq!(contains_bytes(&octet.pty.output, b"\x1b]8;"), hyperlinks);
         let capture = octet.shutdown();
         assert!(capture.status.success());
         assert!(capture.termios_restored);

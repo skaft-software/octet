@@ -2134,11 +2134,73 @@ fn provider_retry_diagnostics_include_bounded_operational_details() {
 }
 
 #[test]
+fn payload_size_rejections_do_not_trigger_token_compaction() {
+    for code in [None, Some("413"), Some("request_too_large")] {
+        let error = AiError::Http(octet_ai::HttpError {
+            status: http::StatusCode::PAYLOAD_TOO_LARGE,
+            request_id: None,
+            retry_after: None,
+            provider_code: code.map(str::to_owned),
+            body_snippet: Some("request too large for AI studio".into()),
+            retryable: false,
+        });
+        assert!(!looks_like_context_error(&error), "{error:?}");
+        assert!(!retryable_before_generation(&error));
+        assert!(!retryable_stream_start(&error));
+        assert_eq!(provider_retry_limit(&error), 0);
+    }
+    for (code, kind) in [
+        (None, None),
+        (Some("request_too_large"), None),
+        (None, Some("request_too_large")),
+        (Some("413"), None),
+    ] {
+        let error = AiError::Provider(octet_ai::ProviderError {
+            code: code.map(str::to_owned),
+            kind: kind.map(str::to_owned),
+            message: "request_too_large".into(),
+            request_id: None,
+        });
+        assert!(!looks_like_context_error(&error), "{error:?}");
+        assert!(!retryable_stream_start(&error));
+        assert_eq!(provider_retry_limit(&error), 0);
+    }
+}
+
+#[test]
+fn public_payload_size_failure_explains_media_replay_and_recovery() {
+    for body in [
+        None,
+        Some("<html>413 Request Entity Too Large</html>".to_owned()),
+        Some(serde_json::json!({"error": {
+            "code": "request_too_large",
+            "message": format!("request too large for AI studio sk-private {}", "界".repeat(2000))
+        }}).to_string()),
+    ] {
+        let error = AgentError::Ai(AiError::Http(octet_ai::HttpError {
+            status: http::StatusCode::PAYLOAD_TOO_LARGE,
+            request_id: Some("req-413".into()),
+            retry_after: None,
+            provider_code: Some("request_too_large".into()),
+            body_snippet: body,
+            retryable: false,
+        }));
+        let diagnostic = public_error_diagnostic(&error, "openrouter", "gemini-audio");
+        assert!(diagnostic.contains("status=413 (request too large)"), "{diagnostic}");
+        assert!(diagnostic.contains("Earlier media is re-sent with history"), "{diagnostic}");
+        assert!(diagnostic.contains("fresh session with fewer or smaller attachments"), "{diagnostic}");
+        assert!(diagnostic.contains("request_id=req-413"), "{diagnostic}");
+        assert!(!diagnostic.contains("sk-private"));
+        assert!(!diagnostic.contains("<html>"));
+        assert!(diagnostic.len() <= MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES);
+    }
+}
+
+#[test]
 fn provider_context_limit_variants_are_classified_as_overflow() {
     for message in [
         "model_context_window_exceeded",
         "prompt is too long",
-        "request_too_large",
         "context window exceeds limit",
     ] {
         let error = AiError::Provider(octet_ai::ProviderError {

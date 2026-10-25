@@ -864,8 +864,10 @@ impl ObserveSummary {
 }
 
 /// A host-owned write whose before/after revisions were checked by persistence.
-/// Contains metadata only, never configuration contents.
-pub(crate) struct AppliedConfigWrite {
+/// Contains metadata only, never configuration contents. Fields remain host-owned
+/// so a pending idle action cannot manufacture an acknowledgement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedConfigWrite {
     pub(crate) path: PathBuf,
     pub(crate) before: FileFingerprint,
     pub(crate) after: FileFingerprint,

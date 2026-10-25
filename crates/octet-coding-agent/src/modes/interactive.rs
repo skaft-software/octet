@@ -576,6 +576,9 @@ pub enum PendingIdleAction {
     /// Display is already changed; only config synchronization/persistence waits.
     SyncTheme(String),
     SyncImages(bool),
+    /// The screen and preference already changed. Retain each exact write until
+    /// the idle reload owner can acknowledge it; receipt chains never coalesce.
+    AcknowledgeTuiPreference(crate::reload::AppliedConfigWrite),
     /// `/scoped-models` mutations that must own the application catalog and the
     /// shell's cycling list. Reports are rendered immediately instead.
     ScopedModels(commands::ScopedModelsCommand),
@@ -584,8 +587,8 @@ pub enum PendingIdleAction {
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
-/// thinking changes and preference writes collapse to the latest request;
-/// sessions and compaction do not collapse or disappear.
+/// thinking changes and preference intents collapse to the latest request;
+/// sessions, compaction, and checked write receipts never collapse or disappear.
 pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: PendingIdleAction) {
     let same_kind = matches!(
         (&queue.back(), &action),
@@ -2534,11 +2537,13 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::ExtensionsSubcommand::Status
                 | commands::ExtensionsSubcommand::Inspect { .. }
         ),
-        // Only the display settings keep a deferred step: the preference write
-        // that follows an immediate theme or image change.
+        // Display settings retain a deferred write or checked acknowledgement.
+        // Reserve capacity before changing either the screen or its preference.
         Command::Settings(sub) => matches!(
             sub,
-            commands::SettingsCommand::Theme(Some(_)) | commands::SettingsCommand::Images(Some(_))
+            commands::SettingsCommand::Theme(Some(_))
+                | commands::SettingsCommand::Images(Some(_))
+                | commands::SettingsCommand::TuiMode(Some(_))
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -3155,7 +3160,11 @@ where
                 commands::SettingsCommand::QueueMode(kind, Some(mode)) => {
                     save_queue_mode(shell, extensions, inspection.cache_warming_control.as_ref(), kind, mode).await;
                 }
-                commands::SettingsCommand::TuiMode(Some(mode)) => save_tui_mode(shell, extensions, mode).await,
+                commands::SettingsCommand::TuiMode(Some(mode)) => {
+                    if let Some(write) = save_tui_mode(shell, extensions, mode).await {
+                        push_pending_action(queue, PendingIdleAction::AcknowledgeTuiPreference(write));
+                    }
+                }
                 commands::SettingsCommand::DefaultModel(None) => shell.notice(format!(
                     "default model for new sessions: {}",
                     inspection
@@ -8868,6 +8877,9 @@ async fn apply_pending_actions(
                     shell.notice("theme preference saved at the idle boundary");
                 }
             }
+            PendingIdleAction::AcknowledgeTuiPreference(write) => {
+                reload.acknowledge_applied_write(&write);
+            }
             PendingIdleAction::SyncImages(enabled) => {
                 app.config.show_images = enabled;
                 if let Err(error) =
@@ -9987,28 +9999,45 @@ async fn save_tui_mode(
     shell: &mut InteractiveShell,
     extensions: &mut crate::extensions::ExecutableExtensions,
     mode: crate::config::TuiMode,
-) {
+) -> Option<crate::reload::AppliedConfigWrite> {
+    save_tui_mode_with(shell, extensions, mode, |shell| {
+        shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen)
+    })
+    .await
+}
+
+async fn save_tui_mode_with(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    mode: crate::config::TuiMode,
+    switch_renderer: impl FnOnce(&mut InteractiveShell) -> anyhow::Result<()>,
+) -> Option<crate::reload::AppliedConfigWrite> {
     if crate::cli::tui_mode_is_explicit() {
         shell.error(
             "TUI preference unchanged: --tui-mode overrides saved settings for this invocation"
                 .to_owned(),
         );
-        return;
+        return None;
     }
-    if let Err(error) =
-        persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode)).await
+    let write = match persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode))
+        .await
     {
-        shell.error(format!("failed to save the TUI mode preference: {error}"));
-        return;
-    }
-    if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
+        Ok(write) => write,
+        Err(error) => {
+            shell.error(format!("failed to save the TUI mode preference: {error}"));
+            return None;
+        }
+    };
+    if let Err(error) = switch_renderer(shell) {
         shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
-        return;
+        return None;
     }
     shell.notice(format!(
         "interactive terminal mode saved as {}",
         mode.as_str()
     ));
+    // A failed live switch must remain visible to normal resource reload.
+    write
 }
 
 /// Save the default model for new sessions. It never switches the live session.
@@ -10105,7 +10134,11 @@ async fn apply_settings_command(
             save_queue_mode(shell, &mut app.executable_extensions, None, kind, mode).await;
         }
         Sub::TuiMode(None) => shell.notice(tui_mode_report()),
-        Sub::TuiMode(Some(mode)) => save_tui_mode(shell, &mut app.executable_extensions, mode).await,
+        Sub::TuiMode(Some(mode)) => {
+            if let Some(write) = save_tui_mode(shell, &mut app.executable_extensions, mode).await {
+                reload.acknowledge_applied_write(&write);
+            }
+        }
         Sub::Theme(requested) => {
             configure_terminal_theme(
                 shell,

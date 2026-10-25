@@ -338,6 +338,15 @@ pub(super) fn format_http_diagnostic(prefix: &str, error: &octet_ai::HttpError) 
         diagnostic.push_str(summary);
         diagnostic.push(')');
     }
+    if error.status.as_u16() == 413 {
+        // A byte-size rejection is not necessarily token-context exhaustion.
+        // Keep the recovery advice ahead of arbitrary bounded provider fields.
+        append_provider_field(
+            &mut diagnostic,
+            "hint",
+            Some("Earlier media is re-sent with history. Start a fresh session with fewer or smaller attachments; a larger token context window may not help."),
+        );
+    }
     append_provider_field(&mut diagnostic, "code", error.provider_code.as_deref());
     if let Some(message) = provider_error_message(error.body_snippet.as_deref()) {
         append_provider_field(&mut diagnostic, "detail", Some(&message));

@@ -98,12 +98,20 @@ octet's cap may therefore still exceed the provider's limit.
 
 Earlier audio reads remain in history and are re-sent: an album can exceed the
 request-byte limit even when every track fits individually and token context
-remains. A `413 request too large for AI studio` through OpenRouter is this
-upstream payload boundary, not a promise that a larger context window will help.
+remains. On HTTP **413**, octet reports the provider/model, status and available
+request ID, with advice to start a fresh session with fewer or smaller
+attachments. A larger token context window may not raise the request-byte limit.
+A generic `request_too_large` rejection does **not** trigger token compaction or
+an automatic retry; explicit token/context-overflow errors retain their existing
+compaction behavior. The failed request leaves native media in session history,
+including after reopening. octet does not silently remove tracks, replace them
+with summaries, switch providers or transcode them to fit.
+
 [OpenRouter audio](https://openrouter.ai/docs/guides/overview/multimodal/audio)
 requires inline base64, not audio URLs; its workspace Files API is not a Gemini
 audio-upload transport. Use fresh-session batches with explicit per-track notes
-or deliberately compressed copies. octet does not silently remove earlier tracks.
+or deliberately compressed copies. The provider's actual encoded-request limit
+is route-dependent; octet's per-file cap does not establish that limit.
 
 High sample-rate/bit-depth WAVs can be much larger than compressed audio. A
 73,608,392-byte WAV and a 22,542,626-byte WAV both exceed the same 20 MiB audio

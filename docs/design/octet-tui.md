@@ -203,6 +203,11 @@ not the broader semantic render revision; an unrelated mutable borrow cannot
 lose a painted scrollbar. Search visibility also fences the layout. Search-result
 feedback retains the full input/render revision fence so newer query or navigation
 intent cannot flow backwards.
+Interactive rich rows retain zero-width link metadata independently of terminal
+OSC 8 support. The output adapter suppresses only unsupported OSC 8 envelopes,
+including fragmented writes; capability reporting, painted geometry, HTTP(S)-only
+activation and native Tern ownership remain unchanged. Plain rendering stays
+escape-free.
 Selection highlighting is a renderer-only inverse-video
 projection over those source offsets. A release copies only a transcript-owned
 press/drag, so chrome cannot recopy a stale selection. OSC 52 encodes once after

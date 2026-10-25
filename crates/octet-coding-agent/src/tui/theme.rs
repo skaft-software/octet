@@ -1271,7 +1271,11 @@ impl OctetTheme {
     }
 
     fn rich_renderer_with_inner(&self, mut theme: SexyTheme) -> RichRenderer {
-        let capabilities = rich_capabilities(self.capabilities);
+        let mut capabilities = rich_capabilities(self.capabilities);
+        // Retained rows also carry application-owned link hit targets. Keep
+        // their zero-width metadata even when the terminal cannot render OSC 8;
+        // OctetTerminal suppresses unsupported envelopes at the output boundary.
+        capabilities.hyperlinks = self.capabilities.interactive;
         theme.set_capabilities(capabilities);
         RichRenderer::new(
             theme,
