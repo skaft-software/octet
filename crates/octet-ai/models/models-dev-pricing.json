@@ -5567,8 +5567,8 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "cache_read": 30000,
     "cache_write_5m": 0,
-    "input": 150000,
-    "output": 500000,
+    "input": 41800,
+    "output": 77000,
     "reasoning": null
   },
   "openrouter/z-ai/glm-5.3-flashx": {

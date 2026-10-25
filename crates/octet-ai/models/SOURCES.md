@@ -226,6 +226,15 @@ exclusions, endpoint precedence and unverified direct DeepSeek pricing remain
 unchanged. The retained raw response and complete delta are qualification
 evidence; saved-source reproduction and final hosted freshness remain required.
 
+A subsequent freshness check observed one further supported-route correction.
+The 5,937,244-byte response, SHA-256
+`9c6f2a19a4725814c37b91c85fa62bdfb0a3cad3c4b779b952f40e7e32dc17d3`,
+changes only OpenRouter `z-ai/glm-5.3-flash`: $0.0418/$0.077 per million
+input/output tokens, unchanged $0.03 cache read, and a 131,072-token output
+limit. All route counts, names, modalities and other assertions are unchanged.
+These remain aggregator quotes, not independently verified direct tariffs.
+The prior exact-head freshness failures and raw sources remain retained.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
