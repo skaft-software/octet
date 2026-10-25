@@ -209,6 +209,23 @@ unsupported providers outside these projections. Mapping, exclusions, endpoint
 precedence and unverified direct DeepSeek pricing are unchanged. Saved-source
 reproduction and offline tooling passed; hosted freshness remains required.
 
+The next exact-head check required a further reviewed refresh from the retained
+5,937,240-byte public response, SHA-256
+`2492e1dc88a6e8308b86e2f674076a60fa3ba41a31b921275bfc1894541fef38`.
+All four outputs were regenerated together: 919 pricing routes, 379 unchanged
+names and 940 capability routes. Two routes are added: OpenCode Go
+`iceman-contributor-free` and OpenRouter `liquid/lfm-2.5-2.6b`. The source quotes
+zero for the former; this is a catalog assertion, not independently verified free
+service. Nine existing OpenRouter prices change. Examples: `tencent/hy3` now
+quotes $0.132/$0.528/$0.033 per million input/output/cache-read tokens, and
+`deepseek/deepseek-v4-flash-0731` quotes $0.0422/$0.1694/$0.028. These are exact
+aggregator-route quotes, not direct-provider tariffs. That Flash route's output
+limit becomes 943,718; Llama 3.2 3B Instruct's becomes 117,964. No existing name,
+modality, reasoning, tool or structured-output assertion changes. Mapping,
+exclusions, endpoint precedence and unverified direct DeepSeek pricing remain
+unchanged. The retained raw response and complete delta are qualification
+evidence; saved-source reproduction and final hosted freshness remain required.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

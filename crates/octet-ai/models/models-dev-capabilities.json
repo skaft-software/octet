@@ -7481,6 +7481,24 @@
     ],
     "tool_call": true
   },
+  "opencode-go/iceman-contributor-free": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Iceman Contributor Free",
+    "reasoning": true,
+    "reasoning_options": [],
+    "tool_call": true
+  },
   "opencode-go/kimi-k2.7-code": {
     "interleaved": {
       "field": "reasoning_content"
@@ -13069,7 +13087,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -14460,6 +14478,25 @@
     "structured_output": true,
     "tool_call": false
   },
+  "openrouter/liquid/lfm-2.5-2.6b": {
+    "limit": {
+      "context": 128000,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "LFM2.5-2.6B",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/liquid/lfm-2.5-2.6b:free": {
     "limit": {
       "context": 65536,
@@ -14599,7 +14636,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 72000
+      "output": 117964
     },
     "modalities": {
       "input": [
