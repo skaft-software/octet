@@ -13087,7 +13087,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -14133,7 +14133,7 @@
   "openrouter/google/gemma-4-31b-it": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -16452,7 +16452,7 @@
   "openrouter/openai/gpt-4.1-nano": {
     "limit": {
       "context": 1047576,
-      "output": 32768
+      "output": 942818
     },
     "modalities": {
       "input": [
@@ -19059,7 +19059,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -20993,7 +20993,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -21660,7 +21660,7 @@
   "openrouter/~z-ai/glm-latest": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
