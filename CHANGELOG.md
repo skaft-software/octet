@@ -28,7 +28,8 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   registered protocol handler as one argument, so OAuth query strings survive.
 - Pasting multi-line text in Windows terminals inserts it as one paste instead
   of submitting at the first line break. The Windows console input API never
-  reports bracketed paste, so text keys queued together are recombined.
+  reports bracketed paste, so a queued run of text keys containing a line break
+  is recombined; all other input still arrives as the original keys.
 - Captured transcript links retain their click targets on terminals without
   OSC 8 support, including Apple Terminal, without emitting unsupported controls
   or changing the HTTP(S)-only activation and stale-geometry fences.
