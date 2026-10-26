@@ -1,13 +1,11 @@
 # octet-web-search reference
 
-**Source candidate distribution: 0.9.6.** This bundle requires exactly octet 0.9.6.
-Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.6 candidate record](../../docs/releases/v0.9.6.md) for availability and
-remaining qualification. 0.9.6 assets are not published; use a reviewed source
-checkout or matching local archive until publication is approved.
+**Distribution: 0.10.0.** This bundle requires exactly octet 0.10.0. Use the
+[version-matched installation](../../docs/installation.md) and the
+[0.10.0 release notes](../../docs/releases/v0.10.0.md) for availability.
 
 [Usage guide](README.md). This describes the bundled API `0.4` implementation,
-not a general extension-authoring tutorial. Bundle `0.9.6` requires exactly octet `0.9.6`.
+not a general extension-authoring tutorial. Bundle `0.10.0` requires exactly octet `0.10.0`.
 
 The opt-in executable supports [Brave Search API](https://brave.com/search/api/)
 (recommended) and an explicitly configured [SearXNG](https://docs.searxng.org/)
@@ -27,8 +25,7 @@ declarations are visible consent metadata, not a sandbox.
 
 ## Install and opt in
 
-After 0.9.6 publication is approved and matching assets are verified, the
-catalog path with [octet 0.9.6](../../docs/installation.md) is:
+With [octet 0.10.0](../../docs/installation.md), the catalog path is:
 
 ```console
 octet extension install octet-web-search
@@ -67,8 +64,8 @@ safe and inert; load it explicitly with `/skills load octet-web-search` when web
 research is wanted. The runtime contains its dependency-free Python SDK, so
 installation performs no `pip install`, model call, service setup, or other
 arbitrary code. Python 3.9 or newer must be available as `python3`.
-Release compatibility is recorded in `extension.toml`: bundle `0.9.6`, extension
-API `0.4`, exact octet `0.9.6`.
+Release compatibility is recorded in `extension.toml`: bundle `0.10.0`, extension
+API `0.4`, exact octet `0.10.0`.
 
 ## Choose a provider
 
