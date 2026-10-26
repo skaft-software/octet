@@ -12561,25 +12561,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/arcee-ai/trinity-large-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 80000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Trinity Large Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/bytedance-seed/seed-1.6": {
     "limit": {
       "context": 262144,
@@ -14133,7 +14114,7 @@
   "openrouter/google/gemma-4-31b-it": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 16384
     },
     "modalities": {
       "input": [
