@@ -23,6 +23,9 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   usage, cost and stop reason, so Pi footers and status lines such as the
   `custom-footer` example work once a session has a model reply. Unpriced and
   unrecorded turns keep those facts absent rather than invented.
+- On Windows, OpenAI, Copilot and other sign-in flows, and transcript link
+  clicks, open the default browser instead of File Explorer. URLs go to the
+  registered protocol handler as one argument, so OAuth query strings survive.
 - Captured transcript links retain their click targets on terminals without
   OSC 8 support, including Apple Terminal, without emitting unsupported controls
   or changing the HTTP(S)-only activation and stale-geometry fences.
