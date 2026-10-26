@@ -5,20 +5,19 @@
 //! arrives as an ordinary Enter that submits a half-pasted prompt. Consoles
 //! queue every record of one paste at once, while typed keys arrive one by one,
 //! so text keys that are already waiting behind a text key are one paste.
+//! Line breaks inside such a burst are pasted text; a break that ends it is
+//! delivered as Enter, so input typed ahead while octet was busy still submits.
 use std::io;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-/// How long the first follow-up read waits. Queued paste records are ready at
-/// once; no one types two keys within this window, so a keystroke stays a key.
-/// It must be positive: a zero-timeout read consumes at most one record, and
-/// the modifier records a host synthesizes around pasted capitals carry no
-/// event, so a zero wait would end the burst at the first capital letter.
-pub(super) const FIRST_FOLLOW_UP: Duration = Duration::from_millis(3);
-/// Once a burst is established, tolerate the gaps a console host leaves while
-/// converting a large paste in chunks, so one paste is not split at an Enter.
-pub(super) const BURST_FOLLOW_UP: Duration = Duration::from_millis(20);
+/// How long each follow-up read waits. Queued paste records are ready at once;
+/// no one types two keys within this window, so typed keys stay keys. It must
+/// be positive: a zero-timeout read consumes at most one record, and the
+/// modifier records a host synthesizes around pasted capitals carry no event,
+/// so a zero wait would end the burst at the first capital letter.
+pub(super) const FOLLOW_UP: Duration = Duration::from_millis(3);
 /// Bound one coalesced event; the remainder of a larger paste follows as the
 /// next paste.
 const MAX_PASTE_BYTES: usize = 256 * 1024;
@@ -39,12 +38,9 @@ pub(super) fn coalesce(
     }
     let mut keys = 1usize;
     while paste.len() < MAX_PASTE_BYTES {
-        let wait = if keys == 1 {
-            FIRST_FOLLOW_UP
-        } else {
-            BURST_FOLLOW_UP
+        let Some(next) = queued(FOLLOW_UP)? else {
+            break;
         };
-        let Some(next) = queued(wait)? else { break };
         if is_release(&next) {
             continue;
         }
@@ -58,9 +54,16 @@ pub(super) fn coalesce(
         return Ok(first);
     }
     // Pasted CR LF arrives as Enter then Ctrl+Enter; keep one line break.
-    Ok(Event::Paste(
-        paste.replace("\r\n", "\n").replace('\r', "\n"),
-    ))
+    let mut paste = paste.replace("\r\n", "\n").replace('\r', "\n");
+    if held.is_none() && paste.ends_with('\n') {
+        paste.truncate(paste.trim_end_matches('\n').len());
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        if paste.is_empty() {
+            return Ok(enter);
+        }
+        *held = Some(enter);
+    }
+    Ok(Event::Paste(paste))
 }
 
 fn is_release(event: &Event) -> bool {
@@ -157,12 +160,29 @@ mod tests {
     }
 
     #[test]
+    fn a_line_break_that_ends_the_burst_still_submits() {
+        // Typed ahead while octet was busy: the text is inserted and the
+        // Enter that followed it still submits.
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+        let (event, held, ..) = run(text("Continue without\r"));
+        assert_eq!(event, Event::Paste("Continue without".into()));
+        assert_eq!(held, Some(enter.clone()));
+
+        let (event, held, ..) = run(text("one\r\ntwo\r\n\r\n"));
+        assert_eq!(event, Event::Paste("one\ntwo".into()));
+        assert_eq!(held, Some(enter.clone()));
+
+        let (event, held, ..) = run(text("\r\r"));
+        assert_eq!((event, held), (enter, None));
+    }
+
+    #[test]
     fn a_lone_keystroke_is_delivered_unchanged_after_one_short_wait() {
         let enter = key(KeyCode::Enter, KeyModifiers::NONE);
         let (event, held, waits, _) = run(vec![enter.clone()]);
         assert_eq!(event, enter);
         assert_eq!(held, None);
-        assert_eq!(waits, [FIRST_FOLLOW_UP]);
+        assert_eq!(waits, [FOLLOW_UP]);
 
         let a = key(KeyCode::Char('a'), KeyModifiers::NONE);
         let (event, ..) = run(vec![a.clone(), release(KeyCode::Char('a'))]);
@@ -206,12 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn bursts_wait_longer_than_the_first_follow_up_and_stay_bounded() {
-        // `a` and its release are read in the short window; once `b` joins,
-        // the burst tolerates longer gaps.
+    fn every_follow_up_is_short_and_bursts_stay_bounded() {
+        // A paste is queued at once, so no follow-up waits longer than a gap
+        // between keys a person or a typing script could produce.
         let (_, _, waits, _) = run(text("abc"));
-        assert_eq!(waits[..2], [FIRST_FOLLOW_UP, FIRST_FOLLOW_UP]);
-        assert!(waits[2..].iter().all(|wait| *wait == BURST_FOLLOW_UP));
+        assert!(waits.iter().all(|wait| *wait == FOLLOW_UP));
 
         let big = "x".repeat(MAX_PASTE_BYTES + 10);
         let events: Vec<Event> = big
