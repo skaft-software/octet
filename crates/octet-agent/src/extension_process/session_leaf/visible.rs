@@ -1,11 +1,33 @@
 //! Borrowed namespace filtering: count before allocating history representations.
 use super::*;
-use crate::session::{Entry, EntryMetadata};
+use crate::session::{Entry, EntryMetadata, UsageRecord};
 use serde::ser::{SerializeMap, SerializeStruct};
 
 pub(super) struct VisibleEntry<'a> {
     pub(super) entry: &'a Entry,
     pub(super) namespace: &'a str,
+    /// Ledger facts for an assistant entry. Pi assistant messages carry their
+    /// own usage, so a mirror without them cannot answer `message.usage`.
+    pub(super) usage: Option<&'a UsageRecord>,
+}
+
+/// Borrowed [`crate::compaction::ModelTurnAssistantMetadata`] wire shape, so a
+/// session view and a live model-turn report the same per-assistant facts.
+struct AssistantMetadata<'a> {
+    entry: &'a Entry,
+    record: &'a UsageRecord,
+}
+
+impl Serialize for AssistantMetadata<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serializer.serialize_struct("ModelTurnAssistantMetadata", 5)?;
+        value.serialize_field("assistant_entry_id", &self.entry.id)?;
+        value.serialize_field("model", &self.record.model)?;
+        value.serialize_field("usage", &self.record.usage)?;
+        value.serialize_field("cost", &self.record.cost)?;
+        value.serialize_field("stop_reason", &self.record.stop_reason)?;
+        value.end()
+    }
 }
 
 struct VisibleMetadata<'a> {
@@ -78,7 +100,7 @@ impl Serialize for VisibleMetadata<'_> {
 impl Serialize for VisibleEntry<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let entry = self.entry;
-        let mut value = serializer.serialize_struct("Entry", 5)?;
+        let mut value = serializer.serialize_struct("Entry", 6)?;
         value.serialize_field("id", &entry.id)?;
         value.serialize_field("parent", &entry.parent)?;
         if let Some(metadata) = &entry.metadata {
@@ -94,6 +116,9 @@ impl Serialize for VisibleEntry<'_> {
             value.serialize_field("timestamp_unix_ms", &timestamp)?;
         }
         value.serialize_field("value", &entry.value)?;
+        if let Some(record) = self.usage {
+            value.serialize_field("assistant_metadata", &AssistantMetadata { entry, record })?;
+        }
         value.end()
     }
 }
@@ -196,11 +221,16 @@ pub(super) fn legacy_snapshot_bytes(
         },
         limit,
     )?;
+    let usage = session.assistant_usage_index();
     let mut add = |entry: &Entry, comma: bool| -> Result<(), ExtensionRuntimeError> {
         validate_metadata(entry, namespace)?;
         total = total.saturating_add(usize::from(comma));
         let bytes = session_snapshot_bytes(
-            &VisibleEntry { entry, namespace },
+            &VisibleEntry {
+                entry,
+                namespace,
+                usage: usage.get(&entry.id).copied(),
+            },
             limit.saturating_sub(total),
         )?;
         total = total.saturating_add(bytes);

@@ -66,6 +66,31 @@ test('mirror: typed durable custom messages have Pi custom_message identity, det
     type: 'custom_message', customType: 'job', content: [{ type: 'text', text: 'model body' }], display: false, details: { secret: 1 } }]);
 });
 
+test('mirror: assistant entries carry their usage-ledger facts the way Pi custom-footer reads them', () => {
+  const usage = { input_tokens: 1200, output_tokens: 300, cache_read_tokens: 50, cache_write_tokens: 0, cache_write_1h_tokens: 0, reasoning_tokens: 0, total_tokens: 1550 };
+  const cost = { input: 3600, output: 4500, reasoning: 0, cache_read: 15, cache_write: 0, total: 8115, total_picodollars_remainder: 0 };
+  const assistant = (id, metadata) => ({ id, parent: null, timestamp_unix_ms: 1700000000000,
+    value: { type: 'message', Assistant: { model: 'probe', protocol: 'open_ai_chat', content: [{ Text: 'answer' }] } },
+    ...(metadata ? { assistant_metadata: { assistant_entry_id: id, model: 'probe', ...metadata } } : {}) });
+  const [priced, unpriced, unrecorded] = translateSessionEntries([
+    assistant('priced', { usage, cost, stop_reason: 'end_turn' }),
+    assistant('unpriced', { usage, cost: null, stop_reason: 'tool_use' }),
+    assistant('unrecorded'),
+  ], 'octet-pi-compat').map(entry => entry.message);
+  assert.deepEqual(priced.usage, { input: 1200, output: 300, cacheRead: 50, cacheWrite: 0, totalTokens: 1550,
+    cost: { input: 0.0036, output: 0.0045, cacheRead: 0.000015, cacheWrite: 0, total: 0.008115 } });
+  assert.equal(priced.stopReason, 'stop');
+  // The footer's own arithmetic over a real branch entry.
+  assert.equal(`↑${(priced.usage.input / 1000).toFixed(1)}k ↓${priced.usage.output} $${priced.usage.cost.total.toFixed(3)}`, '↑1.2k ↓300 $0.008');
+  // Unpriced and unrecorded turns keep absent facts absent; nothing is invented.
+  assert.equal(unpriced.usage.input, 1200);
+  assert.equal(Object.hasOwn(unpriced.usage, 'cost'), false);
+  assert.equal(unpriced.stopReason, 'toolUse');
+  assert.equal(Object.hasOwn(unrecorded, 'usage'), false);
+  assert.throws(() => translateSessionEntries([assistant('foreign', { usage, cost, stop_reason: 'end_turn', assistant_entry_id: 'other' })], 'octet-pi-compat'),
+    /assistant metadata entry mismatch/);
+});
+
 // Only reviewed test code belongs in body; variable values stay in the JSON sidecar.
 async function command(t, body, data = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-messages-'));

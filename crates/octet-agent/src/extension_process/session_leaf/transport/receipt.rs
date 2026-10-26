@@ -61,6 +61,7 @@ pub(in crate::extension_process) fn fits(
         entry: visible::VisibleEntry {
             entry: &entry,
             namespace,
+            usage: None,
         },
         previous_revision: MAX_SAFE,
         view_revision: MAX_SAFE,
