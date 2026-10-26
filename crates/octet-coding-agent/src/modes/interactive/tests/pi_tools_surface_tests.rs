@@ -537,7 +537,11 @@ export default pi => {
         root: &std::path::Path,
         phase: &str,
     ) {
-        std::fs::write(root.join("retained-gate"), phase).unwrap();
+        // The factory polls for the gate and consumes it on sight. Publish it by
+        // rename so a poll can never read the created-but-unwritten empty file,
+        // record `retained-` and delete the gate this phase is waiting on.
+        std::fs::write(root.join("retained-gate.tmp"), phase).unwrap();
+        std::fs::rename(root.join("retained-gate.tmp"), root.join("retained-gate")).unwrap();
         let marker = format!("\"stage\":\"retained-{phase}\"");
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -552,7 +556,12 @@ export default pi => {
             }
         })
         .await
-        .expect("settled same-owner callback must read the live native catalog");
+        .unwrap_or_else(|_| {
+            panic!(
+                "settled same-owner callback must read the live native catalog; trace: {}",
+                std::fs::read_to_string(root.join("trace.jsonl")).unwrap_or_default()
+            )
+        });
     }
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
