@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
@@ -57,7 +57,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Test binary release tooling
         run: |
           sh -n scripts/install.sh
@@ -179,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
@@ -219,7 +219,7 @@ jobs:
             brew install ripgrep
           fi
           rg --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       # Cold compilation has its own bound; retain the full execution budget.
       - name: Build workspace test binaries
         timeout-minutes: 15
@@ -273,7 +273,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         with:
           node-version: "22.19.0"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         if: github.event_name == 'workflow_dispatch'
         with:
           python-version: "3.13"
@@ -281,7 +281,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
         with:
           targets: x86_64-pc-windows-gnu
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           key: x86_64-pc-windows-gnu
       - name: Select the MinGW-w64 linker and C compiler for the GNU target
@@ -618,7 +618,7 @@ jobs:
           path: source
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -681,7 +681,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # This action revision is fixed to Rust 1.88.0; it has no toolchain input.
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: cargo check --workspace --all-targets --all-features --locked
 
   smoke-install:
@@ -689,7 +689,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --root "$RUNNER_TEMP/octet-install"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --version"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --help"
