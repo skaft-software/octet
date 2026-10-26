@@ -7,6 +7,11 @@
 //! so text keys that are already waiting behind a text key are one paste.
 //! Line breaks inside such a burst are pasted text; a break that ends it is
 //! delivered as Enter, so input typed ahead while octet was busy still submits.
+//!
+//! Terminal replies (cursor reports, colour answers) also arrive as one queued
+//! run of key records, starting with Esc. The reply filter reassembles them key
+//! by key, so a run that starts with Esc is delivered unchanged until the
+//! console queue drains.
 use std::io;
 use std::time::Duration;
 
@@ -21,6 +26,63 @@ pub(super) const FOLLOW_UP: Duration = Duration::from_millis(3);
 /// Bound one coalesced event; the remainder of a larger paste follows as the
 /// next paste.
 const MAX_PASTE_BYTES: usize = 256 * 1024;
+/// How long the first read of each poll waits, as the crossterm reader did.
+pub(super) const READ_WAIT: Duration = Duration::from_millis(1);
+
+/// Console input with pastes rebuilt and terminal replies left intact.
+#[derive(Default)]
+pub(super) struct ConsoleInput {
+    /// A non-text key that ended a coalesced paste, delivered next.
+    held: Option<Event>,
+    /// Inside a queued run that began with Esc; cleared once the queue drains.
+    escape_run: bool,
+}
+
+impl ConsoleInput {
+    /// The next event, or `None` when nothing is queued. `read` waits at most
+    /// the given duration for one event.
+    pub(super) fn next(
+        &mut self,
+        mut read: impl FnMut(Duration) -> io::Result<Option<Event>>,
+    ) -> io::Result<Option<Event>> {
+        let first = match self.held.take() {
+            Some(event) => event,
+            None => match read(READ_WAIT)? {
+                Some(event) => event,
+                None => {
+                    self.escape_run = false;
+                    return Ok(None);
+                }
+            },
+        };
+        if self.escape_run || is_escape(&first) {
+            self.escape_run = true;
+            return Ok(Some(first));
+        }
+        coalesce(first, &mut self.held, read).map(Some)
+    }
+}
+
+/// Esc, or Alt+char: a console host delivers `ESC x` from a reply as Alt+x.
+/// AltGr (reported as Ctrl+Alt) produces ordinary text and does not count.
+fn is_escape(event: &Event) -> bool {
+    let Event::Key(KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press | KeyEventKind::Repeat,
+        ..
+    }) = event
+    else {
+        return false;
+    };
+    match code {
+        KeyCode::Esc => true,
+        KeyCode::Char(_) => {
+            modifiers.contains(KeyModifiers::ALT) && !modifiers.contains(KeyModifiers::CONTROL)
+        }
+        _ => false,
+    }
+}
 
 /// Coalesce `first` with the text keys already queued behind it.
 ///
@@ -223,6 +285,71 @@ mod tests {
             alt_b.clone(),
         ]);
         assert_eq!(held, Some(alt_b));
+    }
+
+    /// Drive `ConsoleInput` over `batches`: each batch is queued at once, and
+    /// an empty read separates batches the way a drained console does.
+    fn drain(batches: Vec<Vec<Event>>) -> Vec<Event> {
+        let mut queue: VecDeque<Option<Event>> = VecDeque::new();
+        for batch in batches {
+            queue.extend(batch.into_iter().map(Some));
+            queue.push_back(None);
+        }
+        let mut input = ConsoleInput::default();
+        let mut out = Vec::new();
+        while !queue.is_empty() {
+            if let Some(event) = input.next(|_| Ok(queue.pop_front().flatten())).unwrap() {
+                out.push(event);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_terminal_reply_run_reaches_the_reply_filter_key_by_key() {
+        // A cursor-position reply as console key records, with key-ups.
+        let mut reply = vec![key(KeyCode::Esc, KeyModifiers::NONE)];
+        reply.extend(text("[1;1R"));
+        let events = drain(vec![reply.clone(), text("pasted\r\nlines")]);
+        assert_eq!(events[..reply.len()], reply[..], "the reply is unchanged");
+        assert_eq!(
+            events[reply.len()..],
+            [Event::Paste("pasted\nlines".into())],
+            "once the queue drains, a later paste is rebuilt again"
+        );
+    }
+
+    #[test]
+    fn an_alt_led_reply_run_is_also_left_unchanged() {
+        // ConPTY folds `ESC ]` into Alt+] before the OSC 11 colour reply.
+        let mut reply = vec![key(KeyCode::Char(']'), KeyModifiers::ALT)];
+        reply.extend(text("11;rgb:0c0c/0c0c/0c0c"));
+        reply.push(key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert_eq!(drain(vec![reply.clone()]), reply);
+
+        // AltGr text is not a reply and still pastes.
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let events = drain(vec![vec![
+            key(KeyCode::Char('@'), altgr),
+            key(KeyCode::Char('x'), KeyModifiers::NONE),
+        ]]);
+        assert_eq!(events, [Event::Paste("@x".into())]);
+    }
+
+    #[test]
+    fn an_escape_that_ends_a_paste_starts_an_unchanged_run() {
+        let mut batch = text("ab");
+        batch.push(key(KeyCode::Esc, KeyModifiers::NONE));
+        batch.extend(text("]11;rgb"));
+        let events = drain(vec![batch]);
+        assert_eq!(events[0], Event::Paste("ab".into()));
+        assert_eq!(events[1], key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            events[2..]
+                .iter()
+                .all(|event| matches!(event, Event::Key(_))),
+            "{events:?}"
+        );
     }
 
     #[test]

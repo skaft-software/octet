@@ -487,9 +487,9 @@ pub struct ForegroundEvents {
     // Open/register lazily: construction must not need a tty or Tokio runtime.
     #[cfg(unix)]
     tty: std::sync::OnceLock<Option<AsyncFd<OwnedFd>>>,
-    /// A non-text key that ended a coalesced console paste, delivered next.
+    /// Console records with pastes rebuilt and terminal replies intact.
     #[cfg(not(unix))]
-    held: Option<Event>,
+    console: console_paste::ConsoleInput,
 }
 
 impl ForegroundEvents {
@@ -630,26 +630,20 @@ impl Stream for ForegroundEvents {
         }
         #[cfg(not(unix))]
         {
-            let mut held = this.held.take();
+            let mut console = std::mem::take(&mut this.console);
+            // The console API never reports bracketed paste; rebuild it.
             let result = this.poll_next_with(cx, || {
-                let first = match held.take() {
-                    Some(event) => event,
-                    None if crossterm::event::poll(Duration::from_millis(1))? => {
-                        crossterm::event::read()?
-                    }
-                    None => return Ok(None),
-                };
-                // The console API never reports bracketed paste; rebuild it.
-                console_paste::coalesce(first, &mut held, |wait| {
-                    if crossterm::event::poll(wait)? {
-                        crossterm::event::read().map(Some)
-                    } else {
-                        Ok(None)
-                    }
-                })
-                .map(|event| Some(event.into()))
+                console
+                    .next(|wait| {
+                        if crossterm::event::poll(wait)? {
+                            crossterm::event::read().map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .map(|event| event.map(Into::into))
             });
-            this.held = held;
+            this.console = console;
             result
         }
     }
@@ -1143,6 +1137,33 @@ mod tests {
             assert!(replies.begin_query(start));
             let wire = format!("\x1b]11;rgb:0c0c/0c0c/0c0c{ending}");
             for event in windows_decoded(&wire) {
+                replies.push(event, start);
+                assert!(replies.ready.is_empty(), "reply byte escaped: {wire:?}");
+            }
+            assert_eq!(
+                replies.color,
+                Some(RgbColor {
+                    r: 12,
+                    g: 12,
+                    b: 12
+                })
+            );
+            assert!(replies.held.is_empty());
+        }
+    }
+
+    #[test]
+    fn osc11_windows_reply_survives_console_paste_recovery() {
+        // The reply's records are queued at once, exactly like a paste; the
+        // paste recovery in front of the filter must leave them as keys.
+        for ending in ["\x07", "\x1b\\"] {
+            let start = Instant::now();
+            let mut replies = BackgroundReplies::default();
+            assert!(replies.begin_query(start));
+            let wire = format!("\x1b]11;rgb:0c0c/0c0c/0c0c{ending}");
+            let mut queued: VecDeque<Event> = windows_decoded(&wire).into();
+            let mut console = console_paste::ConsoleInput::default();
+            while let Some(event) = console.next(|_| Ok(queued.pop_front())).unwrap() {
                 replies.push(event, start);
                 assert!(replies.ready.is_empty(), "reply byte escaped: {wire:?}");
             }
