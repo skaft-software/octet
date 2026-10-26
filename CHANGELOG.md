@@ -17,6 +17,14 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 - Native command catalogs and resource provenance stay bound to the current
   owner across reloads; metadata never grants execution authority.
 
+### Security
+
+- Update zstd from 0.13.3 to 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2) for
+  RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 and
+  RUSTSEC-2026-0410. octet only compresses Codex request bodies with one-shot
+  zstd calls and does not use the affected reused-stream, seekable,
+  legacy-frame decompression or WebAssembly paths.
+
 ### Fixed
 
 - Pi assistant messages from `ctx.sessionManager` carry their recorded token
