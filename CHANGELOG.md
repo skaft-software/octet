@@ -26,6 +26,9 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 - On Windows, OpenAI, Copilot and other sign-in flows, and transcript link
   clicks, open the default browser instead of File Explorer. URLs go to the
   registered protocol handler as one argument, so OAuth query strings survive.
+- Pasting multi-line text in Windows terminals inserts it as one paste instead
+  of submitting at the first line break. The Windows console input API never
+  reports bracketed paste, so text keys queued together are recombined.
 - Captured transcript links retain their click targets on terminals without
   OSC 8 support, including Apple Terminal, without emitting unsupported controls
   or changing the HTTP(S)-only activation and stale-geometry fences.

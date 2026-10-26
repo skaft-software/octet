@@ -52,6 +52,9 @@ const MAX_REPLY_BYTES: usize = 128;
 const MAX_HELD_EVENTS: usize = MAX_REPLY_BYTES * 2;
 #[path = "terminal_input/codec.rs"]
 mod codec;
+#[cfg(any(not(unix), test))]
+#[path = "terminal_input/console_paste.rs"]
+mod console_paste;
 #[path = "terminal_input/intercept.rs"]
 mod intercept;
 #[cfg(unix)]
@@ -484,6 +487,9 @@ pub struct ForegroundEvents {
     // Open/register lazily: construction must not need a tty or Tokio runtime.
     #[cfg(unix)]
     tty: std::sync::OnceLock<Option<AsyncFd<OwnedFd>>>,
+    /// A non-text key that ended a coalesced console paste, delivered next.
+    #[cfg(not(unix))]
+    held: Option<Event>,
 }
 
 impl ForegroundEvents {
@@ -623,13 +629,29 @@ impl Stream for ForegroundEvents {
             result
         }
         #[cfg(not(unix))]
-        this.poll_next_with(cx, || {
-            if crossterm::event::poll(Duration::from_millis(1))? {
-                crossterm::event::read().map(|event| Some(event.into()))
-            } else {
-                Ok(None)
-            }
-        })
+        {
+            let mut held = this.held.take();
+            let result = this.poll_next_with(cx, || {
+                let first = match held.take() {
+                    Some(event) => event,
+                    None if crossterm::event::poll(Duration::from_millis(1))? => {
+                        crossterm::event::read()?
+                    }
+                    None => return Ok(None),
+                };
+                // The console API never reports bracketed paste; rebuild it.
+                console_paste::coalesce(first, &mut held, |wait| {
+                    if crossterm::event::poll(wait)? {
+                        crossterm::event::read().map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .map(|event| Some(event.into()))
+            });
+            this.held = held;
+            result
+        }
     }
 }
 
