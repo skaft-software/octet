@@ -318,6 +318,203 @@ async fn opencode_parallel_google_calls_survive_streaming_and_result_replay() {
     }
 }
 
+// A signature is bound to the provider's original part. The scripted endpoint
+// rejects changed signed text on continuation, as opposed to accepting any JSON
+// and letting an assertion after a successful response miss the HTTP 400 path.
+#[tokio::test]
+async fn signed_delta_replay_with_large_write_uses_native_google_contract_on_every_route() {
+    use octet_ai::types::ReasoningOptions;
+    use octet_ai::{
+        AssistantPart, ConstrainedSampling, ConstrainedSamplingStrict, ReasoningCapability,
+        ReasoningControl, ReasoningEffort, ToolResult, ToolResultPart,
+    };
+    use serde_json::{json, Value};
+    use wiremock::{Request as WireRequest, Respond};
+
+    const CODE: &str = "line = \"quoted\";\n";
+    let arguments = json!({"path": "large.txt", "content": CODE.repeat(16_384)});
+    struct SignedReplay {
+        arguments: Value,
+    }
+    impl Respond for SignedReplay {
+        fn respond(&self, request: &WireRequest) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let contents = body["contents"].as_array().unwrap();
+            if contents.len() == 1 {
+                let mut sse = String::new();
+                // Repeated, extending-prefix and shortening-prefix text chunks
+                // are all deltas, for thought summaries as well as visible text.
+                for thought in [true, false] {
+                    for text in ["a", "a", "aa", "a"] {
+                        sse.push_str(&format!("data: {}\n\n", json!({
+                            "candidates": [{"content": {"parts": [{"text": text, "thought": thought}]}}]
+                        })));
+                    }
+                    sse.push_str(&format!("data: {}\n\n", json!({
+                        "candidates": [{"content": {"parts": [{"text": "", "thought": thought,
+                            "thoughtSignature": if thought { "dGhvdWdodA==" } else { "dGV4dA==" }}]}}]
+                    })));
+                }
+                sse.push_str(&format!("data: {}\n\n", json!({
+                    "candidates": [{"content": {"parts": [{
+                        "functionCall": {"id": "write-1", "name": "write", "args": self.arguments},
+                        "thoughtSignature": "d3JpdGU="
+                    }]}, "finishReason": "STOP"}]
+                })));
+                return ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse);
+            }
+            let expected = json!([
+                {"text": "aaaaa", "thought": true, "thoughtSignature": "dGhvdWdodA=="},
+                {"text": "aaaaa", "thoughtSignature": "dGV4dA=="},
+                {"functionCall": {"id": "write-1", "name": "write", "args": self.arguments},
+                 "thoughtSignature": "d3JpdGU="}
+            ]);
+            if contents[1]["parts"] != expected {
+                return ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {"code": 400, "status": "INVALID_ARGUMENT",
+                        "message": "synthetic signed-part replay mismatch"}
+                }));
+            }
+            assert_eq!(
+                contents[2]["parts"][0]["functionResponse"],
+                json!({
+                    "id": "write-1", "name": "write", "response": {"output": "written"}
+                })
+            );
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Written.\"}]},\"finishReason\":\"STOP\"}]}\n\n")
+        }
+    }
+
+    for (provider, api_name, base_path) in [
+        ("google", "gemini-4-argon", "/v1beta/"),
+        ("opencode", "gemini-4-argon", "/zen/v1/"),
+        (
+            "opencode-go",
+            "gemini-4-argon-contributor",
+            "/inference/go/v1/",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "{base_path}models/{api_name}:streamGenerateContent"
+            )))
+            .respond_with(SignedReplay {
+                arguments: arguments.clone(),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut model = fixture_model(&format!("{}{base_path}", server.uri()));
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.id = ModelId(format!("{provider}/{api_name}"));
+        spec.api_name = api_name.into();
+        spec.endpoint = EndpointId(format!("{provider}-google"));
+        spec.cache.send_session_affinity_headers = provider != "google";
+        spec.capabilities.reasoning = Some(ReasoningCapability {
+            options: Some(ReasoningOptions {
+                values: vec!["LOW".into(), "MEDIUM".into(), "HIGH".into()],
+                default: Some("HIGH".into()),
+            }),
+            control: ReasoningControl::Effort,
+            exposes_text: true,
+            preserves_state: true,
+            effort_budgets: None,
+            openai_chat_mode: Default::default(),
+            min_effort: ReasoningEffort::Low,
+            max_effort: ReasoningEffort::High,
+        });
+        let endpoint = Arc::make_mut(&mut model.endpoint);
+        endpoint.id = model.spec.endpoint.clone();
+        if provider != "google" {
+            endpoint.auth = Auth::bearer("fixture-key");
+        }
+        let mut request = fixture_request();
+        request.reasoning = ReasoningConfig::Effort(ReasoningEffort::Medium);
+        request.session_id = Some("signed-write".into());
+        request.max_output_tokens = Some(65_536);
+        request.tool_choice = ToolChoice::Auto;
+        request.tools = vec![ToolDef {
+            async_execution: false,
+            name: "write".into(),
+            description: "Write a file.".into(),
+            parameters: json!({"type": "object", "properties": {
+                "path": {"type": "string"}, "content": {"type": "string"}
+            }, "required": ["path", "content"]}),
+            constrained_sampling: Some(ConstrainedSampling::JsonSchema {
+                strict: ConstrainedSamplingStrict::Require,
+            }),
+        }];
+        let client = AiClient::new();
+        let first = client.complete(&model, request.clone()).await.unwrap();
+        let call = first
+            .message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                AssistantPart::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        assert!(call.argument_error.is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&call.arguments_json).unwrap(),
+            arguments
+        );
+        let id = call.id.clone();
+        // Exercise the durable canonical representation, not just an in-memory
+        // pass-through of provider JSON.
+        let assistant =
+            serde_json::from_str(&serde_json::to_string(&first.message).unwrap()).unwrap();
+        request.messages.push(Message::Assistant(assistant));
+        request.messages.push(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(ToolResult {
+                tool_call_id: id,
+                content: vec![ToolResultPart::Text("written".into())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        }));
+        let final_response = client.complete(&model, request).await.unwrap();
+        assert!(matches!(final_response.message.content.as_slice(),
+            [AssistantPart::Text(text)] if text == "Written."
+        ));
+        for request in server.received_requests().await.unwrap() {
+            assert_eq!(request.url.query(), Some("alt=sse"));
+            if provider != "google" {
+                assert_eq!(request.headers["authorization"], "Bearer fixture-key");
+                assert_eq!(request.headers["x-opencode-session"], "signed-write");
+            } else {
+                assert_eq!(request.headers["x-goog-api-key"], "fixture-key");
+            }
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"],
+                json!({
+                    "thinkingLevel": "MEDIUM", "includeThoughts": true
+                })
+            );
+            assert!(body["generationConfig"]["thinkingConfig"]
+                .get("thinkingBudget")
+                .is_none());
+            let declaration = &body["tools"][0]["functionDeclarations"][0];
+            assert!(declaration.get("parameters").is_none());
+            assert_eq!(
+                declaration["parametersJsonSchema"]["additionalProperties"],
+                false
+            );
+            assert_eq!(
+                body["toolConfig"]["functionCallingConfig"]["mode"],
+                "VALIDATED"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn gemini_current_error_and_drop_cancellation_fixtures() {
     let error_server = MockServer::start().await;

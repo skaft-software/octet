@@ -493,6 +493,42 @@ fn text_continuation_and_empty_terminal_signature_follow_the_active_part() {
 }
 
 #[test]
+fn repeated_and_prefix_related_text_chunks_are_preserved_as_deltas() {
+    for thought in [false, true] {
+        let response = streamed_parts(vec![
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![serde_json::json!({"text": "aa", "thought": thought})],
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![
+                serde_json::json!({"text": "", "thought": thought, "thoughtSignature": "c2lnbmVk"}),
+            ],
+        ]);
+        let [AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature,
+        }), part] = response.message.content.as_slice()
+        else {
+            panic!("expected one signed part: {response:?}");
+        };
+        assert_eq!(signature, "c2lnbmVk");
+        if thought {
+            assert!(matches!(part, AssistantPart::Reasoning(reasoning)
+                if reasoning.text.as_deref() == Some("aaaaa")));
+        } else {
+            assert!(matches!(part, AssistantPart::Text(text) if text == "aaaaa"));
+        }
+        let mut request = base_request();
+        request.messages.push(Message::Assistant(response.message));
+        let contents =
+            google_contents(&model_with_api_name("gemini-4-argon-contributor"), &request).unwrap();
+        let replay = &contents.last().unwrap()["parts"][0];
+        assert_eq!(replay["text"], "aaaaa");
+        assert_eq!(replay["thoughtSignature"], "c2lnbmVk");
+        assert_eq!(replay.get("thought"), thought.then_some(&Value::Bool(true)));
+    }
+}
+
+#[test]
 fn incremental_argument_size_matches_recursive_merge_and_escaping() {
     let mut prior = serde_json::json!({});
     let mut size = argument_json_size(&prior).unwrap();

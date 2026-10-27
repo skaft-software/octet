@@ -825,16 +825,14 @@ fn decode_google_text_part(
     }
     attach_thought_signature(builder, index, signature)?;
 
-    let previous = if thought {
-        builder.reasoning_text_buffers.get(&index)
-    } else {
-        builder.text_buffers.get(&index)
-    }
-    .map(String::as_str)
-    .unwrap_or_default();
-    let Some(delta) = cumulative_or_delta(previous, &text) else {
+    // generateContent streams text deltas, not cumulative text snapshots. A
+    // repeated or prefix-related chunk is still new content. Deduplicating it
+    // corrupts both visible output and the signed part replayed on the next
+    // request. Function-call argument snapshots have separate merge handling.
+    if text.is_empty() {
         return Ok(());
-    };
+    }
+    let delta = text;
     if thought {
         emit_event(
             events,
@@ -953,18 +951,6 @@ fn attach_thought_signature(
 
 fn signature_is_bounded(signature: &str) -> bool {
     !signature.is_empty() && signature.len() <= MAX_THOUGHT_SIGNATURE_BYTES
-}
-
-fn cumulative_or_delta(previous: &str, next: &str) -> Option<String> {
-    if let Some(delta) = next.strip_prefix(previous) {
-        (!delta.is_empty()).then(|| delta.to_owned())
-    } else if previous.starts_with(next) {
-        // Repeated/stale cumulative snapshot.
-        None
-    } else {
-        // Native streaming deltas are not prefix-related.
-        Some(next.to_owned())
-    }
 }
 
 fn google_canonical_index(builder: &mut ResponseBuilder, key: &str) -> usize {

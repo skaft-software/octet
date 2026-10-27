@@ -50,7 +50,9 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   retain native audio in history without silent removal or provider switching.
 - Google streaming preserves signed assistant text/reasoning boundaries across tool
   calls and chunk-position changes, including signatures on empty final text
-  chunks. Signatures stay attached to their original parts during replay.
+  chunks. Repeated and prefix-related text/thought deltas are no longer mistaken
+  for cumulative snapshots, preserving the original signed text on tool-result
+  replay through Gemini, Vertex and native Google-compatible gateways.
 - Pi startup publishes real model/scoped-model facts before callbacks run.
 - CamelCase extension tools such as `mcpScript` retain their exact spelling.
   Tool allowlists and exclusions are consistently case-sensitive, including
