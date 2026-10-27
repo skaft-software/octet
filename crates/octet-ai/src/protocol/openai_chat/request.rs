@@ -110,6 +110,8 @@ enum ChatCompletionsMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_details: Option<Vec<serde_json::Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ChatToolCall>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         audio: Option<ChatAssistantAudioRef>,
@@ -514,9 +516,22 @@ pub(crate) fn build_request(
                 let mut reasoning_parts = Vec::new();
                 let mut tool_calls = Vec::new();
                 let mut audio_ref = None;
+                // A gateway that returned `reasoning_details` for this exact
+                // model needs them back unchanged, with the reasoning text in
+                // `reasoning` rather than mixed into visible content.
+                let reasoning_details = (assistant.protocol == Protocol::OpenAiChat
+                    && assistant.model == model.spec.id)
+                    .then(|| replayable_reasoning_details(assistant, &model.spec.id))
+                    .filter(|details| !details.is_empty());
+                let mut details_reasoning_text = Vec::new();
 
                 for part in &assistant.content {
                     match part {
+                        AssistantPart::Reasoning(reasoning) if reasoning_details.is_some() => {
+                            if let Some(text) = &reasoning.text {
+                                details_reasoning_text.push(text.clone());
+                            }
+                        }
                         AssistantPart::Text(ref text) => {
                             text_parts.push(text.clone());
                             if mistral_profile {
@@ -649,16 +664,22 @@ pub(crate) fn build_request(
                     Some(tool_calls)
                 };
 
+                let reasoning = if reasoning_details.is_some() {
+                    (!details_reasoning_text.is_empty()).then(|| details_reasoning_text.join(""))
+                } else {
+                    cerebras_reasoning
+                        .then(|| reasoning_content.clone())
+                        .flatten()
+                };
                 messages.push(ChatCompletionsMessage::Assistant {
                     content: content_str,
-                    reasoning: cerebras_reasoning
-                        .then(|| reasoning_content.clone())
-                        .flatten(),
+                    reasoning,
                     reasoning_content: if cerebras_reasoning {
                         None
                     } else {
                         reasoning_content
                     },
+                    reasoning_details,
                     tool_calls: tool_calls_opt,
                     audio: audio_ref,
                 });
@@ -1060,4 +1081,48 @@ fn add_cache_control_to_instruction(
         }
         ChatInstructionContent::Text(_) => None,
     }
+}
+
+/// `reasoning_details` this model returned on `assistant`, in order. As in
+/// OpenRouter's SDK, a `reasoning.text` entry in the Anthropic or Gemini
+/// format without its signature is dropped: those providers reject unsigned
+/// reasoning, and the remaining entries are still valid on their own.
+fn replayable_reasoning_details(
+    assistant: &crate::types::AssistantMessage,
+    model: &crate::types::ModelId,
+) -> Vec<serde_json::Value> {
+    assistant
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Reasoning(crate::types::ReasoningPart {
+                state:
+                    Some(crate::types::ReasoningState {
+                        protocol: Protocol::OpenAiChat,
+                        model: state_model,
+                        kind: crate::types::ReasoningStateKind::ChatReasoningDetails { details },
+                    }),
+                ..
+            }) if state_model == model => Some(details),
+            _ => None,
+        })
+        .flatten()
+        .filter(|detail| {
+            if detail.get("type").and_then(serde_json::Value::as_str) != Some("reasoning.text") {
+                return true;
+            }
+            let format = detail
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("anthropic-claude-v1");
+            if format != "anthropic-claude-v1" && format != "google-gemini-v1" {
+                return true;
+            }
+            detail
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|signature| !signature.is_empty())
+        })
+        .cloned()
+        .collect()
 }

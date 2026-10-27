@@ -38,8 +38,11 @@ pub(super) const DEFAULT_STREAM_INITIAL_TIMEOUT: Duration = Duration::from_secs(
 /// Maximum silence allowed between SSE body chunks after the response starts.
 /// Slow local servers can pause for several minutes between reasoning/output
 /// chunks without being dead, especially while paging or swapping a large
-/// model.
-pub(super) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// model. Gemini models never stream tool-call arguments, so a large `write`
+/// arrives in one chunk after the whole call is generated; the stream is
+/// silent for that long. This matches the initial wait so such a call can
+/// finish, while the overall deadline still bounds a wedged response.
+pub(super) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Absolute deadline for one response-body read. This remains finite so a
 /// wedged provider is eventually surfaced, while leaving room for large
 /// compaction/reasoning turns and rate-limited gateways.

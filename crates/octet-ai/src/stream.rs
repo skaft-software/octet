@@ -235,6 +235,12 @@ pub(crate) struct ResponseBuilder {
     pub(crate) text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_text_buffers: HashMap<usize, String>,
     pub(crate) reasoning_states: HashMap<usize, ReasoningState>,
+    /// Chat Completions `reasoning_details` merged across deltas. They become
+    /// the reasoning state of `chat_reasoning_details_index` when the response
+    /// is assembled, so late signatures still reach the part.
+    pub(crate) chat_reasoning_details: Vec<serde_json::Value>,
+    pub(crate) chat_reasoning_details_bytes: usize,
+    pub(crate) chat_reasoning_details_index: Option<usize>,
     /// Opaque provider metadata retained immediately before its target part.
     pub(crate) part_metadata: HashMap<usize, ProviderPartMetadata>,
     pub(crate) tool_call_builders: HashMap<usize, ToolCallBuilder>,
@@ -317,6 +323,9 @@ impl ResponseBuilder {
             text_buffers: HashMap::with_capacity(4),
             reasoning_text_buffers: HashMap::with_capacity(2),
             reasoning_states: HashMap::with_capacity(2),
+            chat_reasoning_details: Vec::new(),
+            chat_reasoning_details_bytes: 0,
+            chat_reasoning_details_index: None,
             part_metadata: HashMap::with_capacity(2),
             tool_call_builders: HashMap::with_capacity(4),
             media_parts: HashMap::with_capacity(2),
@@ -636,6 +645,9 @@ impl ResponseBuilder {
                     .as_ref()
                     .map_or(0, String::len)
                     .checked_add(encrypted_content.as_ref().map_or(0, String::len)),
+                crate::types::ReasoningStateKind::ChatReasoningDetails { details } => {
+                    serde_json::to_vec(details).ok().map(|bytes| bytes.len())
+                }
             }
         }
 
@@ -875,6 +887,17 @@ impl ResponseBuilder {
     }
 
     fn finish_normalized(mut self) -> Result<Response, AiError> {
+        if let Some(index) = self.chat_reasoning_details_index {
+            let details = std::mem::take(&mut self.chat_reasoning_details);
+            if !details.is_empty() {
+                let state = ReasoningState {
+                    protocol: self.protocol,
+                    model: self.model.clone(),
+                    kind: crate::types::ReasoningStateKind::ChatReasoningDetails { details },
+                };
+                self.set_reasoning_state(index, state)?;
+            }
+        }
         let mut content = Vec::new();
 
         // Sort indices based on first-observation order

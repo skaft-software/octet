@@ -53,6 +53,15 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   chunks. Repeated and prefix-related text/thought deltas are no longer mistaken
   for cumulative snapshots, preserving the original signed text on tool-result
   replay through Gemini, Vertex and native Google-compatible gateways.
+- OpenRouter `reasoning_details` are kept with each reply and returned unchanged
+  on the next request to the same model, so Gemini 3-class and Anthropic models
+  keep their signed reasoning across tool calls. As in OpenRouter's SDK, unsigned
+  Anthropic/Gemini text entries are not returned, and replayed reasoning goes in
+  `reasoning` instead of the visible assistant content.
+- A provider stream may stay silent for 15 minutes after its first byte instead
+  of 5. Gemini models never stream tool-call arguments, so a large file write was
+  cut off while the model was still generating it. The 15-minute first-byte wait
+  and one-hour response deadline are unchanged.
 - Pi startup publishes real model/scoped-model facts before callbacks run.
 - CamelCase extension tools such as `mcpScript` retain their exact spelling.
   Tool allowlists and exclusions are consistently case-sensitive, including
