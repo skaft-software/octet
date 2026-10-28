@@ -16,6 +16,14 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   factories with OS permissions, without granting native credential disclosure.
 - Native command catalogs and resource provenance stay bound to the current
   owner across reloads; metadata never grants execution authority.
+- Pi 1.4 support. `--from-pi` and the installed-Pi fallback accept managed Pi
+  1.0.2 through 1.4.x, and the adapter follows Pi 1.4's extension API:
+  `before_agent_start` reports `messageType: "user"`, `agent_settled` reports
+  `aborted`, tool lifecycle events carry `toolCallId`, `toolName` and
+  `durationMs`, tools may declare `reachesTools` and namespace `aliases`,
+  `prepareLoadout` gets `getPromptGuidelines()`, and `@earendil-works/pi-ai/models`
+  resolves like the pi-ai root. Pi 1.4's 79 example extensions load exactly as
+  Pi 1.0.2's do.
 
 ### Security
 
@@ -62,6 +70,17 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   of 5. Gemini models never stream tool-call arguments, so a large file write was
   cut off while the model was still generating it. The 15-minute first-byte wait
   and one-hour response deadline are unchanged.
+- Long sessions no longer stop at 256 MiB or one million records with "session
+  append exceeds storage bounds". A session can grow to 512 MiB, about the
+  largest file Pi can reopen, and a full session now says so and suggests
+  `/new`; it stays saved and resumable.
+- Your own skills in `~/.agents/skills`, `~/.pi/agent/skills` and
+  `~/.octet/skills` now replace a skill of the same name bundled with an
+  installed extension, as in Pi, and doing so no longer prints a name-collision
+  warning.
+- The computer-use and Cua Driver skills let the agent work in apps and sites
+  where you are already signed in once you approve that app and account. Signing
+  in, passwords and two-factor prompts stay with you.
 - Pi startup publishes real model/scoped-model facts before callbacks run.
 - CamelCase extension tools such as `mcpScript` retain their exact spelling.
   Tool allowlists and exclusions are consistently case-sensitive, including
