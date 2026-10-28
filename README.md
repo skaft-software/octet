@@ -16,8 +16,10 @@ in any language.
 
 **v0.10.0 is octet's first Pi-compatible release.** Bring your Pi extensions,
 skills, prompt templates, themes and custom UI; octet keeps the agent loop native.
-[Get started with your Pi setup](docs/pi-compatibility.md). Pi is Mario Zechner's
-coding agent; its licence and attribution are retained.
+We're working toward full compatibility with existing Pi setups (Pi 1.0.2
+through 1.4.x today); the [API ledger](docs/pi-extension-api.md) shows what works
+and what doesn't yet. [Get started with your Pi setup](docs/pi-compatibility.md).
+Pi is Mario Zechner's coding agent; its licence and attribution are retained.
 
 MCP, web search, subagents, codemode, computer use and the
 [Pi adapter](extensions/octet-pi-compat/README.md) are optional first-party

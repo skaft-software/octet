@@ -4,16 +4,19 @@
 extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
-The adapter targets **Pi 1.0.2's public extension API** and requires Node 22.19+.
-Rust still owns the agent loop, sessions, permissions and terminal; the adapter
-loads extension code, not a second Pi agent. Ordinary octet use does not need Node.
+We're working toward full compatibility with existing Pi setups. The adapter
+follows **Pi 1.4's public extension API**, works with managed Pi installs from
+1.0.2 through 1.4.x, and needs Node 22.19+. Rust still owns the agent loop,
+sessions, permissions and terminal; the adapter loads extension code, not a
+second Pi agent. Ordinary octet use does not need Node.
 
 See the [v0.10.0 release notes](releases/v0.10.0.md) for downloads and launch scope.
 Pi support requires octet 0.10.0 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
-The adapter pins Pi's jiti 2.7.0, TypeBox 1.3.27 and pi-tui 1.0.2 dependencies.
+The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.4
+ship, and pi-tui 1.0.2's components.
 Compatibility concerns public extensions, not Pi's private internals or complete CLI.
 
 <a id="use-your-pi-setup"></a>
@@ -57,8 +60,8 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 
 ## Bring your Pi extensions
 
-Requires Node **22.19.0 or newer** and an existing managed **Pi 1.0.2**
-installation. The entrypoints reject older Node versions before loading adapter
+Requires Node **22.19.0 or newer** and an existing managed Pi installation,
+**1.0.2 through 1.4.x**. The entrypoints reject older Node versions before loading adapter
 dependencies or factories. Bun's existing execution path remains available but
 is separately unqualified. From a source checkout, install dependencies once:
 
@@ -286,9 +289,9 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Only managed Pi 1.0.2 is accepted.
+Managed Pi 1.0.2 through 1.4.x is accepted.
 
-This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
+This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
 
 - Pi's built-in tool factories run commands and file reads/writes in that
@@ -300,7 +303,7 @@ This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
   terminal. Pi functions that would start Pi sessions or agents, call models,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
-- A missing Pi install, or any version other than 1.0.2, fails loudly; nothing
+- A missing Pi install, or a version outside 1.0.2–1.4.x, fails loudly; nothing
   downloads or switches Pi versions silently.
 
 ## Qualification and reproduction

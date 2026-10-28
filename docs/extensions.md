@@ -1,7 +1,7 @@
 # Executable extensions
 
 Extensions run as subprocesses over JSON-RPC. The optional Pi adapter implements
-the reviewed subset of **Pi 1.0.2's public extension API** that the
+the reviewed subset of **Pi 1.4's public extension API** that the
 [27-row ledger](pi-extension-api.md) records; Pi defines that API's semantics,
 and rows the adapter does not implement are marked partial or missing there. The
 adapter is not a general Pi runtime. Third-party package internals, the Pi CLI

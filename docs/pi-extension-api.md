@@ -1,11 +1,15 @@
-# Pi 1.0.2 extension API ledger
+# Pi extension API ledger
 
-Pi compatibility starts with octet 0.10.0. This ledger records individual API
-coverage and development evidence. For installation and launch scope, see
+Pi compatibility starts with octet 0.10.0, and we're working toward full
+compatibility with existing Pi setups. This ledger records what each part of the
+API does in octet today. For installation and launch scope, see
 [Pi compatibility](pi-compatibility.md) and the [release notes](releases/v0.10.0.md).
 
-Target: Pi 1.0.2 (`200387122ca450d6387f033949423114a270b96c`),
+Target: Pi 1.4.0's public extension API,
 `packages/coding-agent/src/core/extensions/types.ts` and `docs/extensions.md`.
+The rows below were first written against Pi 1.0.2
+(`200387122ca450d6387f033949423114a270b96c`); Pi 1.1 through 1.4 added only
+the members listed in [Pi 1.1–1.4 additions](#pi-11-14-additions).
 Octet replicates that public API under its extension protocol through the
 `octet-pi-compat` Node adapter. This ledger describes public API behavior, not
 blanket acceptance of third-party packages, private Pi modules, the complete
@@ -82,6 +86,26 @@ cargo test -p octet-coding-agent --lib --locked --offline pi_exec_contract_tests
 These qualify the listed interactive and Unix process behaviors, not all
 members of rows 3–4 and 20. Those rows remain partial; the outstanding members
 above are still required.
+
+<a id="pi-11-14-additions"></a>
+
+## Pi 1.1–1.4 additions
+
+| Pi | Member | octet |
+|----|--------|-------|
+| 1.1 | `durationMs` on `tool_execution_end` | The host's measured execution time. Tool lifecycle events also carry `toolCallId` and `toolName`. |
+| 1.1 | `durationMs`, `outputPad` in the tool render context | Always `undefined` and `0`: octet records no per-result duration for renderers and pads no tool rows. |
+| 1.1 | `aborted` on `agent_settled` | `true` when the run was cancelled or interrupted. |
+| 1.0.4 | `ToolLoadout.getPromptGuidelines(name)` | Returns the tool's `promptGuidelines`, or `[]`. |
+| 1.2 | `reachesTools` on tool definitions | Accepted and returned by `getAllTools()`. octet never registers tools late, so the host doesn't call it. |
+| 1.2 | `aliases` on tool namespaces | Accepted (up to 16) and returned by `getAllTools()` and `getNamespace()`. |
+| 1.2 | `before_agent_start` `messageType` | Always `"user"`. **Gap:** runs started by `pi.sendMessage(..., { triggerTurn: true })` don't yet fire a `"custom"` event. |
+| 1.4 | `@earendil-works/pi-ai/models` import | Resolves like the `pi-ai` root, through the same guarded namespace. |
+
+The installed-Pi fallback accepts managed Pi 1.0.2 through 1.4.x. Exports that
+first appear after 1.0.2 are refused unless classified; the pure helpers
+`formatReadLineRange`, `parseToolCallArguments`, `AI_TELEMETRY_SCHEMA` and
+`PI_AI_VERSION` are allowed.
 
 ## Existing designs
 

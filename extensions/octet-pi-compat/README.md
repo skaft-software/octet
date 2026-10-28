@@ -1,7 +1,8 @@
 # Pi extension compatibility
 
 **The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
-Import your existing Pi 1.0.2 setup or select extension entrypoints manually.
+Import your existing Pi setup (managed Pi 1.0.2 through 1.4.x) or select
+extension entrypoints manually.
 One Node process loads unchanged extension factories; Rust owns the agent,
 sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
 fallback loads helpers in that process, not a second Pi agent.
@@ -39,7 +40,7 @@ node extensions/octet-pi-compat/configure.mjs --reviewed --from-pi \
 octet --extension-dir /absolute/local-extensions --enable-extension octet-pi-compat
 ```
 
-`--from-pi` uses the installed Pi 1.0.2 resolver, probes each enabled factory on
+`--from-pi` uses the installed Pi's own resolver, probes each enabled factory on
 octet's emulated path, then automatically tries installed Pi when loading fails
 or a bounded source scan detects direct Pi tool execution, such as hashline's
 image-read branch. Child-tool descriptors alone stay on the emulated path.
@@ -123,20 +124,22 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.0 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
-1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
-Imports resolve through the same module table as Pi 1.0.2's extension loader:
+octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
+through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
+2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
+resolve through the same module table as Pi 1.4's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
-root and `pi-ai/compat` share one entry, and both `@earendil-works` and old
-`@mariozechner` Pi imports alias to the same host facades. `pi-agent-core`,
-`pi-ai/oauth` and `pi-ai/providers/all` come only from the installed Pi 1.0.2.
+root, `pi-ai/compat` and `pi-ai/models` share one entry, and both
+`@earendil-works` and old `@mariozechner` Pi imports alias to the same host
+facades. `pi-agent-core`, `pi-ai/oauth` and `pi-ai/providers/all` come only
+from the installed Pi.
 Setup uses `npm ci --ignore-scripts`, without global installs, asset downloads,
 providers or model calls. There is no coding-agent npm dependency. jiti keeps
 its default content-hashed transpile cache, as in Pi. Pure context helpers and
 command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 `v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
 license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
-runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
+runtime. The explicit installed-Pi route loads the managed Pi's own packages.
 Its native ESM imports finish sequentially before the synchronous overlays are
 published; an in-flight package graph is never read with `require()`. The shim
 precedence and denied-export boundaries are unchanged.

@@ -75,7 +75,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   unsupported is refused loudly.
 - **Installed-Pi fallback (opt-in, experimental).** Same adapter and host
   boundary, but imports the shims lack or refuse resolve to the user's managed
-  Pi 1.0.2 install. Selected with `--pi-runtime installed` or
+  Pi install (1.0.2 through 1.4.x). Selected with `--pi-runtime installed` or
   `"pi_runtime": "installed"` in `bridge.json`. See
   [pi-compatibility.md](pi-compatibility.md#installed-pi-fallback-experimental-opt-in)
   for what it gives up. Path A failures it can fix report
@@ -150,6 +150,14 @@ fallback if path A failed:
 | Fallback only | 4 | `bash-spawn-hook`, `ssh`, `minimal-mode`, `built-in-tool-renderer` (Pi built-in tool factories) |
 | Needs its own `npm install` (as in Pi) | 4 | `custom-provider-anthropic`, `gondolin`, `sandbox`, `with-deps`; not verified here, no installs were run |
 | Deferred host feature | 4 | `custom-provider-gitlab-duo` (`registerProvider` `oauth`), `debug-provider` (`provider_stream_event`), `jev-router` (`registerVirtualModel`), `project-trust` (`project_trust`) |
+
+Pi 1.4.0's 79 examples, run the same way on 2026-10-28 against real managed
+Pi 1.0.2 and 1.4.0 installs, give the same routes as the 1.0.2 table above:
+69 load directly (including `debug-provider` and `project-trust`, whose deferred
+host features only fail once used), the same 4 need the fallback, the same 4
+need their own `npm install`, and `custom-provider-gitlab-duo` and `jev-router`
+are refused at load. `configure.mjs --reviewed --from-pi --mirror` imports a Pi
+1.4.0 setup with `custom-footer`, `rainbow-editor` and `with-deps`.
 
 Loading and registering is not behavioral qualification. The native suites above
 are the behavioral evidence.

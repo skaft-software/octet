@@ -121,8 +121,8 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 ### Known limitations
 
 - Individual API gaps are recorded in the [API ledger](docs/pi-extension-api.md).
-  Compatibility targets Pi 1.0.2's public extension API, not its private internals
-  or complete CLI. Windows remains preview; Bun is unqualified.
+  Compatibility targets Pi 1.4's public extension API (managed Pi 1.0.2 through
+  1.4.x), not its private internals or complete CLI. Windows remains preview; Bun is unqualified.
 - Live provider/audio and model-quality acceptance are not part of this launch.
   The versioned release page records actual distribution-channel availability.
 - Product/installer and Python/TypeScript source identities target 0.10.0;
