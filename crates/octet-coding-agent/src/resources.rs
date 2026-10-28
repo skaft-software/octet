@@ -862,6 +862,9 @@ struct SkillRootPolicy {
     trust: SkillTrust,
     direct_markdown: bool,
     legacy_octet: bool,
+    /// A skill shipped inside an installed extension bundle: a default that the
+    /// user's own skills replace.
+    bundled: bool,
 }
 
 #[derive(Clone)]
@@ -1176,8 +1179,22 @@ impl FileSystemSkillRegistry {
             trust: SkillTrust::UserInstalled,
             direct_markdown: false,
             legacy_octet: false,
+            bundled: false,
         };
         if let Some(home) = &home {
+            // Lowest precedence first. As in Pi, skills that come with a
+            // package or extension never replace the user's own skills.
+            for bundled_skills in
+                crate::extension_bundle::installed_skill_roots(&home.join(".octet/extensions"))
+            {
+                roots.push((
+                    bundled_skills,
+                    SkillRootPolicy {
+                        bundled: true,
+                        ..user_standard
+                    },
+                ));
+            }
             roots.push((home.join(".agents/skills"), user_standard));
             roots.push((
                 home.join(".pi/agent/skills"),
@@ -1186,11 +1203,6 @@ impl FileSystemSkillRegistry {
                     ..user_standard
                 },
             ));
-            for bundled_skills in
-                crate::extension_bundle::installed_skill_roots(&home.join(".octet/extensions"))
-            {
-                roots.push((bundled_skills, user_standard));
-            }
             roots.push((
                 home.join(".octet/skills"),
                 SkillRootPolicy {
@@ -1206,6 +1218,7 @@ impl FileSystemSkillRegistry {
             trust: SkillTrust::Workspace,
             direct_markdown: false,
             legacy_octet: false,
+            bundled: false,
         };
         let mut gated_project_roots = project_roots;
         gated_project_roots.push(invocation_cwd.join(".pi/skills"));
@@ -1260,6 +1273,7 @@ impl FileSystemSkillRegistry {
                     trust: SkillTrust::ExplicitExternal,
                     direct_markdown: true,
                     legacy_octet: false,
+                    bundled: false,
                 },
             ));
         }
@@ -1317,15 +1331,20 @@ impl FileSystemSkillRegistry {
                             policy: candidate.policy,
                         },
                     ) {
+                        // Replacing an extension's bundled default with your
+                        // own skill is the intended override, not a conflict.
+                        let replaces_bundled = shadowed.policy.bundled && !candidate.policy.bundled;
                         let loser = shadowed.entrypoint;
-                        diagnostics.push(skill_diagnostic(
-                            &real_path,
-                            format!(
-                                "skill name {:?} collision; {} was shadowed by this higher-precedence definition",
-                                descriptor.id,
-                                loser.display()
-                            ),
-                        ));
+                        if !replaces_bundled {
+                            diagnostics.push(skill_diagnostic(
+                                &real_path,
+                                format!(
+                                    "skill name {:?} collision; {} was shadowed by this higher-precedence definition",
+                                    descriptor.id,
+                                    loser.display()
+                                ),
+                            ));
+                        }
                     }
                     // Admit in deterministic discovery order. A later winner
                     // always replaces its predecessor, even if it no longer
@@ -1397,6 +1416,7 @@ impl FileSystemSkillRegistry {
             trust: SkillTrust::UserInstalled,
             direct_markdown: false,
             legacy_octet: true,
+            bundled: false,
         };
         if let Some(user_dir) = user_dir {
             scan_skill_root(&user_dir, legacy_user, &mut candidates, &mut diagnostics);
