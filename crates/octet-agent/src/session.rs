@@ -1197,8 +1197,12 @@ fn write_json_line<T: Serialize>(buf: &mut Vec<u8>, record: &T) -> Result<(), Se
     Ok(())
 }
 
-pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
-pub(crate) const MAX_SESSION_RECORDS: usize = 1_000_000;
+/// Largest session file octet writes or opens. Pi has no write limit and
+/// cannot reopen a session past Node's ~512 MiB string limit, so every session
+/// Pi can resume fits.
+pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Every record line is at least two bytes, so the byte limit binds first.
+pub(crate) const MAX_SESSION_RECORDS: usize = (MAX_SESSION_FILE_BYTES / 2) as usize;
 
 /// Immutable-entry index shared by replay and live appends. Parent links and
 /// call IDs are indexed once, rather than rewalking a batch for every result.

@@ -94,7 +94,7 @@ live state. `generation` fences handles; state spelling is `EffectPending` or
 - `pi.op.tool_memo:<operation>:<invocation>:<name>`: serialized JSON memo text.
 
 Defaults bound a value to 64 KiB, values per invocation to 256 and live
-invocations to 64, within the session's 256 MiB/1,000,000-record envelope.
+invocations to 64, within the session's 512 MiB limit.
 The product's Bash checkpoint sink retains its existing 50 KiB snapshot and
 interval bounds. These records do not move the head or affect usage/cost.
 
