@@ -32,6 +32,8 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
   RUSTSEC-2026-0410. octet only compresses Codex request bodies with one-shot
   zstd calls and does not use the affected reused-stream, seekable,
   legacy-frame decompression or WebAssembly paths.
+- Update pulldown-cmark from 0.13.4 to 0.13.5 for RUSTSEC-2026-0414. octet does
+  not enable the affected wikilinks extension.
 
 ### Fixed
 
