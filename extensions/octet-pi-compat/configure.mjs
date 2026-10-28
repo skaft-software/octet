@@ -11,7 +11,6 @@ import { isDeepStrictEqual } from 'node:util';
 const { hookEvents } = await import('./lib/api.mjs');
 const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
 const { locateInstalledPi } = await import('./lib/installed-pi.mjs');
-const { PI_VERSION } = await import('./lib/pi-modules.mjs');
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
 const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
@@ -346,7 +345,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
   return { ...result, setup, config, routed };
 }
-// The user's enabled Pi extensions, resolved by the installed Pi 1.0.2's own
+// The user's enabled Pi extensions, resolved by the installed Pi's own
 // package manager exactly as Pi would load them. Read-only: settings are
 // never written and missing packages are skipped, never installed.
 async function piResources({ cwd = process.cwd(), env = process.env } = {}) {
@@ -463,7 +462,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
   const { install, resolved, settingsManager } = await piResources({ cwd, env });
   const piAgentDir = install.agentDir;
   const extensions = [...new Set(enabledPaths(resolved.extensions).map(entry => realpathSync(entry)))];
-  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${PI_VERSION} setup`);
+  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${install.version} setup`);
   const themeImport = planThemeImport({ output, paths: enabledPaths(resolved.themes), selection: settingsManager.getThemeSetting(),
     thinkingLevel: settingsManager.getDefaultThinkingLevel(), builtinDir: join(install.packages['coding-agent'].dir, 'dist/modes/interactive/theme') });
   checkThemeImportOutput(output, overwrite, themeImport.themes);
@@ -490,7 +489,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
     piTheme: themeImport.selected, themePaths: themeImport.themes.map(theme => theme.nativePath),
     routes: Object.fromEntries(accepted.map(r => [r.entry, r.route])) });
   writeThemeImport(themeImport, { overwrite });
-  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${PI_VERSION}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
+  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${install.version}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
   for (const message of themeImport.diagnostics) log(`  ${message}`);
   log(`  Imported ${themeImport.themes.length} Pi themes; the enabled bridge contributes them and its startup preference. Host settings were not changed.`);
   if (themeImport.launchArgs.length) log(`  Optional standalone theme options (not needed with the bridge): ${themeImportLaunchHint(themeImport)}`);

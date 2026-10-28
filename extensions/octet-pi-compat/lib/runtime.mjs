@@ -54,6 +54,13 @@ export const REVIEWED_SOURCE_LIMITS = Object.freeze({
 });
 
 function missingPath(error) { return error?.code === 'ENOENT' || error?.code === 'ENOTDIR'; }
+// Pi's names for the host's tool lifecycle fields, next to the wire names.
+// durationMs (Pi 1.1) is the host's measured execution time.
+function piToolLifecycle(method, p) {
+  if (method !== 'tool/started' && method !== 'tool/settled') return {};
+  return { toolCallId: p.tool_call_id, toolName: p.tool_name,
+    ...(method === 'tool/settled' && Number.isSafeInteger(p.duration_ms) ? { durationMs: p.duration_ms } : {}) };
+}
 function sourceFilePath(pathname, baseDirectory) {
   const absolute = resolve(pathname), relativePath = relative(baseDirectory, absolute);
   const parts = relativePath ? relativePath.split(sep) : [];
@@ -1015,9 +1022,10 @@ export class Runtime {
         await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
       } else {
         if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
-        else await this.runEvent(event, facade({ type: event, ...p }, `${event} event`), store);
+        else await this.runEvent(event, facade({ type: event, ...p, ...piToolLifecycle(message.method, p) }, `${event} event`), store);
         const following = followingEvents[message.method];
-        if (following) await this.runEvent(following, { type: following }, store);
+        // Pi 1.1 agent_settled says whether the run was cancelled.
+        if (following) await this.runEvent(following, { type: following, aborted: p.outcome === 'cancelled' || p.outcome === 'interrupted' }, store);
       }
       await this.flush(store);
     });

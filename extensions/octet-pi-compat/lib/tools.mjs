@@ -79,7 +79,7 @@ function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0) {
 export function validateTool(tool) {
   fields(tool, ['name', 'label', 'description', 'parameters', 'execute', 'promptSnippet', 'promptGuidelines',
     'outputSchema', 'prepareArguments', 'renderCall', 'renderResult', 'renderShell', 'annotations',
-    'defaultActive', 'executionMode', 'exposure', 'namespace', 'constrainedSampling', 'prepareLoadout'], 'tool');
+    'defaultActive', 'executionMode', 'exposure', 'namespace', 'constrainedSampling', 'prepareLoadout', 'reachesTools'], 'tool');
   bounded(tool.name, 'tool name', 128);
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(tool.name)) invalid('tool name');
   bounded(tool.description, 'tool description', 4096);
@@ -95,7 +95,9 @@ export function validateTool(tool) {
   if (tool.renderShell !== undefined && !['default', 'self'].includes(tool.renderShell)) invalid('tool.renderShell');
   if (tool.defaultActive !== undefined && typeof tool.defaultActive !== 'boolean') invalid('tool.defaultActive');
   if (tool.outputSchema !== undefined && (!tool.outputSchema || typeof tool.outputSchema !== 'object' || Array.isArray(tool.outputSchema))) invalid('tool.outputSchema');
-  for (const key of ['prepareArguments', 'prepareLoadout']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
+  // reachesTools (Pi 1.2) is published through getAllTools; the host never
+  // registers tools late, so it has nothing to wait for before a call.
+  for (const key of ['prepareArguments', 'prepareLoadout', 'reachesTools']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
   if (tool.exposure !== undefined && tool.exposure !== 'direct') unsupported('tool.exposure', 'non-direct callable and declared surfaces are not bound');
   if (tool.executionMode !== undefined && tool.executionMode !== 'sequential') unsupported('tool.executionMode', 'the host keeps extension effects exclusive');
   // These are consumed by getAllTools, never used as verified effect or replay declarations.
@@ -104,8 +106,12 @@ export function validateTool(tool) {
     for (const value of Object.values(tool.annotations)) if (typeof value !== 'boolean') invalid('tool annotations must be boolean hints');
   }
   if (tool.namespace !== undefined) {
-    fields(tool.namespace, ['name', 'description', 'instructions'], 'tool namespace');
+    fields(tool.namespace, ['name', 'aliases', 'description', 'instructions'], 'tool namespace');
     bounded(tool.namespace.name, 'tool namespace name', 128);
+    if (tool.namespace.aliases !== undefined) {
+      if (!Array.isArray(tool.namespace.aliases) || tool.namespace.aliases.length > 16) invalid('tool namespace aliases must contain at most 16 strings');
+      for (const alias of tool.namespace.aliases) bounded(alias, 'tool namespace alias', 128);
+    }
     for (const key of ['description', 'instructions']) if (tool.namespace[key] !== undefined) bounded(tool.namespace[key], `tool namespace ${key}`, 4096);
   }
   if (tool.constrainedSampling !== undefined && tool.constrainedSampling !== false) {
@@ -172,6 +178,7 @@ export function getAllTools(runtime, factory, snapshot = toolSnapshot(runtime, f
       ...(local?.definition.promptGuidelines === undefined ? {} : { promptGuidelines: [...local.definition.promptGuidelines] }),
       ...(local?.definition.annotations === undefined ? {} : { annotations: { ...local.definition.annotations } }),
       ...(local?.definition.namespace === undefined ? {} : { namespace: { ...local.definition.namespace } }),
+      ...(local?.definition.reachesTools === undefined ? {} : { reachesTools: local.definition.reachesTools }),
       ...(local ? { sourceInfo: { path: local.factory, source: 'extension', scope: 'temporary', origin: 'top-level' } } : {}),
     };
   });
@@ -327,7 +334,8 @@ export function prepareToolLoadout(runtime, store, declared) {
   const descriptor = tool => ({ ...tool, label: runtime.tools.get(tool.name)?.definition.label ?? tool.name });
   const loadout = { declared: declared.map(descriptor), callable: all.filter(tool => active.has(tool.name) && tool.exposure !== 'model-only' && tool.exposure !== 'hidden').map(descriptor),
     registered: all.map(descriptor), getExposure: name => all.find(tool => tool.name === name)?.exposure ?? 'direct',
-    getNamespace: name => runtime.tools.get(name)?.definition.namespace };
+    getNamespace: name => runtime.tools.get(name)?.definition.namespace,
+    getPromptGuidelines: name => all.find(tool => tool.name === name)?.promptGuidelines ?? [] };
   const descriptions = new Map(), hidden = new Set();
   for (const entry of callbacks) {
     try {

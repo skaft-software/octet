@@ -26,7 +26,8 @@ export async function beforeAgentStart(runtime, payload, store) {
     for (const entry of [...runtime.events.get('before_agent_start') || []]) {
       store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
       const child = { ...store, factory: entry.factory };
-      const event = facade({ type: 'before_agent_start', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
+      // Pi 1.2 tags user-prompt runs; the host runs this hook for those only.
+      const event = facade({ type: 'before_agent_start', messageType: 'user', prompt: payload.prompt, systemPrompt: effective, images: undefined }, 'before_agent_start event');
       let result;
       try {
         const run = await cancellable(budget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(event, createContext(runtime, child)))), store.controller.signal);
