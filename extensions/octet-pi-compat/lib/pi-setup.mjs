@@ -345,7 +345,7 @@ function packageEntries(settings, base, scope, ctx) {
   });
 }
 
-function add(map, path, enabled, rank = 4) { if (!map.has(path)) map.set(path, { enabled, rank }); }
+function add(map, path, enabled, rank = 4, metadata) { if (!map.has(path)) map.set(path, { enabled, rank, sourceInfo: { path, ...metadata } }); }
 
 function packageResources(entries, maps, ctx) {
   const deduped = [], seen = new Map();
@@ -364,6 +364,8 @@ function packageResources(entries, maps, ctx) {
     const delta = filter?.autoload === false;
     const base = entry.scope === 'project' && delta ? deduped.find(other => other.scope === 'user' && other.info.identity === entry.info.identity) ?? entry : entry;
     const { root, type, version } = base.info;
+    const metadata = { source: entry.source, scope: entry.scope, origin: 'package',
+      baseDir: type === 'local' && safeStat(root, ctx, 'package source')?.isFile() ? dirname(root) : root };
     const emptyDelta = delta && RESOURCE_KINDS.every(kind => filter?.[kind] === undefined || Array.isArray(filter[kind]) && filter[kind].length === 0);
     // Empty npm/git deltas contribute nothing and need no package lookup. Local
     // file entries are special: Pi enables the file directly, regardless of filters.
@@ -371,7 +373,7 @@ function packageResources(entries, maps, ctx) {
     const stat = safeStat(root, ctx, `package ${entry.source}`);
     if (!stat) { diagnostic(ctx, `package ${entry.source}: not installed at ${root}; the mirror never installs packages`); continue; }
     if (type === 'local' && stat.isFile()) {
-      for (const path of collect(root, 'extensions', ctx, { required: true })) add(maps.extensions, path, true);
+      for (const path of collect(root, 'extensions', ctx, { required: true })) add(maps.extensions, path, true, 4, metadata);
       continue;
     }
     if (emptyDelta) continue;
@@ -397,7 +399,7 @@ function packageResources(entries, maps, ctx) {
         // A project delta with unsupported selectors must also suppress the
         // global kind; otherwise global autoload would bypass the restriction.
         const files = manifest.pi?.[kind] !== undefined ? manifestFiles(root, kind, manifest.pi[kind], ctx) : collect(join(root, kind), kind, ctx);
-        for (const path of files) add(maps[kind], path, false);
+        for (const path of files) add(maps[kind], path, false, 4, metadata);
         continue;
       }
       let files;
@@ -425,10 +427,10 @@ function packageResources(entries, maps, ctx) {
             changes.set(path, enabled);
           }
         }
-        for (const [path, enabled] of changes) add(maps[kind], path, enabled);
+        for (const [path, enabled] of changes) add(maps[kind], path, enabled, 4, metadata);
       } else {
         const enabled = patterns === undefined ? new Set(files) : patterns.length === 0 ? new Set() : enabledPaths(files, patterns, root);
-        for (const path of files) add(maps[kind], path, enabled.has(path));
+        for (const path of files) add(maps[kind], path, enabled.has(path), 4, metadata);
       }
     }
   }
@@ -451,12 +453,26 @@ function mergeSettings(base, overrides) {
   return merged;
 }
 
+function agentDirectory(agentDir, env) {
+  return resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+}
+
+// Pi's SettingsManager.getSettings(): global and trusted project settings.json
+// merged, no defaults filled in. Unreadable or non-object files contribute
+// nothing; the diagnostics say why.
+export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
+  const ctx = { diagnostics: [], projectTrusted: projectTrusted === true };
+  const global = settingsObject(join(agentDirectory(agentDir, env), 'settings.json'), 'settings.json', ctx) ?? {};
+  const project = ctx.projectTrusted ? settingsObject(join(resolve(cwd, '.pi'), 'settings.json'), 'project settings.json', ctx) ?? {} : {};
+  return { settings: mergeSettings(global, project), diagnostics: ctx.diagnostics };
+}
+
 // Contract: extensions and resource paths are exact enabled files, not roots
 // that a downstream loader could re-expand to excluded or linked resources.
 // projectTrusted defaults false, even for a reviewed global mirror. Callers
 // must pass the host's current project decision, never infer trust from opt-in.
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
-  const resolvedAgentDir = resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+  const resolvedAgentDir = agentDirectory(agentDir, env);
   const projectRoot = resolve(cwd, '.pi');
   const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
@@ -483,7 +499,7 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     if (!validSelectors(patterns, `settings.skills (${label})`, ctx)) return;
     const base = dirname(directory), files = collect(directory, 'skills', ctx);
     const enabled = enabledPaths(files, patterns.filter(override), base);
-    for (const path of files) add(maps.skills, path, enabled.has(path), rank);
+    for (const path of files) add(maps.skills, path, enabled.has(path), rank, { source: 'auto', scope: rank === 1 ? 'project' : 'user', origin: 'top-level', baseDir: base });
   };
   for (const [base, scopeSettings] of scopes) {
     for (const kind of RESOURCE_KINDS) {
@@ -496,10 +512,10 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
         catch (error) { diagnostic(ctx, `${kind} ${value}: ${error.message}`); }
       }
       const enabled = enabledPaths(local, patterns, base);
-      for (const path of local) add(maps[kind], path, enabled.has(path), base === projectRoot ? 0 : 2);
+      for (const path of local) add(maps[kind], path, enabled.has(path), base === projectRoot ? 0 : 2, { source: 'local', scope: base === projectRoot ? 'project' : 'user', origin: 'top-level' });
       const auto = collect(join(base, kind), kind, ctx);
       const autoEnabled = enabledPaths(auto, patterns.filter(override), base);
-      for (const path of auto) add(maps[kind], path, autoEnabled.has(path), base === projectRoot ? 1 : 3);
+      for (const path of auto) add(maps[kind], path, autoEnabled.has(path), base === projectRoot ? 1 : 3, { source: 'auto', scope: base === projectRoot ? 'project' : 'user', origin: 'top-level', baseDir: base });
     }
     if (base === projectRoot && ctx.projectTrusted) {
       const globalAgentsSkills = resolve(homedir(), '.agents', 'skills');
@@ -516,9 +532,11 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   }
   if (globalSettings !== undefined) addAgentSkills(join(homedir(), '.agents', 'skills'), globalSettings, 3, 'user .agents');
   const resourceFiles = {};
+  setup.sourceInfos = {};
   for (const kind of RESOURCE_KINDS) {
     const files = [...maps[kind]].filter(([, value]) => value.enabled).sort((a, b) => a[1].rank - b[1].rank).map(([path]) => path);
     resourceFiles[kind] = files;
+    for (const path of files) setup.sourceInfos[path] = maps[kind].get(path).sourceInfo;
     const limit = kind === 'extensions' ? MAX_EXTENSIONS : MAX_RESOURCE_ENTRIES;
     if (files.length > limit) {
       setup.resourceLimitsExceeded.push({ dimension: 'kind', kind, actual: files.length, limit });

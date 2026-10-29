@@ -42,16 +42,7 @@ pub async fn login_with_host(host: &dyn CopilotHost, headless: bool) -> Result<(
         wire::VERIFICATION_URI,
     ));
     if !headless {
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(target_os = "windows") {
-            "explorer"
-        } else {
-            "xdg-open"
-        };
-        let _ = std::process::Command::new(opener)
-            .arg(wire::VERIFICATION_URI)
-            .spawn();
+        crate::auth::subscription::login::open_browser(wire::VERIFICATION_URI);
     }
     let deadline = Instant::now() + device.expires_in();
     loop {

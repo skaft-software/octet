@@ -7,7 +7,7 @@ export function customMessage(message) {
     custom_type: bounded(message.customType, 'customType', 128),
     content: messageContent(message.content ?? []),
     display: Boolean(message.display),
-    ...(message.details === undefined ? {} : { details: plainJSON(message.details, 'message details') }),
+    ...(message.details === undefined ? {} : { details: plainJSON(message.details, 'message details', 65536, { omitUndefined: true }) }),
   };
 }
 

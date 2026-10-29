@@ -181,6 +181,45 @@ fn private_entries_are_inert_and_keep_their_namespace_and_real_identity() {
 }
 
 #[test]
+fn tool_renderer_self_shell_owns_decoration_independently_of_native_theme() {
+    for width in [30, 80] {
+        for self_shell in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.set_transcript_render_owners(vec![owner(1)]);
+            shell.on_agent_event(&AgentEvent::ToolStarted {
+                id: octet_ai::ToolCallId("rendered-tool".into()),
+                name: "custom".into(),
+                args: json!({}),
+            });
+            let candidate = shell
+                .transcript_render_candidates()
+                .into_iter()
+                .find(|candidate| matches!(candidate.render, TranscriptRenderContent::Tool { .. }))
+                .unwrap();
+            let mut response = rows("\x1b[38;2;1;2;3;48;2;4;5;6mOWN TOOL\x1b[0m");
+            response.render_shell = self_shell.then(|| "self".into());
+            assert!(shell.accept_transcript_render(&candidate, owner(1), response));
+            let state = shell.state.borrow();
+            let index = state
+                .transcript_commit_ids
+                .iter()
+                .position(|id| *id == candidate.key.id)
+                .unwrap();
+            let painted = state.extension_rendered(index, width).unwrap().lines;
+            assert_eq!(painted.join("\n").contains('•'), !self_shell);
+            assert!(painted.join("\n").contains("38;2;1;2;3;48;2;4;5;6"));
+            if self_shell {
+                assert_eq!(
+                    painted,
+                    vec!["\x1b[38;2;1;2;3;48;2;4;5;6mOWN TOOL\x1b[0m\x1b[0m"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn full_tool_partial_and_final_details_survive_without_animation_rpcs() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_transcript_render_owners(vec![owner(1)]);

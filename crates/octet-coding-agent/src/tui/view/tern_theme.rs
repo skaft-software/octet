@@ -403,6 +403,54 @@ background = "#203040"
     }
 
     #[test]
+    fn imported_pi_palette_keeps_every_distinct_token_across_models_and_appearances() {
+        let mut document =
+            crate::extensions::resource_paths::pi_theme::fixture("Distinct Pi", "#123456");
+        for (index, (_, value)) in document["colors"]
+            .as_object_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            *value = Value::String(format!("#{:06x}", 0x102030 + index * 0x010203));
+        }
+        for token in ["selectedBg", "customMessageBg"] {
+            document["colors"][token] = Value::String(String::new());
+        }
+        let json = document.to_string();
+        let source = crate::extensions::resource_paths::pi_theme::native_source(
+            std::path::Path::new("distinct.json"),
+            &json,
+        )
+        .unwrap();
+        let theme = crate::tui::theme::test_theme_source_with(
+            &source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme.clone());
+        for (lab, provider, model) in [
+            (ModelLab::Anthropic, "anthropic", "claude-sonnet-4"),
+            (ModelLab::OpenAi, "openai", "gpt-5"),
+        ] {
+            shell.set_identity(provider, model, "max");
+            let helper = shell.extension_theme_get(None).unwrap();
+            let native = NativeTheme::resolve(&theme, Some(lab), "test").unwrap();
+            for (token, expected) in document["colors"].as_object().unwrap() {
+                assert_eq!(&helper["colors"][token], expected, "helper {token}");
+                for variant in [&native.palette.dark, &native.palette.light] {
+                    let variant = variant.as_ref().unwrap();
+                    if expected == "" {
+                        assert!(!variant.contains_key(token), "terminal default {token}");
+                    } else {
+                        assert_eq!(&variant[token], expected, "native {token}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn indexed_and_named_colors_do_not_disappear() {
         assert_eq!(hex(Color::Ansi16(1)).as_deref(), Some("#800000"));
         assert_eq!(hex(Color::Indexed(16)).as_deref(), Some("#000000"));

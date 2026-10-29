@@ -423,7 +423,7 @@ fn parse_tokens(
             _ if !value.is_table() && !value.is_array() => {
                 insert_token(&mut tokens, key.clone(), value, source_name)?;
             }
-            _ => {}
+            _ => bail!("theme {source_name} has unknown section {key:?}"),
         }
     }
     Ok(tokens)
@@ -867,6 +867,81 @@ mod tests {
         assert_eq!(parsed.glyphs.get("prompt").map(String::as_str), Some("❯"));
         assert_eq!(parsed.layout.density, ThemeDensity::Compact);
         assert_eq!(parsed.roles["tool_title"].bold, Some(true));
+    }
+
+    #[test]
+    fn unknown_root_sections_are_rejected() {
+        for background in [
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+            TerminalBackground::Unknown,
+        ] {
+            for source in [
+                "[unknown_section]\ninvalid = true\n",
+                "[[unknown_section]]\ninvalid = true\n",
+            ] {
+                let error = parse_theme(source, "unknown-root", background)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("unknown section \"unknown_section\""),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_sections_in_applied_variants_are_rejected() {
+        for (variant, background) in [
+            ("universal", TerminalBackground::Dark),
+            ("universal", TerminalBackground::Light),
+            ("universal", TerminalBackground::Unknown),
+            ("dark", TerminalBackground::Dark),
+            ("light", TerminalBackground::Light),
+            ("unknown", TerminalBackground::Unknown),
+        ] {
+            let source = format!("[variants.{variant}.unknown_section]\ninvalid = true\n");
+            let error = parse_theme(&source, "unknown-variant", background)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("unknown section \"unknown_section\""),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_scalar_tokens_and_legacy_sections_remain_supported() {
+        let parsed = parse_theme(
+            r##"
+                prompt_wash = false
+                [colors]
+                accent = "#123456"
+                [tokens]
+                custom = "#654321"
+                [model]
+                use_lab_color = false
+                [spacing]
+                compact = 2
+                [icons]
+                folder = ">"
+            "##,
+            "legacy-tokens",
+            TerminalBackground::Unknown,
+        )
+        .unwrap();
+        for (key, value) in [
+            ("prompt_wash", "false"),
+            ("accent", "#123456"),
+            ("custom", "#654321"),
+            ("model.use_lab_color", "false"),
+            ("spacing_compact", "2"),
+            ("icon_folder", ">"),
+        ] {
+            assert_eq!(parsed.tokens[key], value, "{key}");
+        }
     }
 
     #[test]

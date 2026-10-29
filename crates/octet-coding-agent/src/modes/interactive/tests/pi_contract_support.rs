@@ -334,7 +334,7 @@ fn pi_app_policy_with_frontend_and_native(
         &app.config,
         &app.skills,
         &app.prompts,
-        &extensions,
+        &mut extensions,
         &mut host,
         crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
     );

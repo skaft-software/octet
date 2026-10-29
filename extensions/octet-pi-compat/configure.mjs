@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './lib/runtime-prerequisites.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -6,15 +7,15 @@ import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { hookEvents } from './lib/api.mjs';
-import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
-import { locateInstalledPi } from './lib/installed-pi.mjs';
-import { PI_VERSION } from './lib/pi-modules.mjs';
-import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } from './lib/pi-setup.mjs';
-import { readPiTheme } from './lib/theme-palette.mjs';
-import { reviewedSourceHashes } from './lib/runtime.mjs';
-import { startupCacheDirectory } from './lib/startup-cache.mjs';
-import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
+// Delay linking adapter dependencies until the runtime prerequisite has passed.
+const { hookEvents } = await import('./lib/api.mjs');
+const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
+const { locateInstalledPi } = await import('./lib/installed-pi.mjs');
+const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
+const { readPiTheme } = await import('./lib/theme-palette.mjs');
+const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
+const { startupCacheDirectory } = await import('./lib/startup-cache.mjs');
+const { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } = await import('./lib/theme-import.mjs');
 
 // Importing a factory executes arbitrary user code. Never perform implicit
 // discovery or change host trust/enablement. The caller must explicitly review
@@ -332,9 +333,11 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
     extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])),
     capturedRegistrations: reused?.registrations ?? (combined && !combined.skipped.size ? combined.registrations : undefined), captureCacheDir });
   const { config } = result;
-  // A factory that ran out of time may be waiting on something transient;
-  // never pin its exclusion, so the next start tries it again.
-  if (cached && !reused && !refused.some(item => /^setup did not finish within /.test(String(item.error)))) cached.write({ routed, registrations: result.capturedRegistrations });
+  // Timeouts, missing dependencies and unavailable installed-Pi graphs can
+  // recover without changing factory sources or the managed Pi version. Never
+  // pin those exclusions in the catalog cache; the next start must retry them.
+  const transientRefusal = refused.some(item => /^(setup did not finish within |installed_pi_unavailable\b)|\b(Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND)\b/.test(String(item.error)));
+  if (cached && !reused && !transientRefusal) cached.write({ routed, registrations: result.capturedRegistrations });
   if (reused) log('  Reused the captured catalog: the Pi setup and its factories are unchanged');
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
   for (const item of mirrorExcluded) log(`  excluded      ${label(item.entry)}: ${item.reason.slice(0, 160)}`);
@@ -342,7 +345,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
   return { ...result, setup, config, routed };
 }
-// The user's enabled Pi extensions, resolved by the installed Pi 1.0.2's own
+// The user's enabled Pi extensions, resolved by the installed Pi's own
 // package manager exactly as Pi would load them. Read-only: settings are
 // never written and missing packages are skipped, never installed.
 async function piResources({ cwd = process.cwd(), env = process.env } = {}) {
@@ -459,7 +462,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
   const { install, resolved, settingsManager } = await piResources({ cwd, env });
   const piAgentDir = install.agentDir;
   const extensions = [...new Set(enabledPaths(resolved.extensions).map(entry => realpathSync(entry)))];
-  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${PI_VERSION} setup`);
+  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${install.version} setup`);
   const themeImport = planThemeImport({ output, paths: enabledPaths(resolved.themes), selection: settingsManager.getThemeSetting(),
     thinkingLevel: settingsManager.getDefaultThinkingLevel(), builtinDir: join(install.packages['coding-agent'].dir, 'dist/modes/interactive/theme') });
   checkThemeImportOutput(output, overwrite, themeImport.themes);
@@ -486,7 +489,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
     piTheme: themeImport.selected, themePaths: themeImport.themes.map(theme => theme.nativePath),
     routes: Object.fromEntries(accepted.map(r => [r.entry, r.route])) });
   writeThemeImport(themeImport, { overwrite });
-  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${PI_VERSION}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
+  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${install.version}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
   for (const message of themeImport.diagnostics) log(`  ${message}`);
   log(`  Imported ${themeImport.themes.length} Pi themes; the enabled bridge contributes them and its startup preference. Host settings were not changed.`);
   if (themeImport.launchArgs.length) log(`  Optional standalone theme options (not needed with the bridge): ${themeImportLaunchHint(themeImport)}`);

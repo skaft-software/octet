@@ -1,7 +1,7 @@
 import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, parse, resolve } from 'node:path';
-import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
@@ -171,7 +171,30 @@ export function createAPI(runtime, factory) {
     getThinkingLevel() { return thinkingLevel(store().state.host); },
     setModel(model) { return setModel(runtime, store(), model); },
     setThinkingLevel(level) { setThinkingLevel(runtime, store(), level); },
-    getCommands() { return [...runtime.commands].map(([name, d]) => ({ name, description: d.definition.description || name, source: 'extension' })); },
+    getCommands() {
+      runtime.require('command_catalog_v1');
+      const s = store();
+      if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+      s.controller.signal.throwIfAborted();
+      const result = runtime.transport.requestSync('commands/snapshot', {
+        parent_request_id: s.id, resource_owner: s.state.owner,
+      }, { parent: s.live ? s.id : undefined, signal: s.controller.signal });
+      fields(result, ['commands'], 'command catalog');
+      const commands = plainJSON(result.commands, 'command catalog', 524288);
+      if (!Array.isArray(commands)) invalid('command catalog must be an array');
+      return commands.map(({ extension, registeredName, ...command }) => {
+        // Native resolves invocation names and membership. Only this bridge can
+        // identify its own registered factory; it never adds a command here.
+        const local = extension === runtime.namespace ? runtime.commands.get(registeredName) : undefined;
+        if (!local) return command;
+        const path = runtime.entrypoint(local.factory);
+        command.sourceInfo = { ...(runtime.commandSourceInfos?.[path] ?? {
+          path, source: 'local', scope: 'temporary', origin: 'top-level', baseDir: dirname(path),
+        }) };
+        if (local.definition.description === undefined) delete command.description;
+        return command;
+      });
+    },
   };
   const methods = new Map();
   return new Proxy(api, {
@@ -375,9 +398,13 @@ export function createContext(runtime, store, replaced = false) {
       if (host.model_view?.context_window) return { tokens: null, contextWindow: host.model_view.context_window, percent: null };
       return undefined;
     },
-    isIdle: () => snapshot(current().host, 'is_idle', 'ctx.isIdle'),
+    isIdle: () => {
+      const state = current();
+      if (Object.hasOwn(state.host, 'is_idle')) return state.host.is_idle;
+      return !state.runActive && !state.compacting;
+    },
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
-    getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
+    getSystemPrompt: () => contextFacts(runtime, store).getSystemPrompt(),
     get signal() { return compactionCallbackStore(runtime, store).controller.signal; },
     waitForIdle() {
       if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');

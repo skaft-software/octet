@@ -335,6 +335,11 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if offered_host_services.resource_paths
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_COMMAND_CATALOG);
+            }
+            if offered_host_services.resource_paths
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
                 && manifest
                     .contributes
                     .hooks

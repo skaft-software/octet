@@ -464,6 +464,10 @@ impl AiClient {
     /// including SSE and completed JSON. Bounded HTTP error snippets also obey
     /// these values but retain shorter internal ceilings so an already-known
     /// status is surfaced promptly.
+    /// HTTP/SSE idleness means no response-body bytes, not no decoded assistant
+    /// events: comments and incomplete SSE/JSON frames are transport activity.
+    /// Such activity never extends the absolute lifetime. WebSocket control
+    /// Ping/Pong frames do not extend the provider-event idle timeout.
     /// The idle value also bounds the first body chunk; callers that need a
     /// longer time-to-first-body-byte can override it with
     /// [`Self::with_initial_stream_timeout`].

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 const TARGET: &str = "https://example.test/docs?x=1&y=2";
@@ -18,8 +19,12 @@ fn paint(shell: &mut InteractiveShell) -> Vec<String> {
     }
 }
 
-fn fixture(threaded: bool) -> (InteractiveShell, u16, u16) {
-    let mut shell = InteractiveShell::test_shell();
+fn fixture(threaded: bool, hyperlinks: bool) -> (InteractiveShell, u16, u16) {
+    let mut capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    capabilities.hyperlinks = hyperlinks;
+    let theme = crate::tui::theme::test_theme_with(capabilities);
+    assert_eq!(theme.capabilities().hyperlinks, hyperlinks);
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
     shell.set_size(80, 20);
     shell.apply_edit(EditAction::Paste("kept draft".into()));
     {
@@ -54,9 +59,27 @@ fn release(shell: &mut InteractiveShell, row: u16, col: u16) -> Vec<String> {
 }
 
 #[test]
+fn noninteractive_link_rendering_remains_escape_free() {
+    let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+        false,
+        true,
+        ColorDepth::None,
+    ));
+    let document = sexy_tui_rs::rich_text::markdown::parse(&format!("see [docs]({TARGET})"));
+    for renderer in [theme.rich_renderer(), theme.reasoning_renderer()] {
+        let rendered = renderer.render(&document, 100);
+        assert!(rendered
+            .lines
+            .iter()
+            .all(|line| !line.styled.contains('\x1b')));
+        assert!(rendered.plain_lines().join("\n").contains(TARGET));
+    }
+}
+
+#[test]
 fn stationary_web_click_activates_once_after_release_and_survives_an_unchanged_paint() {
-    for threaded in [false, true] {
-        let (mut shell, row, col) = fixture(threaded);
+    for (threaded, hyperlinks) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (mut shell, row, col) = fixture(threaded, hyperlinks);
         assert!(release(&mut shell, row, col).is_empty());
         shell.begin_transcript_selection(row, col, false);
         assert_eq!(
@@ -80,9 +103,9 @@ fn stationary_web_click_activates_once_after_release_and_survives_an_unchanged_p
 
 #[test]
 fn dragging_a_link_never_opens_it_even_after_returning_to_the_press_cell() {
-    for threaded in [false, true] {
+    for (threaded, hyperlinks) in [(false, false), (false, true), (true, false), (true, true)] {
         for movement in ["release only", "drag", "return", "wide cell"] {
-            let (mut shell, row, col) = fixture(threaded);
+            let (mut shell, row, col) = fixture(threaded, hyperlinks);
             shell.begin_transcript_selection(row, col, false);
             let release_col = match movement {
                 "drag" => {
@@ -115,13 +138,13 @@ fn dragging_a_link_never_opens_it_even_after_returning_to_the_press_cell() {
 
 #[test]
 fn shift_selection_and_presses_outside_the_link_cannot_activate_it() {
-    for threaded in [false, true] {
+    for (threaded, hyperlinks) in [(false, false), (false, true), (true, false), (true, true)] {
         for (press_col, extend) in [(0, false), (0, true), (u16::MAX, false)] {
-            let (mut shell, row, col) = fixture(threaded);
+            let (mut shell, row, col) = fixture(threaded, hyperlinks);
             shell.begin_transcript_selection(row, press_col, extend);
             assert!(release(&mut shell, row, col).is_empty());
         }
-        let (mut shell, row, col) = fixture(threaded);
+        let (mut shell, row, col) = fixture(threaded, hyperlinks);
         shell.begin_transcript_selection(row, col, true);
         assert!(release(&mut shell, row, col).is_empty());
         assert!(shell.transcript_link_at_screen_cell(19, col).is_none());
@@ -132,11 +155,11 @@ fn shift_selection_and_presses_outside_the_link_cannot_activate_it() {
 
 #[test]
 fn input_and_layout_changes_revoke_a_pending_link_click() {
-    for threaded in [false, true] {
+    for (threaded, hyperlinks) in [(false, false), (false, true), (true, false), (true, true)] {
         for change in [
             "resize", "wheel", "focus", "keyboard", "overlay", "output", "draft",
         ] {
-            let (mut shell, row, col) = fixture(threaded);
+            let (mut shell, row, col) = fixture(threaded, hyperlinks);
             shell.begin_transcript_selection(row, col, false);
             match change {
                 "resize" => {
@@ -177,7 +200,7 @@ fn input_and_layout_changes_revoke_a_pending_link_click() {
 
 #[test]
 fn a_press_without_painted_geometry_cannot_gain_link_authority_later() {
-    let (mut shell, row, col) = fixture(true);
+    let (mut shell, row, col) = fixture(true, false);
     {
         let mut state = shell.state.borrow_mut();
         state.render_geometry = None;

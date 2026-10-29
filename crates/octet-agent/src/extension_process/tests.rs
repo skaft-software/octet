@@ -477,6 +477,92 @@ fn wave2_terminal_release_dispatch_stays_typed_and_bounded() {
 }
 
 #[test]
+fn command_catalog_snapshot_requires_negotiation_and_complete_issued_owner() {
+    let (events, mut received) = broadcast::channel(16);
+    let (state, mut frames) =
+        protocol_read_state_for_test(ManifestContributions::default(), events);
+    insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+    let send = |id, params| {
+        handle_protocol_line(&wave1_line(id, "commands/snapshot", params), &state)
+            .expect("refusal must not close the reader");
+    };
+    send(700, serde_json::json!({"parent_request_id": 1}));
+    assert_eq!(
+        wave1_error(&frames.try_recv().unwrap()),
+        (-32601, "unsupported_feature".into())
+    );
+    wave1_negotiate(&state, &[EXTENSION_FEATURE_COMMAND_CATALOG]);
+    send(
+        701,
+        serde_json::json!({"parent_request_id": 1, "commands": []}),
+    );
+    assert_eq!(
+        wave1_error(&frames.try_recv().unwrap()),
+        (-32602, "invalid_request".into())
+    );
+    send(702, serde_json::json!({"parent_request_id": 1}));
+    match received.try_recv().expect("live catalog request") {
+        ExtensionEvent::ContextSnapshotRequested {
+            owner,
+            operation,
+            generation,
+            ..
+        } => {
+            assert_eq!(owner, Some(test_resource_owner("session-a")));
+            assert_eq!(generation, 1);
+            assert_eq!(operation, ExtensionContextOperation::Commands);
+        }
+        other => panic!("expected command catalog request, got {other:?}"),
+    }
+    lock_std_mutex(&state.pending)
+        .get(&1)
+        .unwrap()
+        .terminal
+        .store(REQUEST_COMPLETED, Ordering::Release);
+    // Settled callbacks need their genuinely issued complete owner. A dead
+    // parent alone or a guessed session/instance/generation cannot grant reads.
+    let genuine = serde_json::to_value(test_resource_owner("session-a")).unwrap();
+    let mut invalid = vec![serde_json::json!({"parent_request_id": 1})];
+    for (field, value) in [
+        ("session_id", serde_json::json!("session-b")),
+        (
+            "extension_instance_id",
+            serde_json::json!("foreign-instance"),
+        ),
+        ("process_generation", serde_json::json!(9)),
+    ] {
+        let mut owner = genuine.clone();
+        owner[field] = value;
+        invalid.push(serde_json::json!({"parent_request_id": 1, "resource_owner": owner}));
+    }
+    for (index, params) in invalid.into_iter().enumerate() {
+        send(703 + index as u64, params);
+        assert_eq!(
+            wave1_error(&frames.try_recv().unwrap()),
+            (-32002, "not_foreground_owner".into())
+        );
+    }
+    assert!(received.try_recv().is_err());
+    send(
+        707,
+        serde_json::json!({"parent_request_id": 1, "resource_owner": genuine}),
+    );
+    match received.try_recv().expect("retained catalog request") {
+        ExtensionEvent::ContextSnapshotRequested {
+            owner, operation, ..
+        } => {
+            assert_eq!(owner, Some(test_resource_owner("session-a")));
+            assert_eq!(operation, ExtensionContextOperation::Commands);
+        }
+        other => panic!("expected retained catalog request, got {other:?}"),
+    }
+    assert!(
+        frames.try_recv().is_err(),
+        "admitted reads must reach the host"
+    );
+}
+
+#[test]
 fn wave3_context_snapshot_dispatch_requires_feature_owner_and_bounds() {
     let (events, mut received) = broadcast::channel(16);
     let (state, mut frames) =

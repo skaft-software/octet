@@ -97,6 +97,7 @@ use crate::tui::view::{
 };
 
 mod admission;
+mod command_catalog;
 mod commands;
 mod composition;
 mod confirmation;
@@ -419,6 +420,7 @@ pub struct ExecutableExtensions {
     // The actual host registry handle, not an adapter-owned tool mirror. Its
     // interior dynamic registry remains usable while the Agent is borrowed.
     tool_host: Option<octet_agent::ExtensionHost>,
+    command_resources: Option<command_catalog::CommandResources>,
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
@@ -523,6 +525,7 @@ impl Default for ExecutableExtensions {
             pending_session_requests: VecDeque::new(),
             pending_session_setup: None,
             tool_host: None,
+            command_resources: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),
             remote_ui_wake: None,

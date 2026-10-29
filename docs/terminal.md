@@ -23,6 +23,19 @@ octet --mode rpc                            # JSONL for automation
 On native Windows, the console (Windows Terminal or conhost), not `TERM`, picks
 the frontend. See [Windows](windows.md#terminal).
 
+Tern's `TERM=stencil-term` is recognized on Unix and VT-enabled Windows
+consoles, so its own terminal identifier does not force the plain frontend.
+`TERM_PROGRAM=tern` then selects native surface negotiation; `--tern off` keeps
+the ordinary formatted ANSI UI. This detection support does not qualify every
+Tern version's native protocol or Windows terminal rendering.
+
+If a capable terminal unexpectedly shows plain output, check `TERM`, `NO_COLOR`,
+`OCTET_COLOR` and the `plain` configuration/`--plain` flag. `TERM=dumb`, unknown
+terminal identifiers and redirected input/output retain conservative fallback;
+forcing `--color always` does not enable cursor control. `NO_COLOR` suppresses
+styling without disabling the interactive layout. Preserve the terminal's real
+identifier rather than globally overriding `TERM` to hide a detection problem.
+
 The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
@@ -122,6 +135,9 @@ While octet works:
 Pi custom editors use the same native submission rules, including slash and
 extension commands. Their resolved Enter/follow-up keybindings are honored, and
 a rejected submission retains the genuine Pi Editor's draft, pastes and undo.
+Terminal bracketed paste into a Pi custom editor normalizes CR and CRLF line
+endings to newlines, without submitting the draft. The original byte bound and
+rejection of other terminal controls remain enforced.
 The custom editor occupies the composer slot, not the screen: Octet keeps the
 transcript, chrome, queue indicators and one native slash popup. Native, executable
 extension and Pi commands share that popup; later name collisions are owner-qualified
@@ -153,7 +169,10 @@ the height of the content, not a fixed full-screen composer and footer; it loads
 the complete resumed branch and appends to native scrollback. Explicit
 `--mouse app` (or `mouse = "app"` in configuration) opts inline sessions into the
 bounded semantic viewport as well, and lets a resumed session load newest-first.
-Explicit CLI choices take precedence over configured mouse policy.
+Explicit CLI choices take precedence over configured mouse policy. Switching
+surfaces with `/settings tui fullscreen` or `/settings tui inline` immediately
+reapplies that policy: `auto` starts or stops capture with the surface, while
+`app`, `terminal`, and `off` keep their explicit ownership.
 
 A `pi` theme changes presentation, not viewport ownership. Native Tern surfaces
 negotiate their own inline layout and leave ANSI mouse reporting off, including
@@ -165,7 +184,9 @@ report overlays do not change the ordinary ANSI launch default.
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release
-copies it, or use Ctrl+Shift+C to copy the current selection again; Ctrl+C keeps
+copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
+a stationary pointer does not expand the selected range on release; a displaced
+release still counts as movement when terminals coalesce drag events. Ctrl+C keeps
 its draft-clear/interrupt meaning. Composer, footer and separator rows are not
 transcript text. Shift+drag remains your terminal's native selection override
 where the terminal supports it.
@@ -175,7 +196,9 @@ an available system browser on release, without Shift or Ctrl. Dragging a link
 selects/copies instead; moving away and back does not activate it. Resize,
 scrolling, focus changes and intervening input cancel the pending click. Octet
 never launches local-file or application-protocol links this way. With capture
-off, including native Tern, link gestures remain terminal-owned.
+off, including native Tern, link gestures remain terminal-owned. Captured clicks
+also work without terminal OSC 8 support; unsupported hyperlink controls are
+omitted from terminal output, not from Octet's retained hit targets.
 
 Copy writes to an available local clipboard helper and emits OSC 52 to the
 terminal, so SSH/remote sessions can reach the client clipboard. The terminal must

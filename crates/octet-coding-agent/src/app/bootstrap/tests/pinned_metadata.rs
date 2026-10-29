@@ -1877,6 +1877,99 @@ fn opencode_fixture_catalog(declaration: &ProviderDeclaration) -> ModelCatalog {
     catalog
 }
 
+/// Reproduce Muse request construction through discovery and the real Chat
+/// codec, with no credentials and only a loopback fixture (not live inference).
+#[tokio::test]
+async fn opencode_go_muse_contributors_construct_chat_requests_for_declared_efforts() {
+    use octet_ai::{CompatibilityMode, Message, Request, UserMessage, UserPart};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let declaration = &crate::providers::OPENCODE_GO;
+    let ids = ["muse-spark-1.2-contributor", "muse-spark-1.3-contributor"];
+    let efforts = ["minimal", "low", "medium", "high", "xhigh"];
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/zen/go/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"id\":\"muse-fixture\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                    "data: {\"id\":\"muse-fixture\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                )),
+        )
+        .expect((ids.len() * efforts.len()) as u64)
+        .mount(&server)
+        .await;
+    let mut catalog = opencode_fixture_catalog(declaration);
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data": ids.map(|id| serde_json::json!({"id": id}))}),
+    )
+    .unwrap();
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let client = AiClient::with_http_client(http);
+    for id in ids {
+        let route = declaration.route_for_model(id).unwrap();
+        assert_eq!(route.protocol, Protocol::OpenAiChat);
+        assert_eq!(route.endpoint_id, "opencode-go");
+        let mut model = catalog
+            .resolve(&ModelId(format!("opencode-go/{id}")))
+            .unwrap();
+        assert_eq!(model.spec.protocol, Protocol::OpenAiChat);
+        assert_eq!(model.spec.preset, octet_ai::ModelPreset::default());
+        let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+        for effort in efforts {
+            assert!(reasoning.supports(&ReasoningConfig::from_provider_value(effort).unwrap()));
+        }
+        // Preserve the declaration's path, substituting only the destination.
+        let mut base = url::Url::parse(&server.uri()).unwrap();
+        base.set_path(declaration.resolved_route_base_url(route).unwrap().path());
+        Arc::make_mut(&mut model.endpoint).base_url = base;
+        for effort in efforts {
+            let request = Request {
+                system: Some("fixture system".into()),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![UserPart::Text("fixture prompt".into())],
+                })],
+                tools: vec![],
+                tool_choice: octet_ai::ToolChoice::None,
+                max_output_tokens: Some(128),
+                temperature: None,
+                stop: vec![],
+                reasoning: ReasoningConfig::from_provider_value(effort).unwrap(),
+                reasoning_mode: ReasoningMode::Standard,
+                responses: None,
+                output_format: octet_ai::OutputFormat::Text,
+                output_modalities: octet_ai::OutputModalities::Text,
+                compatibility: CompatibilityMode::Strict,
+                cache_retention: octet_ai::CacheRetention::None,
+                session_id: None,
+            };
+            client.complete(&model, request).await.unwrap();
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), ids.len() * efforts.len());
+    for (wire, (id, effort)) in requests.iter().zip(
+        ids.into_iter()
+            .flat_map(|id| efforts.map(|effort| (id, effort))),
+    ) {
+        assert!(wire.headers.get("authorization").is_none());
+        assert!(wire.headers.get("x-api-key").is_none());
+        let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(body["model"], id);
+        assert_eq!(body["reasoning_effort"], effort);
+    }
+}
+
 /// OpenCode's inventory publishes identifiers only. Every discovered model
 /// without a hand-written preset takes its thinking levels and input
 /// modalities from the pinned provider record, on its own route's primitive.

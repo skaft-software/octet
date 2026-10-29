@@ -16,6 +16,7 @@ pub(super) struct GeometryFence {
     content_width: u16,
     verbose: bool,
     overlay: bool,
+    search: bool,
     scroll: usize,
     follow_tail: bool,
 }
@@ -33,6 +34,7 @@ impl GeometryFence {
             content_width: state.transcript_content_width(state.size.0),
             verbose: state.verbose_tools,
             overlay: state.overlay.is_some(),
+            search: state.transcript_search_active(),
             scroll: state.scroll_from_bottom.get(),
             follow_tail: state.follow_tail,
         }
@@ -219,6 +221,7 @@ pub(super) struct RenderedGeometry {
     fence: GeometryFence,
     pub(super) panel: Option<PanelRenderReceipt>,
     pub(super) report: Option<ReportRenderReceipt>,
+    pub(super) navigation_frame: Option<super::transcript_navigation::NavigationFrame>,
     pub(super) generation: u64,
     pub(super) total_rows: usize,
     pub(super) visible_start: usize,
@@ -296,6 +299,7 @@ impl RenderedGeometry {
             fence,
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
+            navigation_frame: state.transcript_navigation.borrow().rendered_frame(),
             generation: cache.generation,
             total_rows,
             visible_start: start,

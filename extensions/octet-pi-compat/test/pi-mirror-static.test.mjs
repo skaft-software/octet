@@ -148,6 +148,24 @@ test('environment-dependent static definitions and late registrations cannot exp
   await p.close();
 });
 
+test('dynamic tool negotiation does not unfreeze mirror commands, shortcuts, flags or renderer declarations', async t => {
+  const f = fixture(t, `export default pi => pi.registerCommand('late',{handler(method){
+    if(method==='registerCommand') pi.registerCommand('added',{handler(){}});
+    if(method==='registerShortcut') pi.registerShortcut('ctrl+y',{handler(){}});
+    if(method==='registerFlag') pi.registerFlag('added',{type:'boolean',default:false});
+    if(method==='registerMessageRenderer') pi.registerMessageRenderer('added',()=>({render:()=>[]}));
+    if(method==='registerEntryRenderer') pi.registerEntryRenderer('added',()=>({render:()=>[]}));
+  }});`);
+  const captured = await configureMirror(f.options), p = peer(t, f, captured);
+  assert.ok((await initialize(p, captured)).result);
+  for (const method of ['registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
+    assert.match((await p.command('late', [method], { has_ui: false }).response).error.message,
+      new RegExp(`mirror ${method} changed static registrations; review and configure again`));
+  }
+  assert.equal(p.seen.some(frame => ['tools/register', 'shortcut/register'].includes(frame.method)), false);
+  await p.close();
+});
+
 test('present but disabled first-party manifests do not discard a factory; active collisions refuse the review', async t => {
   const f = fixture(t, `export default pi => { ${tool('web_search')} pi.registerCommand('unrelated',{handler(){}}); };`);
   const nativeRoot = join(f.dir, 'native');
@@ -297,6 +315,24 @@ test('automatic mirror reuses its capture for an unchanged setup and recaptures 
   const before = count();
   await configureMirror({ ...options, cache: false });
   assert.ok(count() > before);
+});
+
+test('automatic mirror retries a missing dependency without a factory source change', async t => {
+  const f = fixture(t);
+  const dependent = put(join(f.agent, 'extensions/dependent.js'), `import {label} from 'fixture-dependency';
+    export default pi => pi.registerCommand('dependent',{description:label,handler(){}});`);
+  const options = { ...f.options, env: { ...f.env, OCTET_PI_COMPAT_CACHE: join(f.dir, 'mirror-cache') }, cache: true, overwrite: true };
+  const first = await configureMirror(options);
+  assert.deepEqual(first.config.extensions, [f.entry]);
+  assert.deepEqual(first.config.mirror_excluded.map(item => item.entry), [dependent]);
+  // No factory/settings edit: only the previously absent dependency appears.
+  const dependency = join(f.agent, 'node_modules/fixture-dependency');
+  put(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture-dependency', type: 'module', exports: './index.js' }));
+  put(join(dependency, 'index.js'), 'export const label="dependency ready";');
+  const second = await configureMirror(options);
+  assert.deepEqual([...second.config.extensions].sort(), [f.entry, dependent].sort());
+  assert.equal(second.config.mirror_excluded, undefined);
+  assert.equal(second.registrations.commands.find(command => command.name === 'dependent').description, 'dependency ready');
 });
 
 test('automatic mirror settles a mixed setup in one capture and names the factory it left out', async t => {

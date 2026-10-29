@@ -1,23 +1,35 @@
-# Optional Pi factory compatibility
+# Pi extension compatibility
 
-> **Experimental and unstable source-only work; excluded from v0.9.6.** No Pi compatibility
-> bundle is shipped or offered in this release's catalog. Instructions below
-> describe development setup, not a qualified release integration.
+**The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
+Import your existing Pi setup (managed Pi 1.0.2 through 1.4.x) or select
+extension entrypoints manually.
+One Node process loads unchanged extension factories; Rust owns the agent,
+sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
+fallback loads helpers in that process, not a second Pi agent.
 
-One optional Node/Bun process loads unchanged Pi extension factories after explicit
-review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
-still owns octet's agent, sessions, approvals, terminal, keyboard focus and
-shutdown. The installed-Pi fallback loads helpers inside this process, not a
-second Pi CLI or agent loop. It is not an OS sandbox or universal Pi compatibility claim.
-Full stable Pi 1.0.2 compatibility remains the target; this source preview does
-not qualify that target, and new generic resource APIs do not substitute for Pi
-parity.
+See [getting started](../../docs/pi-compatibility.md) and the
+[API coverage ledger](../../docs/pi-extension-api.md). Extension execution uses
+your OS permissions; it is not a sandbox.
 
 ## Local setup and configuration
 
-Requires Node 22.19+ or Bun. Source dependency setup uses npm; release bundles
-include the dependencies. Nothing executes during extension discovery, and
-neither helper enables an extension or writes host configuration/trust:
+Requires Node **22.19.0 or newer**. Entrypoints reject older Node versions before
+loading adapter dependencies or factories. Bun's existing path is retained but
+separately unqualified. Source dependency setup uses npm; release archives
+include locked production dependencies. Installation/discovery are inert.
+Enabling the stock bundle automatically mirrors this
+machine's enabled Pi setup and runs its factories with OS permissions. Native
+provider-credential disclosure remains a separate reviewed opt-in, and native
+TOML appearance is independent. With octet 0.10.0 or later:
+
+```sh
+octet extension install octet-pi-compat
+# Only after reviewing this machine's enabled Pi factories and imports:
+octet --enable-extension octet-pi-compat
+```
+
+For source development, the commands below generate a separate reviewed bridge;
+neither helper enables it or writes host configuration/trust:
 
 ```sh
 node extensions/octet-pi-compat/setup.mjs
@@ -28,7 +40,7 @@ node extensions/octet-pi-compat/configure.mjs --reviewed --from-pi \
 octet --extension-dir /absolute/local-extensions --enable-extension octet-pi-compat
 ```
 
-`--from-pi` uses the installed Pi 1.0.2 resolver, probes each enabled factory on
+`--from-pi` uses the installed Pi's own resolver, probes each enabled factory on
 octet's emulated path, then automatically tries installed Pi when loading fails
 or a bounded source scan detects direct Pi tool execution, such as hashline's
 image-read branch. Child-tool descriptors alone stay on the emulated path.
@@ -39,8 +51,8 @@ ownership and fresh review, refusing a partial setup rather than silently droppi
 other commands. Installed native manifests alone do not prove active ownership;
 only explicit host-active tools conflict. Reviewed builtin tool replacements require
 exact manifest grants and negotiated native `builtin_tool_overrides_v1` admission.
-For a manual list, replace `--from-pi` with absolute entrypoint paths. Replace
-`node` with `bun` to reuse Bun; configure records that executable. A load pass
+For a manual list, replace `--from-pi` with absolute entrypoint paths. Configure
+records the executable; selecting Bun does not qualify that runtime. A load pass
 does not qualify commands, hooks or UI behavior.
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
@@ -88,9 +100,8 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The release catalog now includes this adapter with locked npm dependencies and
-an empty factory configuration. Publication is still a separate gate. When using
-an installed bundle, generate configuration in a separate directory rather than
+The 0.10.0 release catalog includes this adapter. For an installed bundle,
+generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
 The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
@@ -107,23 +118,38 @@ skips a changed factory. Late tools use the negotiated host-acknowledged catalog
 Static shortcut declarations stay reserved when a factory is
 skipped, but their missing handlers refuse execution; reconfigure to remove them.
 These hashes are change detection, not a sandbox or
-an integrity claim over an extension's entire import graph. The shipped config
-is empty and does not discover/import any Pi user installation.
+an integrity claim over an extension's entire import graph. The stock `bridge.json`
+is empty, but its manifest sets `OCTET_PI_AUTO_MIRROR=1`: explicit enablement
+prepares a private session catalog and discovers/runs enabled Pi factories.
+An empty config therefore does not mean stock activation is inert. Installation
+and discovery alone still execute nothing and never import credentials.
 
-octet 0.9.6 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
-1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
-Imports resolve through the same module table as Pi 1.0.2's extension loader:
+octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
+through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
+2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
+resolve through the same module table as Pi 1.4's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
-root and `pi-ai/compat` share one entry, and both `@earendil-works` and old
-`@mariozechner` Pi imports alias to the same host facades. `pi-agent-core`,
-`pi-ai/oauth` and `pi-ai/providers/all` come only from the installed Pi 1.0.2.
+root, `pi-ai/compat` and `pi-ai/models` share one entry, and both
+`@earendil-works` and old `@mariozechner` Pi imports alias to the same host
+facades. `pi-agent-core`, `pi-ai/oauth` and `pi-ai/providers/all` come only
+from the installed Pi.
 Setup uses `npm ci --ignore-scripts`, without global installs, asset downloads,
 providers or model calls. There is no coding-agent npm dependency. jiti keeps
 its default content-hashed transpile cache, as in Pi. Pure context helpers and
 command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 `v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
 license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
-runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
+runtime. The explicit installed-Pi route loads the managed Pi's own packages.
+Its native ESM imports finish sequentially before the synchronous overlays are
+published; an in-flight package graph is never read with `require()`. The shim
+precedence and denied-export boundaries are unchanged.
+
+Automatic-mirror catalog reuse does not retain exclusions caused by missing
+factory dependencies, unavailable installed-Pi modules or timed-out setup. Those
+factories are retried on the next launch, even if their sources did not change.
+Dependencies are never installed automatically. A cold capture still runs before
+the first interactive frame; a cached startup measurement does not qualify that
+cold path.
 
 ## Implemented surface
 
@@ -189,6 +215,15 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   Declaring either field, even empty, requires the feature. Limits: 1024 UTF-8 bytes
   per string, at most 16 guidelines, C0/C1 forbidden except newline/tab. Pi projection
   trimming and aggregate catalog-budget enforcement remain native responsibilities.
+- Synchronous `pi.getCommands()` requires native `command_catalog_v1`: resolved
+  extension commands, then admitted prompts, then **available**, not activated,
+  skills named `skill:<name>`, with original Pi `sourceInfo` where imported.
+  Built-in slash commands are excluded. Membership comes only from native
+  registries; the adapter restores its own factory provenance without adding
+  entries. Retained same-owner callbacks request a fresh snapshot; unbound,
+  retired, cancelled, draining or unsettled-resource contexts refuse rather than
+  inventing an empty catalog. Complete results are bounded to 512 KiB. See the
+  [native contract](../../docs/extensions/resource-paths.md#available-command-catalog).
 - Adapter-side `resources_discover` behind `resource_paths_v1`: ordered awaited
   factory callbacks, normalized filesystem roots and the dedicated native reply.
   Native activation must remain off without the complete App consumer described
@@ -248,7 +283,9 @@ deliberate differences from Pi's unbounded, blocking chain.
   composer slot; native chrome and slash discovery stay visible. JS components,
   callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
   cross the wire; the adapter strips balanced, bounded file/http/https OSC 8 link wrappers and keeps
-  their visible labels as plain text. Other terminal escapes remain rejected. Rust paints cached lines and never calls JS synchronously.
+  their visible labels as plain text. Other terminal escapes remain rejected. Oversized Pi render
+  snapshots are clipped to the existing row, per-line and aggregate wire bounds at UTF-8/SGR
+  boundaries, with an ellipsis. Rust paints cached lines and never calls JS synchronously.
 - `setStatus` is local footer-provider metadata, not an assertion that every
   frontend displays ambient chrome. The compatibility palette is local, not a
   claim to reproduce octet's host theme; unknown roles are explicit errors.
@@ -327,7 +364,7 @@ original shell quoting.
 
 A synchronous reverse request that the host drops (it cancels the hook together
 with the child request it issued) no longer takes the extension down. A dropped
-*read-only* request (`tools/snapshot`, `composition/context`) is terminal
+*read-only* request (`commands/snapshot`, `tools/snapshot`, `composition/context`) is terminal
 cancellation: the factory thread is woken with `request cancelled` instead of
 waiting on a reply that will never arrive. A durable or effectful request keeps
 waiting for its native outcome, because only that outcome decides whether the

@@ -25,7 +25,11 @@ pub(crate) mod eval;
 mod extension_flags;
 pub(crate) mod parity;
 
-pub(crate) use extension_flags::{parse_with_extension_flags, uses_runtime_extension_flag_parser};
+#[cfg(test)]
+pub(crate) use extension_flags::uses_runtime_extension_flag_parser;
+pub(crate) use extension_flags::{
+    parse_static_invocation, parse_with_extension_flags, StaticInvocation,
+};
 
 use config_diagnostics::{
     read_layer, report_config_diagnostics, ConfigSourceKind, LoadedConfigLayer,
@@ -57,16 +61,26 @@ pub fn tui_mode_is_explicit() -> bool {
     TUI_MODE_EXPLICIT.load(Ordering::Relaxed)
 }
 
-pub fn persist_tui_mode(mode: config::TuiMode) -> anyhow::Result<()> {
+/// Return the checked preference write; acknowledge only after a live switch succeeds.
+pub(crate) fn persist_tui_mode(
+    mode: config::TuiMode,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
     if tui_mode_is_explicit() {
         anyhow::bail!("--tui-mode overrides the saved preference for this invocation");
     }
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist TUI mode: user home directory is unavailable")
     })?;
-    persist_key_to_path("tui_mode", mode.as_str(), &path)?;
+    let receipt = persist_tui_mode_to_path(mode, &path)?;
     store_tui_mode(mode);
-    Ok(())
+    Ok(receipt)
+}
+
+fn persist_tui_mode_to_path(
+    mode: config::TuiMode,
+    path: &std::path::Path,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
+    persist_keys_to_path(&[("tui_mode", mode.as_str())], path, true)
 }
 
 /// Which Pi message queue a delivery mode governs.
@@ -950,11 +964,19 @@ pub fn persist_reasoning(reasoning: &str) -> anyhow::Result<()> {
 /// Persist a built-in selector or a resource name already validated and loaded
 /// by the interactive picker. Keep custom names case-sensitive for discovery.
 pub fn persist_theme_choice(choice: &str) -> anyhow::Result<()> {
+    persist_theme_selection(choice).map(|_| ())
+}
+
+/// Return the exact atomic preference write so an already-applied live palette
+/// does not trigger a resource rebuild that retires retained editor/footer mounts.
+pub(crate) fn persist_theme_selection(
+    choice: &str,
+) -> anyhow::Result<Option<crate::reload::AppliedConfigWrite>> {
     let key = theme_choice_key(choice)?;
     let path = global_config_path().ok_or_else(|| {
         anyhow::anyhow!("cannot persist theme: user home directory is unavailable")
     })?;
-    persist_key_to_path("theme", key, &path)
+    persist_keys_to_path(&[("theme", key)], &path, true)
 }
 
 fn theme_choice_key(choice: &str) -> anyhow::Result<&str> {

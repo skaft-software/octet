@@ -720,7 +720,8 @@ pub(crate) fn build_request(
                                                 data: data.clone(),
                                             });
                                         }
-                                        ReasoningStateKind::OpenAiReasoning { .. } => {}
+                                        ReasoningStateKind::OpenAiReasoning { .. }
+                                        | ReasoningStateKind::ChatReasoningDetails { .. } => {}
                                     }
                                 }
                             }

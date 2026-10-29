@@ -5039,8 +5039,18 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
 
 /// Whether two endpoint base URLs name the same HTTP(S) origin and path,
 /// ignoring case in the host, default ports and a trailing slash.
-fn same_endpoint_base(left: &str, right: &str) -> bool {
-    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+fn same_endpoint_base(left: &str, right: &url::Url) -> bool {
+    // A declared base URL spells its host out: parsing only lowercases ASCII
+    // domains, and no declaration is an IP literal or uppercase
+    // (`declared_endpoint_hosts_are_lowercase_domains`). Skip the parse for
+    // the declarations that cannot name this host.
+    if right
+        .host_str()
+        .is_some_and(|host| !left.contains(&host.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    let Ok(left) = url::Url::parse(left) else {
         return false;
     };
     matches!(left.scheme(), "http" | "https")
@@ -5064,12 +5074,15 @@ fn apply_declared_endpoint_catalog_limits(
     cred: &crate::auth::custom::CustomCredential,
     models: Vec<crate::auth::custom::CustomModel>,
 ) -> Vec<crate::auth::custom::CustomModel> {
+    let Ok(base_url) = url::Url::parse(&cred.base_url) else {
+        return models;
+    };
     let Some(declaration) =
         crate::providers::BUILTIN_PROVIDER_DECLARATIONS
             .iter()
             .find(|declaration| {
                 declaration.base_url_environment.is_empty()
-                    && same_endpoint_base(declaration.base_url, &cred.base_url)
+                    && same_endpoint_base(declaration.base_url, &base_url)
             })
     else {
         return models;
@@ -9060,7 +9073,7 @@ fn build_app_with_consumer(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );
@@ -9279,6 +9292,106 @@ fn resolve_model_or_complete_fleet(
         Ok(model) => Ok(model),
         Err(_) => Err(unavailable.into()),
     }
+}
+
+/// Reuse the live binding only when model-dependent tool and reasoning modes
+/// remain compatible. No provider discovery, resource reload or session reopen
+/// belongs on this foreground path; incompatible selections use `rebuild_app`.
+pub(super) fn try_select_model_at_idle(
+    app: &mut App,
+    model: Model,
+    new_reasoning: Option<ReasoningConfig>,
+) -> anyhow::Result<bool> {
+    if model.spec.capabilities.tools != app.model.spec.capabilities.tools {
+        return Ok(false);
+    }
+    let requested_mode = if new_reasoning.is_some() {
+        ReasoningMode::Standard
+    } else {
+        app.reasoning_mode
+    };
+    let requested = match new_reasoning {
+        Some(reasoning) => reasoning,
+        None => thinking_to_reasoning(level_from_reasoning(&app.reasoning, &app.model)?, &model)?,
+    };
+    let (reasoning, mode, migration_diagnostic) =
+        normalize_reasoning_selection_for_model_with_subagents(
+            &requested,
+            requested_mode,
+            &model,
+            app.subagents_available(),
+        )?;
+    if mode != app.reasoning_mode {
+        return Ok(false);
+    }
+    let compact_model = match app.config.compaction.compact_model.as_ref() {
+        Some(id) => match app.catalog.resolve(id) {
+            Ok(model) => Some(model),
+            // Only the blocking rebuild may complete a deferred inventory.
+            Err(_) => return Ok(false),
+        },
+        None => None,
+    };
+    validate_compaction_route(app.config.compaction.mode, &model, compact_model.as_ref())?;
+    validate_native_compaction_replay(app.config.compaction.mode, app.agent.session(), &model)?;
+    validate_explicit_tool_policy(
+        &app.config,
+        &app.agent.extension_host_mut().tool_definitions(),
+        &model,
+        app.executable_extensions.has_dynamic_tool_provider(),
+    )?;
+    startup_phase("model.select.begin");
+    record_codex_context_uncertainty(app.agent.session_mut(), &model)?;
+    let previous_tier = app.agent.service_tier();
+    let clear_tier = previous_tier.is_some() && !crate::commands::codex_fast_tier_endpoint(&model);
+    if clear_tier {
+        app.agent.set_service_tier(None)?;
+    }
+    if let Err(error) = app.agent.select_model_at_idle(
+        model.clone(),
+        reasoning.clone(),
+        super::reasoning_label(&reasoning),
+    ) {
+        app.agent.set_service_tier(previous_tier)?;
+        return Err(error.into());
+    }
+    app.agent
+        .set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
+    app.agent
+        .set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
+    app.agent.set_compaction_model(compact_model);
+    app.agent.set_compaction_token_mode(
+        agent_compaction_mode(app.config.compaction.mode),
+        effective_compaction_threshold_fraction(&app.config, &model),
+        app.config.compaction.keep_recent_tokens,
+    )?;
+    app.config.model = Some(model.spec.id.clone());
+    app.config.reasoning = Some(reasoning.clone());
+    app.config.reasoning_mode = mode;
+    app.model = model;
+    app.reasoning = reasoning;
+    app.reasoning_mode = mode;
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
+    if clear_tier {
+        crate::output::stderr!(
+            "warning: fast mode disabled: the selected model route does not support it"
+        );
+    }
+    startup_phase("model.select.complete");
+    Ok(true)
 }
 
 /// Recreate the Agent at an idle boundary. Taking `App` by value guarantees the
@@ -9508,7 +9621,7 @@ pub fn rebuild_app(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );

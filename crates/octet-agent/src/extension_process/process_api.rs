@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+#[path = "startup_catalog_tests.rs"]
+mod startup_catalog_tests;
+
 impl ExtensionProcess {
     /// Launches, initializes, and validates an explicitly enabled and trusted
     /// executable extension.
@@ -639,6 +643,7 @@ impl ExtensionProcess {
         // Pi awaits session_start, and it runs off the startup path here, so it
         // gets the ordinary request deadline. Only the end finalizer keeps the
         // short cap, so exit and reload never wait on an extension.
+        let ending = matches!(&params, api_v03::SessionHookParams::SessionEnd { .. });
         let deadline = match params {
             api_v03::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
             api_v03::SessionHookParams::SessionEnd { .. } => {
@@ -663,6 +668,11 @@ impl ExtensionProcess {
             }
             let mut context = self.execution_context();
             context.resource_owner = Some(resource_owner.clone());
+            if ending {
+                // The end finalizer has no foreground UI pump. Keep that fact
+                // request-local without changing the frontend mode or start state.
+                context.host.has_ui = Some(false);
+            }
             params["context"] = serde_json::to_value(context)
                 .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
             session_leaf::attach_request_session_mirror(

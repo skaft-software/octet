@@ -40,12 +40,55 @@ test('normalize: custom messages preserve text/image content and reject malforme
   assert.throws(() => customMessageParams({ customType: 'media', content: Array(9).fill(image) }), /exceeds bounds/);
 });
 
+test('normalize: custom message details omit optional undefined object members like JSON persistence', () => {
+  const details = { id: 'task', error: undefined, nested: { exitCode: 0, reason: undefined },
+    events: [{ status: 'completed', optional: undefined }] };
+  const wire = customMessageParams({ customType: 'job', content: 'done', display: true, details },
+    { deliverAs: 'followUp', triggerTurn: false });
+  assert.deepEqual(wire.details, JSON.parse(JSON.stringify(details)));
+  assert.equal(Object.hasOwn(details, 'error'), true, 'normalization must not mutate factory data');
+  assert.equal(wire.deliver_as, 'follow_up');
+  assert.equal(wire.trigger_turn, false);
+});
+
+test('normalize: custom message details still reject non-JSON values and undefined array slots', () => {
+  for (const details of [[undefined], { nested: [undefined] }, { fn() {} },
+    { date: new Date(0) }, { value: 1n }, { value: NaN }]) {
+    assert.throws(() => customMessageParams({ customType: 'job', details }), /plain JSON/);
+  }
+});
+
 test('mirror: typed durable custom messages have Pi custom_message identity, details, and visibility', () => {
   const entry = { id: '003', parent: '002', timestamp_unix_ms: 1700000000000,
     value: { type: 'message', User: { content: [{ Text: 'model body' }] } },
     metadata: { custom_message: { custom_type: 'job', content: [{ type: 'text', text: 'model body' }], display: false, details: { secret: 1 } } } };
   assert.deepEqual(translateSessionEntries([entry], 'octet-pi-compat'), [{ id: '003', parentId: '002', timestamp: new Date(entry.timestamp_unix_ms).toISOString(),
     type: 'custom_message', customType: 'job', content: [{ type: 'text', text: 'model body' }], display: false, details: { secret: 1 } }]);
+});
+
+test('mirror: assistant entries carry their usage-ledger facts the way Pi custom-footer reads them', () => {
+  const usage = { input_tokens: 1200, output_tokens: 300, cache_read_tokens: 50, cache_write_tokens: 0, cache_write_1h_tokens: 0, reasoning_tokens: 0, total_tokens: 1550 };
+  const cost = { input: 3600, output: 4500, reasoning: 0, cache_read: 15, cache_write: 0, total: 8115, total_picodollars_remainder: 0 };
+  const assistant = (id, metadata) => ({ id, parent: null, timestamp_unix_ms: 1700000000000,
+    value: { type: 'message', Assistant: { model: 'probe', protocol: 'open_ai_chat', content: [{ Text: 'answer' }] } },
+    ...(metadata ? { assistant_metadata: { assistant_entry_id: id, model: 'probe', ...metadata } } : {}) });
+  const [priced, unpriced, unrecorded] = translateSessionEntries([
+    assistant('priced', { usage, cost, stop_reason: 'end_turn' }),
+    assistant('unpriced', { usage, cost: null, stop_reason: 'tool_use' }),
+    assistant('unrecorded'),
+  ], 'octet-pi-compat').map(entry => entry.message);
+  assert.deepEqual(priced.usage, { input: 1200, output: 300, cacheRead: 50, cacheWrite: 0, totalTokens: 1550,
+    cost: { input: 0.0036, output: 0.0045, cacheRead: 0.000015, cacheWrite: 0, total: 0.008115 } });
+  assert.equal(priced.stopReason, 'stop');
+  // The footer's own arithmetic over a real branch entry.
+  assert.equal(`↑${(priced.usage.input / 1000).toFixed(1)}k ↓${priced.usage.output} $${priced.usage.cost.total.toFixed(3)}`, '↑1.2k ↓300 $0.008');
+  // Unpriced and unrecorded turns keep absent facts absent; nothing is invented.
+  assert.equal(unpriced.usage.input, 1200);
+  assert.equal(Object.hasOwn(unpriced.usage, 'cost'), false);
+  assert.equal(unpriced.stopReason, 'toolUse');
+  assert.equal(Object.hasOwn(unrecorded, 'usage'), false);
+  assert.throws(() => translateSessionEntries([assistant('foreign', { usage, cost, stop_reason: 'end_turn', assistant_entry_id: 'other' })], 'octet-pi-compat'),
+    /assistant metadata entry mismatch/);
 });
 
 // Only reviewed test code belongs in body; variable values stay in the JSON sidecar.
@@ -71,6 +114,22 @@ test('sendMessage: one typed custom message with Pi delivery options, no substit
   const { parent_request_id, resource_owner, ...params } = sent[0].params;
   assert.deepEqual(params, { custom_type: 'job', content: 'done', display: false, details: { id: 1 }, deliver_as: 'follow_up', trigger_turn: true });
   assert.equal(peer.seen.some(f => ['session/send_user_message', 'session/append_entry'].includes(f.method)), false);
+  await peer.close();
+});
+
+test('sendMessage: optional undefined task details reach the real adapter wire without waking a turn', async t => {
+  const peer = await command(t, `await pi.sendMessage({ customType: 'background-task-notification', content: 'done', display: true,
+    details: { id: 'task', exitCode: 0, error: undefined, nested: { optional: undefined, value: 'kept' } } },
+    { deliverAs: 'followUp', triggerTurn: false });`);
+  const sent = peer.seen.filter(f => f.method === 'session/send_message');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].params.details, { id: 'task', exitCode: 0, nested: { value: 'kept' } });
+  assert.equal(sent[0].params.trigger_turn, false);
+  assert.equal(sent[0].params.deliver_as, 'follow_up');
+  assert.equal(sent[0].params.display, true);
+  assert.ok(Number.isSafeInteger(sent[0].params.parent_request_id));
+  assert.ok(sent[0].params.resource_owner);
+  assert.equal(peer.seen.some(f => f.method === 'session/send_user_message'), false);
   await peer.close();
 });
 

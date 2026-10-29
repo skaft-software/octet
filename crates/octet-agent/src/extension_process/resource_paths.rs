@@ -8,6 +8,26 @@ pub const EXTENSION_FEATURE_RESOURCE_PATHS: &str = "resource_paths_v1";
 const MAX_PATHS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TOTAL_PATH_BYTES: usize = 64 * 1024;
+/// API 0.4 authoritative available command/resource metadata snapshots.
+pub const EXTENSION_FEATURE_COMMAND_CATALOG: &str = "command_catalog_v1";
+
+/// Discovery provenance only; membership remains the native loader's decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExtensionSourceInfo {
+    /// Actual source file or root.
+    pub path: String,
+    /// Local, package specifier, or contributing extension source.
+    pub source: String,
+    /// User, project, or temporary scope.
+    pub scope: String,
+    /// Package or top-level origin.
+    pub origin: String,
+    /// Discovery base, when supplied by the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<String>,
+}
+
 const DISCOVERY_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Host-owned reason, mapped to Pi's resources_discover event without guessing.
@@ -36,6 +56,9 @@ pub struct ExtensionDefaultModel {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionResourcePaths {
+    /// Optional provenance keyed by a contributed skill/prompt path. Never admits a path.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_infos: std::collections::BTreeMap<String, ExtensionSourceInfo>,
     /// Skill directories or supported Markdown entrypoints.
     #[serde(default)]
     pub skill_paths: Vec<String>,
@@ -106,6 +129,29 @@ impl ExtensionResourcePaths {
                     "invalid or over-budget resource_paths_v1 paths".into(),
                 ));
             }
+        }
+        let metadata_bytes = serde_json::to_vec(&self.source_infos)
+            .map_err(|e| ExtensionRuntimeError::Protocol(e.to_string()))?
+            .len();
+        if metadata_bytes > 128 * 1024
+            || self.source_infos.iter().any(|(path, info)| {
+                (!self.skill_paths.contains(path) && !self.prompt_paths.contains(path))
+                    || info.path != *path
+                    || !matches!(info.scope.as_str(), "user" | "project" | "temporary")
+                    || !matches!(info.origin.as_str(), "package" | "top-level")
+                    || [&info.path, &info.source]
+                        .into_iter()
+                        .chain(info.base_dir.iter())
+                        .any(|s| {
+                            s.is_empty()
+                                || s.len() > MAX_PATH_BYTES
+                                || s.chars().any(char::is_control)
+                        })
+            })
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "invalid resource source_infos".into(),
+            ));
         }
         if let Some(selection) = &self.default_model {
             let bounded = |value: &str| {
@@ -224,6 +270,15 @@ impl ExtensionProcess {
         let reply: ResourcePathsReply = serde_json::from_value(response).map_err(|_| {
             ExtensionRuntimeError::Protocol("invalid resources_discover result shape".into())
         })?;
+        if !reply.resource_paths.source_infos.is_empty()
+            && !read_std_lock(&connection.protocol)
+                .features
+                .contains(EXTENSION_FEATURE_COMMAND_CATALOG)
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "source_infos requires command_catalog_v1".into(),
+            ));
+        }
         reply.resource_paths.validate()?;
         Ok((generation, reply.resource_paths))
     }
@@ -273,6 +328,54 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn command_catalog_provenance_is_bounded_and_cannot_admit_resources() {
+        let path = root();
+        let info = ExtensionSourceInfo {
+            path: path.clone(),
+            source: "npm:skills@1.0.0".into(),
+            scope: "user".into(),
+            origin: "package".into(),
+            base_dir: None,
+        };
+        let mut paths = ExtensionResourcePaths {
+            source_infos: [(path.clone(), info.clone())].into(),
+            ..Default::default()
+        };
+        assert!(paths.validate().is_err(), "metadata is not a path grant");
+        paths.skill_paths.push(path.clone());
+        paths.validate().unwrap();
+        assert!(serde_json::to_value(&info)
+            .unwrap()
+            .get("baseDir")
+            .is_none());
+        for (field, value) in [
+            ("path", "/unrelated"),
+            ("source", "bad\nsource"),
+            ("scope", "unknown"),
+            ("origin", "unknown"),
+            ("baseDir", ""),
+        ] {
+            let mut wire = serde_json::to_value(&info).unwrap();
+            wire[field] = serde_json::json!(value);
+            paths
+                .source_infos
+                .insert(path.clone(), serde_json::from_value(wire).unwrap());
+            assert!(
+                paths.validate().is_err(),
+                "invalid {field} provenance admitted"
+            );
+        }
+        paths.source_infos.insert(
+            path,
+            ExtensionSourceInfo {
+                source: "x".repeat(4097),
+                ..info
+            },
+        );
+        assert!(paths.validate().is_err());
+    }
+
     #[test]
     fn resource_paths_wire_is_strict_and_counts_before_deduplication() {
         assert!(serde_json::from_value::<ResourcePathsReply>(serde_json::json!({})).is_err());

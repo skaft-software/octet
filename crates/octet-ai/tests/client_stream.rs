@@ -2113,6 +2113,306 @@ async fn inter_chunk_idle_timeout_applies_after_a_delayed_first_body() {
     );
 }
 
+// A raw loopback peer lets these tests separate HTTP body activity from SSE
+// event completion. No provider, credentials, proxy or paid inference is used.
+struct SyntheticSsePeer {
+    uri: String,
+    task: tokio::task::JoinHandle<()>,
+    disconnected: oneshot::Receiver<()>,
+}
+
+impl Drop for SyntheticSsePeer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl SyntheticSsePeer {
+    async fn start(chunks: Vec<(Duration, Vec<u8>)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let (closed_tx, disconnected) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut buf = [0; 4096];
+                let count = socket.read(&mut buf).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buf[..count]);
+                assert!(request.len() <= 64 * 1024);
+                if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(length <= 64 * 1024);
+            while request.len() < header_end + length {
+                let mut buf = [0; 4096];
+                let count = socket.read(&mut buf).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buf[..count]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            for (delay, chunk) in chunks {
+                tokio::time::sleep(delay).await;
+                let header = format!("{:x}\r\n", chunk.len());
+                if socket.write_all(header.as_bytes()).await.is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    let _ = closed_tx.send(());
+                    return;
+                }
+            }
+            // Deliberately leave the body open, even after [DONE]. An idle
+            // timeout, terminal event or cancellation must close the reader.
+            let mut buf = [0];
+            let result = socket.read(&mut buf).await;
+            assert!(matches!(result, Ok(0) | Err(_)));
+            let _ = closed_tx.send(());
+        });
+        Self {
+            uri,
+            task,
+            disconnected,
+        }
+    }
+}
+
+fn synthetic_sse_client(idle: Duration, deadline: Duration) -> AiClient {
+    AiClient::try_with_proxy_environment(Default::default())
+        .unwrap()
+        .with_stream_timeouts(idle, deadline)
+}
+
+async fn next_synthetic_event(
+    stream: &mut octet_ai::stream::ResponseStream,
+) -> Option<Result<StreamEvent, AiError>> {
+    tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("synthetic SSE stream must remain bounded")
+}
+
+#[tokio::test]
+async fn sse_comments_and_partial_large_tool_json_are_transport_activity() {
+    let idle = Duration::from_millis(250);
+    let interval = Duration::from_millis(30);
+    let content = "large offline write\n".repeat(16 * 1024);
+    let arguments = serde_json::json!({"path": "fixture.txt", "content": content}).to_string();
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "synthetic-write",
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call-write", "type": "function",
+                "function": {"name": "write", "arguments": arguments}
+            }]}}]
+        })
+    );
+    // Each comment is transport activity but no canonical event. The large
+    // data line then spans many body chunks before any JSON can be decoded.
+    let mut chunks = vec![(interval, b": OPENROUTER PROCESSING\n\n".to_vec()); 12];
+    chunks.extend(
+        frame
+            .as_bytes()
+            .chunks(16 * 1024)
+            .map(|part| (interval, part.to_vec())),
+    );
+    chunks.push((interval, b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".to_vec()));
+    let peer = SyntheticSsePeer::start(chunks).await;
+    let mut model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    Arc::make_mut(&mut model.spec).capabilities.tools = true;
+    let mut request = text_request();
+    request.tools.push(octet_ai::ToolDef {
+        async_execution: false,
+        name: "write".to_owned(),
+        description: "Synthetic offline write".to_owned(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"], "additionalProperties": false
+        }),
+        constrained_sampling: None,
+    });
+    let mut stream = synthetic_sse_client(idle, Duration::from_secs(5))
+        .stream(&model, request)
+        .await
+        .unwrap();
+    let mut starts = 0;
+    let mut ends = 0;
+    let mut finished = 0;
+    while let Some(event) = next_synthetic_event(&mut stream).await {
+        match event.unwrap() {
+            StreamEvent::Started { .. } => starts += 1,
+            StreamEvent::ToolCallEnd { argument_error, .. } => {
+                assert!(argument_error.is_none());
+                ends += 1;
+            }
+            StreamEvent::Finished(response) => {
+                assert_eq!(response.stop_reason, octet_ai::StopReason::ToolUse);
+                let [octet_ai::AssistantPart::ToolCall(call)] = response.message.content.as_slice()
+                else {
+                    panic!("expected exactly one complete tool call");
+                };
+                assert_eq!(call.id.0, "call-write");
+                assert_eq!(call.name, "write");
+                assert_eq!(call.arguments_value().unwrap()["content"], content);
+                finished += 1;
+            }
+            StreamEvent::ProviderLifecycle(_) => panic!("ordinary comments must stay invisible"),
+            _ => {}
+        }
+    }
+    assert_eq!((starts, ends, finished), (1, 1, 1));
+}
+
+#[tokio::test]
+async fn sse_early_comment_ends_initial_body_allowance_before_provider_output() {
+    // A gateway keepalive is a first body byte, not a first model event. If
+    // the gateway then stops sending bytes, the shorter inter-chunk bound
+    // applies even while the provider may still be buffering its first call.
+    let peer = SyntheticSsePeer::start(vec![
+        (Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec()),
+        (
+            Duration::from_millis(400),
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"buffered\"}}]}\n\n".to_vec(),
+        ),
+    ])
+    .await;
+    let model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    let mut stream = synthetic_sse_client(Duration::from_millis(100), Duration::from_secs(3))
+        .with_initial_stream_timeout(Duration::from_secs(2))
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let error = next_synthetic_event(&mut stream)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(stream_inner(&error), AiError::Transport(transport)
+        if transport.timeout && transport.message.contains("idle beyond its timeout")));
+    let AiError::StreamFailure { progress, .. } = error else {
+        panic!("expected progress")
+    };
+    assert!(progress.first_body_seen);
+    assert_eq!(progress.provider_events, 0);
+    assert_eq!(progress.last_event_ms, None);
+}
+
+#[tokio::test]
+async fn sse_partial_json_then_dead_socket_still_times_out() {
+    let peer = SyntheticSsePeer::start(vec![
+        (Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec()),
+        (
+            Duration::from_millis(20),
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[".to_vec(),
+        ),
+    ])
+    .await;
+    let model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    let mut stream = synthetic_sse_client(Duration::from_millis(100), Duration::from_secs(2))
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let error = next_synthetic_event(&mut stream)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(stream_inner(&error), AiError::Transport(transport)
+        if transport.timeout && transport.phase == octet_ai::TransportPhase::Body
+            && transport.message.contains("idle beyond its timeout")));
+    let AiError::StreamFailure { progress, .. } = error else {
+        panic!("expected progress")
+    };
+    assert!(progress.first_body_seen);
+    assert_eq!(progress.provider_events, 0);
+    assert_eq!(progress.last_event_ms, None);
+}
+
+#[tokio::test]
+async fn sse_heartbeats_cannot_extend_overall_deadline() {
+    let peer = SyntheticSsePeer::start(vec![
+        (
+            Duration::from_millis(20),
+            b": OPENROUTER PROCESSING\n\n".to_vec()
+        );
+        100
+    ])
+    .await;
+    let model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    let mut stream = synthetic_sse_client(Duration::from_millis(200), Duration::from_millis(300))
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let error = next_synthetic_event(&mut stream)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(stream_inner(&error), AiError::Transport(transport)
+        if transport.timeout && transport.message.contains("overall deadline")));
+}
+
+#[tokio::test]
+async fn sse_partial_json_remains_size_bounded() {
+    let mut chunks = vec![(Duration::ZERO, b"data: {\"arguments\":\"".to_vec())];
+    chunks.extend((0..33).map(|_| (Duration::ZERO, vec![b'x'; 64 * 1024])));
+    let peer = SyntheticSsePeer::start(chunks).await;
+    let model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    let mut stream = synthetic_sse_client(Duration::from_secs(1), Duration::from_secs(3))
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    let error = next_synthetic_event(&mut stream)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        stream_inner(&error),
+        AiError::Decode(octet_ai::DecodeError::BodyTooLarge)
+    ));
+}
+
+#[tokio::test]
+async fn sse_cancellation_drops_reader_waiting_for_partial_json() {
+    let mut peer = SyntheticSsePeer::start(vec![
+        (
+            Duration::ZERO,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"ready\"}}]}\n\n".to_vec(),
+        ),
+        (Duration::ZERO, b"data: {\"choices\":[{\"delta\":".to_vec()),
+    ])
+    .await;
+    let model = make_test_model(&peer.uri, Protocol::OpenAiChat, false);
+    let mut stream = synthetic_sse_client(Duration::from_secs(10), Duration::from_secs(20))
+        .stream(&model, text_request())
+        .await
+        .unwrap();
+    loop {
+        if matches!(
+            next_synthetic_event(&mut stream).await.unwrap().unwrap(),
+            StreamEvent::TextDelta { .. }
+        ) {
+            break;
+        }
+    }
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(2), &mut peer.disconnected)
+        .await
+        .expect("cancellation must close the incomplete HTTP body without waiting for idle")
+        .expect("synthetic peer must observe disconnection");
+}
+
 #[tokio::test]
 async fn error_response_body_obeys_idle_timeout_but_preserves_status() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -1391,6 +1391,14 @@ pub enum ReasoningStateKind {
         /// Opaque encrypted reasoning block.
         encrypted_content: Option<String>,
     },
+    /// Chat Completions `reasoning_details` (OpenRouter), merged across stream
+    /// deltas. Gateways carry provider signatures here, such as Gemini thought
+    /// signatures and Anthropic thinking signatures, and require the entries
+    /// back unchanged on the assistant message.
+    ChatReasoningDetails {
+        /// Provider entries in emission order.
+        details: Vec<serde_json::Value>,
+    },
 }
 
 // Opaque replay state must survive serialization unchanged, but it is not
@@ -1410,6 +1418,10 @@ impl std::fmt::Debug for ReasoningStateKind {
                 .debug_struct("OpenAiReasoning")
                 .field("item_id", &"[REDACTED]")
                 .field("encrypted_content", &"[REDACTED]")
+                .finish(),
+            Self::ChatReasoningDetails { details } => formatter
+                .debug_struct("ChatReasoningDetails")
+                .field("details", &format_args!("[REDACTED; {}]", details.len()))
                 .finish(),
         }
     }

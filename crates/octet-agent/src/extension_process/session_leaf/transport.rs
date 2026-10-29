@@ -3,7 +3,6 @@
 //! The encoded representation is the native view. One Arc has one reservation,
 //! retained until both current publication and every invocation have released it.
 use super::*;
-use base64::Engine as _;
 use serde_json::{json, Value};
 
 mod dispatch;

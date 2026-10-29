@@ -20,7 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches, Parser};
+#[cfg(test)]
+use clap::Parser;
+use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches};
 use octet_agent::extension_process::{ExtensionFlag, ExtensionFlagType};
 
 use super::{
@@ -404,34 +406,66 @@ pub(super) fn invocation_has_top_level_subcommand(
 }
 
 fn parse_static_or_exit(args: Vec<OsString>) -> Cli {
-    match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
+    parse_static_with(None, args)
+}
+
+/// The static parse, reusing `command` when the caller already built it.
+fn parse_static_with(command: Option<Command>, args: Vec<OsString>) -> Cli {
+    // A bare `octet` sets nothing, so clap would only rebuild the defaults
+    // after constructing the whole command: most of the work of reaching the
+    // interactive frontend. `bare_invocation_parses_to_the_default_cli` keeps
+    // the two equal.
+    if args.len() <= 1 {
+        return Cli::default();
+    }
+    let mut matches = match command
+        .unwrap_or_else(Cli::command)
+        .try_get_matches_from(args)
+    {
+        Ok(matches) => matches,
         Err(error) => error.exit(),
+    };
+    match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(error) => error.format(&mut Cli::command()).exit(),
     }
 }
 
 /// Parse the normal runtime command after adding trusted manifest-declared
 /// flags. Discovery reads only bounded manifests and never launches extensions.
+///
+/// `command` is the static command when [`parse_static_invocation`] already
+/// built it; the parse then reuses it instead of building it again.
 pub(crate) fn parse_with_extension_flags(
     args: Vec<OsString>,
     cwd: &Path,
+    command: Option<Command>,
 ) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
     let declarations = bootstrap_extension_config(&args, cwd)
         .map(|config| crate::extensions::selected_extension_flag_declarations(&config))
         .unwrap_or_default();
-    parse_declared_extension_flags(args, declarations)
+    parse_declared_extension_flags_with(args, declarations, command)
 }
 
+#[cfg(test)]
 fn parse_declared_extension_flags(
     args: Vec<OsString>,
     declarations: Vec<(String, ExtensionFlag)>,
+) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
+    parse_declared_extension_flags_with(args, declarations, None)
+}
+
+fn parse_declared_extension_flags_with(
+    args: Vec<OsString>,
+    declarations: Vec<(String, ExtensionFlag)>,
+    command: Option<Command>,
 ) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
     // Manifest discovery and its trust checks still run before this boundary.
     // Without declarations, there is nothing to register or scan around: use
     // the existing static parser without rebuilding its command for collision
     // enumeration and subcommand detection first.
     if declarations.is_empty() {
-        return Ok((parse_static_or_exit(args), BTreeMap::new()));
+        return Ok((parse_static_with(command, args), BTreeMap::new()));
     }
     let static_args = args.clone();
     let registered = register_extension_flags(declarations)?;
@@ -523,11 +557,42 @@ fn has_static_early_exit_option(args: &[OsString]) -> bool {
 /// clap with error recovery. Recovery stops at an unknown dynamic flag and can
 /// therefore misclassify later activation options or a positional prompt as a
 /// subcommand.
+#[cfg(test)]
 pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
     if has_static_early_exit_option(args) {
         return false;
     }
+    // A bare invocation has nothing to scan: it takes the runtime parser,
+    // which applies declared defaults, without building the command here.
+    args.len() <= 1 || scan_uses_runtime_parser(args, &static_extension_command())
+}
+
+/// How [`parse_static_invocation`] resolved an invocation.
+pub(crate) enum StaticInvocation {
+    /// No extension flag can occur; this is the parsed command line.
+    Parsed(Box<Cli>),
+    /// The invocation needs [`parse_with_extension_flags`]; the static
+    /// command is handed over when it was already built for the scan.
+    Runtime(Option<Box<Command>>),
+}
+
+/// Parse with the static command when no extension flag can occur, building
+/// that command once for both the scan and the parse.
+pub(crate) fn parse_static_invocation(args: &[OsString]) -> StaticInvocation {
+    if has_static_early_exit_option(args) {
+        return StaticInvocation::Parsed(Box::new(parse_static_or_exit(args.to_vec())));
+    }
+    if args.len() <= 1 {
+        return StaticInvocation::Runtime(None);
+    }
     let command = static_extension_command();
+    if scan_uses_runtime_parser(args, &command) {
+        return StaticInvocation::Runtime(Some(Box::new(command)));
+    }
+    StaticInvocation::Parsed(Box::new(parse_static_with(Some(command), args.to_vec())))
+}
+
+fn scan_uses_runtime_parser(args: &[OsString], command: &Command) -> bool {
     let mut index = 1;
     while index < args.len() {
         let Some(value) = args[index].to_str() else {
@@ -540,7 +605,7 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
             let (name, inline_value) = long
                 .split_once('=')
                 .map_or((long, false), |(name, _)| (name, true));
-            let Some(argument) = static_long_argument(&command, name) else {
+            let Some(argument) = static_long_argument(command, name) else {
                 // It may be a dynamic flag. Keep parsing on the runtime path
                 // rather than guessing how many following values it consumes.
                 return true;
@@ -575,6 +640,16 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
+
+    #[test]
+    fn bare_invocation_parses_to_the_default_cli() {
+        let parsed = Cli::try_parse_from(["octet"]).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{:?}", Cli::default()));
+        assert_eq!(
+            format!("{:?}", parse_static_or_exit(vec![OsString::from("octet")])),
+            format!("{parsed:?}")
+        );
+    }
 
     #[test]
     fn no_declarations_preserve_static_parse_without_extension_command_builds() {

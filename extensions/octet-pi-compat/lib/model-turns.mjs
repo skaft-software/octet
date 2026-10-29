@@ -5,7 +5,7 @@ import { assistantObservation, emitRunPrompt, settleRunTurn, settleStreamedParti
 
 export const modelTurnHooks = ['model_turn_start', 'model_turn_end'];
 
-function assistantMetadata(message, entry, data) {
+export function assistantMetadata(message, entry, data) {
   fields(data, ['assistant_entry_id', 'model', 'usage', 'cost', 'stop_reason'], 'assistant metadata');
   if (data.assistant_entry_id !== entry.id) invalid('assistant metadata entry mismatch');
   if (data.model != null && data.model !== message.model) invalid('assistant metadata model mismatch');

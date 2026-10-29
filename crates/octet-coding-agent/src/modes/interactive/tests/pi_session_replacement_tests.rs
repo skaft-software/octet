@@ -71,7 +71,7 @@ fn pi_app(factory: &str) -> (tempfile::TempDir, App) {
         &app.config,
         &app.skills,
         &app.prompts,
-        &extensions,
+        &mut extensions,
         &mut host,
         crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
     );

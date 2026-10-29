@@ -125,6 +125,9 @@ fn known_terminal(term: &str) -> bool {
         "gnome",
         "putty",
         "st",
+        // Tern's terminfo name. The frontend gate must admit this before
+        // TERM_PROGRAM=tern can negotiate TSP or use its ANSI fallback.
+        "stencil-term",
         "alacritty",
         "kitty",
         "foot",

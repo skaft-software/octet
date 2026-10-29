@@ -528,6 +528,61 @@ fn pointer_press_before_the_frame_is_recorded_resolves_against_that_frame() {
 }
 
 #[test]
+fn stationary_release_keeps_semantic_selection_when_the_composer_reflows() {
+    for dragged in [true, false] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.tui = None;
+        shell.set_size(80, 16);
+        for index in 0..50 {
+            shell.notice(format!("release-line-{index:03}"));
+        }
+        {
+            let mut state = shell.state.borrow_mut();
+            state.render_threaded = true;
+            state.application_viewport_requested = true;
+        }
+        let component = ShellComponent::isolated(shell.state.clone(), false);
+        let frame = component.render(80);
+        shell.state.frame_written();
+        let (row, column) = frame
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find_map(|(row, line)| {
+                sexy_tui_rs::strip_terminal_sequences(line)
+                    .find("release-line-")
+                    .map(|column| (row as u16, column as u16))
+            })
+            .unwrap();
+        shell.begin_transcript_selection(row, column, false);
+        let release_column = if dragged { column + 5 } else { column };
+        if dragged {
+            shell.extend_transcript_selection(row, release_column);
+        }
+        let expected = shell.selected_plain_text();
+        assert_eq!(expected.as_ref().map(String::len), dragged.then_some(5));
+        // A completed frame moves transcript cells under a stationary pointer.
+        // The retained semantic selection must not acquire those new rows.
+        shell
+            .state
+            .borrow_mut()
+            .editor
+            .set_text("draft\nsecond\nthird\nfourth");
+        component.render(80);
+        shell.state.frame_written();
+        shell.end_transcript_selection(row, release_column);
+        assert_eq!(
+            shell.state.borrow().copy_buffer.as_deref(),
+            expected.as_deref(),
+            "dragged={dragged}"
+        );
+        if !dragged {
+            assert!(shell.state.borrow().transcript_selection.is_none());
+        }
+    }
+}
+
+#[test]
 fn stale_layout_cannot_overwrite_new_viewport_intent() {
     let state = SharedState::new(ShellState {
         theme: crate::tui::theme::test_theme(),

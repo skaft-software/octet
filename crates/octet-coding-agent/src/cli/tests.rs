@@ -2586,6 +2586,40 @@ fn debug_prompt_is_an_explicit_prompt_template_diagnostic() {
 }
 
 #[test]
+fn tui_preferences_preserve_config_and_return_an_exact_receipt_chain() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let before = config_fingerprint(&path).unwrap();
+    let first = persist_tui_mode_to_path(config::TuiMode::Fullscreen, &path)
+        .unwrap()
+        .expect("creating the preference also produces a checked receipt");
+    assert_eq!(first.path, path);
+    assert_eq!(first.before, before);
+    assert_eq!(Some(first.after), config_fingerprint(&path));
+
+    std::fs::write(
+        &path,
+        "# retained\nreload = true\ntui_mode = 'fullscreen'\n",
+    )
+    .unwrap();
+    let before = config_fingerprint(&path).unwrap();
+    let second = persist_tui_mode_to_path(config::TuiMode::Inline, &path)
+        .unwrap()
+        .unwrap();
+    let third = persist_tui_mode_to_path(config::TuiMode::Fullscreen, &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.before, before);
+    assert_eq!(third.before, second.after);
+    assert_eq!(Some(third.after), config_fingerprint(&path));
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.starts_with("# retained"));
+    let value: toml::Value = toml::from_str(&content).unwrap();
+    assert_eq!(value["tui_mode"].as_str(), Some("fullscreen"));
+    assert_eq!(value["reload"].as_bool(), Some(true));
+}
+
+#[test]
 fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

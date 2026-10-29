@@ -5,6 +5,7 @@ use serde::ser::{SerializeMap, SerializeSeq};
 struct Entries<'a> {
     session: &'a crate::Session,
     namespace: &'a str,
+    usage: &'a HashMap<&'a crate::session::EntryId, &'a crate::session::UsageRecord>,
 }
 impl Serialize for Entries<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -13,6 +14,7 @@ impl Serialize for Entries<'_> {
             seq.serialize_element(&visible::VisibleEntry {
                 entry,
                 namespace: self.namespace,
+                usage: self.usage.get(&entry.id).copied(),
             })?;
         }
         seq.end()
@@ -89,8 +91,13 @@ pub(super) fn encode(
     for entry in session.entries() {
         visible::validate_metadata(entry, namespace)?;
     }
+    let usage = session.assistant_usage_index();
     let mut document = History {
-        entries: Entries { session, namespace },
+        entries: Entries {
+            session,
+            namespace,
+            usage: &usage,
+        },
         branch_ids: Branch {
             session,
             ordered: None,

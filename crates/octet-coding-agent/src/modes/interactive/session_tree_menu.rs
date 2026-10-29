@@ -97,7 +97,7 @@ async fn drive_navigation<F, S>(
     extensions: &mut crate::extensions::ExecutableExtensions,
     shell: &mut InteractiveShell,
     input: &mut S,
-) -> Result<TreeNavigationResult, AgentError>
+) -> Result<TreeNavigationResult, Box<AgentError>>
 where
     F: Future<Output = Result<TreeNavigationResult, AgentError>>,
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -142,7 +142,7 @@ where
                     cancellation.cancel();
                 }
             },
-            result = &mut work => return result,
+            result = &mut work => return result.map_err(Box::new),
             event = events.recv(), if events_open => match event {
                 Some(AgentEvent::ProviderOperationRetry { attempt, error, .. }) => {
                     shell.notice(format!("Branch summary retry {attempt}: {error}"));
@@ -219,7 +219,8 @@ where
         shell,
         input,
     )
-    .await;
+    .await
+    .map_err(|error| *error);
     shell.set_run_label("idle");
     // An after-hook can fail after the atomic durable commit. Hydrate the real
     // head on that error too, never pretend the old branch is still selected.

@@ -388,6 +388,146 @@ fn thought_signature_is_metadata_not_reasoning_classification() {
     ));
 }
 
+fn streamed_parts(parts: Vec<Vec<Value>>) -> crate::types::Response {
+    let stream_model = model_with_api_name("gemini-4-argon-contributor");
+    let mut builder = ResponseBuilder::new(
+        stream_model.spec.id.clone(),
+        Protocol::GoogleGenerativeAi,
+        None,
+    );
+    for parts in parts {
+        let frame = SseEvent {
+            event: None,
+            data: serde_json::json!({"candidates": [{"content": {"parts": parts}}]}).to_string(),
+        };
+        decode_stream_event(&stream_model, &frame, &mut builder).unwrap();
+    }
+    decode_stream_event(
+        &stream_model,
+        &SseEvent {
+            event: None,
+            data: r#"{"candidates":[{"finishReason":"STOP"}]}"#.into(),
+        },
+        &mut builder,
+    )
+    .unwrap()
+    .into_iter()
+    .find_map(|event| match event {
+        StreamEvent::Finished(response) => Some(response),
+        _ => None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn signed_text_does_not_merge_across_a_function_call() {
+    for thought in [false, true] {
+        let response = streamed_parts(vec![
+            vec![
+                serde_json::json!({"text": "before", "thought": thought, "thoughtSignature": "sig-before"}),
+            ],
+            vec![
+                serde_json::json!({"functionCall": {"id": "read-1", "name": "read", "args": {"path": "clip.mp3"}}, "thoughtSignature": "sig-call"}),
+            ],
+            vec![
+                serde_json::json!({"text": "after", "thought": thought, "thoughtSignature": "sig-after"}),
+            ],
+        ]);
+        let [AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature: before_signature,
+        }), before, AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature: call_signature,
+        }), AssistantPart::ToolCall(call), AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature: after_signature,
+        }), after] = response.message.content.as_slice()
+        else {
+            panic!("expected three separate signed parts: {response:?}");
+        };
+        assert_eq!(before_signature, "sig-before");
+        assert_eq!(call_signature, "sig-call");
+        assert_eq!(after_signature, "sig-after");
+        assert_eq!(call.id.0, "read-1");
+        if thought {
+            assert!(
+                matches!(before, AssistantPart::Reasoning(part) if part.text.as_deref() == Some("before"))
+            );
+            assert!(
+                matches!(after, AssistantPart::Reasoning(part) if part.text.as_deref() == Some("after"))
+            );
+        } else {
+            assert!(matches!(before, AssistantPart::Text(text) if text == "before"));
+            assert!(matches!(after, AssistantPart::Text(text) if text == "after"));
+        }
+    }
+}
+
+#[test]
+fn different_text_signatures_at_the_same_chunk_position_keep_separate_parts() {
+    let response = streamed_parts(vec![
+        vec![serde_json::json!({"text": "before", "thoughtSignature": "sig-before"})],
+        vec![serde_json::json!({"text": "after", "thoughtSignature": "sig-after"})],
+    ]);
+    assert!(matches!(response.message.content.as_slice(), [
+        AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature { signature: before_signature }),
+        AssistantPart::Text(before),
+        AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature { signature: after_signature }),
+        AssistantPart::Text(after),
+    ] if before_signature == "sig-before" && before == "before" && after_signature == "sig-after" && after == "after"));
+}
+
+#[test]
+fn text_continuation_and_empty_terminal_signature_follow_the_active_part() {
+    let response = streamed_parts(vec![
+        vec![
+            serde_json::json!({"text": "planning", "thought": true}),
+            serde_json::json!({"text": "hello"}),
+        ],
+        vec![serde_json::json!({"text": " world"})],
+        vec![serde_json::json!({"text": "", "thoughtSignature": "sig-text"})],
+    ]);
+    assert!(matches!(response.message.content.as_slice(), [
+        AssistantPart::Reasoning(part),
+        AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature { signature }),
+        AssistantPart::Text(text),
+    ] if part.text.as_deref() == Some("planning") && signature == "sig-text" && text == "hello world"));
+}
+
+#[test]
+fn repeated_and_prefix_related_text_chunks_are_preserved_as_deltas() {
+    for thought in [false, true] {
+        let response = streamed_parts(vec![
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![serde_json::json!({"text": "aa", "thought": thought})],
+            vec![serde_json::json!({"text": "a", "thought": thought})],
+            vec![
+                serde_json::json!({"text": "", "thought": thought, "thoughtSignature": "c2lnbmVk"}),
+            ],
+        ]);
+        let [AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+            signature,
+        }), part] = response.message.content.as_slice()
+        else {
+            panic!("expected one signed part: {response:?}");
+        };
+        assert_eq!(signature, "c2lnbmVk");
+        if thought {
+            assert!(matches!(part, AssistantPart::Reasoning(reasoning)
+                if reasoning.text.as_deref() == Some("aaaaa")));
+        } else {
+            assert!(matches!(part, AssistantPart::Text(text) if text == "aaaaa"));
+        }
+        let mut request = base_request();
+        request.messages.push(Message::Assistant(response.message));
+        let contents =
+            google_contents(&model_with_api_name("gemini-4-argon-contributor"), &request).unwrap();
+        let replay = &contents.last().unwrap()["parts"][0];
+        assert_eq!(replay["text"], "aaaaa");
+        assert_eq!(replay["thoughtSignature"], "c2lnbmVk");
+        assert_eq!(replay.get("thought"), thought.then_some(&Value::Bool(true)));
+    }
+}
+
 #[test]
 fn incremental_argument_size_matches_recursive_merge_and_escaping() {
     let mut prior = serde_json::json!({});

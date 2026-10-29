@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 
 from support import REPOSITORY, ROOT, run_checked
@@ -78,18 +79,20 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             staging = self.staged_bundle(directory)
+            manifest = tomllib.loads((REPOSITORY / "Cargo.toml").read_text())
+            version = manifest["workspace"]["package"]["version"]
             self.assertFalse((staging / "target").exists())
             command = [
                 "bash",
                 str(REPOSITORY / "scripts/package-octet-extension-release.sh"),
                 "octet-codemode",
                 str(directory / "out"),
-                "v0.9.6",
+                f"v{version}",
                 str(staging),
             ]
             environment = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
             run_checked(command, env=environment)
-            archive = directory / "out/octet-codemode-0.9.6.tar.gz"
+            archive = directory / f"out/octet-codemode-{version}.tar.gz"
             first = archive.read_bytes()
             run_checked(command, env=environment)
             self.assertEqual(archive.read_bytes(), first, "archive is not reproducible")

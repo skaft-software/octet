@@ -22,6 +22,8 @@ mod deferred_enrichment;
 #[cfg(test)]
 mod discovery_and_capability;
 #[cfg(test)]
+mod idle_model_switch;
+#[cfg(test)]
 mod inventory_cache;
 #[cfg(test)]
 mod launch_and_resume;

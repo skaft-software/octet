@@ -495,7 +495,7 @@ async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_succes
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
+async fn resource_and_model_session_transitions_restore_granted_terminal_input() {
     use crate::extensions::reload_lifecycle_test_support::{
         acquire_terminal, assert_revoked_before_shutdown, fixture,
     };
@@ -543,7 +543,22 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
             !app.executable_extensions.terminal_grant_is_active(),
             "{operation}"
         );
-        assert_revoked_before_shutdown(&wire);
+        if operation == "model" {
+            // A compatible selection still revokes the foreground grant, but
+            // keeps its exact executable instance and command service alive.
+            assert!(process.is_running());
+            assert_eq!(
+                app.executable_extensions
+                    .execute_command_without_confirmation("worker-control", Vec::new())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("control retained"),
+            );
+            assert!(!std::fs::read_to_string(&wire).unwrap().contains("shutdown"));
+        } else {
+            assert_revoked_before_shutdown(&wire);
+        }
         // Test input uses the same restored ownership flag as the live stream.
         let key = theme_picker_key(KeyCode::Char('x'));
         let mut restored =
@@ -555,6 +570,9 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
                 .is_some()
         );
         app.executable_extensions.shutdown().await;
+        if operation == "model" {
+            assert_revoked_before_shutdown(&wire);
+        }
     }
 }
 

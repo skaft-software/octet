@@ -109,8 +109,9 @@ impl ExecutableExtensions {
             // foreground consumer exists to service them.
             if matches!(
                 &operation,
-                HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools)
-                    | HostRequestOperation::ActiveTools { .. }
+                HostRequestOperation::ContextSnapshot(
+                    ExtensionContextOperation::Tools | ExtensionContextOperation::Commands
+                ) | HostRequestOperation::ActiveTools { .. }
             ) {
                 let outcome = if process.is_running()
                     && process.health_snapshot().generation == generation
@@ -134,6 +135,9 @@ impl ExecutableExtensions {
                                 "live tool registry is not bound".into(),
                             ),
                         },
+                        HostRequestOperation::ContextSnapshot(
+                            ExtensionContextOperation::Commands,
+                        ) => self.command_catalog_outcome(),
                         _ => self.tool_snapshot_outcome(),
                     }
                 } else {
@@ -540,6 +544,7 @@ impl ExecutableExtensions {
                 Self::context_pending_messages_outcome(shell)
             }
             ExtensionContextOperation::Tools => self.tool_snapshot_outcome(),
+            ExtensionContextOperation::Commands => self.command_catalog_outcome(),
             ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
                 "the system prompt is resolved by the session owner".to_owned(),
@@ -781,6 +786,7 @@ impl ExecutableExtensions {
                     ExtensionContextOperation::SystemPrompt => {
                         Self::context_system_prompt_outcome(agent)
                     }
+                    ExtensionContextOperation::Commands => self.command_catalog_outcome(),
                     ExtensionContextOperation::Tools => {
                         ExtensionRequestOutcome::Ok(agent.extension_tool_snapshot())
                     }

@@ -1271,7 +1271,11 @@ impl OctetTheme {
     }
 
     fn rich_renderer_with_inner(&self, mut theme: SexyTheme) -> RichRenderer {
-        let capabilities = rich_capabilities(self.capabilities);
+        let mut capabilities = rich_capabilities(self.capabilities);
+        // Retained rows also carry application-owned link hit targets. Keep
+        // their zero-width metadata even when the terminal cannot render OSC 8;
+        // OctetTerminal suppresses unsupported envelopes at the output boundary.
+        capabilities.hyperlinks = self.capabilities.interactive;
         theme.set_capabilities(capabilities);
         RichRenderer::new(
             theme,
@@ -1844,6 +1848,49 @@ pub(crate) fn load_theme_for_background(
             background,
             TerminalCapabilities::detect(config.color, config.plain),
         ),
+    }
+}
+
+/// Retain a validated active file when a reload fell back because its current
+/// contents are invalid. Discovery must still select the same source: a missing,
+/// withdrawn or shadowed resource cannot keep a retired palette alive.
+pub(crate) fn retain_invalid_file_theme(
+    config: &Config,
+    current: &OctetTheme,
+    candidate: OctetTheme,
+) -> (OctetTheme, Option<String>) {
+    let Some(path) = current.source_path() else {
+        return (candidate, None);
+    };
+    if !candidate.is_compiled_default() {
+        return (candidate, None);
+    }
+    let Some(name) = config.theme.as_deref() else {
+        return (candidate, None);
+    };
+    let Ok((resolver, resource)) = resolved_theme_resource(name, config) else {
+        return (candidate, None);
+    };
+    if resource.path != path {
+        return (candidate, None);
+    }
+    match resolver.read_text(&resource).and_then(|source| {
+        load_resolved_theme_for(
+            &resource.path,
+            &source,
+            current.capabilities(),
+            current.background(),
+        )
+    }) {
+        Ok(theme) => (theme, None),
+        Err(error) => {
+            let diagnostic = format!("theme {name:?}: {error:#}; previous theme retained")
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(4096)
+                .collect();
+            (current.clone(), Some(diagnostic))
+        }
     }
 }
 

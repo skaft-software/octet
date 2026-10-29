@@ -123,6 +123,50 @@ fn native_pi_cards_and_editor_rules_preserve_input_and_disclosure_ownership() {
 }
 
 #[test]
+fn native_extension_working_frames_cannot_override_reduced_motion() {
+    for theme in themes() {
+        let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme);
+        shell.begin_run("test");
+        shell.set_extension_ui(super::super::ShellExtensionUi {
+            working: Some(super::super::ShellExtensionWorking {
+                frames: Some(vec!["custom spinner".into(), "next spinner".into()]),
+                interval_ms: Some(60_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let state = shell.state.borrow();
+        let animated = working_row(&state, false).unwrap();
+        assert_eq!(animated.c.as_ref().unwrap()[0].k, Kind::Ansi);
+        assert!(serde_json::to_string(&animated)
+            .unwrap()
+            .contains("custom spinner"));
+        let reduced = working_row(&state, true).unwrap();
+        assert_eq!(reduced.c.as_ref().unwrap()[0].k, Kind::Text);
+        assert!(!serde_json::to_string(&reduced)
+            .unwrap()
+            .contains("custom spinner"));
+        drop(state);
+
+        let mut capabilities = shell.theme().capabilities();
+        capabilities.animation = false;
+        shell.set_theme(crate::tui::theme::test_theme_source_with(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../extensions/octet-pi-compat/test/fixtures/pi-native-layout.toml"
+            )),
+            capabilities,
+            TerminalBackground::Dark,
+        ));
+        let static_row = working_row(&shell.state.borrow(), false).unwrap();
+        assert_eq!(static_row.c.as_ref().unwrap()[0].k, Kind::Text);
+        assert!(!serde_json::to_string(&static_row)
+            .unwrap()
+            .contains("custom spinner"));
+    }
+}
+
+#[test]
 fn native_pi_spinner_changes_glyph_not_label_style_and_honors_reduced_motion() {
     for theme in themes() {
         let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme);

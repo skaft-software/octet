@@ -61,6 +61,68 @@ fn apple_terminal_supports_italics_without_hyperlinks() {
 }
 
 #[test]
+fn tern_stencil_term_reaches_the_interactive_renderer_on_unix_and_windows() {
+    // Current Tern exports its own terminfo name, not xterm-256color. The
+    // frontend gate runs before native TSP negotiation (and also governs the
+    // ANSI fallback selected by --tern off).
+    for windows in [false, true] {
+        let mut tern = if windows {
+            windows_probe(false)
+        } else {
+            probe(None)
+        };
+        tern.term = Some("stencil-term".into());
+        tern.term_program = Some("tern".into());
+        tern.colorterm = Some("truecolor".into());
+        let caps = TerminalCapabilities::from_probe(ColorMode::Auto, tern);
+        assert!(caps.interactive, "windows={windows}");
+        assert!(caps.unicode, "windows={windows}");
+        assert_eq!(caps.color, ColorDepth::TrueColor);
+        let renderer = sexy_terminal_capabilities(caps, (100, 30));
+        assert!(renderer.interactive);
+        assert!(!renderer.plain);
+        assert!(renderer.cursor_addressing && renderer.line_clearing);
+    }
+}
+
+#[test]
+fn tern_identifier_does_not_override_plain_or_console_boundaries() {
+    for windows in [false, true] {
+        let mut tern = if windows {
+            windows_probe(false)
+        } else {
+            probe(None)
+        };
+        tern.term = Some("stencil-term".into());
+        tern.term_program = Some("tern".into());
+        tern.colorterm = Some("truecolor".into());
+        for stream in ["stdin", "stdout", "plain"] {
+            let mut p = tern.clone();
+            match stream {
+                "stdin" => p.stdin_tty = false,
+                "stdout" => p.stdout_tty = false,
+                _ => p.explicit_plain = true,
+            }
+            assert!(!TerminalCapabilities::from_probe(ColorMode::Always, p).interactive);
+        }
+        tern.no_color = true;
+        let caps = TerminalCapabilities::from_probe(ColorMode::Always, tern.clone());
+        assert!(caps.interactive);
+        assert_eq!(caps.color, ColorDepth::None);
+        tern.term = Some("dumb".into());
+        assert!(!TerminalCapabilities::from_probe(ColorMode::Always, tern.clone()).interactive);
+        if let Some(console) = tern.windows.as_mut() {
+            tern.term = Some("stencil-term".into());
+            console.output_vt = false;
+            assert!(!TerminalCapabilities::from_probe(ColorMode::Always, tern).interactive);
+        }
+    }
+    for term in ["stencil", "stencil-terminal", "stencil-termunknown"] {
+        assert!(!TerminalCapabilities::from_probe(ColorMode::Auto, probe(Some(term))).interactive);
+    }
+}
+
+#[test]
 fn capability_detection_degrades_truecolour_to_256_and_16() {
     let mut rich = probe(Some("xterm-256color"));
     rich.colorterm = Some("truecolor".into());

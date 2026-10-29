@@ -5,16 +5,149 @@ use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol, Terminal};
 use super::*;
 
 fn terminal() -> OctetTerminal<Vec<u8>> {
+    terminal_with_hyperlinks(false)
+}
+
+fn terminal_with_hyperlinks(supported: bool) -> OctetTerminal<Vec<u8>> {
     OctetTerminal {
         out: Vec::new(),
         size: Arc::new(Mutex::new((80, 24))),
         last_was_cr: false,
+        hyperlink_filter: (!supported).then(Osc8Filter::default),
         pending: Vec::new(),
         pending_log: Vec::new(),
         image_store: TerminalImageStore::default(),
         write_log: None,
         in_synchronized_frame_depth: 0,
     }
+}
+
+#[test]
+fn backend_without_hyperlink_support_keeps_labels_but_not_osc8_controls() {
+    let mut backend = terminal();
+    backend.write("\x1b]8;id=label;https://example.test/\x1b\\界é\x1b]8;;\x07");
+    assert_eq!(backend.out, "界é".as_bytes());
+}
+
+#[test]
+fn osc8_policy_preserves_other_controls_and_every_utf8_safe_chunk_boundary() {
+    let body = concat!(
+        "\x1b[32mgreen\x1b[0m\r\n",
+        "\x1b]8;id=文;https://example.test/界\x1b\\界é\x1b]8;;\x07",
+        "\x1b]2;title 8; unchanged\x07",
+        "\x1b]52;c;aGVsbG8=\x1b\\",
+        "\x1b]80;other OSC\x07",
+        "\x1b]8;;https://example.test/\x07label\x1b]8;;\x1b\\",
+        "\nlast\r\n"
+    );
+    let stripped = concat!(
+        "\x1b[32mgreen\x1b[0m\r\n界é",
+        "\x1b]2;title 8; unchanged\x07",
+        "\x1b]52;c;aGVsbG8=\x1b\\",
+        "\x1b]80;other OSC\x07label\nlast\r\n"
+    );
+    for supported in [false, true] {
+        let text = if supported { body } else { stripped };
+        let expected = format!(
+            "{SYNC_OUTPUT_BEGIN}{}{SYNC_OUTPUT_END}",
+            normalize_line_endings(text, &mut false)
+        );
+        for split in (0..=body.len()).filter(|index| body.is_char_boundary(*index)) {
+            let mut backend = OctetTerminal {
+                out: RecordingSink::default(),
+                size: Arc::new(Mutex::new((80, 24))),
+                last_was_cr: false,
+                hyperlink_filter: (!supported).then(Osc8Filter::default),
+                pending: Vec::new(),
+                pending_log: Vec::new(),
+                image_store: TerminalImageStore::default(),
+                write_log: None,
+                in_synchronized_frame_depth: 0,
+            };
+            backend.write(SYNC_OUTPUT_BEGIN);
+            backend.write(&body[..split]);
+            backend.write("");
+            backend.write(&body[split..]);
+            assert!(backend.out.frames.is_empty());
+            backend.write(SYNC_OUTPUT_END);
+            assert_eq!(
+                backend.out.frames,
+                [expected.as_bytes()],
+                "{supported}, split {split}"
+            );
+        }
+        // Many fragments, not only a single split. No UTF-8 grapheme is removed.
+        let mut backend = terminal_with_hyperlinks(supported);
+        backend.write(SYNC_OUTPUT_BEGIN);
+        for ch in body.chars() {
+            backend.write(ch.encode_utf8(&mut [0; 4]));
+        }
+        backend.write(SYNC_OUTPUT_END);
+        assert_eq!(backend.out, expected.as_bytes());
+    }
+}
+
+#[test]
+fn unsupported_osc8_is_filtered_before_diagnostic_log_mirroring() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hyperlink-write.log");
+    let mut backend = terminal();
+    backend.write_log = Some(File::create(&path).unwrap());
+    backend.write(SYNC_OUTPUT_BEGIN);
+    backend.write("\x1b]8;;https://example.test/\x07界é\x1b]8;;\x1b\\");
+    backend.write(SYNC_OUTPUT_END);
+    let expected = format!("{SYNC_OUTPUT_BEGIN}界é{SYNC_OUTPUT_END}");
+    assert_eq!(backend.out, expected.as_bytes());
+    assert_eq!(std::fs::read(path).unwrap(), expected.as_bytes());
+}
+
+#[derive(Default)]
+struct ShortWritingSink {
+    bytes: Vec<u8>,
+    writes: usize,
+    flushes: usize,
+}
+
+impl std::io::Write for ShortWritingSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = bytes.len().min(3);
+        self.bytes.extend_from_slice(&bytes[..written]);
+        self.writes += 1;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flushes += 1;
+        Ok(())
+    }
+}
+
+impl FrameSink for ShortWritingSink {}
+
+#[test]
+fn filtered_hyperlink_frame_retains_write_all_and_single_flush_on_short_sink_writes() {
+    let mut backend = OctetTerminal {
+        out: ShortWritingSink::default(),
+        size: Arc::new(Mutex::new((80, 24))),
+        last_was_cr: false,
+        hyperlink_filter: Some(Osc8Filter::default()),
+        pending: Vec::new(),
+        pending_log: Vec::new(),
+        image_store: TerminalImageStore::default(),
+        write_log: None,
+        in_synchronized_frame_depth: 0,
+    };
+    backend.write(SYNC_OUTPUT_BEGIN);
+    backend.write("\x1b]8;;https://example.test/\x07界é\x1b]8;;\x07");
+    assert_eq!(backend.out.writes, 0);
+    assert_eq!(backend.out.flushes, 0);
+    backend.write(SYNC_OUTPUT_END);
+    assert_eq!(
+        backend.out.bytes,
+        format!("{SYNC_OUTPUT_BEGIN}界é{SYNC_OUTPUT_END}").as_bytes()
+    );
+    assert!(backend.out.writes > 1);
+    assert_eq!(backend.out.flushes, 1);
 }
 
 #[test]
@@ -111,6 +244,7 @@ fn a_multi_row_frame_reaches_the_sink_in_one_write() {
         out: RecordingSink::default(),
         size: Arc::new(Mutex::new((80, 24))),
         last_was_cr: false,
+        hyperlink_filter: Some(Osc8Filter::default()),
         pending: Vec::new(),
         pending_log: Vec::new(),
         image_store: TerminalImageStore::default(),

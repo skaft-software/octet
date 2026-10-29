@@ -1,44 +1,40 @@
-# Optional Pi extension compatibility
+# Pi compatibility
 
-> **Experimental and unstable; not shipped in v0.9.6.** This page documents
-> experimental source-only work. Loading real Pi setups can be slow, and
-> individual extensions can fail to load or render.
-> `octet-pi-compat` is excluded from the official release catalog and assets;
-> these development receipts do not qualify installed-Pi lifecycle or workflow parity.
+**v0.10.0 is octet's first Pi-compatible release.** Use your existing Pi
+extensions, skills, prompt templates, themes and custom UI with a native Rust
+agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
-Octet can load explicitly reviewed Pi extension factories through the optional
-`extensions/octet-pi-compat` Node package. **Rust remains the agent and terminal
-host.** The fallback loads installed Pi helpers in the extension process, not a
-second Pi CLI or agent loop. Ordinary octet use and native executable extensions
-do not need Node.
+We're working toward full compatibility with existing Pi setups. The adapter
+follows **Pi 1.4's public extension API**, works with managed Pi installs from
+1.0.2 through 1.4.x, and needs Node 22.19+. Rust still owns the agent loop,
+sessions, permissions and terminal; the adapter loads extension code, not a
+second Pi agent. Ordinary octet use does not need Node.
 
-**Source preview:** unchanged Doom, drawing, and powerline-footer factories have
-passed actual octet binary/PTY acceptance as well as synthetic-host tests. The
-original rainbow editor now passes paced and immediate-burst rescue on a fresh
-native binary, including retained editable draft, resize and shutdown. Full Pi API
-parity and a startup-speed comparison are not established.
+See the [v0.10.0 release notes](releases/v0.10.0.md) for downloads and launch scope.
+Pi support requires octet 0.10.0 or later; v0.9.6 does not ship the adapter.
 
-The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
-subprocess JSON-RPC protocol. octet 0.9.6 is pinned to exactly Pi 1.0.2: the
-adapter ships the dependency versions Pi 1.0.2 ships (jiti 2.7.0, TypeBox
-1.3.27, pi-tui 1.0.2) and resolves imports through the same module table as Pi
-1.0.2's extension loader. The [27-row ledger](pi-extension-api.md) is the
-bounded scope and distinguishes implementation from real-host acceptance.
-Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
-are not targets. The [package README](../extensions/octet-pi-compat/README.md)
-describes the adapter; historical package acceptance is not public API parity.
+For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
+For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
+The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.4
+ship, and pi-tui 1.0.2's components.
+Compatibility concerns public extensions, not Pi's private internals or complete CLI.
 
 <a id="use-your-pi-setup"></a>
 
 ## Use your Pi setup
 
-Install the adapter and turn it on. That is the whole setup; there is nothing to
-configure and no folder to be in:
+With octet **0.10.0+**, Node **22.19+** and your existing Pi setup:
 
 ```bash
 octet extension install octet-pi-compat
-octet --enable-extension octet-pi-compat   # or choose Enable in /extensions
+# Installation is inert. Enable only after reviewing your Pi factories:
+octet --enable-extension octet-pi-compat
 ```
+
+For source development, install locked adapter dependencies as described below,
+then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
+To install a downloaded bundle explicitly, use
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.0.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
@@ -48,7 +44,9 @@ extension such as `powerline-footer` draws the footer, so it matches the one in
 Pi. Nothing is written to your Pi directory or to octet's saved settings, and
 turning the adapter off returns octet to its own setup. Enabling is the review:
 it lets the adapter run your enabled Pi extensions with your OS permissions, as
-Pi does. Project `.pi` resources load only in a trusted workspace. It needs
+Pi does. Native provider-credential disclosure remains a separate reviewed
+opt-in; enabling the stock bundle does not grant it. Native TOML appearance
+remains independent. Project `.pi` resources load only in a trusted workspace. It needs
 Node 22.19+ on `PATH`.
 
 Because the setup is read at every start, a change you make in Pi shows up the
@@ -62,8 +60,10 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 
 ## Bring your Pi extensions
 
-Requires Node 22.19+ or Bun and an existing managed **Pi 1.0.2** installation. From a
-source checkout, install the adapter's dependencies once:
+Requires Node **22.19.0 or newer** and an existing managed Pi installation,
+**1.0.2 through 1.4.x**. The entrypoints reject older Node versions before loading adapter
+dependencies or factories. Bun's existing execution path remains available but
+is separately unqualified. From a source checkout, install dependencies once:
 
 ```bash
 cd /absolute/path/to/octet/extensions/octet-pi-compat
@@ -88,17 +88,20 @@ receive exact manifest grants and require native `builtin_tool_overrides_v1`
 admission. Unsupported tool-schema constraints cause an explicit skip, not
 constraint removal. Supported patterns are enforced. Loading is not proof that an extension's commands, hooks or UI work.
 Failing lifecycle observation callbacks are reported and isolated; permission/veto
-hooks and failed host mutations still fail closed. Replace `node` with `bun` to
-reuse Bun; generated configuration records the executable.
+hooks and failed host mutations still fail closed. Generated configuration records
+the executable; using Bun does not establish Node or Bun compatibility qualification.
 
 `--reviewed` accepts executing the enabled factories and their imports, including
 installed Pi code on the fallback route, with your OS permissions. Setup does not
 import credentials, change Pi settings, or enable the bridge. It snapshots enabled
 Pi palettes as native `pi-*` themes and makes the selected palette this session's
 startup preference; explicit `--theme`/`OCTET_THEME` wins. Saved settings are not
-rewritten. Pi helper/remote-component colors use the imported snapshot; later
-native theme changes are not yet synchronized to those components. While enabled,
-the bridge also exposes current enabled Pi themes in `/theme` at startup and
+rewritten. Pi helpers and remote components receive the imported palette, and
+native theme selection supplies updated palette snapshots and invalidates their
+render caches. This implemented synchronization is not qualification of composed
+editor/footer lifetimes across theme changes. Native TOML appearance and extension
+surface ownership remain separate; enabling extensions does not disable native
+customization. While enabled, the bridge also exposes current enabled Pi themes in `/theme` at startup and
 `/reload`, even without mirror mode. This read-only palette discovery does not
 expand executable grants or change Pi/Octet settings. Invalid or over-budget
 palettes are diagnosed; disabling the extension withdraws them. The built-in
@@ -109,6 +112,10 @@ HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 <a id="mirror-your-pi-setup"></a>
 
 ### Mirror your Pi setup
+
+The stock bundle already uses automatic mirroring on explicit
+enablement. The following generated bridge is a distinct fingerprint-bound
+review mode, not an extra mandatory setup step for the stock bundle.
 
 To have an enabled `octet-pi-compat` activate this machine's Pi setup instead of
 one frozen import, configure the reviewed mirror opt-in once:
@@ -164,8 +171,8 @@ sessions and trust state are never read. Mirror mode refuses a
 factory that needs a hook outside the advertised set instead of silently
 leaving it inert.
 
-After matching release assets are published, `octet extension install octet-pi-compat`
-installs the adapter with its locked npm dependencies. Run its
+`octet extension install octet-pi-compat` installs the adapter with its locked
+npm dependencies. Run its
 `~/.octet/extensions/octet-pi-compat/configure.mjs` with the same arguments above.
 Keep the generated output separate from the installed bundle; don't overwrite
 its integrity-checked files.
@@ -282,9 +289,9 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Only managed Pi 1.0.2 is accepted.
+Managed Pi 1.0.2 through 1.4.x is accepted.
 
-This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
+This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
 
 - Pi's built-in tool factories run commands and file reads/writes in that
@@ -296,7 +303,7 @@ This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
   terminal. Pi functions that would start Pi sessions or agents, call models,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
-- A missing Pi install, or any version other than 1.0.2, fails loudly; nothing
+- A missing Pi install, or a version outside 1.0.2–1.4.x, fails loudly; nothing
   downloads or switches Pi versions silently.
 
 ## Qualification and reproduction

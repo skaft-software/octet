@@ -75,9 +75,11 @@ impl SessionWriter {
                 if len > super::session::MAX_SESSION_FILE_BYTES
                     || records > super::session::MAX_SESSION_RECORDS
                 {
-                    return Err(SessionError::Limit(
-                        "session append exceeds storage bound".into(),
-                    ));
+                    return Err(SessionError::Limit(format!(
+                        "this session is full ({} MiB); start a new session with /new. \
+                         This one stays saved and can still be resumed",
+                        super::session::MAX_SESSION_FILE_BYTES / (1024 * 1024)
+                    )));
                 }
                 state.file.seek(std::io::SeekFrom::End(0))?;
                 state.file.write_all(bytes)?;
@@ -101,5 +103,51 @@ impl SessionWriter {
         } else {
             append()
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_session_says_how_to_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("full.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // Sparse on Unix filesystems: no real disk is used.
+        let len = crate::session::MAX_SESSION_FILE_BYTES - 8;
+        file.set_len(len).unwrap();
+        let writer = SessionWriter::new(file, len, 1, true);
+
+        let error = writer.persist(b"{\"type\":\"head\"}\n").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("this session is full (512 MiB)"),
+            "{message}"
+        );
+        assert!(message.contains("/new"), "{message}");
+        // Nothing was appended.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+
+        // A record that fits is still written.
+        let writer = SessionWriter::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+            len,
+            1,
+            true,
+        );
+        writer.persist(b"{}\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len + 3);
     }
 }

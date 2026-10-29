@@ -54,7 +54,7 @@ mod session_tree;
 mod tui;
 mod update;
 
-use clap::Parser;
+use std::ffi::OsString;
 
 /// Build the multi-thread runtime that the `octet` and `octet-host` binaries run on.
 ///
@@ -97,7 +97,7 @@ fn forward_startup_trace(line: &str) {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let args = std::env::args_os().collect::<Vec<_>>();
+    let args = std::env::args_os().collect::<Vec<OsString>>();
     // The internal re-exec probe is answered before clap, provider setup,
     // extension activation, workspace access, networking, or the agent loop.
     // This early return is the whole guarantee: no `App` can be constructed,
@@ -115,14 +115,15 @@ async fn run() -> anyhow::Result<()> {
     octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
     let bench = args.len() <= 1 && std::env::var_os(STARTUP_BENCH_ENV).is_some();
-    let (mut cli, extension_flag_values, parsed_cwd) =
-        if cli::uses_runtime_extension_flag_parser(&args) {
+    let (mut cli, extension_flag_values, parsed_cwd) = match cli::parse_static_invocation(&args) {
+        cli::StaticInvocation::Parsed(cli) => (*cli, Default::default(), None),
+        cli::StaticInvocation::Runtime(command) => {
             let cwd = std::env::current_dir()?;
-            let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
+            let (cli, extension_flag_values) =
+                cli::parse_with_extension_flags(args, &cwd, command.map(|command| *command))?;
             (cli, extension_flag_values, Some(cwd))
-        } else {
-            (cli::Cli::parse(), Default::default(), None)
-        };
+        }
+    };
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;

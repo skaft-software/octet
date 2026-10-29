@@ -13,8 +13,13 @@ The host invokes `hook/run` with `hook: "resources_discover"`, payload
 `{cwd: <host workspace>, reason: "startup" | "reload"}`, and its current
 owner-bound execution context. It must wait for `session_start`, including any
 deferred interactive hook, and keep the frontend servicing reverse/UI requests.
-This is not a factory/initialize/preflight hook. The dedicated native process
-method pins one connection; the generic `run_hook` method refuses this hook.
+This is not a factory/initialize/preflight hook. Both App frontends publish the
+native model catalog and invocation scope before releasing deferred
+`session_start` hooks, including after interactive reload. Pi callbacks may read
+or spread their context immediately; unavailable or unrepresentable facts still
+refuse rather than becoming fabricated empty snapshots. The dedicated native
+process method pins one connection; the generic `run_hook` method refuses this
+hook.
 
 Response (not the generic hook disposition envelope):
 
@@ -28,8 +33,7 @@ Paths are absolute UTF-8, at most 4096 bytes each, at most 256 entries / 64 KiB
 across all five path arrays before deduplication (skills, prompts, themes,
 keybindings and context). The combined count accommodates complete setups without
 per-kind truncation; exceeding either bound is an explicit validation failure.
-No arbitrary JSON or objects cross
-this boundary. The host request deadline is at most 5 seconds. A product pass
+Only the documented typed fields cross this boundary. The host request deadline is at most 5 seconds. A product pass
 allows 16 contributing processes and retains at most 256 paths / 512 KiB,
 in deterministic extension-name and returned-array order. Over-budget or failed
 contributors produce diagnostics; an empty response is a genuine withdrawal.
@@ -46,6 +50,38 @@ choice. This never rewrites host settings. For example:
 ```json
 {"resource_paths":{"theme_paths":["/reviewed/pkg/themes/pi-ghostty-dark.toml"],"default_theme":"/reviewed/pkg/themes/pi-ghostty-dark.toml"}}
 ```
+
+## Available command catalog
+
+`command_catalog_v1` is an optional API 0.4 read contract, offered only by a
+native resource consumer. An extension requests `commands/snapshot` with the
+shared `parent_request_id` / `resource_owner` envelope. The response is
+`{"commands": [...]}`: native-admitted extension commands with resolved invocation
+names, then admitted prompt templates, then available skills named `skill:<name>`.
+Built-in slash commands are excluded. Activated session skills, filesystem scans
+and system-prompt text are not availability authorities. Each entry has `name`,
+`description`, `source` (`extension`, `prompt` or `skill`) and `sourceInfo`.
+Extension entries also carry native `extension` and `registeredName` for the
+adapter to recover its original factory provenance; these are not Pi API fields.
+
+Discovery may optionally attach `source_infos`, a map keyed by contributed
+skill/prompt paths, only when `command_catalog_v1` is negotiated. Values contain
+`path`, `source`, `scope` (`user`, `project`, `temporary`), `origin` (`package`,
+`top-level`) and optional `baseDir`. Keys must be actual contributed paths and
+match the value's path. Metadata is bounded to 128 KiB; individual strings to
+4096 UTF-8 bytes without controls. It never grants a path or bypasses parsing,
+trust, precedence or resource admission. The loader publishes provenance with
+the same native registries and resource lease; unannotated native resources use
+their actual native path/trust provenance.
+
+Snapshots require the complete genuinely issued session/instance/generation
+owner. Retained same-owner callbacks re-read the current catalog rather than a
+captured list. Reload/withdrawal use the existing resource publication boundary;
+revoked leases refuse reads until publication settles. An unbound consumer,
+unnegotiated feature, retired owner or over-budget complete catalog refuses,
+never returns invented empty availability or a truncated list. The whole response
+is bounded to 512 KiB. This is implemented-source behavior, not a final-artifact
+or original-profile parity receipt.
 
 Only an enabled, trusted, admitted extension process can contribute. The feature
 is not an extension sandbox or additional shell/network authority. Local external

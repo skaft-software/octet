@@ -924,12 +924,17 @@ fn session_snapshot(
     // Admit the complete visible serialization BEFORE cloning any history.
     // This includes duplicate legacy branch bodies and all header/label facts.
     visible::legacy_snapshot_bytes(session, namespace, limit)?;
+    let usage = session.assistant_usage_index();
     let entries = session
         .entries()
         .iter()
         .map(|entry| {
-            serde_json::to_value(visible::VisibleEntry { entry, namespace })
-                .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))
+            serde_json::to_value(visible::VisibleEntry {
+                entry,
+                namespace,
+                usage: usage.get(&entry.id).copied(),
+            })
+            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut branch = Vec::new();
@@ -939,9 +944,12 @@ fn session_snapshot(
             ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
         })?;
         branch.push(
-            serde_json::to_value(visible::VisibleEntry { entry, namespace }).map_err(|_| {
-                ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
-            })?,
+            serde_json::to_value(visible::VisibleEntry {
+                entry,
+                namespace,
+                usage: usage.get(&entry.id).copied(),
+            })
+            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?,
         );
         cursor = entry.parent.clone();
     }
@@ -1330,7 +1338,7 @@ pub(super) fn dispatch_append_request(
                     let entry = commit.entry.clone();
                     let previous_head = entry.parent.as_ref().map(|id| id.0.clone());
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":transport::receipt::Receipt {
-                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace }, previous_revision, view_revision, previous_head,
+                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head,
                     }})
                 } else {
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})

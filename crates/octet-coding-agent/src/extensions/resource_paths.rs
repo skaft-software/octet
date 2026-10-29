@@ -225,6 +225,7 @@ impl ResourceLoader {
                 .clone()
                 .context("resource owner retired")?,
             fences: Vec::new(),
+            source_infos: Default::default(),
             config,
             skills,
             prompts,
@@ -251,6 +252,7 @@ impl ResourceLoader {
         if let Some(error) = batch.resource_rejection.as_deref() {
             anyhow::bail!("resource discovery rejected: {error}");
         }
+        let mut source_infos = std::collections::BTreeMap::new();
         let mut config = base.clone();
         let mut diagnostics = batch.diagnostics;
         // Added roots precede the caller's explicit paths: explicit user
@@ -317,7 +319,16 @@ impl ResourceLoader {
             ] {
                 for path in paths {
                     match admit_path(Path::new(path), base, explicit, kind) {
-                        Ok(path) if !target.contains(&path) => target.push(path),
+                        Ok(path) if !target.contains(&path) => {
+                            if let Some(info) = contribution
+                                .paths
+                                .source_infos
+                                .get(&path.to_string_lossy().into_owned())
+                            {
+                                source_infos.insert(path.clone(), info.clone());
+                            }
+                            target.push(path);
+                        }
                         Ok(_) => {}
                         Err(error) => diagnostics.push(format!(
                             "warning: {}: rejected resource path: {error}",
@@ -476,6 +487,7 @@ impl ResourceLoader {
         Ok(LoadedResourcePaths {
             owner: batch.owner,
             fences,
+            source_infos,
             config,
             skills,
             prompts,
@@ -494,6 +506,8 @@ impl ResourceLoader {
 pub(crate) struct LoadedResourcePaths {
     pub(super) owner: String,
     pub(super) fences: Vec<(ExtensionProcess, u64)>,
+    pub(crate) source_infos:
+        std::collections::BTreeMap<PathBuf, octet_agent::extension_process::ExtensionSourceInfo>,
     pub(crate) config: Config,
     pub(crate) skills: Arc<dyn SkillRegistry>,
     pub(crate) prompts: Arc<crate::prompts::PromptRegistry>,

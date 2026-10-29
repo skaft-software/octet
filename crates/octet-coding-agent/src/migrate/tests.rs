@@ -463,7 +463,7 @@ fn classifies_pi_0844_surfaces_and_fails_closed_on_unknown_apis() {
     assert!(report
         .reasons
         .iter()
-        .any(|reason| reason.contains("outside the pinned Pi 1.0.2 compatibility profile")));
+        .any(|reason| reason.contains("outside the Pi 1.4 compatibility profile")));
 
     // Names Pi 1.0.2 added are inside the pinned profile, not blocked.
     let current = root.join("current.ts");

@@ -73,7 +73,7 @@ function complete(value, status) {
 // learn, so a host that drops it gets terminal cancellation and the factory
 // thread is woken instead of waiting out the watchdog. The host also drops the
 // request silently, so its reply may never arrive.
-const READ_ONLY_SYNC = new Set(['tools/snapshot', 'composition/context']);
+const READ_ONLY_SYNC = new Set(['tools/snapshot', 'commands/snapshot', 'composition/context', 'context/system_prompt']);
 function cancelSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
@@ -123,7 +123,7 @@ parentPort.on('message', packet => {
       forwarded.delete(packet.token); bytes -= size; return;
     }
     if (packet.kind === 'sync') {
-      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
+      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent, method: packet.message.method };
       sync.timer = setTimeout(cancelSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);

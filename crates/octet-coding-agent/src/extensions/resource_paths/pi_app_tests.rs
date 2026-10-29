@@ -49,10 +49,11 @@ impl HostStreamTransport for Capture {
     }
 }
 
-async fn complete(app: &mut App) -> Result<octet_agent::RunOutput, octet_agent::AgentError> {
+async fn complete(app: &mut App) -> Result<octet_agent::RunOutput, Box<octet_agent::AgentError>> {
     tokio::time::timeout(Duration::from_secs(10), app.agent.complete("hello"))
         .await
         .unwrap()
+        .map_err(Box::new)
 }
 fn render(
     app: &App,
@@ -277,6 +278,228 @@ fn configured_pi(root: &Path, start: StartBehavior) -> ConfiguredPi {
         manifest,
         bridge,
     }
+}
+
+/// Startup reads the real native model facts, including the eager getters that
+/// Pi packages evaluate by spreading ctx. No provider is invoked by this fixture.
+fn headless_model_facts_app(root: &Path) -> App {
+    let workspace = root.join("workspace");
+    let home = root.join("home");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let factory = root.join("model-facts.mjs");
+    put(
+        &factory,
+        r#"import { appendFileSync } from 'node:fs';
+export default pi => {
+  async function record(kind, ctx) {
+    const row = { kind, hasUI: ctx.hasUI, mode: ctx.mode };
+    try {
+      const spread = { ...ctx };
+      row.scoped = spread.scopedModels;
+      row.available = spread.modelRegistry.getAvailable();
+      const before = JSON.stringify({ scoped: row.scoped, available: row.available });
+      const scoped = ctx.scopedModels, available = ctx.modelRegistry.getAvailable();
+      if (scoped.length) scoped[0].model.input.push('mutated');
+      if (available.length) available[0].input.push('mutated');
+      row.owned = before === JSON.stringify({ scoped: ctx.scopedModels, available: ctx.modelRegistry.getAvailable() });
+      row.refusals = [];
+      for (const read of [() => ctx.modelRegistry.getAll(),
+          () => ctx.modelRegistry.find('fixture', 'first'),
+          () => ctx.modelRegistry.hasConfiguredAuth('fixture'),
+          () => ctx.modelRegistry.getApiKeyAndHeaders({ provider: 'fixture', id: 'first' })]) {
+        try { await read(); row.refusals.push('unexpected success'); }
+        catch (error) { row.refusals.push(String(error.message)); }
+      }
+    } catch (error) { row.error = String(error.message); }
+    appendFileSync(new URL('./model-facts.jsonl', import.meta.url), JSON.stringify(row) + '\n');
+  }
+  pi.on('session_start', (_, ctx) => record('start', ctx));
+  pi.on('resources_discover', async (_, ctx) => { await record('discover', ctx); return {}; });
+};
+"#,
+    );
+    let output = root.join("extensions/octet-pi-compat");
+    let configured = Command::new("node")
+        .arg(adapter_root().join("configure.mjs"))
+        .args(["--reviewed", "--output"])
+        .arg(&output)
+        .arg(&factory)
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .env("XDG_CACHE_HOME", root.join("xdg-cache"))
+        .env("OCTET_PI_AGENT_DIR", home.join(".pi/agent"))
+        .env("OCTET_PI_COMPAT_CACHE", root.join("adapter-cache"))
+        .output()
+        .expect("existing Node and local adapter dependencies; never auto-install");
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    // Only environment isolation changes; reviewed grants and the real runner
+    // remain exactly those produced by configure (no credential opt-in).
+    let manifest_path = output.join("extension.toml");
+    let mut manifest =
+        octet_agent::ExtensionManifest::parse(&std::fs::read_to_string(&manifest_path).unwrap())
+            .unwrap();
+    assert!(!manifest.capabilities.provider_credentials);
+    for (name, path) in [
+        ("HOME", home.clone()),
+        ("XDG_CONFIG_HOME", root.join("xdg-config")),
+        ("XDG_CACHE_HOME", root.join("xdg-cache")),
+        ("OCTET_PI_AGENT_DIR", home.join(".pi/agent")),
+        ("OCTET_PI_COMPAT_CACHE", root.join("adapter-cache")),
+    ] {
+        manifest
+            .entrypoint
+            .env
+            .insert(name.into(), path.to_string_lossy().into());
+    }
+    put(manifest_path, toml::to_string(&manifest).unwrap());
+    let mut config = crate::extensions::tests::executable_extension_config(
+        &workspace,
+        &root.join("extensions"),
+        "octet-pi-compat",
+    );
+    config.mode = crate::config::Mode::Print {
+        prompt: "model facts only".into(),
+    };
+    let mut app = configured_app_from_config(config, true);
+    assert!(app.executable_extensions.has_pending_session_starts());
+    assert!(!app.executable_extensions.processes[0].supports_feature("remote_ui"));
+    assert!(!app.executable_extensions.processes[0].supports_feature("provider_credentials"));
+    // Host-generated native routes with dummy static auth. Neither these
+    // endpoint secrets nor headers/URLs belong in a public model snapshot.
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "x-fixture-private",
+        http::HeaderValue::from_static("header-fixture-secret"),
+    );
+    app.catalog
+        .register_endpoint(octet_ai::Endpoint {
+            id: octet_ai::EndpointId("fixture-static-auth".into()),
+            base_url: url::Url::parse("https://private-fixture.invalid/v1/").unwrap(),
+            auth: octet_ai::Auth::bearer("catalog-fixture-secret"),
+            default_headers: headers,
+            transport: Default::default(),
+            runtime: Default::default(),
+            timeout: Duration::from_secs(30),
+        })
+        .unwrap();
+    let builtins = octet_ai::ModelCatalog::builtin().unwrap();
+    for name in ["first", "second"] {
+        let mut spec = (*builtins
+            .resolve(&octet_ai::ModelId("gpt-6-astra".into()))
+            .unwrap()
+            .spec)
+            .clone();
+        spec.id = octet_ai::ModelId(format!("fixture/{name}"));
+        spec.endpoint = octet_ai::EndpointId("fixture-static-auth".into());
+        spec.api_name = name.into();
+        app.catalog.register_model(spec).unwrap();
+    }
+    app
+}
+
+fn headless_model_facts_rows(root: &Path) -> Vec<Value> {
+    std::fs::read_to_string(root.join("model-facts.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_model_facts_precede_startup_and_resource_admission() {
+    for patterns in [None, Some("fixture/second:high,fixture/first:low")] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut app = headless_model_facts_app(&root);
+        app.set_model_scope_patterns(patterns).unwrap();
+        let scope = app.model_scope.clone();
+        app.refresh_resource_paths_headless().await.unwrap();
+        app.refresh_resource_paths_headless().await.unwrap();
+        app.mark_resource_paths_reload();
+        app.refresh_resource_paths_headless().await.unwrap();
+        let rows = headless_model_facts_rows(&root);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["start", "discover", "discover"]
+        );
+        for row in &rows {
+            assert!(row.get("error").is_none(), "{row}");
+            assert_eq!(row["hasUI"], false);
+            assert_eq!(row["mode"], "print");
+            assert_eq!(row["owned"], true);
+            assert!(
+                row["refusals"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|error| error.as_str().unwrap().contains("unsupported_feature")),
+                "{row}"
+            );
+            let available = row["available"].as_array().unwrap();
+            for id in ["first", "second"] {
+                assert!(available
+                    .iter()
+                    .any(|model| model["provider"] == "fixture" && model["id"] == id));
+            }
+            let scoped = row["scoped"].as_array().unwrap();
+            if patterns.is_some() {
+                assert_eq!(scoped.len(), 2);
+                assert_eq!(scoped[0]["model"]["id"], "second");
+                assert_eq!(scoped[0]["thinkingLevel"], "high");
+                assert_eq!(scoped[1]["model"]["id"], "first");
+                assert_eq!(scoped[1]["thinkingLevel"], "low");
+            } else {
+                assert!(
+                    scoped.is_empty(),
+                    "native None invocation scope, not persisted interactive scope"
+                );
+            }
+            let serialized = row.to_string();
+            for private in [
+                "catalog-fixture-secret",
+                "header-fixture-secret",
+                "private-fixture.invalid",
+                "x-fixture-private",
+                "baseUrl",
+                "base_url",
+            ] {
+                assert!(
+                    !serialized.contains(private),
+                    "public snapshot leaked {private}"
+                );
+            }
+        }
+        assert_eq!(
+            app.model_scope, scope,
+            "guest mutation must not change native scope"
+        );
+        app.executable_extensions.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_model_facts_unrepresentable_scope_still_refuses_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut app = headless_model_facts_app(&root);
+    app.set_model_scope_patterns(Some("fixture/first:on"))
+        .unwrap();
+    app.refresh_resource_paths_headless().await.unwrap();
+    let rows = headless_model_facts_rows(&root);
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert!(row["error"].as_str().unwrap().contains("unsupported_feature ctx.scopedModels: scoped_models snapshot not supplied by the host"), "{row}");
+        assert_eq!(row["hasUI"], false);
+    }
+    app.executable_extensions.shutdown().await;
 }
 
 fn assert_unchanged_capture(root: &Path, fixture: &ConfiguredPi) {

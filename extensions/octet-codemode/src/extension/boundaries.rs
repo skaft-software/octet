@@ -357,13 +357,17 @@ pub(super) struct Negotiated {
     pub inline_budget: u64,
     pub concurrent: usize,
 }
+/// The bundle ships with exactly one octet release (`requires_octet` pins it),
+/// so the host and the bundle must both report this crate's version.
+const RELEASE: &str = env!("CARGO_PKG_VERSION");
+
 pub(super) fn negotiate(init: &Value) -> Result<Negotiated> {
     params(
         init["api_version"] == "0.4"
-            && init["octet_version"] == "0.9.6"
+            && init["octet_version"] == RELEASE
             && init["extension"]["name"] == "octet-codemode"
-            && init["extension"]["version"] == "0.9.6",
-        "requires API 0.4, octet 0.9.6 and octet-codemode 0.9.6",
+            && init["extension"]["version"] == RELEASE,
+        &format!("requires API 0.4, octet {RELEASE} and octet-codemode {RELEASE}"),
     )?;
     let offer = &init["protocol"];
     params(
@@ -713,7 +717,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     fn offer() -> Value {
-        json!({"api_version":"0.4","octet_version":"0.9.6","extension":{"name":"octet-codemode","version":"0.9.6"},"protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["tool_composition_v1","request_progress","artifacts"],"limits":{"max_concurrent_requests":8,"resource_refs_v1":{"max_records":128,"max_registrations_per_parent":16}},"bulk_objects_v1":{"profile":"local-file.v1"}},"flag_values":[]})
+        json!({"api_version":"0.4","octet_version":RELEASE,"extension":{"name":"octet-codemode","version":RELEASE},"protocol":{"version":"0.4","required_features":["request_cancellation","content_parts"],"optional_features":["tool_composition_v1","request_progress","artifacts"],"limits":{"max_concurrent_requests":8,"resource_refs_v1":{"max_records":128,"max_registrations_per_parent":16}},"bulk_objects_v1":{"profile":"local-file.v1"}},"flag_values":[]})
     }
     fn context() -> Value {
         json!({"tools":[{"name":"first","description":"Read numbers","parameters":{"type":"object"},"output_schema":{"type":"object"}}],"store":{"previous":5},"limits":{"timeout_ms":30000,"max_calls":256}})
@@ -760,6 +764,26 @@ mod tests {
             let mut bad = offer();
             bad["protocol"]["optional_features"] = features;
             assert!(negotiate(&bad).is_err());
+        }
+    }
+    #[test]
+    fn negotiation_requires_this_release_on_both_sides() {
+        // The shipped manifest pins the same release the handshake checks.
+        let manifest = include_str!("../../extension.toml");
+        assert!(
+            manifest.contains(&format!("version = \"{RELEASE}\"")),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(&format!("requires_octet = \"={RELEASE}\"")),
+            "{manifest}"
+        );
+        assert!(negotiate(&offer()).is_ok());
+        for pointer in ["/octet_version", "/extension/version"] {
+            let mut stale = offer();
+            *stale.pointer_mut(pointer).unwrap() = json!("0.9.6");
+            let error = negotiate(&stale).err().unwrap().to_string();
+            assert!(error.contains(&format!("octet {RELEASE}")), "{error}");
         }
     }
     #[test]

@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from urllib.parse import urlsplit
 
@@ -45,11 +46,13 @@ def walk(value):
 class ReleaseAndFixtureTests(unittest.TestCase):
     def test_release_manifest_and_self_contained_runtime(self):
         manifest = (ROOT / "extension.toml").read_text(encoding="utf-8")
+        workspace = tomllib.loads((ROOT.parents[1] / "Cargo.toml").read_text(encoding="utf-8"))
+        version = workspace["workspace"]["package"]["version"]
         for exact in (
             'name = "octet-web-search"',
-            'version = "0.9.6"',
+            f'version = "{version}"',
             'api_version = "0.4"',
-            'requires_octet = "=0.9.6"',
+            f'requires_octet = "={version}"',
             'command = "extension.py"',
             'tools = ["web_search", "web_fetch", "web_find"]',
             'commands = ["web-search"]',

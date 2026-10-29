@@ -359,6 +359,11 @@ jobs:
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test agent_run partial_assistant_journal -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test windows_process_current
+      - name: Test managed extension updates and interrupted-update recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib -- extension_bundle::tests extension_package:: resource_resolver::tests
+          if ($LASTEXITCODE -ne 0) { throw 'Windows extension package qualification failed' }
       - name: Test the Python SDK, computer-use extension, and Windows release tooling
         if: ${{ !cancelled() }}
         run: |

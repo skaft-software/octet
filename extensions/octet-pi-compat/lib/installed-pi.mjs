@@ -11,27 +11,26 @@
 // refused, and real names this build has not classified are refused too, so a
 // export from another Pi release cannot silently become live. This is a guard against
 // silent takeover, not a sandbox: a trusted factory keeps normal OS authority.
-import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { invalid, rpcError } from './errors.mjs';
-import { PI_MODULES, PI_PREFIXES, PI_VERSION, piModule } from './pi-modules.mjs';
+import { PI_MODULES, PI_PREFIXES, PI_SUPPORTED_RANGE, piModule, piReleaseSupported } from './pi-modules.mjs';
 
 export const FALLBACK_ELIGIBLE = -32030;
 export const INSTALLED_PI_UNAVAILABLE = -32031;
-// octet 0.8.2 is pinned to exactly the Pi release its shims and module table
-// were built from; another installed Pi version is refused, not guessed at.
-export const SUPPORTED_RANGE = PI_VERSION;
-const SUPPORTED = { test: version => version === PI_VERSION };
+// The Pi releases the shims and module table were checked against; any other
+// installed Pi version is refused, not guessed at.
+export const SUPPORTED_RANGE = PI_SUPPORTED_RANGE;
+const SUPPORTED = { test: piReleaseSupported };
 const REGISTRY = Symbol.for('octet.pi-compat.installed-pi');
 const PREFIXES = PI_PREFIXES;
 // shim file key -> real package directory name
 export const PACKAGES = { 'coding-agent': 'pi-coding-agent', ai: 'pi-ai', tui: 'pi-tui' };
 // Pi modules octet does not emulate: the fallback serves the installed files
-// as they are, with the export Pi 1.0.2's loader resolves them to.
+// as they are, with the export Pi's loader resolves them to.
 const DIRECT_MODULES = Object.fromEntries(Object.entries(PI_MODULES).filter(([, module]) => !module.shim));
 // The export each emulated package's real namespace is read from (Pi resolves
 // the pi-ai root to its compat entry, a strict superset of the core entry).
@@ -39,7 +38,7 @@ const REAL_EXPORT = { 'coding-agent': '.', ai: './compat', tui: '.' };
 const words = text => text.trim().split(/\s+/);
 
 // Real-only names (absent from the shims) refused in path B, with the seam each
-// one would open. Keep in sync with NOTES/docs; pinned to Pi 1.0.2.
+// one would open. Keep in sync with NOTES/docs; classified for Pi 1.0.2-1.4.0.
 const DENIED = {
   'coding-agent': [
     ['AgentSessionRuntime createAgentSessionFromServices createAgentSessionRuntime createAgentSessionServices createExtensionRuntime ExtensionRunner discoverAndLoadExtensions InteractiveMode main runPrintMode runRpcMode RpcClient wrapRegisteredTool wrapRegisteredTools',
@@ -73,7 +72,7 @@ const ALLOWED = {
     getLanguageFromPath getLastAssistantUsage getLatestCompactionEntry getPackageDir getPowerShellConfig getReadmePath getShellConfig
     hasTrustRequiringProjectResources highlightCode keyText loadProjectContextFiles loadSkills loadSkillsFromDir migrateSessionEntries parseArgs
     parseSessionEntries parseSkillBlock prepareBranchEntries rawKeyHint renderDiff resizeImage resolveCliModel resolveModelScopeWithDiagnostics
-    sessionEntryToContextMessages shouldCompact truncateToVisualLines`),
+    sessionEntryToContextMessages shouldCompact truncateToVisualLines formatReadLineRange`),
   ai: words(`AssistantMessageEventStream AssistantMessageFrameEncoder DEFAULT_MAX_AGENT_RETRY_DELAY_MS EventStream ModelsError
     appendAssistantMessageDiagnostic clampThinkingLevel cleanupSessionResources contentText createAssistantMessageDiagnostic createFauxCore
     createInitialSystemMessage declarationsEqual extractDiagnosticError fauxAssistantMessage fauxProvider fauxText fauxThinking fauxToolCall
@@ -81,7 +80,7 @@ const ALLOWED = {
     getSystemMessageText getToolStateChanges hasApi hasNonAdditiveToolChanges hasToolRedefinitions isContextOverflow isModelType isRecoverableLength
     isRetryableAssistantError modelsAreEqual normalizeContext parseJsonWithRepair parseStreamingJson reduceAssistantMessageFrames
     registerSessionResourceCleanup renderSystemMessageUpdate repairJson resolveTranscript resolveTranscriptTools retryDelayMs toToolDeclaration
-    validateToolArguments validateToolCall withoutInitialSystemMessage`),
+    validateToolArguments validateToolCall withoutInitialSystemMessage parseToolCallArguments AI_TELEMETRY_SCHEMA PI_AI_VERSION`),
   tui: words(`CombinedAutocompleteProvider HStack Marked MouseRegion ScrollView VStack allocateImageId backgroundAnsi calculateImageRows colorToHex
     colorToOkhsl colorToOklch colorToRgb compositeTuiLine deleteAllKittyImages deleteKittyImage detectCapabilities encodeITerm2 encodeKitty
     foregroundAnsi getCapabilities getCellDimensions getGifDimensions getImageDimensions getJpegDimensions getOsc8LinkAtColumn getPngDimensions
@@ -194,7 +193,8 @@ export function installedPiAliases(env = process.env) {
 }
 // Installs the overlay registry. Shim namespaces are preloaded through the
 // runtime's jiti so they are the same module instances path A would use; real
-// Pi loads lazily, natively (outside jiti aliases), and only when imported.
+// Pi loads natively (outside jiti aliases) before publishing synchronous
+// overlays. require() cannot safely observe a pending native ESM graph.
 // The managed Pi package directory the overlay actually serves, or null on the
 // emulated path. Used by the Pi config helpers so a factory sees real Pi's own
 // package root whenever real Pi provides the module.
@@ -204,12 +204,17 @@ export async function activateInstalledPi(jiti, install) {
   activePackageDir = install.packages['coding-agent'].dir;
   const shims = {};
   for (const key of Object.keys(PACKAGES)) shims[key] = await jiti.import(shimPath(key));
-  const nativeRequire = createRequire(import.meta.url), cache = new Map();
+  const native = new Map(), cache = new Map();
+  // Complete each import sequentially: Pi's packages share an ESM graph that
+  // a factory's native dependency may already be evaluating. The CommonJS
+  // overlay must expose settled namespaces, not require() that in-flight graph.
+  for (const [key, pkg] of Object.entries(install.packages)) {
+    try { native.set(key, await import(pathToFileURL(pkg.entry).href)); }
+    catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+  }
   const namespace = key => {
     if (cache.has(key)) return cache.get(key);
-    const pkg = install.packages[key], shim = shims[key];
-    let real;
-    try { real = nativeRequire(pkg.entry); } catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+    const pkg = install.packages[key], shim = shims[key], real = native.get(key);
     const merged = { __esModule: true };
     for (const name of Object.keys(real)) {
       if (name === 'default') continue;

@@ -1,7 +1,7 @@
 name = "octet-codemode"
-version = "0.9.6"
+version = "0.10.0"
 api_version = "0.4"
-requires_octet = "=0.9.6"
+requires_octet = "=0.10.0"
 description = "No-Node QuickJS/WASM JavaScript sandbox for bounded host-brokered tool composition"
 
 [entrypoint]

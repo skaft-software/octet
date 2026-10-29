@@ -706,6 +706,9 @@ pub(crate) fn validate_request(
                                         Protocol::PiMessages,
                                         crate::types::ReasoningStateKind::AnthropicSignature { .. }
                                             | crate::types::ReasoningStateKind::AnthropicRedacted { .. }
+                                    ) | (
+                                        Protocol::OpenAiChat,
+                                        crate::types::ReasoningStateKind::ChatReasoningDetails { .. }
                                     )
                                 );
                                 let empty_bedrock_signature = protocol == Protocol::BedrockConverse

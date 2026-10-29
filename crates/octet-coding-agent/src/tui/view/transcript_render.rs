@@ -597,6 +597,7 @@ pub(super) fn render_block_planned_with_rainbow(
         TranscriptBlock::Reasoning(reasoning)
             if collapsed_reasoning
                 && !reasoning.finished
+                && theme.capabilities().animation
                 && reasoning
                     .extension_working
                     .as_ref()

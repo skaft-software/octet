@@ -1,12 +1,22 @@
-// The Pi release this adapter is pinned to, and the module specifiers Pi's own
-// extension loader resolves for every extension (Pi 1.0.2,
+// The Pi extension API this adapter emulates, and the module specifiers Pi's own
+// extension loader resolves for every extension (Pi 1.4.0,
 // packages/coding-agent/src/core/extensions/loader.ts getAliases). Both the
 // emulated path and the installed-Pi fallback resolve exactly these names, so
 // an extension sees the same module graph it sees in Pi.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export const PI_VERSION = '1.0.2';
+export const PI_VERSION = '1.4.0';
+// Installed Pi releases the fallback and `--from-pi` accept. 1.0.2 through
+// 1.4.x share the install layout, settings and package-manager APIs, and module
+// table; only new export names differ, and unclassified names stay refused.
+export const PI_SUPPORTED_RANGE = '>=1.0.2 <1.5.0';
+export function piReleaseSupported(version) {
+  const match = /^1\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const [minor, patch] = [Number(match[1]), Number(match[2])];
+  return minor <= 4 && (minor > 0 || patch >= 2);
+}
 export const PI_PREFIXES = ['@earendil-works', '@mariozechner'];
 
 // Specifier (after the scope) -> the Pi package and export it resolves to, and
@@ -19,6 +29,9 @@ export const PI_MODULES = {
   'pi-tui': { pkg: 'pi-tui', key: 'tui', exportKey: '.', shim: 'tui' },
   'pi-ai': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
   'pi-ai/compat': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
+  // Pi 1.4 aliases pi-ai/models too. Its names are a subset of compat in every
+  // supported release, so it is served by the same guarded namespace.
+  'pi-ai/models': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
   'pi-ai/oauth': { pkg: 'pi-ai', key: 'ai-oauth', exportKey: './oauth' },
   'pi-ai/providers/all': { pkg: 'pi-ai', key: 'ai-providers', exportKey: './providers/all' },
 };
@@ -43,7 +56,7 @@ const shimFile = shim => fileURLToPath(new URL(`../shims/${shim}.mjs`, import.me
 // emulate; loading it fails, and the load is retried on the installed Pi.
 export const UNAVAILABLE_MODULE = fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url));
 
-/** Emulated-path aliases for every Pi specifier Pi 1.0.2 resolves. */
+/** Emulated-path aliases for every Pi specifier Pi resolves. */
 export function emulatedPiAliases() {
   const aliases = {};
   for (const prefix of PI_PREFIXES) {
@@ -59,7 +72,7 @@ const pick = target => typeof target === 'string' ? target
 
 /**
  * TypeBox aliases from the adapter's pinned TypeBox (the version Pi 1.0.2
- * ships). Pi aliases the root, `compile` and `value`; the other exported
+ * through 1.4.0 ship). Pi aliases the root, `compile` and `value`; the other exported
  * subpaths (`system`, `guard`, ...) are resolved too, because a bare alias
  * would otherwise turn `typebox/system` into a path below the root file.
  */

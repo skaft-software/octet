@@ -36,11 +36,20 @@ test('tool follow-up runs unchanged context callbacks without rewriting native e
 });
 
 test('real process context edits preserve untouched opaque reasoning and tool replay', async t => {
-  const peer = launch(t, [fixture]); await peer.init();
+  const peer = launch(t, [fixture], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  await peer.start();
   const messages = transcript(), before = structuredClone(messages);
-  const reply = await peer.request('hook/run', params(host => peer.context(host), messages, 'throws')).response;
+  const request = peer.request('hook/run', params(host => peer.context(host), messages, 'throws'));
+  const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+  assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+  // The getter's host result must not fall back to the preparation's system.
+  peer.send({ jsonrpc: '2.0', id: read.id, result: { text: 'host-served prompt' } });
+  const reply = await request.response;
   assert.ok(reply.result, JSON.stringify(reply));
-  assert.deepEqual(reply.result.provider_context, { messages: [...before, user('second:real system')], system: 'real system' });
+  assert.deepEqual(reply.result.provider_context, { messages: [...before, user('second:host-served prompt')], system: 'real system' });
   assert.deepEqual(messages, before);
   await peer.close();
 });

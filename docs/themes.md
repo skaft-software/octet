@@ -123,6 +123,47 @@ also change perceived contrast.
 
 </details>
 
+### Extension rendering boundary
+
+Model accents and the max/ultra `Working` rainbow belong to Octet's native
+activity/chrome renderer. They are not a filter over extension output. A mounted
+Pi editor, header, footer or widget supplies its own validated styled rows,
+including foregrounds and backgrounds; Octet clips and composes them without
+model recoloring. Tern receives those rows as native ANSI content, not a second
+terminal renderer. Extension titles are owner-scoped terminal-safe text, not theme
+colors. Removing a mount restores the native surface.
+
+The built-in `pi` and imported Pi palettes disable native label shimmer/rainbow
+and model recoloring. Selecting a different native theme changes native chrome;
+the admitted Pi adapter also receives the active palette for its helper callbacks
+and component rerenders. Extensions with hard-coded colors still own those colors.
+A model switch uses the validated theme snapshot, not a fresh file read. Active
+file-theme reload validates edits before replacement and retains the last good
+palette on invalid edits.
+
+Reduced motion keeps Octet's working marker static, including extension-supplied
+working-indicator frames animated by the host. It does not stop arbitrary timers
+inside an extension's custom editor or widget. Original extension combinations
+and terminal pixels require separate qualification; palette and cached-row tests
+are not full Pi customization parity.
+
+Native controls remain in one TOML file; enabling a Pi extension does not change
+its presentation policy:
+
+| Area | Native theme controls |
+| --- | --- |
+| Tool/activity gutter | `[colors] margin_markers`, `event_marker_gutter`, `tool_dot_breathing`, `tool_dot_dim`, `tool_dot_bright` |
+| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[glyphs]` border characters |
+| Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, `[surfaces.user]`, `[surfaces.tool]` |
+| Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `composer_padding`, `narrow_*`; per-surface `padding` and `narrow_padding` |
+| Model colors | `[model] use_lab_color` and per-family colors |
+
+These are not controls for every rendered pixel: event-dot glyphs and some live
+status spacing remain compiled policy, and Tern owns native widget geometry.
+A custom tool renderer may own its entire shell (`renderShell: "self"`), omitting
+native gutters/frames without changing the surrounding theme. A renderer that
+keeps the native shell retains its selected theme's decoration.
+
 ## Tool call and thinking verbosity
 
 A theme chooses how much of the agent's work the transcript shows by default.
@@ -335,7 +376,12 @@ the whole table. `[variants.unknown]` applies when detection fails.
 Theme files reject terminal control bytes, unknown sections and fields, invalid
 role names, non-ASCII ASCII-fallbacks, wide or empty structural glyphs and
 oversized values. Unknown or partial files fall back to the compiled default
-rather than starting with a broken shell.
+rather than starting with a broken shell. Invalid edits to an active file are
+reported without replacing its last good theme. Retention requires normal
+discovery to still select that same source; removing it, withdrawing its root or
+shadowing it with another file uses normal fallback rather than keeping a stale
+palette. Root scalar tokens and the legacy `[model]`, `[spacing]` and `[icons]`
+sections remain supported.
 
 ## Pi JSON themes
 

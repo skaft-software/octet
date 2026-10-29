@@ -43,12 +43,18 @@ impl ResourcePathConsumer {
         config: &Config,
         skills: &Arc<dyn octet_agent::SkillRegistry>,
         prompts: &Arc<crate::prompts::PromptRegistry>,
-        extensions: &crate::extensions::ExecutableExtensions,
+        extensions: &mut crate::extensions::ExecutableExtensions,
         host: &mut octet_agent::ExtensionHost,
         capability: ResourceConsumerCapability,
     ) -> Self {
         let enabled = capability == ResourceConsumerCapability::AppFrontend
             && extensions.has_resource_consumer_processes();
+        extensions.bind_command_resources(
+            skills.clone(),
+            prompts.clone(),
+            Default::default(),
+            None,
+        );
         let guard = ResourceProviderGuard::default();
         // This observes an already negotiated offer. It NEVER creates one, and
         // is appended after process hooks to reject retirement while they wait.
@@ -317,6 +323,14 @@ impl App {
                     .collect(),
             );
         }
+        // Default resolution may complete the native provider catalog. Publish
+        // those genuine model facts as well as the invocation scope, without
+        // importing interactive preferences or granting credential/UI access.
+        self.executable_extensions.refresh_pi_model_catalog(
+            &self.catalog,
+            self.model_scope.as_deref(),
+            &self.model,
+        );
         // All fallible work is above. Registry snapshots and provider admission
         // receive the same owner/generation fence in this synchronous boundary.
         self.system = system;
@@ -328,6 +342,12 @@ impl App {
             lease: lease.clone(),
         });
         self.prompts = Arc::new((*loaded.prompts).clone().with_resource_lease(lease.clone()));
+        self.executable_extensions.bind_command_resources(
+            self.skills.clone(),
+            self.prompts.clone(),
+            loaded.source_infos,
+            Some(lease.clone()),
+        );
         self.config.skill_paths = loaded.config.skill_paths;
         self.config.prompt_paths = loaded.config.prompt_paths;
         self.config.theme_paths = loaded.config.theme_paths;
@@ -372,6 +392,16 @@ impl App {
         })
     }
     pub(crate) async fn refresh_resource_paths_headless(&mut self) -> anyhow::Result<()> {
+        // The interactive pump normally publishes these secret-free facts. A
+        // headless App must do so before releasing its deferred session_start
+        // barrier: Pi factories can read/spread ctx there, before discovery.
+        // None is the real absence of an invocation scope, not an unavailable
+        // snapshot or permission to load the interactive persisted scope.
+        self.executable_extensions.refresh_pi_model_catalog(
+            &self.catalog,
+            self.model_scope.as_deref(),
+            &self.model,
+        );
         let resources_pending = self.resource_paths_pending();
         if !resources_pending && !self.executable_extensions.has_pending_session_starts() {
             return Ok(());

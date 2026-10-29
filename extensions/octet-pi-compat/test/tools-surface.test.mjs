@@ -111,6 +111,33 @@ test('module: loadout callbacks receive the actual host registry and only projec
   assert.equal(original[0].description, 'original'); assert.equal(original.length, 2);
 });
 
+test('module: Pi 1.4 tool fields: reachesTools, namespace aliases and loadout prompt guidelines', () => {
+  const reaches = input => (typeof input.code === 'string' ? input.code.split(/\W+/) : 'all');
+  const rt = runtime();
+  registerTool(rt, '/probe.ts', definition({ reachesTools: reaches, promptGuidelines: ['Prefer probe for docs'],
+    namespace: { name: 'mcp__docs', aliases: ['docs'], description: 'Docs server' },
+    prepareLoadout: loadout => {
+      assert.deepEqual(loadout.getPromptGuidelines('probe'), ['Prefer probe for docs']);
+      assert.deepEqual(loadout.getPromptGuidelines('read'), []);
+      assert.deepEqual(loadout.getNamespace('probe').aliases, ['docs']);
+      return undefined;
+    } }));
+  rt.transport = { requestSync() { return { all_tools: [{ name: 'probe', description: 'Probe tool', parameters: { type: 'object' }, exposure: 'direct' },
+    { name: 'read', description: 'native read', parameters: { type: 'object' }, exposure: 'direct' }], active_tools: ['probe', 'read'] }; } };
+  rt.backgroundError = error => { throw error; };
+  let checked = false;
+  rt.tools.get('probe').definition.prepareLoadout = (inner => loadout => { checked = true; return inner(loadout); })(rt.tools.get('probe').definition.prepareLoadout);
+  const declared = [{ name: 'probe', description: 'Probe tool', parameters: { type: 'object' } }];
+  assert.deepEqual(prepareToolLoadout(rt, rt.store, declared), declared);
+  assert.equal(checked, true);
+  const [probe] = getAllTools(rt, '/probe.ts');
+  assert.equal(probe.reachesTools, reaches);
+  assert.deepEqual(probe.namespace.aliases, ['docs']);
+  assert.throws(() => validateTool(definition({ reachesTools: 'all' })), /tool\.reachesTools/);
+  assert.throws(() => validateTool(definition({ namespace: { name: 'docs', aliases: 'docs' } })), /aliases/);
+  assert.throws(() => validateTool(definition({ namespace: { name: 'docs', aliases: Array(17).fill('a') } })), /aliases/);
+});
+
 test('module: nested execution returns real full outcomes and uses the frozen host catalog', async () => {
   const rt = runtime(); rt.features.add('tool_composition_v1'); registerTool(rt, '/probe.ts', definition());
   let failed = false;

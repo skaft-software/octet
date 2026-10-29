@@ -40,7 +40,7 @@ import { tracePhase } from './startup-trace.mjs';
 import { jitiCacheOptions } from './startup-cache.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials']);
-const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials']);
+const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -54,6 +54,13 @@ export const REVIEWED_SOURCE_LIMITS = Object.freeze({
 });
 
 function missingPath(error) { return error?.code === 'ENOENT' || error?.code === 'ENOTDIR'; }
+// Pi's names for the host's tool lifecycle fields, next to the wire names.
+// durationMs (Pi 1.1) is the host's measured execution time.
+function piToolLifecycle(method, p) {
+  if (method !== 'tool/started' && method !== 'tool/settled') return {};
+  return { toolCallId: p.tool_call_id, toolName: p.tool_name,
+    ...(method === 'tool/settled' && Number.isSafeInteger(p.duration_ms) ? { durationMs: p.duration_ms } : {}) };
+}
 function sourceFilePath(pathname, baseDirectory) {
   const absolute = resolve(pathname), relativePath = relative(baseDirectory, absolute);
   const parts = relativePath ? relativePath.split(sep) : [];
@@ -327,6 +334,7 @@ export class Runtime {
       if (!this.config.registrations || !this.config.entrypoint_sources) invalid('mirror static registrations require review; configure again');
       const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
+      this.commandSourceInfos = setup.sourceInfos;
       extensions = setup.extensions.map(entry => realpathSync(entry));
       // Factories the owner explicitly excluded at review stay unloaded; an
       // exclusion only narrows the reviewed grant and is reported each start.
@@ -430,9 +438,10 @@ export class Runtime {
             const add = api[method];
             if (typeof add === 'function') api[method] = (...args) => { this.assertFactory(factory); return add(...args); };
           }
-          // Mirror static surfaces cannot grow after review via retained APIs.
+          // Tools use the negotiated, native-acknowledged dynamic catalog path;
+          // the other mirror static surfaces cannot grow via retained APIs.
           // Resource callbacks remain dynamic and host-admitted.
-          if (this.mirrorPiSetup) for (const method of ['registerTool', 'registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
+          if (this.mirrorPiSetup) for (const method of ['registerCommand', 'registerShortcut', 'registerFlag', 'registerMessageRenderer', 'registerEntryRenderer']) {
             const register = api[method];
             api[method] = (...args) => {
               if (this.loaded) invalid(`mirror ${method} changed static registrations; review and configure again`);
@@ -958,6 +967,14 @@ export class Runtime {
   async notify(message) {
     const p = message.params;
     if (message.method === 'provider/cancel') { cancelProviderStream(this, p.stream_id); return; }
+    // Pi's isIdle: no agent run is active and nothing is compacting. Track it
+    // from the host's own lifecycle notifications as they arrive, before any
+    // queued delivery, so a hook running inside the run already sees it busy.
+    const activity = { 'turn/started': ['runActive', true], 'turn/settled': ['runActive', false], 'compaction/started': ['compacting', true], 'compaction/settled': ['compacting', false] }[message.method];
+    if (activity) {
+      const tracked = p?.resource_owner ? this.states.get(ownerKey(p.resource_owner)) : this.foreground;
+      if (tracked?.alive) tracked[activity[0]] = activity[1];
+    }
     // Advisory notifications cannot deliver a veto or a post-commit append
     // consumer. Actual Pi compaction callbacks now arrive as awaited hook/run.
     if (['compaction/started', 'compaction/settled'].includes(message.method)) return;
@@ -1005,9 +1022,10 @@ export class Runtime {
         await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
       } else {
         if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
-        else await this.runEvent(event, facade({ type: event, ...p }, `${event} event`), store);
+        else await this.runEvent(event, facade({ type: event, ...p, ...piToolLifecycle(message.method, p) }, `${event} event`), store);
         const following = followingEvents[message.method];
-        if (following) await this.runEvent(following, { type: following }, store);
+        // Pi 1.1 agent_settled says whether the run was cancelled.
+        if (following) await this.runEvent(following, { type: following, aborted: p.outcome === 'cancelled' || p.outcome === 'interrupted' }, store);
       }
       await this.flush(store);
     });

@@ -8,7 +8,7 @@ none requires a paid provider, registry publication or global SDK installation.
 
 ## Status and contract boundaries
 
-This guide targets feature-negotiated **extension API `0.4`** and the 0.9.6
+This guide targets feature-negotiated **extension API `0.4`** and the 0.10.0
 candidate source host. Extension version, SDK distribution version, host version
 and API version are independent. Read [the host guide](../extensions.md) for
 current admission rules and [the wire reference](PROTOCOL-REFERENCE.md) when
@@ -80,7 +80,7 @@ license and provenance. The generator accepts literal static tool declarations;
 extra modules/assets must be included deliberately. See the
 [Python SDK](../../sdk/python/README.md) and
 [single-file recipe](../../examples/extensions/python-single-file/README.md).
-The generator pins the actual workspace host version (`=0.9.6` here) and emits
+The generator pins the actual workspace host version (`=0.10.0` here) and emits
 relative executable `run-extension`. That launcher uses `OCTET_EXTENSION_DIR`
 when staged by the host, selects the vendored SDK and suppresses bytecode writes;
 no global SDK installation or original checkout path is needed.
@@ -89,7 +89,7 @@ Package this reviewed generated directory using the existing release packager:
 
 ```sh
 bash scripts/package-octet-extension-release.sh \
-  wait-extension /tmp/bundles v0.9.6 /tmp/my-extensions/wait-extension
+  wait-extension /tmp/bundles v0.10.0 /tmp/my-extensions/wait-extension
 # Check the exact produced archive and digest before installation.
 # Extract to a separate reviewed location, then run the provider-free smoke:
 env -u PYTHONPATH CARGO_TARGET_DIR=/tmp/python-single-file-host-target \
@@ -180,7 +180,7 @@ make -C sdk/cpp OCTET_ROOT="$PWD"
 ```
 
 Generated manifests live in `examples/extensions/native-hello/build/extensions/`
-and pin `requires_octet = "=0.9.6"`. Choose one language to avoid duplicate
+and pin `requires_octet = "=0.10.0"`. Choose one language to avoid duplicate
 `hello` tools. Rebuild/regenerate after moving the checkout. Native helpers
 support static tools and one text result/error only: no hooks, commands, UI,
 flags, dynamic catalogs, media, reverse host services, secrets, approvals,
@@ -236,7 +236,7 @@ existing packager takes the source explicitly:
 ```sh
 # Example placeholders: supply your reviewed source and exact host version.
 bash scripts/package-octet-extension-release.sh \
-  hello-tools /tmp/bundles v0.9.6 /absolute/path/to/hello-tools
+  hello-tools /tmp/bundles v0.10.0 /absolute/path/to/hello-tools
 # Use the actual produced archive path, not a guessed filename.
 octet extension install --path /absolute/path/to/reviewed-bundle.tar.gz
 octet extension list
@@ -249,9 +249,8 @@ installable. In particular, TS's generated launcher/absolute paths are local,
 not a portable release bundle; Python's generated relative-launcher package has
 local release-format archive evidence, not publication qualification.
 The installer rejects links, special files, unsafe paths and mismatched
-API/host identity, records SHA-256, and atomically publishes a validated staged
-candidate. A hash detects byte changes; it does not establish authorship or
-safety. Do not claim catalog installation until matching assets are published
+API/host identity, records SHA-256, and publishes a validated staged candidate.
+A hash detects byte changes; it does not establish authorship or safety. Do not claim catalog installation until matching assets are published
 and verified. These commands are guidance, not actions performed by this guide.
 
 ## Test, upgrade and roll back the whole closure
@@ -283,10 +282,14 @@ referencing a mutable SDK checkout is not a closed rollback artifact.
 
 Disable before replacing files; inspect the candidate's closure and pin before
 `octet extension update --path /absolute/path/to/candidate.tar.gz`. Updates
-require the same managed ID, validate before swap and restore the old directory
-on publication failure. That automatic failure rollback is **not** behavioral
-rollback or reversal of external effects. Keep the prior reviewed compatible
-archive and its dependencies: an intentional restore uses the local update
+require the same managed ID and validate before replacement. Linux/macOS use
+atomic directory exchange. Windows uses locked, recoverable replacement: close
+programs using the bundle first. Publication failure restores the old directory;
+if Windows blocks restoration, the backup is retained with recovery instructions.
+After interruption, listing or global managed discovery recovers it. See
+[Windows update recovery](../windows.md#managed-extension-updates-unreleased).
+That failure recovery is **not** behavioral rollback or reversal of external
+effects. Keep the prior reviewed compatible archive and its dependencies: an intentional restore uses the local update
 path with that prior archive, subject to current host/API validation. A host
 version change may also require restoring the matching host; don't erase a pin
 to force admission. Re-enable only after review and repeat the smoke checks.
@@ -320,6 +323,6 @@ output, keep secrets out of logs/results, and never infer success from transport
 loss or replay ambiguous unsafe effects. The host owns approval policy, sessions,
 persistence, supervision and cleanup; helpers do not replace that authority.
 
-Optional Codemode is separate and currently requires Python 3.11+ and Node 22.19+
-for its launcher and pinned QuickJS/WASM runtime. These native tools do not imply a no-Node Codemode or
-shared Pi runtime qualification.
+Optional [Codemode](../../extensions/octet-codemode/README.md) is a separate Rust executable
+with an embedded QuickJS/WASM runtime; it needs neither Node nor Python at runtime.
+That does not qualify the Pi adapter or a shared Pi runtime.

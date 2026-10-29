@@ -576,6 +576,9 @@ pub enum PendingIdleAction {
     /// Display is already changed; only config synchronization/persistence waits.
     SyncTheme(String),
     SyncImages(bool),
+    /// The screen and preference already changed. Retain each exact write until
+    /// the idle reload owner can acknowledge it; receipt chains never coalesce.
+    AcknowledgeTuiPreference(crate::reload::AppliedConfigWrite),
     /// `/scoped-models` mutations that must own the application catalog and the
     /// shell's cycling list. Reports are rendered immediately instead.
     ScopedModels(commands::ScopedModelsCommand),
@@ -584,8 +587,8 @@ pub enum PendingIdleAction {
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
-/// thinking changes and preference writes collapse to the latest request;
-/// sessions and compaction do not collapse or disappear.
+/// thinking changes and preference intents collapse to the latest request;
+/// sessions, compaction, and checked write receipts never collapse or disappear.
 pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: PendingIdleAction) {
     let same_kind = matches!(
         (&queue.back(), &action),
@@ -2534,11 +2537,13 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::ExtensionsSubcommand::Status
                 | commands::ExtensionsSubcommand::Inspect { .. }
         ),
-        // Only the display settings keep a deferred step: the preference write
-        // that follows an immediate theme or image change.
+        // Display settings retain a deferred write or checked acknowledgement.
+        // Reserve capacity before changing either the screen or its preference.
         Command::Settings(sub) => matches!(
             sub,
-            commands::SettingsCommand::Theme(Some(_)) | commands::SettingsCommand::Images(Some(_))
+            commands::SettingsCommand::Theme(Some(_))
+                | commands::SettingsCommand::Images(Some(_))
+                | commands::SettingsCommand::TuiMode(Some(_))
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -3155,7 +3160,11 @@ where
                 commands::SettingsCommand::QueueMode(kind, Some(mode)) => {
                     save_queue_mode(shell, extensions, inspection.cache_warming_control.as_ref(), kind, mode).await;
                 }
-                commands::SettingsCommand::TuiMode(Some(mode)) => save_tui_mode(shell, extensions, mode).await,
+                commands::SettingsCommand::TuiMode(Some(mode)) => {
+                    if let Some(write) = save_tui_mode(shell, extensions, mode).await {
+                        push_pending_action(queue, PendingIdleAction::AcknowledgeTuiPreference(write));
+                    }
+                }
                 commands::SettingsCommand::DefaultModel(None) => shell.notice(format!(
                     "default model for new sessions: {}",
                     inspection
@@ -5555,7 +5564,8 @@ where
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
-    let background = shell.theme().background();
+    let current_theme = shell.theme();
+    let background = current_theme.background();
     let mut app = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
@@ -5565,8 +5575,19 @@ where
         Ok(app)
     })
     .await?;
-    let problems = resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
-    shell.set_theme(load_theme_for_background(&app.config, background));
+    let mut problems =
+        resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
+    let (theme, problem) = crate::tui::theme::retain_invalid_file_theme(
+        &app.config,
+        &current_theme,
+        load_theme_for_background(&app.config, background),
+    );
+    if let Some(problem) = problem {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+    shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     app.executable_extensions
@@ -7534,18 +7555,37 @@ where
     // later rebuilds and stay authoritative over session-only resource
     // contributions (for example a mirrored Pi default model).
     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
-    let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
-        apply_reconfig(app, reconfig)
-    })
-    .await?;
+    let in_place = if let Reconfig::Model(id) = &reconfig {
+        match crate::app::try_apply_model_reconfig(&mut app, id) {
+            Ok(selected) => selected,
+            Err(error) => {
+                shell.error(format!("model unchanged: {error}"));
+                return Ok(app);
+            }
+        }
+    } else {
+        false
+    };
+    let mut app = if in_place {
+        app
+    } else {
+        run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
+            apply_reconfig(app, reconfig)
+        })
+        .await?
+    };
     if explicit_model_change {
         app.config.model_explicit = true;
     }
-    refresh_resource_paths(&mut app, shell, input).await?;
-    shell.hydrate(app.agent.session())?;
-    let session_id = herdr_session_id(&app);
-    if session_id != previous_session_id {
-        shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+    if !in_place {
+        refresh_resource_paths(&mut app, shell, input).await?;
+        shell.hydrate(app.agent.session())?;
+        let session_id = herdr_session_id(&app);
+        if session_id != previous_session_id {
+            shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+        }
+        app.executable_extensions
+            .activate_session_lifecycle_driver();
     }
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
@@ -7553,8 +7593,6 @@ where
     if had_fast && app.agent.service_tier().is_none() {
         shell.notice("Fast mode: off after the model/session change; use /fast on on a supported route to enable it again");
     }
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
     host_notification.publish(&mut app.executable_extensions);
     Ok(app)
 }
@@ -8824,7 +8862,11 @@ async fn apply_pending_actions(
                 app.config.theme_explicit = true;
                 if let Err(error) =
                     persist_configuration(Some(&mut app.executable_extensions), || {
-                        crate::cli::persist_theme_choice(&selector)
+                        let receipt = crate::cli::persist_theme_selection(&selector)?;
+                        if let Some(receipt) = receipt {
+                            reload.acknowledge_applied_write(&receipt);
+                        }
+                        Ok(())
                     })
                     .await
                 {
@@ -8834,6 +8876,9 @@ async fn apply_pending_actions(
                 } else {
                     shell.notice("theme preference saved at the idle boundary");
                 }
+            }
+            PendingIdleAction::AcknowledgeTuiPreference(write) => {
+                reload.acknowledge_applied_write(&write);
             }
             PendingIdleAction::SyncImages(enabled) => {
                 app.config.show_images = enabled;
@@ -9954,28 +9999,45 @@ async fn save_tui_mode(
     shell: &mut InteractiveShell,
     extensions: &mut crate::extensions::ExecutableExtensions,
     mode: crate::config::TuiMode,
-) {
+) -> Option<crate::reload::AppliedConfigWrite> {
+    save_tui_mode_with(shell, extensions, mode, |shell| {
+        shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen)
+    })
+    .await
+}
+
+async fn save_tui_mode_with(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    mode: crate::config::TuiMode,
+    switch_renderer: impl FnOnce(&mut InteractiveShell) -> anyhow::Result<()>,
+) -> Option<crate::reload::AppliedConfigWrite> {
     if crate::cli::tui_mode_is_explicit() {
         shell.error(
             "TUI preference unchanged: --tui-mode overrides saved settings for this invocation"
                 .to_owned(),
         );
-        return;
+        return None;
     }
-    if let Err(error) =
-        persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode)).await
+    let write = match persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode))
+        .await
     {
-        shell.error(format!("failed to save the TUI mode preference: {error}"));
-        return;
-    }
-    if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
+        Ok(write) => write,
+        Err(error) => {
+            shell.error(format!("failed to save the TUI mode preference: {error}"));
+            return None;
+        }
+    };
+    if let Err(error) = switch_renderer(shell) {
         shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
-        return;
+        return None;
     }
     shell.notice(format!(
         "interactive terminal mode saved as {}",
         mode.as_str()
     ));
+    // A failed live switch must remain visible to normal resource reload.
+    write
 }
 
 /// Save the default model for new sessions. It never switches the live session.
@@ -10035,6 +10097,7 @@ async fn apply_settings_command(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     sub: commands::SettingsCommand,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<()> {
     use commands::SettingsCommand as Sub;
     let sub = if sub == Sub::Menu {
@@ -10071,7 +10134,11 @@ async fn apply_settings_command(
             save_queue_mode(shell, &mut app.executable_extensions, None, kind, mode).await;
         }
         Sub::TuiMode(None) => shell.notice(tui_mode_report()),
-        Sub::TuiMode(Some(mode)) => save_tui_mode(shell, &mut app.executable_extensions, mode).await,
+        Sub::TuiMode(Some(mode)) => {
+            if let Some(write) = save_tui_mode(shell, &mut app.executable_extensions, mode).await {
+                reload.acknowledge_applied_write(&write);
+            }
+        }
         Sub::Theme(requested) => {
             configure_terminal_theme(
                 shell,
@@ -10080,6 +10147,7 @@ async fn apply_settings_command(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10713,6 +10781,7 @@ async fn run_idle_command_inner(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10807,7 +10876,7 @@ async fn run_idle_command_inner(
             apply_idle_goal_command(&app, shell, goal, goal_deadline)?;
         }
         Command::Settings(sub) => {
-            apply_settings_command(&mut app, shell, input, sub).await?;
+            apply_settings_command(&mut app, shell, input, sub, reload).await?;
         }
         Command::Pi(sub) => {
             app = Box::new(apply_pi_command(*app, shell, input, sub).await?);
@@ -11491,6 +11560,7 @@ async fn configure_terminal_theme<S, E: Into<crate::tui::terminal::InputPacket>>
     requested: Option<String>,
     onboarding: bool,
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+    reload: Option<&mut crate::reload::ReloadSupervisor>,
 ) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<E>> + Unpin,
@@ -11548,7 +11618,16 @@ where
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
-        crate::cli::persist_theme_choice(choice.key())
+        let Some(reload) = reload else {
+            return crate::cli::persist_theme_choice(choice.key());
+        };
+        let receipt = crate::cli::persist_theme_selection(choice.key())?;
+        if let Some(receipt) = receipt {
+            // The live palette is already installed. Acknowledge only this
+            // exact atomic write, not unrelated/queued resource changes.
+            reload.acknowledge_applied_write(&receipt);
+        }
+        Ok(())
     })
     .await
     {
@@ -11719,6 +11798,7 @@ async fn run_interactive_without_model(
                         &mut boot.config,
                         requested,
                         false,
+                        None,
                         None,
                     )
                     .await?;
@@ -12782,7 +12862,8 @@ async fn run_interactive_once(
         && shell.theme().capabilities().interactive
         && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None, None)
+            .await?;
         if shell.close_requested() {
             shell.leave();
             return Ok(InteractiveExit::Finished);

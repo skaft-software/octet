@@ -13,6 +13,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = ROOT.parents[1]
+# The one octet release this bundle runs on; its manifest pins both sides.
+RELEASE = next(
+    line.split('"')[1]
+    for line in (ROOT / "extension.toml").read_text(encoding="utf-8").splitlines()
+    if line.startswith("version = ")
+)
 FRAME_BYTES = 1024 * 1024
 IPC_BYTES = 20 * 1024 * 1024
 OUTPUT_BYTES = 50 * 1024
@@ -94,11 +100,11 @@ def text(result):
 
 
 def offer(optional=("tool_composition_v1", "request_progress", "artifacts")):
-    """The exact feature-negotiated API 0.4 offer the 0.9.6 host sends."""
+    """The exact feature-negotiated API 0.4 offer the matching host sends."""
     return {
         "api_version": "0.4",
-        "octet_version": "0.9.6",
-        "extension": {"name": "octet-codemode", "version": "0.9.6"},
+        "octet_version": RELEASE,
+        "extension": {"name": "octet-codemode", "version": RELEASE},
         "flag_values": [],
         "protocol": {
             "version": "0.4",

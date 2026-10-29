@@ -2,7 +2,6 @@
 //! The mutation probes use the same idle consumer as ordinary frontend commands.
 #![cfg(unix)]
 
-use super::support::*;
 use super::*;
 
 const IDLE_COMMAND_PROBE: &str = r#"import json

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { basename, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bounded, facade, invalid, ownerKey, rpcError, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
@@ -110,6 +110,10 @@ function appendPiSetupPaths(runtime, paths, budget) {
   if (runtime.mirrorPiSetup) {
     paths.skill_paths.push(...admit(setup.skillsPaths, 'Pi skills'));
     paths.prompt_paths.push(...admit(setup.promptsPaths, 'Pi prompts'));
+    if (runtime.features.has('command_catalog_v1')) {
+      paths.source_infos = Object.fromEntries([...paths.skill_paths, ...paths.prompt_paths]
+        .map(path => [path, setup.sourceInfos[path]]));
+    }
   }
   for (const diagnostic of setup.diagnostics.slice(0, 32)) runtime.diagnostic(`Pi setup ${diagnostic}`);
   if (setup.diagnostics.length > 32) runtime.diagnostic(`Pi setup: ${setup.diagnostics.length - 32} further discovery diagnostics omitted`);
@@ -165,7 +169,21 @@ export async function discoverResources(runtime, params, store) {
         continue;
       }
       live();
-      try { appendPaths(paths, contribution, budget); }
+      try {
+        const before = new Set([...paths.skill_paths, ...paths.prompt_paths]);
+        appendPaths(paths, contribution, budget);
+        if (runtime.features.has('command_catalog_v1')) {
+          paths.source_infos ??= {};
+          const factoryPath = runtime.entrypoint(entry.factory);
+          const info = {
+            source: `extension:${basename(factoryPath).replace(/\.(ts|js)$/, '')}`,
+            scope: 'temporary', origin: 'top-level', baseDir: dirname(factoryPath),
+          };
+          for (const path of [...paths.skill_paths, ...paths.prompt_paths]) {
+            if (!before.has(path)) paths.source_infos[path] = { ...info, path };
+          }
+        }
+      }
       catch (error) { throw rpcError(error.code ?? -32602, `${provenance}: ${error.message}`); }
     }
     hookBudget.finish();

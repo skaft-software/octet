@@ -630,7 +630,7 @@ impl Agent {
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
-                    break 'run finish;
+                    break 'run *finish;
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
@@ -722,7 +722,7 @@ impl Agent {
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
-                    break 'run finish;
+                    break 'run *finish;
                 }
 
                 // Freeze one coherent schema/implementation snapshot after
@@ -1863,7 +1863,7 @@ impl Agent {
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
-                    break 'run finish;
+                    break 'run *finish;
                 }
 
                 // Drain control before deciding whether a provisional candidate
@@ -3306,7 +3306,7 @@ impl Agent {
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
-                    break 'run finish;
+                    break 'run *finish;
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
@@ -3417,7 +3417,7 @@ impl Agent {
                 notify_observers(&observers, &event); yield event;
             }
             if let Err(finish) = observation {
-                reason = finish;
+                reason = *finish;
             }
 
             if session.has_unsettled_native_steering() {

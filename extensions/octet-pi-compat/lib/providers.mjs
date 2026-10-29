@@ -114,6 +114,10 @@ function declaration(name, config, factory) {
   // Deliberately bounded first unit: no built-in overrides, OAuth, environment
   // key lookup, arbitrary API codecs or silently ignored compatibility options.
   fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
+  // Pi permits omitted models: inherit the catalog and override only supplied
+  // provider fields. Public model facts are not authority to replace native
+  // routes or inherit their HTTP/auth configuration through providers/register.
+  if (config.models === undefined) unsupported('registerProvider partial override', 'Pi permits omitted models, but native provider catalog, authentication and transport inheritance has no negotiated contract; this adapter requires explicit models and a process-owned streamSimple');
   if (typeof config.streamSimple !== 'function') unsupported('registerProvider', 'a custom streamSimple is required; native HTTP overrides are not supported by this unit');
   const baseUrl = bounded(config.baseUrl ?? '', 'provider baseUrl', 8192);
   if (baseUrl) {

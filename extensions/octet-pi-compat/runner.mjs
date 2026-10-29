@@ -1,13 +1,16 @@
+import './lib/runtime-prerequisites.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isolateStdout, Transport } from './lib/transport.mjs';
-import { Runtime } from './lib/runtime.mjs';
-import { sendDesktopNotification } from './lib/desktop-notifications.mjs';
-import { fallbackData } from './lib/installed-pi.mjs';
-import { configureBridgeTheme, bindInstalledPiTheme, onBridgeThemeChange } from './lib/theme.mjs';
-import { tracePhase } from './lib/startup-trace.mjs';
-import { enableModuleCompileCache } from './lib/startup-cache.mjs';
+// Load the adapter graph only after the prerequisite import has evaluated;
+// older Node versions may lack named exports used by those dependencies.
+const { isolateStdout, Transport } = await import('./lib/transport.mjs');
+const { Runtime } = await import('./lib/runtime.mjs');
+const { sendDesktopNotification } = await import('./lib/desktop-notifications.mjs');
+const { fallbackData } = await import('./lib/installed-pi.mjs');
+const { configureBridgeTheme, bindInstalledPiTheme, onBridgeThemeChange } = await import('./lib/theme.mjs');
+const { tracePhase } = await import('./lib/startup-trace.mjs');
+const { enableModuleCompileCache } = await import('./lib/startup-cache.mjs');
 
 // The compile cache must be enabled before any factory module is compiled.
 enableModuleCompileCache();

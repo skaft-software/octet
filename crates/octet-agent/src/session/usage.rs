@@ -18,6 +18,20 @@ impl Session {
         &self.usage_records
     }
 
+    /// The latest assistant-turn record for each durable assistant entry.
+    ///
+    /// Later records win, matching the reverse search model-turn observation
+    /// uses, so a bulk session view and a live turn report the same facts.
+    pub fn assistant_usage_index(&self) -> HashMap<&EntryId, &UsageRecord> {
+        self.usage_records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                UsageRecordKind::AssistantTurn { assistant } => Some((assistant, record)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The one `UsageRecord` shape every `record_*_usage` entry point builds:
     /// a provider call charged to this session, attributed to one endpoint and
     /// model, stamped at completion, carrying the exact microdollar total

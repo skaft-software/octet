@@ -5,6 +5,9 @@ import { createContext } from '../lib/api.mjs';
 import { contextFacts, getSettings, transformInput } from '../lib/context-api.mjs';
 import { projectContext } from '../lib/provider-context.mjs';
 import { owner } from './helper.mjs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function harness(method = 'hook/run', host = {}) {
   const errors = [];
@@ -67,6 +70,78 @@ test('session directory derives only from the authoritative native session file'
   assert.throws(() => manager.getSessionDir(), /not_foreground_owner/);
 });
 
+function systemPromptHarness() {
+  const { runtime, store } = harness('command/execute');
+  const calls = [];
+  let result = { text: 'actual native service text\n文' };
+  runtime.features.add('system_prompt_read');
+  runtime.active.set(store.id, store);
+  runtime.transport.requestSync = (method, params, options) => {
+    calls.push({ method, params, options });
+    return result;
+  };
+  return { runtime, store, calls, ctx: createContext(runtime, store), reply(value) { result = value; } };
+}
+
+test('getSystemPrompt synchronously reads exact current native service text, including empty', () => {
+  const { runtime, store, ctx, calls, reply } = systemPromptHarness();
+  // Even a leftover provider-preparation fact is not command authority.
+  store.state.host.system_prompt = 'stale provider preparation';
+  assert.equal(ctx.getSystemPrompt(), 'actual native service text\n文');
+  assert.deepEqual(calls[0].params, { parent_request_id: store.id, resource_owner: owner });
+  assert.equal(calls[0].method, 'context/system_prompt');
+  assert.equal(calls[0].options.parent, store.id);
+  assert.equal(calls[0].options.signal, store.controller.signal);
+  reply({ text: 'changed live Agent text' });
+  assert.equal(ctx.getSystemPrompt(), 'changed live Agent text');
+  reply({ text: '' });
+  assert.equal(ctx.getSystemPrompt(), '');
+  // The native contract allows controls except NUL and counts UTF-8 bytes.
+  const maximum = '文'.repeat(87381) + '\t';
+  assert.equal(Buffer.byteLength(maximum), 262144);
+  reply({ text: maximum });
+  assert.equal(ctx.getSystemPrompt(), maximum);
+  assert.equal(calls.length, 4);
+  assert.equal(store.state.host.system_prompt, 'stale provider preparation');
+  runtime.active.delete(store.id);
+});
+
+test('getSystemPrompt refuses absent negotiation, retired/settled/reused parents and cancellation without cached fallback', () => {
+  const { runtime, store, ctx, calls } = systemPromptHarness();
+  store.state.host.system_prompt = 'must not disclose ambient text';
+  runtime.features.delete('system_prompt_read');
+  assert.throws(() => ctx.getSystemPrompt(), /unsupported_feature.*system_prompt_read/);
+  runtime.features.add('system_prompt_read');
+  const issued = store.state.owner;
+  store.state.owner = undefined;
+  assert.throws(() => ctx.getSystemPrompt(), /not_foreground_owner/);
+  store.state.owner = issued; store.state.alive = false;
+  assert.throws(() => ctx.getSystemPrompt(), /not_foreground_owner/);
+  store.state.alive = true; store.live = false;
+  assert.throws(() => ctx.getSystemPrompt(), /live request|active numeric parent/);
+  store.live = true;
+  runtime.active.set(store.id, { ...store, controller: new AbortController() });
+  assert.throws(() => ctx.getSystemPrompt(), /live request|active numeric parent/);
+  runtime.active.set(store.id, store); runtime.stopping = true;
+  assert.throws(() => ctx.getSystemPrompt(), /draining/);
+  runtime.stopping = false; store.controller.abort(new Error('cancelled prompt read'));
+  assert.throws(() => ctx.getSystemPrompt(), /cancelled prompt read/);
+  assert.equal(calls.length, 0);
+});
+
+test('getSystemPrompt refuses malformed, oversized, NUL and non-UTF-8 native replies without disclosure in errors', () => {
+  const { ctx, reply } = systemPromptHarness();
+  for (const result of [undefined, null, [], {}, { text: null }, { text: 4 }, { text: 'private', extra: true },
+    { text: '文'.repeat(87382) }, { text: 'private\0text' }, { text: '\uD800' }]) {
+    reply(result);
+    assert.throws(() => ctx.getSystemPrompt(), error => {
+      assert.ok([-32601, -32602].includes(error.code));
+      assert.doesNotMatch(error.message, /private|文/);
+      return true;
+    });
+  }
+});
+
 test('hasUI respects the native frontend consumer as well as negotiated support', () => {
   const { runtime, store } = harness('hook/run', { has_ui: false });
   runtime.features.add('remote_ui');
@@ -106,7 +181,6 @@ test('facts refuse absent snapshots and preserve false project trust', () => {
   const facts = contextFacts(runtime, store);
   assert.throws(() => facts.mode, /authoritative mode/);
   assert.throws(() => facts.isProjectTrusted(), /authoritative project_trusted/);
-  assert.throws(() => getSettings(runtime, store), /authoritative settings/);
   store.state.host = { mode: 'rpc', project_trusted: false, system_prompt_options: { cwd: '/actual', customPrompt: 'base' }, settings: { defaultProvider: 'actual' } };
   assert.equal(facts.mode, 'rpc'); assert.equal(facts.isProjectTrusted(), false);
   const options = facts.getSystemPromptOptions(); options.customPrompt = 'mutated';
@@ -115,6 +189,46 @@ test('facts refuse absent snapshots and preserve false project trust', () => {
   assert.equal(getSettings(runtime, store).defaultProvider, 'actual');
   store.method = 'hook/run'; assert.throws(() => facts.getSystemPromptOptions(), /command context only/);
 });
+test('getSettings reads the user Pi settings the way Pi merges them; a host snapshot wins', () => {
+  // macOS TMPDIR may traverse /var -> /private/var. Keep this positive
+  // fixture canonical: linked ancestors are intentionally refused by discovery.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-settings-')));
+  const agentDir = join(root, 'agent'), workspace = join(root, 'project');
+  mkdirSync(agentDir, { recursive: true }); mkdirSync(join(workspace, '.pi'), { recursive: true });
+  writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ theme: 'dark', defaultTools: ['read', 'bash'], powerline: { segments: ['cwd'], icons: true } }));
+  writeFileSync(join(workspace, '.pi', 'settings.json'), JSON.stringify({ defaultTools: ['+grep'], powerline: { segments: ['model'] } }));
+  const { runtime, store } = harness('command/execute');
+  runtime.config.pi_agent_dir = agentDir; store.state.workspace = workspace;
+  // Untrusted: project settings never count.
+  assert.deepEqual(getSettings(runtime, store), { theme: 'dark', defaultTools: ['read', 'bash'], powerline: { segments: ['cwd'], icons: true } });
+  store.state.host = { project_trusted: true };
+  const merged = getSettings(runtime, store);
+  assert.deepEqual(merged, { theme: 'dark', defaultTools: ['read', 'bash', '+grep'], powerline: { segments: ['model'], icons: true } });
+  merged.theme = 'mutated';
+  assert.equal(getSettings(runtime, store).theme, 'dark');
+  store.state.host = { settings: { defaultProvider: 'actual' } };
+  assert.deepEqual(getSettings(runtime, store), { defaultProvider: 'actual' });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('isIdle follows the host run and compaction lifecycle', async () => {
+  const { runtime, store } = harness();
+  runtime.features.add('lifecycle_events');
+  const ctx = createContext(runtime, store);
+  assert.equal(ctx.isIdle(), true);
+  const resource_owner = owner;
+  await runtime.notify({ method: 'turn/started', params: { resource_owner } });
+  assert.equal(ctx.isIdle(), false);
+  await runtime.notify({ method: 'turn/settled', params: { resource_owner } });
+  assert.equal(ctx.isIdle(), true);
+  await runtime.notify({ method: 'compaction/started', params: { resource_owner } });
+  assert.equal(ctx.isIdle(), false);
+  await runtime.notify({ method: 'compaction/settled', params: { resource_owner } });
+  assert.equal(ctx.isIdle(), true);
+  store.state.host = { ...store.state.host, is_idle: false };
+  assert.equal(ctx.isIdle(), false);
+});
+
 async function fullContext(handlers, tools = []) {
   const { runtime, store, errors } = harness(); runtime.features.add('session_entries');
   runtime.events.set('context', [{ factory: 0, handler(event) { assert.equal(event.messages[0].role, 'user'); event.messages[0].content[0].text = 'conversation'; } }]);

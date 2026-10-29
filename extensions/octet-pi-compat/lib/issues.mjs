@@ -47,8 +47,8 @@ export function loadIssue(failure) {
     reason = 'The extension needs Pi helpers that octet does not emulate and was skipped.';
     next = 'Review the installed-Pi fallback, then re-import with configure.mjs --reviewed --from-pi and your original --output, or disable this extension.';
   } else if (code === -32031) {
-    reason = 'The configured managed Pi 1.0.2 runtime is unavailable; the extension was skipped.';
-    next = 'Restore the managed Pi 1.0.2 installation, then reconfigure, or disable this extension.';
+    reason = 'The managed Pi install this extension runs on is missing or unsupported; the extension was skipped.';
+    next = 'Install Pi 1.0.2 through 1.4.x, then reconfigure, or disable this extension.';
   } else if (error.startsWith('invalid_request duplicate registration ')) {
     reason = 'A registration conflicts with another extension; this extension was skipped.';
     next = 'Disable one of the conflicting extensions, then reconfigure and restart octet.';

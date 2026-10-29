@@ -240,7 +240,7 @@ struct ScrollbarGeometry {
 }
 
 #[derive(Clone, Copy)]
-struct NavigationFrame {
+pub(super) struct NavigationFrame {
     size: (u16, u16),
     generation: u64,
     scrollbar: Option<ScrollbarGeometry>,
@@ -298,10 +298,19 @@ impl TranscriptNavigation {
         }
     }
 
+    pub(super) fn rendered_frame(&self) -> Option<NavigationFrame> {
+        self.frame
+    }
+
+    /// Publish hit targets only after the terminal write and geometry fence.
+    /// Unrelated semantic borrows must not discard a painted scrollbar.
+    pub(super) fn accept_rendered_frame(&mut self, frame: Option<NavigationFrame>) {
+        self.frame = frame;
+    }
+
     /// The caller must fence this by the complete shell input/render revision.
     /// Draft/query edits never flow backwards from a completed renderer frame.
     pub(super) fn apply_render_feedback(&mut self, rendered: &Self) {
-        self.frame = rendered.frame;
         if let (Some(search), Some(result)) = (&mut self.search, &rendered.search) {
             if search.editor.text() == result.editor.text() {
                 search.cache = result.cache.clone();
@@ -1116,6 +1125,24 @@ mod tests {
     use crossterm::event::{KeyEvent, MouseEvent};
 
     #[test]
+    fn search_visibility_invalidates_painted_geometry() {
+        let shell = InteractiveShell::test_shell();
+        let state = shell.state.borrow();
+        let capture = || {
+            super::renderer_geometry::RenderedGeometry::capture(
+                &state,
+                super::renderer_geometry::GeometryFence::capture(&state),
+            )
+        };
+        let closed = capture();
+        state.transcript_navigation.borrow_mut().search = Some(TranscriptSearch::default());
+        assert!(!closed.is_current(&state));
+        let open = capture();
+        state.transcript_navigation.borrow_mut().search = None;
+        assert!(!open.is_current(&state));
+    }
+
+    #[test]
     fn unmodified_mouse_release_displacement_copies_without_a_motion_event() {
         for with_motion in [true, false] {
             let mut shell = InteractiveShell::test_shell();
@@ -1141,7 +1168,7 @@ mod tests {
             if with_motion {
                 dispatch(
                     &mut shell,
-                    mouse(MouseEventKind::Drag(MouseButton::Left), start + 4, row),
+                    mouse(MouseEventKind::Drag(MouseButton::Left), start + 2, row),
                 );
             }
             dispatch(

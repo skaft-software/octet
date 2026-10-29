@@ -1,5 +1,136 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.10.0]
+
+**The first Pi-compatible octet release.** Bring your Pi extensions, skills,
+prompts, themes and custom UI to a native, open-source coding agent.
+See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries.
+
+### Added
+
+- The release catalog includes `octet-pi-compat` among six optional bundles,
+  all at 0.10.0 with exact `=0.10.0` host pins and API `0.4`. Installation and
+  discovery remain inert; enabling the stock bridge imports/runs enabled Pi
+  factories with OS permissions, without granting native credential disclosure.
+- Native command catalogs and resource provenance stay bound to the current
+  owner across reloads; metadata never grants execution authority.
+- Pi 1.4 support. `--from-pi` and the installed-Pi fallback accept managed Pi
+  1.0.2 through 1.4.x, and the adapter follows Pi 1.4's extension API:
+  `before_agent_start` reports `messageType: "user"`, `agent_settled` reports
+  `aborted`, tool lifecycle events carry `toolCallId`, `toolName` and
+  `durationMs`, tools may declare `reachesTools` and namespace `aliases`,
+  `prepareLoadout` gets `getPromptGuidelines()`, and `@earendil-works/pi-ai/models`
+  resolves like the pi-ai root. Pi 1.4's 79 example extensions load exactly as
+  Pi 1.0.2's do.
+
+### Security
+
+- Update zstd from 0.13.3 to 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2) for
+  RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 and
+  RUSTSEC-2026-0410. octet only compresses Codex request bodies with one-shot
+  zstd calls and does not use the affected reused-stream, seekable,
+  legacy-frame decompression or WebAssembly paths.
+- Update pulldown-cmark from 0.13.4 to 0.13.5 for RUSTSEC-2026-0414. octet does
+  not enable the affected wikilinks extension.
+
+### Fixed
+
+- Pi assistant messages from `ctx.sessionManager` carry their recorded token
+  usage, cost and stop reason, so Pi footers and status lines such as the
+  `custom-footer` example work once a session has a model reply. Unpriced and
+  unrecorded turns keep those facts absent rather than invented.
+- On Windows, OpenAI, Copilot and other sign-in flows, and transcript link
+  clicks, open the default browser instead of File Explorer. URLs go to the
+  registered protocol handler as one argument, so OAuth query strings survive.
+- Pasting multi-line text in Windows terminals inserts it as one paste instead
+  of submitting at the first line break. The Windows console input API never
+  reports bracketed paste, so a queued run of text keys containing a line break
+  is recombined; all other input still arrives as the original keys.
+- Captured transcript links retain their click targets on terminals without
+  OSC 8 support, including Apple Terminal, without emitting unsupported controls
+  or changing the HTTP(S)-only activation and stale-geometry fences.
+- Successful live `/settings tui` switches acknowledge their exact preference
+  writes, avoiding redundant reloads that reset the transcript viewport. Active
+  runs retain ordered receipts for idle ownership; failed switches and external
+  edits still participate in normal reload.
+- HTTP 413 includes recovery advice for accumulated native media. Generic
+  `request_too_large` errors no longer trigger token compaction; failed requests
+  retain native audio in history without silent removal or provider switching.
+- Google streaming preserves signed assistant text/reasoning boundaries across tool
+  calls and chunk-position changes, including signatures on empty final text
+  chunks. Repeated and prefix-related text/thought deltas are no longer mistaken
+  for cumulative snapshots, preserving the original signed text on tool-result
+  replay through Gemini, Vertex and native Google-compatible gateways.
+- OpenRouter `reasoning_details` are kept with each reply and returned unchanged
+  on the next request to the same model, so Gemini 3-class and Anthropic models
+  keep their signed reasoning across tool calls. As in OpenRouter's SDK, unsigned
+  Anthropic/Gemini text entries are not returned, and replayed reasoning goes in
+  `reasoning` instead of the visible assistant content.
+- A provider stream may stay silent for 15 minutes after its first byte instead
+  of 5. Gemini models never stream tool-call arguments, so a large file write was
+  cut off while the model was still generating it. The 15-minute first-byte wait
+  and one-hour response deadline are unchanged.
+- Long sessions no longer stop at 256 MiB or one million records with "session
+  append exceeds storage bounds". A session can grow to 512 MiB, about the
+  largest file Pi can reopen, and a full session now says so and suggests
+  `/new`; it stays saved and resumable.
+- Your own skills in `~/.agents/skills`, `~/.pi/agent/skills` and
+  `~/.octet/skills` now replace a skill of the same name bundled with an
+  installed extension, as in Pi, and doing so no longer prints a name-collision
+  warning.
+- The computer-use and Cua Driver skills let the agent work in apps and sites
+  where you are already signed in once you approve that app and account. Signing
+  in, passwords and two-factor prompts stay with you.
+- Pi startup publishes real model/scoped-model facts before callbacks run.
+- CamelCase extension tools such as `mcpScript` retain their exact spelling.
+  Tool allowlists and exclusions are consistently case-sensitive, including
+  builtin names (`read`, not `Read`).
+- Theme preference commits acknowledge their exact applied write, avoiding the
+  redundant resource reload that retired composed Pi editor/footer mounts;
+  independent resource changes still reload and native TOML appearance remains.
+- Pi startup callbacks can await late-tool catalog acknowledgements without a
+  lifecycle-lock cycle; generation, reload and failed-ACK fences stay intact.
+- Live admitted commands read the actual native system prompt instead of a
+  missing cached snapshot. Retained/headless prompt access remains unqualified.
+- App-deferred headless startup receives credential-filtered model/scoped facts
+  and refreshed mirrored defaults; immediate pre-App/initialize-time starts
+  remain outside this repair, and unavailable facts still refuse explicitly.
+- Legacy raw `0x1f` matches Pi Ctrl+- undo; raw bytes are retained and explicit
+  Kitty Ctrl+7 stays distinct. Legacy bindings relying on that ambiguous byte
+  as Ctrl+7 change meaning. Original-editor guest replay remains open.
+
+### Fixed
+
+- Managed extension updates (`octet extension update`) work on
+  Windows instead of failing with "atomic directory exchange is unavailable on
+  this platform". Validated candidates use locked, recoverable replacement;
+  failed publication restores the previous bundle, or retains its backup with
+  recovery instructions if Windows blocks restoration. Listing and global managed
+  discovery recover interrupted updates. Linux/macOS keep atomic exchange.
+
+### Changed
+
+- Startup reuses the static CLI parser, and endpoint matching parses the selected
+  URL once before comparing builtin provider declarations.
+- Full session listings load cached catalog summaries in one query rather than
+  one per session. Latest-only lookup and transcript fingerprint checks remain.
+- Settling a disposable partial-assistant journal no longer syncs the file just
+  before reading and deleting it. Authoritative session appends retain their
+  existing durability; Linux executable ASLR is unchanged.
+
+### Known limitations
+
+- Individual API gaps are recorded in the [API ledger](docs/pi-extension-api.md).
+  Compatibility targets Pi 1.4's public extension API (managed Pi 1.0.2 through
+  1.4.x), not its private internals or complete CLI. Windows remains preview; Bun is unqualified.
+- Live provider/audio and model-quality acceptance are not part of this launch.
+  The versioned release page records actual distribution-channel availability.
+- Product/installer and Python/TypeScript source identities target 0.10.0;
+  independent Rust SDK 0.8.2, Pi 1.0.2, private adapter npm 0.1.0, API/schema and
+  example fixture versions stay unchanged.
+
 ## [0.9.6] - Unreleased
 
 The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification

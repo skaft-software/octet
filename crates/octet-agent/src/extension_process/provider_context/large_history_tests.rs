@@ -6,8 +6,10 @@ use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
 use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
 async fn adapter(temp: &tempfile::TempDir) -> ExtensionProcess {
-    let factory = temp.path().join("history.mjs");
-    std::fs::write(&factory, r#"
+    adapter_with(temp, HISTORY_FACTORY).await
+}
+
+const HISTORY_FACTORY: &str = r#"
 import { writeFileSync } from 'node:fs';
 export default function(pi) {
   pi.on('context', (event, ctx) => {
@@ -27,7 +29,11 @@ export default function(pi) {
     writeFileSync('history-read.json', JSON.stringify({ count: messages.length, branch: branch.length }));
   });
 }
-"#).unwrap();
+"#;
+
+async fn adapter_with(temp: &tempfile::TempDir, source: &str) -> ExtensionProcess {
+    let factory = temp.path().join("history.mjs");
+    std::fs::write(&factory, source).unwrap();
     let manifest_path = super::super::pi_fixture::capture(temp.path(), &[factory]).await;
     let manifest = ExtensionManifest::load(&manifest_path).unwrap();
     let process = ExtensionProcess::start(
@@ -57,6 +63,15 @@ async fn agent_reads_all(
     process: &ExtensionProcess,
     session: Session,
 ) -> usize {
+    run_agent(temp, process, session).await;
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("history-read.json")).unwrap())
+            .unwrap();
+    report["count"].as_u64().unwrap() as usize
+}
+
+/// One real Agent turn over `session` with the reviewed adapter loaded.
+async fn run_agent(temp: &tempfile::TempDir, process: &ExtensionProcess, session: Session) {
     let mut host = ExtensionHost::new();
     process.register(&mut host);
     let model = ModelCatalog::builtin()
@@ -93,10 +108,6 @@ async fn agent_reads_all(
         "answer"
     );
     assert_eq!(captures.lock().unwrap().len(), 1);
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(temp.path().join("history-read.json")).unwrap())
-            .unwrap();
-    report["count"].as_u64().unwrap() as usize
 }
 
 /// Append `count` 8,000-character user messages: each is far past the legacy
@@ -128,6 +139,84 @@ async fn complete_history(count: usize, publish: bool) {
             .expect("complete history publication must not be a whole-frame mirror");
     }
     assert_eq!(agent_reads_all(&temp, &process, session).await, count + 1);
+    assert!(process.shutdown().await);
+}
+
+/// Pi's custom-footer example sums `usage` over `getBranch()` assistants on
+/// every render. Native assistant entries must carry the usage ledger's facts,
+/// or that arithmetic throws on the first branch with a model reply.
+#[tokio::test]
+async fn real_adapter_branch_assistants_carry_ledger_usage_for_pi_footers() {
+    let temp = tempfile::tempdir().unwrap();
+    let process = adapter_with(
+        &temp,
+        r#"
+import { writeFileSync } from 'node:fs';
+export default function(pi) {
+  pi.on('context', (event, ctx) => {
+    let input = 0, output = 0, cost = 0;
+    const stops = [];
+    for (const e of ctx.sessionManager.getBranch()) {
+      if (e.type === 'message' && e.message.role === 'assistant') {
+        input += e.message.usage.input;
+        output += e.message.usage.output;
+        cost += e.message.usage.cost.total;
+        stops.push(e.message.stopReason);
+      }
+    }
+    writeFileSync('footer.json', JSON.stringify({ input, output, cost, stops }));
+  });
+}
+"#,
+    )
+    .await;
+    let mut session = Session::create(temp.path().join("history.jsonl")).unwrap();
+    session
+        .append(crate::session::EntryValue::Message(
+            octet_ai::Message::User(octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("earlier question".into())],
+            }),
+        ))
+        .unwrap();
+    let assistant = session
+        .append(crate::session::EntryValue::Message(
+            octet_ai::Message::Assistant(octet_ai::AssistantMessage {
+                content: vec![octet_ai::AssistantPart::Text("earlier answer".into())],
+                model: ModelId("probe".into()),
+                protocol: octet_ai::Protocol::OpenAiChat,
+            }),
+        ))
+        .unwrap();
+    session
+        .record_assistant_usage_with_stop_reason(
+            assistant,
+            octet_ai::EndpointId("probe-endpoint".into()),
+            ModelId("probe".into()),
+            octet_ai::Usage {
+                input_tokens: 1200,
+                output_tokens: 300,
+                total_tokens: 1500,
+                ..Default::default()
+            },
+            Some(octet_ai::Cost {
+                input: 3600,
+                output: 4500,
+                total: 8100,
+                ..Default::default()
+            }),
+            octet_ai::StopReason::EndTurn,
+        )
+        .unwrap();
+    process
+        .set_host_state_with_session(ExtensionHostState::default(), &session)
+        .unwrap();
+    run_agent(&temp, &process, session).await;
+    let footer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("footer.json")).unwrap()).unwrap();
+    assert_eq!(
+        footer,
+        serde_json::json!({"input": 1200, "output": 300, "cost": 0.0081, "stops": ["stop"]})
+    );
     assert!(process.shutdown().await);
 }
 

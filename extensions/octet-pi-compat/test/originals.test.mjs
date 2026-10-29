@@ -28,6 +28,22 @@ test('unchanged Doom WASM: animated RGB snapshots, input/release, resize, pause 
   const reopened = await peer.wait(f => f.method === 'ui/open');
   peer.notify('ui/closed', { surface_id: reopened.params.surface_id, reason: 'rescue' }); await peer.close();
 });
+test('unchanged Doom at wide terminal geometry stays within the bounded Pi UI frame', { skip: !existsSync(doom) || !existsSync(wad) ? 'set PI_DOOM_PATH and PI_DOOM_WAD to the built upstream package' : false }, async t => {
+  const peer = launch(t, [doom], { columns: 1200, rows: 24 }); await peer.init();
+  const command = peer.command('doom', [wad]), open = await peer.wait(f => f.method === 'ui/open');
+  assert.ok((await command.response).result);
+  const first = await peer.wait(frame('DOOM |'));
+  assert.equal(first.params.columns, 1200);
+  assert.ok(first.params.lines.some(line => line.endsWith('\x1b[0m…')));
+  assert.ok(first.params.lines.every(line => Buffer.byteLength(line) <= 16384));
+  assert.ok(first.params.lines.reduce((total, line) => total + Buffer.byteLength(line), 0) <= 524288);
+  const next = await peer.wait(f => frame('DOOM |')(f) && f.params.revision > first.params.revision);
+  assert.ok(next.params.revision > first.params.revision);
+  assert.doesNotMatch(peer.stderr(), /bounds_exceeded ui\/frame text/);
+  peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'q', kind: 'press', modifiers: [] });
+  await peer.wait(f => f.method === 'ui/close'); await peer.close();
+});
+
 test('unchanged powerline-footer 0.5.4: real factory, owner-retained getters and host-state replacement', { skip: existsSync(footer) ? false : 'set PI_FOOTER_PATH to the unchanged installed extension' }, async t => {
   const peer = launch(t, [footer], { columns: 140 }); await peer.init();
   const facts = { context_usage: { tokens: 8000, contextWindow: 32768, percent: 24.4 }, session_entries: [{ type: 'message', message: { role: 'assistant', usage: { cost: { total: 0.125 } } } }], using_oauth: false };

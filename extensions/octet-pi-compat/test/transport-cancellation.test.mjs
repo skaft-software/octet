@@ -69,6 +69,41 @@ test('cancelling only the issuing hook still survives the request reply', async 
   await peer.close();
 });
 
+for (const cancel of ['parent', 'child', 'both']) {
+  test(`system-prompt sync read survives ${cancel} cancellation, a late reply and the next command`, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'pi-system-prompt-cancel-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const entry = join(directory, 'factory.mjs');
+    writeFileSync(entry, `export default pi => {
+      pi.registerCommand('prompt', { handler: (_, ctx) => {
+        const text = ctx.getSystemPrompt();
+        if (typeof text !== 'string' || text !== 'healthy native prompt') throw new Error('not a synchronous native prompt');
+      } });
+    };`);
+    const peer = launch(t, [entry]);
+    const initialized = await peer.init(['system_prompt_read']);
+    assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+    const command = peer.command('prompt');
+    const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+    assert.deepEqual(read.params, { parent_request_id: command.id, resource_owner: owner });
+    if (cancel !== 'child') peer.notify('$/cancelRequest', { id: command.id, reason: 'dropped parent' });
+    if (cancel !== 'parent') peer.notify('$/cancelRequest', { id: read.id, reason: 'dropped child' });
+    // No reply is supplied until cancellation has actually woken the factory:
+    // misclassifying this read as durable would hang on its outcome watchdog.
+    const cancelled = await command.response;
+    assert.equal(cancelled.error?.code, -32800, JSON.stringify(cancelled));
+    peer.send({ jsonrpc: '2.0', id: read.id, result: { text: 'late revoked text' } });
+    const next = peer.command('prompt');
+    const healthy = await peer.wait(frame => frame.method === 'context/system_prompt' && frame.params.parent_request_id === next.id);
+    assert.notEqual(healthy.id, read.id);
+    peer.send({ jsonrpc: '2.0', id: healthy.id, result: { text: 'healthy native prompt' } });
+    assert.ok((await next.response).result);
+    assert.equal(peer.child.exitCode, null, peer.stderr());
+    assert.doesNotMatch(peer.stderr(), /late revoked text|healthy native prompt/);
+    await peer.close();
+  });
+}
+
 test('close is bounded when a worker cannot be terminated (Bun pending fd read)', async () => {
   // Bun reads the inherited stdin pipe with fs.read, and worker.terminate()
   // cannot resolve while that read is outstanding. Shutdown must not wait.

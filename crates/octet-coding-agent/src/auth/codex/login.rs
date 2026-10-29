@@ -10,7 +10,6 @@
 //! whenever an authorize parameter changes.
 
 use std::io::{self, IsTerminal as _};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -98,13 +97,7 @@ fn ssh_session() -> bool {
 }
 
 fn opener_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer.exe"
-    } else {
-        "xdg-open"
-    }
+    crate::auth::subscription::login::BROWSER_OPENER
 }
 
 fn opener_available() -> bool {
@@ -392,13 +385,7 @@ pub async fn logout(store: &CredentialStore) -> Result<()> {
 }
 
 fn open_browser(url: &str) -> bool {
-    let Ok(mut child) = Command::new(opener_name())
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+    let Ok(mut child) = crate::auth::subscription::login::browser_command(url).spawn() else {
         return false;
     };
     std::thread::spawn(move || {
