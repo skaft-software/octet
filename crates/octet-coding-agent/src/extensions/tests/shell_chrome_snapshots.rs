@@ -258,7 +258,6 @@ async fn pending_messages_snapshot_includes_native_run_queue_and_fences_its_owne
         session_id: None,
     })
     .unwrap();
-    // This unpolled run never invokes a provider.
     let run = agent.prompt("initial").await.unwrap();
     let control = run.control();
     let mut extensions = ExecutableExtensions::default();

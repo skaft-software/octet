@@ -1001,6 +1001,7 @@ struct PreflightHook {
     results: AtomicUsize,
     after: AtomicUsize,
     veto: bool,
+    before_veto: bool,
     delay: std::time::Duration,
 }
 
@@ -1035,6 +1036,9 @@ impl ToolCallHook for PreflightHook {
         _: &ToolContext<'_>,
     ) -> Result<(), ToolError> {
         self.before.fetch_add(1, Ordering::AcqRel);
+        if self.before_veto {
+            return Err(ToolError::new("PRIVATE_PREFLIGHT_VETO"));
+        }
         Ok(())
     }
     async fn transform_tool_result(
@@ -1250,11 +1254,12 @@ async fn native_preflight_has_no_effects_and_prepared_execution_runs_hooks_once(
 
 #[tokio::test]
 async fn native_preflight_veto_and_schema_failure_settle_results_without_execution() {
-    for invalid_schema in [false, true] {
+    for (invalid_schema, before_veto) in [(false, false), (false, true), (true, false)] {
         let (_directory, mut session, sandbox, model) = fixture();
         let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
         let hook = Arc::new(PreflightHook {
-            veto: true,
+            veto: !before_veto,
+            before_veto,
             ..PreflightHook::default()
         });
         let first = Arc::new(PreflightHook::default());
@@ -1283,23 +1288,64 @@ async fn native_preflight_veto_and_schema_failure_settle_results_without_executi
         assert_eq!(prepared["block"], true);
         assert!(prepared.get("prepared_id").is_none());
         assert_eq!(prepared["outcome"]["is_error"], true);
-        assert_eq!(prepared["outcome"]["content"][0]["Text"], "native result 1");
+        let reason = if invalid_schema {
+            SCHEMA_MISMATCH_TOOL_ERROR
+        } else if before_veto {
+            "tool call denied by host policy"
+        } else {
+            "native veto"
+        };
+        assert_eq!(prepared["reason"], reason);
         assert_eq!(
-            prepared["reason"],
+            prepared["outcome"]["content"][0]["Text"],
             if invalid_schema {
-                SCHEMA_MISMATCH_TOOL_ERROR
+                "native result 1"
             } else {
-                "native veto"
+                reason
             }
         );
         assert_eq!(
-            hook.calls.load(Ordering::Acquire),
-            usize::from(!invalid_schema)
+            prepared["outcome"]["tool_call"]["arguments"],
+            if invalid_schema {
+                json!({"value":"wrong"})
+            } else {
+                json!({"value":if before_veto { 3 } else { 2 }})
+            }
         );
-        assert_eq!(hook.results.load(Ordering::Acquire), 1);
-        assert_eq!(hook.before.load(Ordering::Acquire), 0);
-        assert_eq!(hook.after.load(Ordering::Acquire), 0);
+        for observed in [&first, &hook] {
+            assert_eq!(
+                observed.calls.load(Ordering::Acquire),
+                usize::from(!invalid_schema)
+            );
+            assert_eq!(
+                observed.results.load(Ordering::Acquire),
+                usize::from(invalid_schema)
+            );
+            assert_eq!(
+                observed.before.load(Ordering::Acquire),
+                usize::from(before_veto)
+            );
+            assert_eq!(observed.after.load(Ordering::Acquire), 0);
+        }
         assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+        assert_eq!(session.entries().len(), 2);
+        let record = session
+            .entries()
+            .last()
+            .unwrap()
+            .metadata
+            .as_ref()
+            .unwrap()
+            .tool_composition
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(record, ToolCompositionRecord::CallFinished { allowed: false, ok: false, denial_code, .. }
+            if *denial_code == (!invalid_schema).then_some(ToolPolicyDenialCode::SecondaryHookDenied))
+        );
+        assert!(!std::fs::read_to_string(session.path())
+            .unwrap()
+            .contains("PRIVATE_PREFLIGHT_VETO"));
     }
 }
 

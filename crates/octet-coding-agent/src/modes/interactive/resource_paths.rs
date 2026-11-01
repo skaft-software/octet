@@ -13,6 +13,27 @@ impl std::fmt::Display for ResourceDiscoveryClosed {
 }
 impl std::error::Error for ResourceDiscoveryClosed {}
 
+pub(super) enum FrontendWake {
+    Input(Option<std::io::Result<Event>>),
+    RemoteUi,
+    Tick,
+}
+
+pub(super) async fn next_frontend_wake<S>(
+    input: &mut S,
+    wake: &Option<Arc<tokio::sync::Notify>>,
+    tick: &mut Interval,
+) -> FrontendWake
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    tokio::select! {
+        event = input.next() => FrontendWake::Input(event),
+        _ = crate::extensions::remote_ui::notified(wake) => FrontendWake::RemoteUi,
+        _ = tick.tick() => FrontendWake::Tick,
+    }
+}
+
 async fn pump<F, T, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -36,10 +57,17 @@ where
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => anyhow::bail!("resource discovery cancelled by shutdown"),
             result = &mut future => return result,
-            _ = crate::extensions::remote_ui::notified(&wake) => { apply_extension_background(shell, &mut app.executable_extensions); request_extension_ui(shell, app); shell.render(); }
-            _ = tick.tick() => { apply_extension_background(shell, &mut app.executable_extensions); request_extension_ui(shell, app); shell.render(); }
-            event = input.next() => {
-                let event = match event { Some(event) => event?, None => anyhow::bail!("input closed during resource discovery") };
+            event = next_frontend_wake(input, &wake, &mut tick) => {
+                let event = match event {
+                    FrontendWake::Input(Some(event)) => event?,
+                    FrontendWake::Input(None) => anyhow::bail!("input closed during resource discovery"),
+                    FrontendWake::RemoteUi | FrontendWake::Tick => {
+                        apply_extension_background(shell, &mut app.executable_extensions);
+                        request_extension_ui(shell, app);
+                        shell.render();
+                        continue;
+                    }
+                };
                 if app.executable_extensions.route_remote_ui_event(shell, &event, false) { continue; }
                 observe_extension_terminal_event(&mut app.executable_extensions, &event);
                 match event {
@@ -183,6 +211,126 @@ mod tests {
     use super::*;
     use crate::extensions::resource_paths::consumer_tests::{fixture, hold_session_start};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[tokio::test]
+    async fn continuously_ready_input_and_remote_ui_both_make_progress() {
+        let input_polls = std::cell::Cell::new(0);
+        let mut input = futures_util::stream::repeat_with(|| {
+            input_polls.set(input_polls.get() + 1);
+            Ok(Event::Resize(80, 24))
+        });
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        for _ in 0..32 {
+            wake.notify_one();
+            tokio::select! {
+                biased;
+                _ = wake.notified() => {}
+                _ = tick.tick() => panic!("ready UI wake must win the old biased ordering"),
+                _ = input.next() => panic!("old ordering unexpectedly polled input"),
+            }
+        }
+        assert_eq!(input_polls.get(), 0);
+        let mut input_seen = false;
+        let mut ui_seen = false;
+        for _ in 0..64 {
+            wake.notify_one();
+            match next_frontend_wake(&mut input, &Some(wake.clone()), &mut tick).await {
+                FrontendWake::Input(Some(Ok(Event::Resize(80, 24)))) => input_seen = true,
+                FrontendWake::RemoteUi => ui_seen = true,
+                FrontendWake::Tick => {}
+                _ => panic!("unexpected terminal input"),
+            }
+            if input_seen && ui_seen {
+                return;
+            }
+        }
+        panic!("frontend starvation: input={input_seen}, remote_ui={ui_seen}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_pump_routes_resize_and_draft_during_continuous_remote_ui_wakes() {
+        use crate::extensions::{
+            ExecutableExtensions, ExtensionProviderRuntime, ExtensionStartupTiming,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut app =
+            crate::extensions::resource_paths::consumer_tests::configured_app(&root, true, false);
+        let mut shell = InteractiveShell::test_shell();
+        shell.finish_startup();
+        let config = super::super::tests::terminal_theme_test_config(app.config.workspace.clone());
+        let mut host = octet_agent::ExtensionHost::new();
+        app.executable_extensions = tokio::task::block_in_place(|| {
+            ExecutableExtensions::discover_and_start_for_selection(
+                &config,
+                app.agent.session(),
+                Some((&app.model, &app.reasoning)),
+                &app.sessions,
+                &mut host,
+                None,
+                ExtensionProviderRuntime::default(),
+                crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+                Some(&shell),
+                "startup",
+                ExtensionStartupTiming::AfterFirstFrame,
+            )
+        });
+        let wake = app.executable_extensions.remote_ui_wake().unwrap();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let observed = consumed.clone();
+        let mut events = VecDeque::from([
+            Event::Resize(80, 24),
+            Event::Paste("FAIR-RESOURCE-DRAFT".into()),
+        ]);
+        let mut input = futures_util::stream::poll_fn(move |_| match events.pop_front() {
+            Some(event) => {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok(event)))
+            }
+            None => Poll::Pending,
+        });
+        let mut polls = 0;
+        let work = futures_util::future::poll_fn(|_| {
+            if consumed.load(Ordering::SeqCst) == 2 {
+                return Poll::Ready(Ok(()));
+            }
+            polls += 1;
+            if polls > 64 {
+                return Poll::Ready(Err(anyhow::anyhow!("remote UI starved terminal input")));
+            }
+            wake.notify_one();
+            Poll::Pending
+        });
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            pump(&mut shell, &mut input, &mut app, work),
+        )
+        .await
+        .expect("frontend pump must remain responsive")
+        .unwrap();
+        assert_eq!(consumed.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            shell.extension_editor_snapshot().text,
+            "FAIR-RESOURCE-DRAFT"
+        );
+        let frame = shell.dump_rendered_frame().await.unwrap();
+        assert!(frame.len() <= 24);
+        assert!(sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
+            .contains("FAIR-RESOURCE-DRAFT"));
+
+        let mut input =
+            futures_util::stream::poll_fn(|_| -> Poll<Option<std::io::Result<Event>>> {
+                panic!("completed work must outrank terminal input")
+            });
+        pump(&mut shell, &mut input, &mut app, async { Ok(()) })
+            .await
+            .unwrap();
+        app.executable_extensions.shutdown().await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn already_chosen_close_does_not_dispatch_resource_work() {

@@ -122,9 +122,6 @@ export function buildSessionProjection(entries, leafId, byId) {
     if (entry.type === 'thinking_level_change') thinkingLevel = entry.thinkingLevel;
     else if (entry.type === 'model_change') model = { provider: entry.provider, modelId: entry.modelId };
     else if (entry.type === 'message' && entry.message.role === 'assistant') {
-      // Native historical observations may not record provider identity. Keep
-      // that fact absent without triggering the strict public read guard or
-      // borrowing the currently selected provider for an older response.
       model = { provider: Object.hasOwn(entry.message, 'provider') ? entry.message.provider : undefined,
         modelId: Object.hasOwn(entry.message, 'model') ? entry.message.model : undefined };
     }

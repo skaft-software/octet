@@ -153,12 +153,17 @@ impl ModelessExtensions {
                     anyhow::bail!("extension work cancelled by shutdown");
                 }
                 result = &mut future => return result,
-                _ = crate::extensions::remote_ui::notified(&wake) => { shell.render(); }
-                _ = tick.tick() => { shell.render(); }
-                event = input.next() => {
+                event = resource_paths::next_frontend_wake(input, &wake, &mut tick) => {
                     let event = match event {
-                        Some(event) => event?,
-                        None => { shell.request_close(); anyhow::bail!("input closed during extension work"); }
+                        resource_paths::FrontendWake::Input(Some(event)) => event?,
+                        resource_paths::FrontendWake::Input(None) => {
+                            shell.request_close();
+                            anyhow::bail!("input closed during extension work");
+                        }
+                        resource_paths::FrontendWake::RemoteUi | resource_paths::FrontendWake::Tick => {
+                            shell.render();
+                            continue;
+                        }
                     };
                     if self.extensions.route_remote_ui_event(shell, &event, false) { continue; }
                     observe_extension_terminal_event(&mut self.extensions, &event);
@@ -386,5 +391,84 @@ impl ModelessExtensions {
         }
         shell.render();
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modeless_work_routes_resize_and_draft_during_continuous_remote_ui_wakes() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let config = super::super::tests::terminal_theme_test_config(workspace.clone());
+        let sessions = SessionStore::for_directory(&workspace, &workspace);
+        let mut session = Session::create(workspace.join("fair-modeless.jsonl")).unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        shell.finish_startup();
+        let mut state = tokio::task::block_in_place(|| {
+            ModelessExtensions::new(&config, &session, &sessions, "startup", Some(&shell))
+        })
+        .unwrap();
+        let wake = state.extensions.remote_ui_wake().unwrap();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let observed = consumed.clone();
+        let mut events = VecDeque::from([
+            Event::Resize(80, 24),
+            Event::Paste("FAIR-MODELESS-DRAFT".into()),
+        ]);
+        let mut input = futures_util::stream::poll_fn(move |_| match events.pop_front() {
+            Some(event) => {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok(event)))
+            }
+            None => Poll::Pending,
+        });
+        let mut polls = 0;
+        let work = futures_util::future::poll_fn(|_| {
+            if consumed.load(Ordering::SeqCst) == 2 {
+                return Poll::Ready(Ok(()));
+            }
+            polls += 1;
+            if polls > 64 {
+                return Poll::Ready(Err(anyhow::anyhow!("remote UI starved terminal input")));
+            }
+            wake.notify_one();
+            Poll::Pending
+        });
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            state.work(&mut shell, &mut input, &mut session, &sessions, work),
+        )
+        .await
+        .expect("modeless frontend must remain responsive")
+        .unwrap();
+        assert_eq!(consumed.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            shell.extension_editor_snapshot().text,
+            "FAIR-MODELESS-DRAFT"
+        );
+        let frame = shell.dump_rendered_frame().await.unwrap();
+        assert!(frame.len() <= 24);
+        assert!(sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
+            .contains("FAIR-MODELESS-DRAFT"));
+        assert!(state.extensions.is_modeless());
+        assert!(config.model.is_none());
+        assert!(config.reasoning.is_none());
+
+        let mut input =
+            futures_util::stream::poll_fn(|_| -> Poll<Option<std::io::Result<Event>>> {
+                panic!("completed work must outrank terminal input")
+            });
+        state
+            .work(&mut shell, &mut input, &mut session, &sessions, async {
+                Ok(())
+            })
+            .await
+            .unwrap();
+        state.extensions.shutdown().await;
     }
 }

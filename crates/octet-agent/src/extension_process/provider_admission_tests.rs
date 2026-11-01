@@ -119,9 +119,7 @@ async fn queued_provider_admission_rechecks_after_capacity_wait() {
             "cancel",
             "timeout",
         ] {
-            eprintln!("CASE START capacity={capacity} mutation={mutation}");
             let (accepted, callback, completed) = queued_case(capacity, mutation).await;
-            eprintln!("CASE RESULT capacity={capacity} mutation={mutation} accepted={accepted} callback={callback} completed={completed}");
             let valid = if matches!(mutation, "none" | "unrelated") {
                 accepted && callback && completed
             } else {
@@ -139,7 +137,6 @@ async fn queued_case(capacity: &str, mutation: &str) -> (bool, bool, bool) {
     let label = format!("capacity={capacity} mutation={mutation}");
     let directory = TempDir::new().unwrap().keep();
     let prefix = directory.join("queue");
-    eprintln!("CASE ARTIFACTS {label} {}", directory.display());
     write_executable_script(
         &directory.join("queue-child.py"),
         &PROVIDER
@@ -367,16 +364,7 @@ providers = true
         .await
         .unwrap_or_else(|error| panic!("{label} stream timeout: {error:?}"));
     }
-    let callbacks = std::fs::read_to_string(prefix.with_extension("streams")).unwrap_or_default();
-    let before = process.health_snapshot();
-    eprintln!("CASE PRE SHUTDOWN {label} accepted={accepted} callbacks={callbacks:?} completed={completed} health={before:?} closed={} draining={} pending={} ingress={} permits={} registry={:?}", connection.closed.load(Ordering::Acquire), connection.draining.load(Ordering::Acquire), lock_std_mutex(&connection.pending).len(), lock_std_mutex(&connection.provider_streams).len(), slots.available_permits(), registry.snapshot());
-    let started = Instant::now();
     let graceful = process.shutdown().await;
-    eprintln!(
-        "CASE SHUTDOWN {label} graceful={graceful} elapsed={:?} health={:?}",
-        started.elapsed(),
-        process.health_snapshot()
-    );
     diagnostics.abort();
     let _ = diagnostics.await;
     assert!(
@@ -418,8 +406,6 @@ providers = true
             || callbacks.lines().collect::<Vec<_>>()
                 == vec![pids["fixture"].as_u64().unwrap().to_string()]
     );
-    eprintln!("CASE FIXTURE WAIT {label} {exit}");
-    eprintln!("CASE FINAL CALLBACKS {label} {callbacks:?}");
     (accepted, !callbacks.is_empty(), completed)
 }
 

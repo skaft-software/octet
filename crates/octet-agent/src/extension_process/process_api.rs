@@ -267,9 +267,6 @@ impl ExtensionProcess {
             connection.resource_cleanup_changed.notify_one();
         }
         let protocol = read_std_lock(&connection.protocol);
-        // Retained session contexts need real queue changes even without a UI
-        // mount. Publish only this observed fact to the live issued mirror owner;
-        // it grants no editor, foreground or session mutation authority.
         if pending_messages_changed
             && !replaced_session
             && session_leaf::owner_routes_enabled(&protocol)
@@ -2921,6 +2918,23 @@ impl ExtensionProcess {
             // failed candidates never receive or alter the active mirror.
             let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
             if let Some(mirror) = &mut mirror {
+                if session_leaf::owner_routes_enabled(&read_std_lock(&replacement.protocol)) {
+                    let result = replacement.session_profile().and_then(|profile| {
+                        lock_std_mutex(&replacement.session_leaf.transport).rebind_current(
+                            &lock_std_mutex(&previous.session_leaf.transport),
+                            &mirror.owner,
+                            generation,
+                            &profile,
+                        )
+                    });
+                    if let Err(error) = result {
+                        let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                            message: format!(
+                                "session history unavailable after process reload: {error}"
+                            ),
+                        });
+                    }
+                }
                 mirror.rebind_generation(generation);
             }
             *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;

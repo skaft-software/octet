@@ -271,13 +271,8 @@ pub(super) fn provider_protocol_name(protocol: Protocol) -> Option<&'static str>
         Protocol::OpenAiChat => Some("openai_chat"),
         Protocol::OpenAiResponses => Some("openai_responses"),
         Protocol::AnthropicMessages => Some("anthropic_messages"),
-        // The API 0.3 extension-provider schema intentionally declares only
-        // these three generic wire protocols. Do not coerce native host codecs
-        // into a misleading generic route.
-        Protocol::BedrockConverse
-        | Protocol::GoogleGenerativeAi
-        | Protocol::MistralConversations
-        | Protocol::PiMessages => None,
+        Protocol::GoogleGenerativeAi => Some("google_generative_ai"),
+        Protocol::BedrockConverse | Protocol::MistralConversations | Protocol::PiMessages => None,
     }
 }
 
@@ -416,12 +411,16 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         {
             return None;
         }
+        let mut base_url = url::Url::parse(&metadata.base_url).ok()?;
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
         let id = octet_ai::EndpointId(format!("{}/custom-http", selected.endpoint.id.0));
         let mut model = selected.clone();
         Arc::make_mut(&mut model.spec).endpoint = id.clone();
         model.endpoint = Arc::new(octet_ai::Endpoint {
             id,
-            base_url: url::Url::parse(&metadata.base_url).ok()?,
+            base_url,
             auth: octet_ai::Auth::None,
             default_headers: reqwest::header::HeaderMap::new(),
             transport: octet_ai::EndpointTransport::Http,
@@ -863,7 +862,7 @@ pub(super) fn dispatch_provider_stream_event(
                 cancel = true;
             }
         }
-        if terminal || cancel {
+        if cancel {
             streams.remove(&stream_id);
         }
     }
@@ -935,4 +934,99 @@ pub(super) fn reject_unparented_child_request(
         settle_child_request(&state.child_requests, &request_id);
     }
     delivery.map(|_| ())
+}
+
+#[cfg(test)]
+mod terminal_ingress_tests {
+    use super::*;
+
+    #[test]
+    fn provider_terminal_ingress_retains_native_state_until_consumer_settlement() {
+        let (events, _) = broadcast::channel(8);
+        let (mut state, _frames) = super::super::tests::protocol_read_state_for_test(
+            ManifestContributions::default(),
+            events,
+        );
+        write_std_lock(&state.protocol).version = EXTENSION_API_VERSION_0_3.into();
+        state.provider_registry = Some(Arc::new(ExtensionProviderRegistry::new()));
+        let (sender, mut receiver) = mpsc::channel(1);
+        lock_std_mutex(&state.provider_streams).insert(
+            "terminal".into(),
+            ProviderStreamIngress {
+                delegate: None,
+                sender,
+                next_sequence: 0,
+                terminal: false,
+            },
+        );
+        let terminal = api_v03::ProviderStreamEvent {
+            stream_id: "terminal".into(),
+            sequence: 0,
+            kind: "finished".into(),
+            payload: serde_json::json!({"stop_reason":"stop"}),
+        };
+        dispatch_provider_stream_event(&state, terminal.clone()).unwrap();
+        {
+            let streams = lock_std_mutex(&state.provider_streams);
+            let retained = streams
+                .get("terminal")
+                .expect("consumer still owns terminal state");
+            assert!(retained.terminal);
+            assert_eq!(retained.next_sequence, 1);
+        }
+        assert_eq!(receiver.try_recv().unwrap().kind, "finished");
+        let mut extra = terminal;
+        extra.sequence = 1;
+        assert_eq!(
+            dispatch_provider_stream_event(&state, extra).unwrap_err(),
+            "provider stream event arrived after a terminal event"
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn provider_terminal_backpressure_still_removes_ingress_and_cancels() {
+        let (events, _) = broadcast::channel(8);
+        let (mut state, mut frames) = super::super::tests::protocol_read_state_for_test(
+            ManifestContributions::default(),
+            events,
+        );
+        write_std_lock(&state.protocol).version = EXTENSION_API_VERSION_0_3.into();
+        state.provider_registry = Some(Arc::new(ExtensionProviderRegistry::new()));
+        let (sender, _receiver) = mpsc::channel(1);
+        lock_std_mutex(&state.provider_streams).insert(
+            "full".into(),
+            ProviderStreamIngress {
+                delegate: None,
+                sender,
+                next_sequence: 0,
+                terminal: false,
+            },
+        );
+        dispatch_provider_stream_event(
+            &state,
+            api_v03::ProviderStreamEvent {
+                stream_id: "full".into(),
+                sequence: 0,
+                kind: "started".into(),
+                payload: serde_json::json!({"response_id":"native"}),
+            },
+        )
+        .unwrap();
+        dispatch_provider_stream_event(
+            &state,
+            api_v03::ProviderStreamEvent {
+                stream_id: "full".into(),
+                sequence: 1,
+                kind: "finished".into(),
+                payload: serde_json::json!({"stop_reason":"stop"}),
+            },
+        )
+        .unwrap();
+        assert!(!lock_std_mutex(&state.provider_streams).contains_key("full"));
+        let frame = frames.try_recv().unwrap();
+        let cancellation: serde_json::Value = serde_json::from_slice(&frame.line).unwrap();
+        assert_eq!(cancellation["method"], methods::PROVIDER_CANCEL);
+        assert_eq!(cancellation["params"]["stream_id"], "full");
+    }
 }

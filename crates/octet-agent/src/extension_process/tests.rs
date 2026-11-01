@@ -10,6 +10,9 @@ mod builtin_overrides;
 mod cache_warming;
 #[path = "composer_history_tests.rs"]
 mod composer_history;
+#[cfg(unix)]
+#[path = "google_provider_tests.rs"]
+mod google_provider;
 #[path = "prompt_metadata_tests.rs"]
 mod prompt_metadata;
 #[cfg(unix)]
@@ -95,6 +98,7 @@ pub(super) fn protocol_read_state_for_test(
             event_bus: None,
             approval_store: Arc::new(ExtensionApprovalStore::new()),
             secret_broker: None,
+            pi_settings: None,
             extension_identity: ExtensionIdentity {
                 name: "test-extension".into(),
                 version: "0.1.0".into(),
@@ -903,6 +907,7 @@ system_prompt = {system_prompt}
         session_compaction: false,
         approvals: false,
         secrets: false,
+        pi_settings: false,
         max_message_bytes: 0,
     };
 
@@ -1083,6 +1088,7 @@ provider_credentials = {provider_credentials}
         session_compaction: false,
         approvals: false,
         secrets: false,
+        pi_settings: false,
         max_message_bytes: 0,
     };
 
@@ -3823,7 +3829,10 @@ fn extension_provider_protocols_reject_native_unmodeled_routes() {
         Some("anthropic_messages")
     );
     assert_eq!(provider_protocol_name(Protocol::BedrockConverse), None);
-    assert_eq!(provider_protocol_name(Protocol::GoogleGenerativeAi), None);
+    assert_eq!(
+        provider_protocol_name(Protocol::GoogleGenerativeAi),
+        Some("google_generative_ai")
+    );
     assert_eq!(provider_protocol_name(Protocol::MistralConversations), None);
 }
 

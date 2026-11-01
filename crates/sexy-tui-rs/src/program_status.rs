@@ -1,38 +1,20 @@
-//! Payload-free program activity for terminal chrome (OSC 7501 v0.4).
-//!
-//! No query/reply, title, message, percentage, or private application data is
-//! needed. Unknown OSCs are ignored by terminals without this protocol.
-
-/// Why a program cannot proceed without its user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockedKind {
-    /// Approval to perform an effect.
     Permission,
-    /// An answer to a question (including private input).
     Question,
-    /// A login or credential is required.
     Auth,
 }
 
-/// The program's actual activity, independent of its visual renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgramStatus {
-    /// Waiting for the next instruction, including after cancellation.
     Idle,
-    /// Busy, with no known percentage.
     Working,
-    /// Cannot continue until the user acts.
     Blocked(BlockedKind),
-    /// Work completed; keep the record across process exit.
     Done,
-    /// Work failed; keep the record across process exit.
     Error,
 }
 
 impl ProgramStatus {
-    /// Encode one root record. The stable app identifier is validated, not
-    /// escaped or truncated into a different identity. All reports repeat it
-    /// because each OSC 7501 report replaces the complete record.
     pub fn sequence(self, app: &str) -> Option<String> {
         if app.is_empty()
             || app.len() > 32
@@ -54,8 +36,6 @@ impl ProgramStatus {
         Some(format!("\x1b]7501;state={state}:app={app}\x1b\\"))
     }
 
-    /// Tern's existing OSC 9;4 activity channel. Never send a made-up 0%.
-    /// Paused activity represents a real user gate, not provider/network waits.
     pub fn tern_progress_sequence(self) -> &'static str {
         match self {
             Self::Working => "\x1b]9;4;3\x1b\\",
@@ -65,8 +45,6 @@ impl ProgramStatus {
         }
     }
 
-    /// Whether this record must be retired on terminal handoff. Done/error
-    /// intentionally survive; clearing them would erase an unread result.
     pub fn is_transient(self) -> bool {
         matches!(self, Self::Working | Self::Blocked(_))
     }

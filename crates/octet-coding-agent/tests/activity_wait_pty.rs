@@ -1190,7 +1190,6 @@ fn real_program_status_success_cancel_dedupe_and_exit_pty_contract() {
                 .last()
                 .is_some_and(|s| s == expected)
         });
-        // Renaming and screen replacement must not overwrite a persistent result.
         candidate.pty.write_input(b"/name Status fixture\r");
         candidate.pty.drain_for(Duration::from_millis(200));
         assert_eq!(program_status_records(&candidate.pty.output).len(), 3);

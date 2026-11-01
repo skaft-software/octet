@@ -601,7 +601,8 @@ impl App {
     ) -> anyhow::Result<(PreparedAppSubmission, Vec<String>)> {
         let notices = self.synchronize_extension_provider_catalog_for_request()?;
         self.agent.set_tool_inference_resolver(Some(
-            self.executable_extensions.tool_inference_model_resolver(&self.catalog),
+            self.executable_extensions
+                .tool_inference_model_resolver(&self.catalog),
         ));
         if !catalog_route_matches_active_model(&self.catalog, self.agent.model())
             || !same_model_facts(&self.model, self.agent.model())

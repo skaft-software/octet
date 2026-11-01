@@ -91,8 +91,41 @@ impl PiProviderModelMetadata {
     }
 }
 
-/// Reuse the canonical declaration validator, then validate the additive Pi
-/// facts separately. Credentials and functions never enter the registry.
+fn parse_proxy_declaration(
+    value: serde_json::Value,
+) -> Result<api_v03::ProviderRegisterParams, ProviderHostResponseError> {
+    api_v03::canonical_json(&value).map_err(|_| ProviderHostResponseError::Invalid)?;
+    let request: api_v03::ProviderRegisterParams =
+        serde_json::from_value(value.clone()).map_err(|_| ProviderHostResponseError::Invalid)?;
+    api_v03::parse_provider_definition(value["provider"].clone())
+        .map_err(|_| ProviderHostResponseError::Invalid)?;
+    if request.models.len() > api_v03::MAX_PROVIDER_MODELS {
+        return Err(ProviderHostResponseError::Invalid);
+    }
+    for (model, wire) in request
+        .models
+        .iter()
+        .zip(value["models"].as_array().unwrap())
+    {
+        if model.protocol != "google_generative_ai" {
+            api_v03::parse_provider_model_definition(wire.clone())
+                .map_err(|_| ProviderHostResponseError::Invalid)?;
+        } else if model.id.len() > api_v03::MAX_PROVIDER_ID_BYTES
+            || model.api_name.len() > api_v03::MAX_PROVIDER_ID_BYTES
+            || model
+                .display_name
+                .as_ref()
+                .is_some_and(|name| name.len() > api_v03::MAX_PROVIDER_LABEL_BYTES)
+            || wire
+                .get("display_name")
+                .is_some_and(serde_json::Value::is_null)
+        {
+            return Err(ProviderHostResponseError::Invalid);
+        }
+    }
+    Ok(request)
+}
+
 pub(super) fn parse_provider_proxy_registration(
     mut value: serde_json::Value,
 ) -> Result<
@@ -121,8 +154,13 @@ pub(super) fn parse_provider_proxy_registration(
             .map_err(|_| ProviderHostResponseError::Invalid)?;
         facts.push(fact);
     }
-    let request = api_v03::parse_provider_register_params(value)
-        .map_err(|_| ProviderHostResponseError::Invalid)?;
+    let request = parse_proxy_declaration(value)?;
+    if request.models.iter().zip(&facts).any(|(model, fact)| {
+        model.protocol == "google_generative_ai"
+            && fact.inherit_provider.as_deref() != Some(request.provider.id.as_str())
+    }) {
+        return Err(ProviderHostResponseError::Invalid);
+    }
     if request.provider.auth.kind != "none" {
         // These routes execute an already trusted process's custom streamer;
         // they do not obtain any host credential/OAuth authority.
@@ -143,6 +181,15 @@ pub(super) fn register_provider_proxy(
     update: bool,
 ) -> Result<api_v03::ProviderCatalogResult, ProviderHostResponseError> {
     let (mut request, mut metadata) = parse_provider_proxy_registration(value)?;
+    let google = read_std_lock(&state.protocol).supports("provider_google_generative_ai_v1");
+    if !google
+        && request
+            .models
+            .iter()
+            .any(|model| model.protocol == "google_generative_ai")
+    {
+        return Err(ProviderHostResponseError::Invalid);
+    }
     if metadata.values().any(|metadata| {
         metadata
             .inherit_provider
@@ -171,6 +218,7 @@ pub(super) fn register_provider_proxy(
             Protocol::AnthropicMessages => "anthropic_messages",
             Protocol::OpenAiChat => "openai_chat",
             Protocol::OpenAiResponses => "openai_responses",
+            Protocol::GoogleGenerativeAi if google => "google_generative_ai",
             _ => return Err(ProviderHostResponseError::Unavailable),
         }
         .to_owned();

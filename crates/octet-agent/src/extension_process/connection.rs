@@ -71,6 +71,7 @@ pub(super) struct ProcessConnection {
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
+    pub(super) pi_settings: Option<Arc<pi_settings::Service>>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) child_requests: ChildRequests,
     pub(super) next_id: AtomicU64,
@@ -1143,7 +1144,13 @@ impl ProcessConnection {
             let frame_state = Arc::new(AtomicU8::new(FRAME_QUEUED));
             let cancellation_sent = Arc::new(AtomicBool::new(false));
             if let Some(owner) = &resource_owner {
-                lock_std_mutex(&connection.issued_resource_owners).insert(owner.clone());
+                let mut issued = lock_std_mutex(&connection.issued_resource_owners);
+                issued.insert(owner.clone());
+                if method == methods::HOOK_RUN && message["params"]["hook"] == "session_start" {
+                    if let Some(service) = &connection.pi_settings {
+                        service.remember_parent(id, owner, &issued)?;
+                    }
+                }
             }
             {
                 let mut pending = lock_std_mutex(&connection.pending);
@@ -1477,6 +1484,9 @@ impl ProcessConnection {
             // admission. Publish retirement before releasing that disposition;
             // there must be no cancelled-terminal/current-surface window.
             lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
+            if let Some(service) = &self.pi_settings {
+                service.forget_parent(id);
+            }
             // Retire only the surfaces this request created. A resource owner
             // names the session and process generation, never one request, so a
             // cancelled sibling (an expired input hook, an interrupted turn)

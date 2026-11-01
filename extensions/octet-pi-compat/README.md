@@ -10,6 +10,8 @@ fallback loads helpers in that process, not a second Pi agent.
 See [getting started](../../docs/pi-compatibility.md) and the
 [API coverage ledger](../../docs/pi-extension-api.md). Extension execution uses
 your OS permissions; it is not a sandbox.
+See [native-mediated Pi settings](SETTINGS.md) for the bounded
+`SettingsManager.create` contract and its native policy requirements.
 
 ## Local setup and configuration
 
@@ -237,9 +239,12 @@ native workspace trust keep their original host gate.
   leaves the accepted tool unchanged. Late `on` callbacks can use already
   subscribed native hooks. Late commands additionally require `runtime_commands`
   and `runtime_command_registration_v1`; the owner-fenced synchronous native ACK
-  precedes the local callback/catalog update. Older peers keep their immutable
-  catalog, and mirrors retain their reviewed static-registration fence. New
-  shortcut/flag names remain startup-bound. Unknown command options are ignored;
+  precedes the local callback/catalog update. Late shortcut names require
+  `shortcuts` and the existing owner-bound `shortcut/register` native ACK before
+  installing their trigger handler. Native key conflicts, rescue bindings,
+  quotas and generation checks remain authoritative. Mirrors retain their
+  reviewed static-registration fence; new flag names remain startup-bound.
+  Unknown command options are ignored;
   only Pi's description, handler and argument-completion options are consumed.
 - Reviewed builtin overrides use exact `capabilities.builtin_tool_overrides`
   grants for captured names among `read`, `edit`, `write`, `bash` and
@@ -490,6 +495,15 @@ candidate and security policy; historical passes do not qualify changed source.
 
 ## Native context, persistence and provider phases
 
+`ctx.hasPendingMessages()` requires an actual native boolean; absent facts still
+refuse. With paired session transport, queue-only `runtime.updated` publications
+update an existing live exact owner's retained fact without `remote_ui` or a UI
+mount. They cannot change foreground ownership, history or editor/UI authority,
+and accept no additional host fields. Delayed publications for unknown or retired
+owners are ignored without creating state or reviving action authority; retained
+context actions still refuse retired owners. Native queue and original-package
+qualification remain separate from this adapter contract.
+
 `context` maps to the real API 0.4 `provider_context` preparation hook and requires
 `session_entries`, a matching native owner/preparation and actual top-level
 `session_leaf` grant. Ordered awaited callbacks can replace messages or mutate the
@@ -505,8 +519,10 @@ invented. Native validation/budgeting remains authoritative.
 
 `appendEntry` is now **synchronous void**: an independent worker owns the sole
 physical stdin reader/serialized writer while the factory thread waits for the
-native durable receipt. Hook writes require the actual one-use session-leaf grant;
-only a known successor permits another append. No optimistic entry or Promise
+native durable receipt. Hook writes require an actual one-use session-leaf grant
+or the negotiated grant-less receipt path below. An exhausted or revoked grant
+cannot fall back to grant-less writes; only its known successor permits another
+append. No optimistic entry or Promise
 flush counts as persistence. Cancellation after claim waits for the actual outcome;
 transport loss means unknown outcome, terminal connection and no replay. Existing
 16 KiB/depth16/nodes256 private-entry bounds remain; large CLM checkpoints can be
@@ -517,7 +533,7 @@ markers retain their identities as `octet_native`, not fabricated Pi entries.
 
 Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
 both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appends
-from live commands, shortcuts and tools then publish the actual native durable
+from live hooks, commands, shortcuts and tools then publish the actual native durable
 entry into that invocation's pinned view before returning. Receipt revision,
 head, ancestry and view quotas must match; no session-leaf grant is minted.
 Immediate sessionManager getters therefore see the committed ID, parent and
@@ -580,6 +596,11 @@ merge; omitted models inherit the host's native inventory. Single-object native
 provider wrappers can select from that inventory. Registration does not resolve
 authentication or invoke stream callbacks. Overlays retain the original native
 model identity, capabilities and pricing, and removal restores the original route.
+Google Generative AI inheritance additionally requires
+`provider_google_generative_ai_v1`. Its `google-generative-ai` identity maps only
+to the native Google codec (`google_generative_ai`), retaining the native endpoint
+and authentication. This does not admit Google Interactions, arbitrary custom
+Google HTTP transports, or additional API 0.3 protocols.
 
 Inside an admitted inherited callback, the guarded native transport delegates at
 most once through the current native client, retaining its credentials, request
@@ -591,6 +612,11 @@ redacted reasoning retains its host-owned replay state. Native deltas are relaye
 before the terminal response; final usage/cost remain native-owned. This is not
 permission to run installed Pi HTTP/auth runtimes, perform nested inference, or
 claim OAuth-dependent package behavior without an original-package journey.
+
+Custom OpenAI HTTP delegation accepts Pi base URLs with or without a trailing
+path slash; only the private native endpoint projection adds the missing slash.
+Native URL validation, unauthenticated routing and process-owned key isolation
+remain unchanged.
 
 Ordinary custom-provider streams receive canonical history when a supplied
 Responses replay is exactly equivalent to the native codec's canonical encoding

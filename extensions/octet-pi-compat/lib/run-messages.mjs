@@ -190,7 +190,7 @@ export async function handleRunMessage(runtime, method, payload, store) {
       const { contentIndex } = call;
       if (phase === 'delta') {
         call.text += delta;
-        try { partial.content[contentIndex].arguments = JSON.parse(call.text); } catch { /* provider JSON is incomplete */ }
+        try { partial.content[contentIndex].arguments = JSON.parse(call.text); } catch { }
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_delta', contentIndex, delta, partial } });
       } else {
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_end', contentIndex, toolCall: partial.content[contentIndex], partial } });

@@ -216,8 +216,6 @@ test('Pi trust cannot rise when a previously blocked resource disappears within 
   writeFileSync(resource, '{}');
   const { runtime, store } = harness('command/execute', { project_trusted: false }, root);
   const facts = contextFacts(runtime, store);
-  // Remove the resource before the extension's first query: the owner was
-  // already bound untrusted, so lazy first-query discovery is not sufficient.
   rmSync(resource);
   assert.equal(facts.isProjectTrusted(), false);
   runtime.features.add('remote_ui');

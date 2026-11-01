@@ -58,12 +58,6 @@ fn reapply_original_termios() {
 #[cfg(not(unix))]
 fn reapply_original_termios() {}
 
-/// Re-apply the attributes saved before the first raw-mode entry, if any.
-///
-/// Final process cleanup must call this after the runtime is dropped, without
-/// polling input afterward: on macOS a cooked-tty readiness check clears PENDIN,
-/// even when it consumes no bytes. Renderer teardown alone is too early while
-/// the runtime's terminal notifier can still be registered.
 pub fn restore_starting_attributes() {
     reapply_original_termios();
 }

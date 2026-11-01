@@ -2006,7 +2006,6 @@ where
     shell.close_panel();
     shell.set_run_label("idle");
     if matches!(outcome, Ok(Some(()))) {
-        // Keep this operation working until its catalog is ready as well.
         shell.set_terminal_auth_progress(&LoginProgress::SignedIn);
     } else {
         shell.finish_terminal_auth(&outcome);
@@ -2041,8 +2040,6 @@ where
     {
         Ok(Some(())) if !shell.close_requested() => {}
         Ok(Some(())) => {
-            // The credential committed, but the user is leaving rather than
-            // continuing into a model reload. Do not claim a rollback.
             shell.finish_terminal_operation(true);
             shell.render();
             return Ok(None);
@@ -2078,8 +2075,6 @@ where
     Ok(Some(catalog))
 }
 
-/// Catalog readiness is part of the same foreground login operation, not a
-/// second operation or a return to the previous agent's terminal result.
 async fn reload_codex_login_catalog<S, W>(
     shell: &mut InteractiveShell,
     input: &mut S,

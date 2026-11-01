@@ -9,7 +9,6 @@ pub(super) const MAX_PENDING_CONTROL_INPUTS: usize = 64;
 pub(super) const MAX_PENDING_CONTROL_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct ControlReservation {
-    // Release the narrower reservation before returning shared input capacity.
     _message: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(super) _count: tokio::sync::OwnedSemaphorePermit,
     pub(super) _bytes: tokio::sync::OwnedSemaphorePermit,
@@ -245,8 +244,6 @@ pub struct RunControl {
 
 impl RunControl {
     /// Whether steering or follow-up input is reserved but not yet delivered.
-    /// Includes prepared inputs and drained batches; excludes context-only
-    /// appends, finish-now requests, and non-message control operations.
     pub fn has_pending_messages(&self) -> bool {
         !self.tx.is_closed()
             && *self

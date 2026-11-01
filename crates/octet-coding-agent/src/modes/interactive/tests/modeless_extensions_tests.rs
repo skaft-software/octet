@@ -30,10 +30,12 @@ import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 export default pi => {
   const record = value => appendFileSync(TRACE, JSON.stringify(value) + '\n');
-  pi.on('session_start', async (_, ctx) => {
-    record({start: true, noModel: ctx.model === undefined, noUsage: ctx.getContextUsage() === undefined,
+  pi.on('session_start', async (event, ctx) => {
+    const entries = ctx.sessionManager.getEntries();
+    record({start: true, reason: event.reason, entryCount: entries.length, entryIds: entries.map(entry => entry.id),
+      noModel: ctx.model === undefined, noUsage: ctx.getContextUsage() === undefined,
       sessionId: ctx.sessionId, available: ctx.modelRegistry.getAvailable().length, idle: ctx.isIdle(), hasUI: ctx.hasUI});
-    await ctx.ui.setFooter(() => ({render: () => ['NO-PROVIDER-FOOTER'], invalidate() {}}));
+    await ctx.ui.setFooter(() => ({render: () => [`NO-PROVIDER-FOOTER ${event.reason}`], invalidate() {}}));
   });
   pi.on('resources_discover', (_, ctx) => existsSync(join(ctx.cwd, 'resources-disabled')) ? {} : ({
     skillPaths: [join(ctx.cwd, 'resources/skills')],
@@ -90,8 +92,14 @@ async fn fixture(
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().canonicalize().unwrap();
     for (path, contents) in [
-        ("resources/skills/no-provider-skill/SKILL.md", "---\nname: no-provider-skill\ndescription: NO-PROVIDER-SKILL\n---\nNative model-less skill.\n"),
-        ("resources/prompts/no-provider-prompt.md", "Native model-less prompt $1\n"),
+        (
+            "resources/skills/no-provider-skill/SKILL.md",
+            "---\nname: no-provider-skill\ndescription: NO-PROVIDER-SKILL\n---\nNative model-less skill.\n",
+        ),
+        (
+            "resources/prompts/no-provider-prompt.md",
+            "Native model-less prompt $1\n",
+        ),
     ] {
         let path = workspace.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -218,6 +226,8 @@ async fn modeless_pi_startup_footer_command_append_and_prompt_refusal() {
     assert_eq!(starts[0]["idle"], true);
     assert_eq!(starts[0]["available"], 0);
     assert_eq!(starts[0]["sessionId"], "no-provider");
+    assert_eq!(starts[0]["reason"], "startup");
+    assert_eq!(starts[0]["entryCount"], 0);
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             state.pump(&mut shell, &mut session, &sessions);
@@ -372,6 +382,13 @@ async fn modeless_pi_resource_reload_withdraws_native_catalog() {
         .prompt_paths
         .iter()
         .any(|path| path.ends_with("resources/prompts")));
+    let entry_id = session
+        .append(octet_agent::EntryValue::Config {
+            model: None,
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
     std::fs::write(root.path().join("resources-disabled"), "1").unwrap();
     let report = tokio::time::timeout(
         Duration::from_secs(15),
@@ -387,6 +404,31 @@ async fn modeless_pi_resource_reload_withdraws_native_catalog() {
             .any(|(name, result)| name == "octet-pi-compat" && result.is_ok()),
         "{report:?}"
     );
+    let starts = rows(root.path())
+        .into_iter()
+        .filter(|row| row["start"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert_eq!(starts[0]["reason"], "startup");
+    assert_eq!(starts[1]["reason"], "reload");
+    assert_eq!(starts[1]["entryCount"], 1);
+    assert_eq!(starts[1]["entryIds"], serde_json::json!([entry_id.0]));
+    let reopened = Session::open_read_only(session.path()).unwrap();
+    assert_eq!(reopened.entries().len(), 1);
+    assert_eq!(reopened.entries()[0].id, entry_id);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            state.pump(&mut shell, &mut session, &sessions);
+            shell.render();
+            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+            if sexy_tui_rs::strip_terminal_sequences(&frame).contains("NO-PROVIDER-FOOTER reload") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the native shell must paint the reloaded no-provider footer after reading history");
     assert_eq!(state.config.prompt_paths, config.prompt_paths);
     assert_eq!(state.config.skill_paths, config.skill_paths);
     tokio::time::timeout(

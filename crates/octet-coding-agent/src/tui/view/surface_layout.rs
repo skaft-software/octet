@@ -813,8 +813,6 @@ mod tests {
         rendered: SurfaceGeometry,
         planned: SurfaceGeometry,
     ) {
-        // Source offsets are discovered while wrapping/clipping shell output,
-        // not by the surface planner. All planned rows and columns still match.
         assert_eq!(planned.shell_output, None);
         assert_eq!(
             rendered.shell_output.is_some(),

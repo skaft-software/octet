@@ -891,24 +891,42 @@ export default pi => {
     .unwrap();
     shell.finish_startup();
     shell.set_size(96, 24);
-    pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: ⚡ FULL")).await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("ponytail: ⚡ FULL")
+    })
+    .await;
     command(&mut app, &mut shell, "ultra").await.unwrap();
-    pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: 🔥 ULTRA")).await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("ponytail: 🔥 ULTRA")
+    })
+    .await;
     for columns in [40, 120] {
         shell.set_size(columns, 12);
-        app.executable_extensions.observe_terminal_resize(columns, 12);
-        pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: 🔥 ULTRA")).await;
+        app.executable_extensions
+            .observe_terminal_resize(columns, 12);
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("ponytail: 🔥 ULTRA")
+        })
+        .await;
         let frame = rendered(&mut shell).await;
-        assert!(frame.lines().all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns)));
+        assert!(frame
+            .lines()
+            .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns)));
     }
-    command(&mut app, &mut shell, "custom-footer").await.unwrap();
+    command(&mut app, &mut shell, "custom-footer")
+        .await
+        .unwrap();
     pump_until(&mut app, &mut shell, |frame| {
         frame.contains("STATUS-CUSTOM-FOOTER") && !frame.contains("ponytail:")
-    }).await;
-    command(&mut app, &mut shell, "default-footer").await.unwrap();
+    })
+    .await;
+    command(&mut app, &mut shell, "default-footer")
+        .await
+        .unwrap();
     pump_until(&mut app, &mut shell, |frame| {
         frame.contains("ponytail: 🔥 ULTRA") && !frame.contains("STATUS-CUSTOM-FOOTER")
-    }).await;
+    })
+    .await;
     command(&mut app, &mut shell, "clear-status").await.unwrap();
     pump_until(&mut app, &mut shell, |frame| !frame.contains("ponytail:")).await;
     app.executable_extensions.shutdown().await;

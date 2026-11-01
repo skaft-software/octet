@@ -245,8 +245,6 @@ pub(super) fn sampling(model: &Model, req: &Request, body: &mut Value) -> Result
         }
         _ => false,
     };
-    // The Terra observation is public-API-only; do not import its controls into
-    // an account's Codex route merely because the model ID matches.
     let public_terra = model.spec.api_name == "gpt-6.1-terra"
         && model.endpoint.id.0 == "openai"
         && model.endpoint.base_url.host_str() == Some("api.openai.com");

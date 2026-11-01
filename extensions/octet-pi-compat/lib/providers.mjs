@@ -11,7 +11,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const protocols = { 'openai-completions': 'openai_chat', 'openai-responses': 'openai_responses', 'anthropic-messages': 'anthropic_messages' };
+const protocols = { 'openai-completions': 'openai_chat', 'openai-responses': 'openai_responses', 'anthropic-messages': 'anthropic_messages', 'google-generative-ai': 'google_generative_ai' };
+const needsGoogle = entry => entry?.google || entry?.config.api === 'google-generative-ai' || entry?.models?.some(model => model.pi.api === 'google-generative-ai');
 const providers = providerState;
 // Loading is sequential and no providers have been committed yet. Restore the
 // preceding declarations, including ones a failing factory replaced or removed.
@@ -184,7 +185,8 @@ function declaration(name, config, factory, inherited = false) {
     bounded(model.id, 'model id', inherited ? 256 : 64); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
     bounded(model.name, 'model name', 128);
     const api = model.api ?? config.api;
-    if (!protocols[api]) unsupported(`provider API ${api}`, 'only native chat/responses/anthropic identities are representable');
+    if (!protocols[api]) unsupported(`provider API ${api}`, 'only negotiated native provider identities are representable');
+    if (api === 'google-generative-ai' && !inherited) unsupported('Google provider', 'only inherited native Google models are supported');
     if (typeof model.reasoning !== 'boolean') invalid('model reasoning must be boolean');
     if (!Array.isArray(model.input) || !model.input.includes('text') || model.input.length > 2 || new Set(model.input).size !== model.input.length || model.input.some(x => !['text', 'image'].includes(x))) invalid('model input must be text and optionally image');
     if (![model.contextWindow, model.maxTokens].every(x => Number.isSafeInteger(x) && x > 0) || model.maxTokens > model.contextWindow) invalid('model token limits');
@@ -204,12 +206,14 @@ function enqueue(runtime, action) {
 }
 async function commit(runtime, entry) {
   const state = providers(runtime);
+  if (needsGoogle(entry)) runtime.require('provider_google_generative_ai_v1');
   if (entry.inherited) {
     runtime.require('provider_inheritance_v1');
     const result = await runtime.transport.request('providers/inherit', { provider_id: entry.name });
     fields(result, ['models'], 'inherited provider');
     if (!Array.isArray(result.models) || result.models.length > 256) invalid('inherited provider models');
     const models = result.models.filter(model => !entry.nativeModelIds || entry.nativeModelIds.has(model.id)).map(({ provider, baseUrl, ...model }) => model);
+    if (models.some(model => model.api === 'google-generative-ai')) runtime.require('provider_google_generative_ai_v1');
     if (models.length) {
       const inherited = declaration(entry.name, { ...entry.config, models, streamSimple: entry.stream ?? nativeProviderDelegate }, entry.factory, true);
       entry = { ...entry, ...inherited, inherited: true, config: entry.config, native: entry.native };
@@ -241,6 +245,7 @@ function mutation(runtime, factory, name, entry) {
   if (runtime.initialized) {
     runtime.require('provider_proxy_v1');
     if (entry?.inherited) runtime.require('provider_inheritance_v1');
+    if (needsGoogle(entry)) runtime.require('provider_google_generative_ai_v1');
     store = runtime.current(factory);
     store.controller.signal.throwIfAborted();
   }
@@ -283,7 +288,7 @@ export function registerProvider(runtime, factory, name, config) {
       const models = provider.getModels();
       if (!Array.isArray(models) || models.length > 256) invalid('native provider models');
       const nativeModelIds = new Set(models.map(model => identifier(model?.id, 'native model id')));
-      entry = { name: id, factory, config: {}, stream: provider.streamSimple.bind(provider), inherited: true, native: true, nativeModelIds };
+      entry = { name: id, factory, config: {}, stream: provider.streamSimple.bind(provider), inherited: true, native: true, nativeModelIds, google: models.some(model => model.api === 'google-generative-ai') };
     } else entry = snapshotCustomProvider(provider, factory, declaration);
     entry.nativeObject = provider;
     mutation(runtime, factory, id, entry);
@@ -301,6 +306,7 @@ export function unregisterProvider(runtime, factory, name) {
   mutation(runtime, factory, name);
 }
 export function validateProviderInitialization(runtime) {
+  if ([...providers(runtime).desired.values()].some(needsGoogle)) runtime.require('provider_google_generative_ai_v1');
   if (providers(runtime).desired.size) runtime.require('provider_proxy_v1');
   if ([...providers(runtime).desired.values()].some(entry => entry.inherited)) runtime.require('provider_inheritance_v1');
 }

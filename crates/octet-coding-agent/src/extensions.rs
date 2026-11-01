@@ -114,10 +114,10 @@ mod notice_dedup;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
-mod tool_inference;
 mod runtime_state;
 mod status;
 mod summaries;
+mod tool_inference;
 mod transcript_renderers;
 mod trust_policy;
 mod turns;
@@ -429,7 +429,6 @@ pub struct ExecutableExtensions {
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
-    /// Queue observation only, fenced to the session whose run supplied it.
     pending_message_control: Option<(String, octet_agent::RunControl)>,
     pending_session_setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     // The actual host registry handle, not an adapter-owned tool mirror. Its

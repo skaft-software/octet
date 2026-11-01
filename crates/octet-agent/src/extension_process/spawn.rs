@@ -261,6 +261,11 @@ pub(super) async fn spawn_connection(
         termination.clone(),
         Arc::clone(&frame_limit),
     ));
+    let pi_settings = config
+        .pi_settings
+        .clone()
+        .map(pi_settings::Service::new)
+        .map(Arc::new);
     let (presentation_updates, presentation_update_rx) = watch::channel(None);
     tokio::spawn(dispatch_presentation_updates(
         presentation_update_rx,
@@ -301,6 +306,7 @@ pub(super) async fn spawn_connection(
         config.event_bus.clone(),
         approval_store,
         config.secret_broker.clone(),
+        pi_settings.clone(),
         ExtensionIdentity {
             name: descriptor.manifest.name.clone(),
             version: descriptor.manifest.version.clone(),
@@ -338,6 +344,7 @@ pub(super) async fn spawn_connection(
         issued_resource_owners,
         session_leaf,
         remote_ui,
+        pi_settings,
         pending_changed,
         child_requests,
         next_id: AtomicU64::new(1),
@@ -421,6 +428,8 @@ pub(super) async fn spawn_connection(
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
             && !descriptor.manifest.capabilities.secrets.is_empty(),
+        pi_settings: config.pi_settings.is_some()
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         max_message_bytes: session_offer_frame,
     };
     let mut required_features = API_0_2_REQUIRED_FEATURES
@@ -436,10 +445,14 @@ pub(super) async fn spawn_connection(
         .iter()
         .map(|feature| (*feature).to_owned())
         .collect::<Vec<_>>();
+    if offered_host_services.pi_settings {
+        optional_features.push(pi_settings::FEATURE.to_owned());
+    }
     if offered_host_services.provider_proxy {
         optional_features.push("provider_proxy_v1".to_owned());
         if offered_host_services.provider_inheritance {
             optional_features.push("provider_inheritance_v1".to_owned());
+            optional_features.push("provider_google_generative_ai_v1".to_owned());
         }
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4

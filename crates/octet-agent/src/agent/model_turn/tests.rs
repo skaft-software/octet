@@ -57,11 +57,9 @@ impl SessionOperationInvocation for Invocation {
             return Err("private persistence failed".into());
         }
         let (consumer, binding) = self.leaf.as_mut().unwrap();
-        assert!(
-            consumer
-                .consume_next(session, binding)
-                .map_err(|e| e.to_string())?
-        );
+        assert!(consumer
+            .consume_next(session, binding)
+            .map_err(|e| e.to_string())?);
         Ok(())
     }
 }

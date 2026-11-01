@@ -306,6 +306,131 @@ fn grantless_append_receipts_require_api04_and_both_transport_features_and_entri
 }
 
 #[tokio::test]
+async fn grantless_hook_append_runs_real_pi_handler_and_publishes_durable_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("hook-append.mjs");
+    std::fs::write(&factory, r#"import fs from 'node:fs';
+    export default pi => {
+      pi.on('session_start', (_event, ctx) => {
+        const before = ctx.sessionManager.getEntries();
+        const previous = ctx.sessionManager.getLeafId();
+        if (before.length !== 1) throw new Error('authentic initial history missing');
+        for (let index = 0; index < 2; index++) {
+          if (pi.appendEntry('hook-state', { index }) !== undefined) throw new Error('append must be synchronous void');
+          const entries = ctx.sessionManager.getEntries();
+          const entry = entries.at(-1);
+          if (entries.length !== index + 2 || entry.customType !== 'hook-state' || entry.data.index !== index || ctx.sessionManager.getLeafId() !== entry.id)
+            throw new Error('durable hook receipt not published into pinned context');
+        }
+        fs.writeFileSync(`${process.cwd()}/hook-appended.json`, JSON.stringify({ previous, entries: ctx.sessionManager.getEntries() }));
+      });
+    };"#).unwrap();
+    let manifest_path =
+        crate::extension_process::pi_fixture::capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    config.request_timeout = Duration::from_secs(10);
+    config.host_state.has_ui = Some(false);
+    let process = ExtensionProcess::start(
+        trusted_descriptor(manifest_path.parent().unwrap(), manifest),
+        config,
+    )
+    .await
+    .unwrap();
+    let mut events = process.subscribe();
+    let mut session = Session::create(temp.path().join("session.jsonl")).unwrap();
+    let initial = session
+        .append(EntryValue::Config {
+            model: None,
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    process
+        .set_host_state_with_session(ExtensionHostState::default(), &session)
+        .unwrap();
+    let owner = process
+        .current_context_for_resource_owner(session.resource_owner_key())
+        .resource_owner
+        .unwrap();
+    process
+        .wait_for_session_snapshot_prepared(
+            &owner,
+            Duration::from_secs(5),
+            &CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+    let hook = tokio::spawn({
+        let process = process.clone();
+        let session_key = session.resource_owner_key();
+        async move { process.start_session_hook_binding(session_key).await }
+    });
+    let mut receipts = Vec::new();
+    for index in 0..2 {
+        let (id, generation, entry_type, data) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let ExtensionEvent::SessionEntryRequested {
+                        request_id,
+                        generation,
+                        operation: ExtensionSessionEntryOperation::Append { entry_type, data },
+                        ..
+                    } = events.recv().await.unwrap()
+                    {
+                        break (request_id, generation, entry_type, data);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(entry_type, "hook-state");
+        assert_eq!(data, json!({"index": index}));
+        let receipt = process
+            .append_session_entry_request(&id, generation, &mut session, &entry_type, data)
+            .unwrap();
+        assert_eq!(receipt["successor"], Value::Null);
+        assert_eq!(receipt["entry"]["id"], receipt["entry_id"]);
+        receipts.push(receipt);
+    }
+    hook.await.unwrap().unwrap();
+    let witness: Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("hook-appended.json")).unwrap())
+            .unwrap();
+    assert_eq!(witness["previous"], json!(initial));
+    assert_eq!(witness["entries"].as_array().unwrap().len(), 3);
+    assert_eq!(witness["entries"][1]["id"], receipts[0]["entry_id"]);
+    assert_eq!(witness["entries"][1]["parentId"], json!(initial));
+    assert_eq!(witness["entries"][2]["id"], receipts[1]["entry_id"]);
+    assert_eq!(witness["entries"][2]["parentId"], receipts[0]["entry_id"]);
+    assert_eq!(
+        receipts[1]["previous_revision"],
+        receipts[0]["view_revision"]
+    );
+    assert_eq!(receipts[1]["previous_head"], receipts[0]["head"]);
+    let reopened = Session::open_read_only(session.path()).unwrap();
+    assert_eq!(reopened.entries().len(), 3);
+    for receipt in receipts {
+        let entry = reopened
+            .entry(&crate::session::EntryId(
+                receipt["entry_id"].as_str().unwrap().into(),
+            ))
+            .unwrap();
+        assert_eq!(
+            receipt["entry"]["timestamp_unix_ms"],
+            json!(entry.timestamp_unix_ms.unwrap())
+        );
+        assert_eq!(receipt["entry"]["parent"], json!(entry.parent));
+        assert_eq!(
+            receipt["entry"]["value"],
+            serde_json::to_value(&entry.value).unwrap()
+        );
+    }
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
 async fn pending_messages_retained_real_pi_context_updates_without_a_ui_mount() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp.path().join("pending.mjs");
@@ -359,8 +484,6 @@ async fn pending_messages_retained_real_pi_context_updates_without_a_ui_mount() 
     for pending in [false, true, false] {
         state.has_pending_messages = Some(pending);
         process.set_host_state(state.clone());
-        // Observe the retained context before any new invocation could rebind
-        // its host facts. No UI mount or command can mask a missing notification.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if std::fs::read_to_string(temp.path().join("pending-observed.txt"))

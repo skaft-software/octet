@@ -55,6 +55,43 @@ user's authority.
 an extension may make; they do not confine the process. OS-level enforcement is
 future work.**
 
+## Native Pi settings mediation (`pi_settings_v1`, API `0.4`)
+
+This optional service is offered only with a native-owned Pi setup binding.
+The coding host binds it only to the admitted Pi bridge, using
+`OCTET_PI_AGENT_DIR`, then `PI_CODING_AGENT_DIR`, then the native home directory's
+`.pi/agent`. Named entrypoint selectors take precedence over native environment
+values for that selector. Factory-supplied paths never select a storage root.
+
+`pi/settings/read` takes `{parent_request_id, resource_owner, cwd, agent_dir,
+project_trusted}`. Paths must match the native workspace and Pi setup binding.
+It returns `{global, project, project_trusted, global_path, project_path, errors}`;
+errors contain `{scope, path, message}`. Project reads target only the native
+workspace's `.pi/settings.json`; requesting them requires native workspace trust.
+With `project_trusted:false`, project storage is not opened at all. Missing files
+are empty settings; invalid JSON, duplicate keys, unsafe paths, nonregular files,
+and files larger than 64 KiB produce explicit scoped errors, not silent success.
+
+`pi/settings/update` takes the same envelope plus `{scope:"global", extensions}`.
+Its only supported change appends one new `-builtin:<name>` selector to the exact
+current ordered selectors. Names match `[a-z][a-z0-9_-]{0,63}`; enable, file, glob,
+deletion, reordering and duplicate-addition requests are refused. An exact unchanged
+list is an idempotent no-op. Stale selector snapshots explicitly fail rather than
+silently dropping requested mutations or concurrent selectors. The native merge
+preserves every unrelated current disk field. It never writes project settings,
+authentication, trust, or Octet configuration. Successful `{}` acknowledges the
+actual conditional atomic commit (or an exact already persisted list), not an
+in-memory update. Conflicts and I/O failures are returned.
+
+Every call requires a genuine live issued owner for this process generation and
+an active matching parent. A settled native-issued `session_start` parent may be
+retained for its asynchronous callback, but cancelled, invented, retired, foreign,
+and prior-generation parents/owners are refused. Each generation retains at most
+4096 such parent bindings, pruning retired owners. Writer capacity and response
+bounds are admitted before a write; native cancellation and owner retirement are
+fenced through the bounded mutation. This grants no general filesystem or
+process-execution capability and is unavailable during factory inspection.
+
 ## Transport defaults
 
 | Parameter | Default |

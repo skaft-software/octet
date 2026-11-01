@@ -386,12 +386,15 @@ impl CompositionDispatcher {
                 Err(error) => {
                     let reason = error.message.clone();
                     let denial_code = error.policy_denial_code();
-                    let mut result = Err(error);
-                    for hook in &self.hooks {
-                        result = hook
-                            .transform_tool_result(&name, &arguments, result, &context)
-                            .await;
-                    }
+                    let result = settle_tool_result_hooks(
+                        &self.hooks,
+                        &name,
+                        &arguments,
+                        Err(error),
+                        &context,
+                        false,
+                    )
+                    .await;
                     self.record(ToolCompositionRecord::CallStarted {
                         parent: self.parent_id.0.clone(),
                         id: id.clone(),

@@ -547,7 +547,6 @@ impl ExecutableExtensions {
         }
     }
 
-    /// Observe this session's active run alongside its foreground shell queues.
     pub(crate) fn bind_pending_message_control(&mut self, control: &octet_agent::RunControl) {
         self.pending_message_control = self
             .resource_owner
@@ -555,7 +554,6 @@ impl ExecutableExtensions {
             .map(|owner| (owner.clone(), control.clone()));
     }
 
-    /// Publish actual shell and active-run queues to retained extension contexts.
     pub(crate) fn refresh_frontend_pending_messages(&self, shell: &InteractiveShell) {
         let pending = Some(
             shell.has_pending_messages()

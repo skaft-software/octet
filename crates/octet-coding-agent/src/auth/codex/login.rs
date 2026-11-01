@@ -36,7 +36,6 @@ pub(crate) enum LoginProgress {
         user_code: String,
         phase: DeviceLoginPhase,
     },
-    /// A verified browser callback arrived; exchanging its authorization code.
     Exchanging,
     /// Authorization succeeded; waiting for the existing private-store lock.
     Saving,

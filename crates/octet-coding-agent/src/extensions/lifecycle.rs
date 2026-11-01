@@ -1067,6 +1067,11 @@ impl ExecutableExtensions {
             .lock()
             .expect("extension host state")
             .clone();
+        runtime.pi_settings = super::pi_mirror::settings_binding(
+            &entry.descriptor,
+            &self.workspace,
+            runtime.host_state.project_trusted == Some(true),
+        );
         runtime.remote_ui = self.remote_ui_wake.clone();
         runtime.transcript_render = runtime.remote_ui.is_some();
         runtime.resource_paths = true;
@@ -1553,8 +1558,6 @@ impl ExecutableExtensions {
         let _ = block_on_runtime(self.release_binding());
     }
 
-    /// Resource reload releases the same ownership boundary, but reports an
-    /// interrupted/reload end rather than an application shutdown.
     pub(crate) fn release_binding_for_reload_blocking(&mut self) {
         let _ = block_on_runtime(self.release_binding_for_transition(true));
     }
@@ -1867,6 +1870,11 @@ impl ExtensionActivationPlan {
         runtime.resource_paths = self.resource_paths;
         runtime.provider_pipeline = true;
         runtime.host_state = self.host_state.clone();
+        runtime.pi_settings = super::pi_mirror::settings_binding(
+            descriptor,
+            &self.workspace,
+            self.host_state.project_trusted == Some(true),
+        );
         runtime.remote_ui = self.remote_ui.clone();
         // Both interactive frontends consume the same bounded asynchronous
         // transcript snapshots. Headless hosts have neither this wake nor the

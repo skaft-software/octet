@@ -5,8 +5,6 @@ import { canonicalToPi, piToCanonical } from './provider-context.mjs';
 import { ingestNativeProviderEvent } from './native-provider.mjs';
 
 const runtimes = new WeakMap();
-// Runtime.current() clones its store: the request's controller is the stable,
-// private invocation identity. Never retain caller-mutable usage as a receipt.
 const settledUsages = new WeakMap();
 const efforts = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const MAX_BYTES = 1024 * 1024;

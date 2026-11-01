@@ -50,6 +50,14 @@ export function captureChildHost() {
     track: promise => runtime.track(promise, store),
   };
 }
+export function captureSettingsHost() {
+  const runtime = installedRuntime;
+  if (!runtime) unsupported('SettingsManager.create', 'a native settings host is required');
+  const store = runtime.scope.getStore();
+  runtime.assertOwner(store);
+  ownerKey(store.state.owner);
+  return { runtime, store };
+}
 function live(binding) {
   if (typeof binding?.request !== 'function' || typeof binding.assertLive !== 'function') invalid('authenticated child host binding required');
   ownerKey(binding.owner); binding.assertLive();

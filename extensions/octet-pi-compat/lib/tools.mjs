@@ -385,8 +385,6 @@ export async function executeRegisteredTool(runtime, params, store, context, def
   try { result = await runtime.scope.run(store, () => definition.execute(String(store.id), params.arguments, store.controller.signal, update, context)); }
   finally { settled = true; }
   fields(result, ['content', 'details', 'isError', 'structuredContent', 'usage'], 'tool result');
-  // Native ToolInference already durably owns this exact usage. Preserve any
-  // details/structured content, but never charge its echoed ToolOutput again.
   if (result.usage !== undefined) consumeRegistryUsageEcho(runtime, store, plainJSON(result.usage, 'tool result usage', 4096));
   if (result.isError !== undefined && typeof result.isError !== 'boolean') invalid('tool isError must be boolean');
   const content = await toolContent(runtime, result.content, store);

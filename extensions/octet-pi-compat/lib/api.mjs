@@ -57,7 +57,7 @@ function register(runtime, map, key, definition, factory) {
     }
   }
   if (!runtime.loaded && map.has(key)) invalid(`duplicate registration ${key}`);
-  map.set(key, { definition, factory });
+  map.set(key, { ...map.get(key), definition, factory });
 }
 function gitBranch(cwd) {
   try {
@@ -145,7 +145,20 @@ export function createAPI(runtime, factory) {
       fields(definition, ['description', 'handler'], 'shortcut'); bounded(key, 'shortcut key', 128);
       if (typeof definition.handler !== 'function') invalid('shortcut handler');
       if (key.split('+').includes('ctrl') && ['g', 'd'].includes(key.split('+').at(-1).toLowerCase())) unsupported(`shortcut ${key}`, 'reserved host rescue/shutdown control');
-      register(runtime, runtime.shortcuts, key, definition, factory);
+      if (runtime.loaded && !runtime.shortcuts.has(key)) {
+        runtime.assertFactory(factory);
+        runtime.require('shortcuts');
+        const s = store();
+        if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+        s.controller.signal.throwIfAborted();
+        const nativeName = `pi-runtime-shortcut-${runtime.shortcuts.size}`;
+        const result = runtime.transport.requestSync('shortcut/register', {
+          parent_request_id: s.id, resource_owner: s.state.owner,
+          id: nativeName, key, description: definition.description?.trim() ? definition.description : key,
+        }, { parent: s.live ? s.id : undefined, signal: s.controller.signal });
+        fields(result, [], 'shortcut registration acknowledgement');
+        runtime.shortcuts.set(key, { definition, factory, nativeName });
+      } else register(runtime, runtime.shortcuts, key, definition, factory);
     },
     registerFlag(key, definition) {
       fields(definition, ['description', 'type', 'default'], 'flag');

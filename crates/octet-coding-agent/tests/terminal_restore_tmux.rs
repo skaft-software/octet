@@ -133,8 +133,6 @@ fn ctrl_d_under_tmux_keeps_the_starting_pendin_flag() {
     for exit in 0..EXITS {
         let run = root.join(format!("run-{exit}"));
         std::fs::create_dir_all(&run).expect("run directory");
-        // Cover empty startup, executable extension cleanup, and a reload that
-        // replaces the extension process before Ctrl+D and terminal restoration.
         let extension_args = if exit > 0 {
             install_extension(&run)
         } else {

@@ -122,8 +122,6 @@ export class HookBudget {
     }
     const waited = this.wait();
     if (waited === 0) {
-      // No new side effects, timer or per-handler delay after the deadline.
-      // A skipped veto remains fail-closed at its caller, just like a timeout.
       this.trace(entry, 0, 'skipped-budget');
       return { ran: false, busy: false };
     }
@@ -148,8 +146,6 @@ export class HookBudget {
       // own flush, and anything it queues later is observed but never joined.
       child.detached = true;
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
-      // Failures recorded while this handler ran may belong to earlier tracked
-      // work. Keep them for the live boundary instead of silently discarding them.
       this.detached.set(this.describe(entry), waited);
       this.trace(entry, performance.now() - started, 'detached');
       return { ran: false, busy: false };

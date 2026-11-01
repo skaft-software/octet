@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Runtime } from '../lib/runtime.mjs';
 import { SessionTransport } from '../lib/session-transport.mjs';
-import { createContext } from '../lib/api.mjs';
+import { createAPI, createContext } from '../lib/api.mjs';
 import { ownerKey } from '../lib/errors.mjs';
 import { owner } from './helper.mjs';
 
@@ -12,10 +12,11 @@ const profile = { profile: 'json-chunks.v1', chunk_bytes: 65536, snapshot_bytes:
 
 function fixture(mutate = value => value) {
   const namespace = 'octet-pi-compat';
-  const runtime = Object.create(Runtime.prototype);
+  const runtime = new Runtime({ extensions: [] }, {});
+  runtime.uninstallChildren();
   const state = { key: ownerKey(owner), owner, alive: true, workspace: '/native',
     host: { session_entries: [], session_branch: [], session_leaf_id: null } };
-  const store = { id: 7, live: true, method: 'command/execute', state, controller: new AbortController() };
+  const store = { id: 7, live: true, method: 'command/execute', state, controller: new AbortController(), pending: new Set(), errors: [] };
   Object.assign(runtime, { namespace, features: new Set(['session_entries', 'session_append_receipts_v1']), active: new Map([[7, store]]) });
   const history = { entries: [], branch_ids: [], head: null, file: '/native/session.jsonl', header: {}, labels: {} };
   const descriptor = { owner, view_revision: 1, head: null, bytes: Buffer.byteLength(JSON.stringify(history)), entry_count: 0, branch_count: 0 };
@@ -26,6 +27,7 @@ function fixture(mutate = value => value) {
   const failures = [], calls = [];
   runtime.transport = {
     fail: error => failures.push(error),
+    notify: async () => {},
     requestSync(method, params) {
       assert.equal(method, 'session/append_entry');
       assert.equal(params.parent_request_id, 7);
@@ -45,6 +47,44 @@ function fixture(mutate = value => value) {
   };
   return { runtime, store, state, view, failures, calls, context: createContext(runtime, store) };
 }
+
+test('negotiated grant-less hook appends run the actual API handler and publish both committed deltas', async () => {
+  const { runtime, store, view, calls } = fixture();
+  store.method = 'hook/run';
+  store.hook = 'session_start';
+  runtime.foreground = store.state;
+  const api = createAPI(runtime, 0);
+  let completed = false;
+  api.on('session_start', (_event, context) => {
+    assert.equal(api.appendEntry('hook-first', { phase: 'startup' }), undefined);
+    const first = context.sessionManager.getEntries()[0];
+    assert.equal(first.id, 'native-1');
+    assert.equal(first.timestamp, '2023-11-14T22:13:20.000Z');
+    assert.equal(api.appendEntry('hook-second', { phase: 'startup' }), undefined);
+    assert.equal(context.sessionManager.getEntry('native-2').parentId, first.id);
+    assert.equal(context.sessionManager.getLeafId(), 'native-2');
+    completed = true;
+  });
+  assert.deepEqual(await runtime.runEvent('session_start', { type: 'session_start', reason: 'startup' }, store), { action: 'continue' });
+  assert.equal(completed, true);
+  assert.equal(runtime.issues.callbacks.size, 0);
+  assert.equal(calls.length, 2);
+  assert.equal(store.leaf, undefined);
+  assert.equal(view.document.entries.length, 2);
+});
+
+test('grant-less hook appends refuse without the negotiated paired receipt path or after grant revocation', () => {
+  for (const revoke of [({ runtime }) => runtime.features.delete('session_append_receipts_v1'),
+    ({ runtime }) => { runtime.sessionTransport = undefined; },
+    ({ store }) => { store.leaf = { grant: null }; }]) {
+    const rig = fixture();
+    rig.store.method = 'hook/run';
+    revoke(rig);
+    assert.throws(() => rig.runtime.appendEntry('private', {}, rig.store), /session_leaf/);
+    assert.equal(rig.calls.length, 0);
+    assert.equal(rig.view.document.entries.length, 0);
+  }
+});
 
 test('grant-less routed durable appends immediately update the actual pinned context view', () => {
   const { runtime, store, state, view, context, failures } = fixture();

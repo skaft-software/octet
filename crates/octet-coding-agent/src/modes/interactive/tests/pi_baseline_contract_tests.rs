@@ -121,6 +121,46 @@ export default pi => {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_late_shortcut_hook_registers_native_binding_and_dispatches() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.on('session_start', () => pi.registerShortcut('ctrl+alt+f', {
+    description: 'Late fleet overlay', handler: ctx => {
+      pi.appendEntry('late-shortcut-fired', {session:ctx.sessionManager.getSessionId()});
+    }
+  }));
+  pi.registerCommand('late-shortcut-prime', {handler: (_args, ctx) => {
+    pi.appendEntry('late-shortcut-prime', {session:ctx.sessionManager.getSessionId()});
+  }});
+};
+"#,
+    );
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "late-shortcut-prime")
+        .await
+        .unwrap();
+    let invocation = app
+        .executable_extensions
+        .dispatch_shortcut_for_event(&Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+        )))
+        .expect("late hook registered a real native shortcut binding");
+    assert_eq!(invocation.extension, "octet-pi-compat");
+    assert_eq!(invocation.name, "pi-runtime-shortcut-0");
+    let data = wait_private(&mut app, &mut shell, "late-shortcut-fired").await;
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    assert_eq!(private_entries(&reopened, "late-shortcut-fired").len(), 1);
+    assert_eq!(
+        data["session"],
+        private_entries(&reopened, "late-shortcut-prime")[0].1["session"]
+    );
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_baseline_event_bus_preserves_identity_order_and_unsubscribe_during_dispatch() {
     let (_directory, mut app) = pi_app(
         r#"

@@ -264,7 +264,6 @@ async fn synthetic_login_settles_only_after_catalog_readiness_not_a_previous_run
                 }
                 let mut catalog = octet_ai::ModelCatalog::default();
                 if reload == "ready" {
-                    // Copy only inert schema shapes; no credential resolution or requests.
                     let builtin = octet_ai::ModelCatalog::builtin()?;
                     let mut model = builtin.models().next().unwrap().clone();
                     let mut endpoint = builtin.endpoint(&model.endpoint).unwrap().clone();

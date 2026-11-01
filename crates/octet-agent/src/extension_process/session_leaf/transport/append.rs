@@ -6,12 +6,6 @@ use crate::session::{
 
 impl ExtensionProcess {
     /// Commit an admitted grant-less append and queue its native counted receipt.
-    ///
-    /// Requires `session_append_receipts_v1` and a live, owner-matched parent
-    /// pinned to the session's current head. Writer capacity and receipt bounds
-    /// are checked before the durable write; cancellation is fenced through ACK
-    /// enqueue. Success has already settled the child: callers must not respond
-    /// again. Failure does not enqueue a reply; callers supply the typed refusal.
     pub fn append_session_entry_request(
         &self,
         request_id: &ExtensionRequestId,

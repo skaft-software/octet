@@ -8,7 +8,6 @@ use super::welcome_card::{render_welcome_card, welcome_row_budget};
 use super::{ShellState, TranscriptBlock};
 use sexy_tui_rs::text_editor::{PromptZone, PromptZones};
 
-/// Source boundary of the literal shell tail retained by the renderer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ShellOutputSource {
     pub(super) start: usize,

@@ -466,7 +466,7 @@ fn assert_pi_setup_active(app: &App, pi: &PiHome) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manually_enabled_pi_compat_lists_all_live_palettes_and_withdraws_on_retirement() {
-    use crate::tui::theme::{TerminalBackground, ThemeSource, selectable_file_themes};
+    use crate::tui::theme::{selectable_file_themes, TerminalBackground, ThemeSource};
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let workspace = root.join("workspace");
@@ -555,17 +555,13 @@ async fn manually_enabled_pi_compat_lists_all_live_palettes_and_withdraws_on_ret
     // fleet shutdown deliberately forbids all later publication.
     on.executable_extensions.processes[0].shutdown().await;
     on.refresh_resource_paths_headless().await.unwrap();
-    assert!(
-        names(&on)
-            .iter()
-            .all(|name| name != "pi-setup-theme" && name != "new")
-    );
+    assert!(names(&on)
+        .iter()
+        .all(|name| name != "pi-setup-theme" && name != "new"));
     let off = app_for(&root, &workspace, false);
-    assert!(
-        names(&off)
-            .iter()
-            .all(|name| name != "pi-setup-theme" && name != "new")
-    );
+    assert!(names(&off)
+        .iter()
+        .all(|name| name != "pi-setup-theme" && name != "new"));
 }
 
 fn assert_octet_only(app: &App) {
@@ -665,36 +661,31 @@ async fn mirrored_default_catalog_enrichment_republishes_headless_model_facts() 
         .find(|spec| spec.api_name == "pi-mirror-model")
         .unwrap()
         .clone();
-    assert!(
-        app.catalog
-            .remove_model_if_endpoint(&contributed.id, &contributed.endpoint)
-    );
+    assert!(app
+        .catalog
+        .remove_model_if_endpoint(&contributed.id, &contributed.endpoint));
     app.readiness = crate::app::bootstrap::CatalogReadiness::Routes(vec!["openai"]);
     app.refresh_resource_paths_headless().await.unwrap();
     assert_pi_setup_active(&app, &pi);
     {
         let state = app.executable_extensions.host_state.lock().unwrap();
         let snapshot = state.pi_models.as_ref().unwrap();
-        assert!(
-            snapshot["available_models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|model| {
-                    model["provider"] == "pi-mirror-provider" && model["id"] == "pi-mirror-model"
-                })
-        );
+        assert!(snapshot["available_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| {
+                model["provider"] == "pi-mirror-provider" && model["id"] == "pi-mirror-model"
+            }));
         assert_eq!(snapshot["scoped_models"], serde_json::json!([]));
         assert_eq!(snapshot["all_models_status"]["status"], "catalog");
-        assert!(
-            snapshot["all_models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|model| {
-                    model["provider"] == "pi-mirror-provider" && model["id"] == "pi-mirror-model"
-                })
-        );
+        assert!(snapshot["all_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| {
+                model["provider"] == "pi-mirror-provider" && model["id"] == "pi-mirror-model"
+            }));
         assert_eq!(snapshot["configured_auth"]["pi-mirror-provider"], true);
         assert_eq!(snapshot["provider_auth_status"]["status"], "unavailable");
     }

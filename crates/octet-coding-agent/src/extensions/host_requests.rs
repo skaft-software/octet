@@ -475,8 +475,6 @@ impl ExecutableExtensions {
                         }
                     };
                     shell.queue_extension_message(message);
-                    // The counted queue fact precedes the effectful ACK, so a
-                    // retained synchronous getter cannot read the old value.
                     self.refresh_frontend_pending_messages(shell);
                     ExtensionRequestOutcome::Ok(serde_json::json!({}))
                 }

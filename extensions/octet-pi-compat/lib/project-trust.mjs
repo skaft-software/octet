@@ -1,6 +1,4 @@
 // Pi 1.0.2 trust-manager.js's no-project-resources rule (MIT; LICENSE.pi).
-// This is only the signal exposed to already admitted Pi factories. It never
-// grants native workspace trust or admits project resources into the mirror.
 import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,14 +8,10 @@ const projectResources = ['settings.json', 'mcp.json', 'extensions', 'skills', '
 function present(path) {
   try { lstatSync(path); return true; }
   catch (error) {
-    // An unreadable or linked/dangling resource must not turn into a trust grant.
     return !['ENOENT', 'ENOTDIR'].includes(error.code);
   }
 }
 
-// Keep the plain-workspace exception within a single owner. Once resources
-// appear or native trust is granted, only the host can subsequently grant trust;
-// removing resources or revoking host trust must not silently promote an owner.
 export function retainPiProjectTrust(state) {
   if (state.host.project_trusted === true) state.piPlainWorkspaceTrusted = false;
   else if (state.piPlainWorkspaceTrusted !== false) {

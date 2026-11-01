@@ -2544,8 +2544,6 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    // Terra's reviewed public API contract must not expand the independent
-    // Codex fallback, reasoning or entitlement allowlists.
     declaration.id == "openai" && (known_gpt_6_model(id) || id == "gpt-6.1-terra")
 }
 
@@ -9456,8 +9454,6 @@ pub fn rebuild_app(
     )
 }
 
-/// Rebuild resources at the explicit reload boundary without misreporting the
-/// old binding as shutdown or the replacement as a resumed session.
 pub fn rebuild_app_for_reload(app: App) -> anyhow::Result<App> {
     rebuild_app_with_start_reason(app, None, None, None, None, "reload")
 }

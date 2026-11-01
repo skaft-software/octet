@@ -10,6 +10,8 @@ mod append;
 mod append_tests;
 mod dispatch;
 mod history;
+#[cfg(all(test, unix))]
+mod reload_tests;
 pub(in crate::extension_process) use dispatch::attach;
 pub(in crate::extension_process) use dispatch::{publish, stage, PublicationPump, Staged};
 pub(super) mod receipt;
@@ -197,6 +199,43 @@ impl Store {
             preparation,
             revision,
         )
+    }
+
+    pub(in crate::extension_process) fn rebind_current(
+        &mut self,
+        previous: &Self,
+        owner: &ExtensionResourceOwner,
+        generation: u64,
+        profile: &SessionSnapshotProfile,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let mut replacement_owner = owner.clone();
+        replacement_owner.process_generation = generation;
+        self.current.insert(replacement_owner.clone(), None);
+        let current = previous.current.get(owner).ok_or_else(unavailable)?;
+        if let Some(view) = current {
+            let reservation = self.reserve(
+                profile,
+                view.bytes.len(),
+                view.descriptor.entry_count + view.descriptor.branch_count,
+                false,
+            )?;
+            let descriptor = Descriptor {
+                owner: replacement_owner.clone(),
+                transfer_id: String::new(),
+                preparation: None,
+                ..view.descriptor.clone()
+            };
+            self.revision = self.revision.max(descriptor.view_revision);
+            self.current.insert(
+                replacement_owner,
+                Some(Arc::new(View {
+                    bytes: view.bytes.clone(),
+                    descriptor,
+                    _reservation: reservation,
+                })),
+            );
+        }
+        Ok(())
     }
 
     pub(in crate::extension_process) fn invocation(

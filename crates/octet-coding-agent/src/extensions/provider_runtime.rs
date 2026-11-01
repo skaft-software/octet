@@ -1048,6 +1048,7 @@ pub(super) fn extension_provider_protocol(protocol: &str) -> Option<Protocol> {
         "openai_chat" => Some(Protocol::OpenAiChat),
         "openai_responses" => Some(Protocol::OpenAiResponses),
         "anthropic_messages" => Some(Protocol::AnthropicMessages),
+        "google_generative_ai" => Some(Protocol::GoogleGenerativeAi),
         _ => None,
     }
 }
@@ -1167,6 +1168,19 @@ mod credential_tests {
 
 #[cfg(test)]
 mod pi_catalog_fact_tests {
+    #[test]
+    fn google_extension_projection_uses_only_its_native_protocol() {
+        assert_eq!(
+            super::extension_provider_protocol("google_generative_ai"),
+            Some(Protocol::GoogleGenerativeAi)
+        );
+        assert_eq!(
+            super::extension_provider_protocol("google_interactions"),
+            None
+        );
+        assert_eq!(super::extension_provider_protocol("bedrock_converse"), None);
+    }
+
     use super::*;
 
     fn credential_catalog() -> ModelCatalog {
@@ -1404,6 +1418,7 @@ providers = true
         .unwrap();
         let mut extensions = ExecutableExtensions::default();
         extensions.host_state.lock().unwrap().session_id = Some("catalog-session".into());
+        extensions.host_state.lock().unwrap().has_ui = Some(false);
         let mut runtime = ExtensionRuntimeConfig::new(directory.path());
         runtime.provider_registry = Some(extensions.provider_runtime.registry());
         runtime.host_state = extensions.host_state.lock().unwrap().clone();
@@ -1466,14 +1481,19 @@ providers = true
                 })
         }));
         extensions.refresh_pi_model_catalog_without_selection(&catalog, None);
+        let context = process.current_context_for_resource_owner("catalog-owner");
+        assert_eq!(context.host.has_ui, Some(false));
+        let mut command_events = process.subscribe();
         process
-            .execute_command(
-                "inventory",
-                Vec::new(),
-                process.current_context_for_resource_owner("catalog-owner"),
-            )
+            .execute_command("inventory", Vec::new(), context)
             .await
             .unwrap();
+        while let Ok(event) = command_events.try_recv() {
+            assert!(!matches!(
+                event,
+                octet_agent::extension_process::ExtensionEvent::ComposerRequested { .. }
+            ));
+        }
         let captured = std::fs::read_to_string(trace).unwrap();
         let snapshot: Value = serde_json::from_str(&captured).unwrap();
         assert_eq!(snapshot["all"].as_array().unwrap().len(), expected_all);
@@ -1492,7 +1512,6 @@ providers = true
         )
         .unwrap()
         .len();
-        eprintln!("Pi catalog: {expected_all} all models, {expected_available} available models, {published_bytes} snapshot bytes");
         assert!(published_bytes <= 256 * 1024);
         assert_eq!(snapshot["found"]["id"], "unconfigured-model");
         assert_eq!(snapshot["extension"]["id"], "extension-model");

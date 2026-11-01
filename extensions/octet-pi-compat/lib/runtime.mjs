@@ -45,8 +45,8 @@ import { jitiCacheOptions } from './startup-cache.mjs';
 import { withToolHost } from './tool-host.mjs';
 import { createHostedRunner, hostedToolCatalog } from './extension-runner.mjs';
 
-const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials']);
-const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_inheritance_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1']);
+const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials', 'pi/settings/update']);
+const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_inheritance_v1', 'provider_google_generative_ai_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1', 'pi_settings_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -274,7 +274,8 @@ export class Runtime {
     this.assertSessionOwner(store); store.controller.signal.throwIfAborted();
     if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'active numeric parent_request_id required for synchronous append');
     const grant = store.leaf?.grant;
-    if (!grant && !['command/execute', 'shortcut/execute', 'tool/call'].includes(store.method)) unsupported('synchronous hook append', 'actual host session_leaf grant required');
+    const routed = Boolean(this.sessionTransport && (grant || this.features.has('session_append_receipts_v1')));
+    if (!grant && !routed && !['command/execute', 'shortcut/execute', 'tool/call'].includes(store.method)) unsupported('synchronous hook append', 'actual host session_leaf grant required');
     if (store.leaf && !grant) throw rpcError(-32002, 'session_leaf authority exhausted or revoked');
     // Consume locally before submission, including ambiguous transport failure.
     // Only an authenticated known successor may authorize another append.
@@ -283,7 +284,6 @@ export class Runtime {
       parent_request_id: store.id, resource_owner: store.state.owner, entry_type: type, data: clean,
       ...(grant ? { session_leaf: { grant_id: grant.grant_id, activation_epoch: grant.activation_epoch, operation_id: grant.operation_id } } : {}),
     }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) });
-    const routed = Boolean(this.sessionTransport && (grant || this.features.has('session_append_receipts_v1')));
     let committed;
     try { committed = appendReply(result, grant, store.state.owner, routed);
       if (routed) this.sessionTransport.append(store, result, grant, committed.successor); }
@@ -524,7 +524,7 @@ export class Runtime {
       tools: [...tools].map(([name, tool]) => toolWire(name, tool)),
       commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description?.trim() ? d.description : name })),
       hooks: hooks.sort(), flags: [...this.flags].map(([name, { definition }]) => ({ name, ...definition })),
-      shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ name: this.config.registrations?.shortcuts?.find(shortcut => shortcut.key === key)?.name ?? `pi-shortcut-${i}`, key, description: d.description || key })),
+      shortcuts: [...this.shortcuts].map(([key, { definition: d, nativeName }], i) => ({ name: nativeName ?? this.config.registrations?.shortcuts?.find(shortcut => shortcut.key === key)?.name ?? `pi-shortcut-${i}`, key, description: d.description || key })),
       events: [...this.events.keys()].sort(),
       tool_renderers: [...this.tools].filter(([, t]) => t.definition.renderCall || t.definition.renderResult).map(([name]) => name),
     };
@@ -747,6 +747,11 @@ export class Runtime {
       this.sessionTransport.invalidate(params.resource_owner, revision);
     }
     const state = this.states.get(key);
+    if (this.sessionTransport && params.host && Object.keys(params.host).length === 1 && typeof params.host.has_pending_messages === 'boolean') {
+      if (!state?.alive) return;
+      state.host = { ...state.host, has_pending_messages: params.host.has_pending_messages };
+      return;
+    }
     if (routedPublication) {
       // Retained host facts belong to the current foreground only. For any
       // other owner the invalidation above is the whole effect: that is a

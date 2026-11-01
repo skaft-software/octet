@@ -279,7 +279,6 @@ pub trait Terminal {
         true
     }
 
-    /// Set legacy indeterminate progress without claiming a percentage.
     fn set_progress(&mut self, active: bool) {
         use crate::program_status::ProgramStatus;
         self.write(if active {
@@ -289,9 +288,6 @@ pub trait Terminal {
         });
     }
 
-    /// Publish payload-free activity through this terminal's output owner.
-    /// `tern` additionally uses Tern's existing OSC 9;4 channel; other terminals
-    /// receive only OSC 7501, avoiding OSC 9 notification/progress collisions.
     fn set_program_status(
         &mut self,
         status: crate::program_status::ProgramStatus,
@@ -303,8 +299,6 @@ pub trait Terminal {
             return;
         }
         if let Some(sequence) = status.sequence(app) {
-            // Send legacy progress first: a terminal mapping OSC 9;4 to the
-            // root record must finish with the complete native identity/kind.
             if tern {
                 self.write(status.tern_progress_sequence());
             }

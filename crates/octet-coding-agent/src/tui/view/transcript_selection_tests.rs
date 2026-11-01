@@ -70,7 +70,6 @@ fn shell_output_drag_maps_painted_ascii_and_unicode_not_command_header() {
                 for step in 1..=visible_width(expected) as u16 {
                     shell.extend_transcript_selection(row, col + step);
                 }
-                // Inspect the payload without invoking the owner's clipboard helper.
                 assert_eq!(
                     shell.selected_plain_text().as_deref(),
                     Some(expected),
@@ -168,8 +167,6 @@ fn compact_shell_selection_starts_at_the_retained_tail_not_an_omitted_duplicate(
             shell.state.borrow_mut().application_viewport_requested = true;
             let id = shell.append_shell_in_progress("printf fixture".into());
             let tail = "SAME 界é\ntail-1\ntail-2\nEND";
-            // Even a literal copy of the elision label must not make that
-            // renderer-owned metadata a source row.
             let output = format!("SAME 界é\nPRIVATE-HIDDEN\n{hidden}\n{tail}\n");
             shell.finalize_shell(&id, output, 0);
             if threaded {
@@ -212,8 +209,6 @@ fn compact_shell_selection_starts_at_the_retained_tail_not_an_omitted_duplicate(
                 "threaded={threaded}, width={width}"
             );
             let (row, col) = cell("earlier visual rows hidden");
-            // A gesture on a single non-source offset cannot replace a prior
-            // selection. Test the metadata-only gesture with none retained.
             shell.state.borrow_mut().transcript_selection = None;
             shell.begin_transcript_selection(row, col, false);
             shell.extend_transcript_selection(row, col + 7);

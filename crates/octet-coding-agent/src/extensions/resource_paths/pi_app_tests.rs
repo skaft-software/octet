@@ -6,7 +6,7 @@ use octet_ai::{
     HostStreamTransport, Message, Request, Response, ResponseStream, StopReason, StreamEvent,
     Usage, UserPart,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -464,11 +464,9 @@ async fn headless_model_facts_precede_startup_and_resource_admission() {
             assert!(all.len() >= available.len());
             for models in [available, all] {
                 for id in ["first", "second"] {
-                    assert!(
-                        models
-                            .iter()
-                            .any(|model| model["provider"] == "fixture" && model["id"] == id)
-                    );
+                    assert!(models
+                        .iter()
+                        .any(|model| model["provider"] == "fixture" && model["id"] == id));
                 }
             }
             let scoped = row["scoped"].as_array().unwrap();
@@ -565,19 +563,16 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
     assert_eq!(system.matches("PI-EXPLICIT-CATALOG").count(), 1);
     for factory in ["first", "second"] {
         let name = format!("pi-{factory}-{current}");
-        assert!(
-            app.skills
-                .load(&name.clone())
-                .unwrap()
-                .instructions
-                .contains(&format!("PI-{factory}-{current}-BODY"))
-        );
-        assert!(
-            render(app, &name)
-                .unwrap()
-                .text
-                .contains(&format!("PI-{factory}-{current}-PROMPT argument"))
-        );
+        assert!(app
+            .skills
+            .load(&name.clone())
+            .unwrap()
+            .instructions
+            .contains(&format!("PI-{factory}-{current}-BODY")));
+        assert!(render(app, &name)
+            .unwrap()
+            .text
+            .contains(&format!("PI-{factory}-{current}-PROMPT argument")));
         assert!(!app.prompts.contains(&format!("pi-{factory}-{old}")));
         assert!(app.skills.load(&format!("pi-{factory}-{old}")).is_err());
         assert_eq!(
@@ -603,12 +598,10 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
         selected.glyph("prompt"),
         if current == "a" { ":" } else { ">" }
     );
-    assert!(
-        render(app, "user-proof")
-            .unwrap()
-            .text
-            .contains("USER PROMPT argument")
-    );
+    assert!(render(app, "user-proof")
+        .unwrap()
+        .text
+        .contains("USER PROMPT argument"));
     assert!(!app.resource_paths_pending());
 }
 
@@ -842,11 +835,9 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
     assert_eq!(fixture.app.config.skill_paths, original.skill_paths);
     assert_eq!(fixture.app.config.prompt_paths, original.prompt_paths);
     assert_eq!(fixture.app.config.theme_paths, original.theme_paths);
-    assert!(
-        crate::tui::theme::load_theme(&fixture.app.config)
-            .source_path()
-            .is_none()
-    );
+    assert!(crate::tui::theme::load_theme(&fixture.app.config)
+        .source_path()
+        .is_none());
     assert!(fixture.app.skills.load(&"pi-explicit".into()).is_ok());
     complete_rendered(&mut fixture.app, "user-proof").await;
     {
@@ -943,16 +934,12 @@ async fn configured_pi_callback_start_error_preserves_discovery_and_reload_witho
         issues[0].level,
         octet_agent::extension_process::ExtensionNotificationLevel::Warning
     );
-    assert!(
-        issues[0]
-            .message
-            .contains(root.join("factories/first.mjs").to_str().unwrap())
-    );
-    assert!(
-        issues[0]
-            .message
-            .contains("session_start callback failed and was skipped")
-    );
+    assert!(issues[0]
+        .message
+        .contains(root.join("factories/first.mjs").to_str().unwrap()));
+    assert!(issues[0]
+        .message
+        .contains("session_start callback failed and was skipped"));
     assert!(!issues[0].message.contains("private start failure details"));
     let rows = trace(&root);
     assert_eq!(
@@ -999,12 +986,10 @@ async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_
         .find(|row| row["kind"] == "start_refused")
         .unwrap();
     assert_eq!(refusal["code"], -32602);
-    assert!(
-        refusal["message"]
-            .as_str()
-            .unwrap()
-            .contains("no foreground session")
-    );
+    assert!(refusal["message"]
+        .as_str()
+        .unwrap()
+        .contains("no foreground session"));
     assert_eq!(
         fixture
             .app
@@ -1050,11 +1035,9 @@ async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_
             .count(),
         1
     );
-    assert!(
-        !rows
-            .iter()
-            .any(|row| row["kind"] == "started" || row["kind"] == "discover")
-    );
+    assert!(!rows
+        .iter()
+        .any(|row| row["kind"] == "started" || row["kind"] == "discover"));
     assert_unchanged_capture(&root, &fixture);
     fixture.app.executable_extensions.shutdown().await;
 }

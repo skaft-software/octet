@@ -1567,9 +1567,7 @@ async fn rpc_provider_reload_streams_only_from_the_replacement_process() {
         .enumerate()
         {
             let id = command["id"].as_str().unwrap().to_owned();
-            eprintln!("RPC phase {id}: sending");
             tx.send(RpcInput::Value(command)).await.unwrap();
-            eprintln!("RPC phase {id}: sent; waiting");
             let started = std::time::Instant::now();
             let deadline = started + std::time::Duration::from_secs(5);
             loop {
@@ -1604,11 +1602,6 @@ async fn rpc_provider_reload_streams_only_from_the_replacement_process() {
                         at <= deadline,
                         "RPC phase {id}: response arrived late at {:?}",
                         at.duration_since(started)
-                    );
-                    eprintln!(
-                        "RPC phase {id}: completed; response={:?}, observed={:?}",
-                        at.duration_since(started),
-                        started.elapsed()
                     );
                     if index == 2 {
                         observed_routes
@@ -1681,7 +1674,6 @@ async fn rpc_provider_reload_streams_only_from_the_replacement_process() {
     assert_ne!(routes[0].1, routes[1].1);
     assert_eq!(routes[0].0.provider, routes[1].0.provider);
     assert_eq!(routes[0].0.model, routes[1].0.model);
-    eprintln!("RPC registered owner/routes: {routes:?}");
     let completed = frames
         .iter()
         .filter(|frame| frame["type"] == "agent_end")
@@ -1813,10 +1805,6 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                 .keep();
             std::fs::write(directory.join("preentry-evidence"), "enabled").unwrap();
             std::fs::write(directory.join("rpc-evidence"), "enabled").unwrap();
-            eprintln!(
-                "RPC009 START reload={reload} mutation={mutation} directory={}",
-                directory.display()
-            );
             let mut app = crate::app::bootstrap::provider_reload_hook_test_app(&directory);
             if reload {
                 app = reload_resources(app).await.unwrap();
@@ -1923,7 +1911,6 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                         }
                     }
                     let entry = json!({"phase": phase, "acknowledgment": acknowledgment, "route": format!("{route:?}"), "callbacks": 0});
-                    eprintln!("RPC009 ACK {entry}");
                     chronology.push(entry);
                 }
                 let restored = runtime.registered_route_for_test(&selected).unwrap();
@@ -1940,7 +1927,6 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                     "all mutation ACKs received; release first Run poll",
                 )
                 .unwrap();
-                eprintln!("RPC009 RELEASE reload={reload} mutation={mutation} captured={captured:?} restored={restored:?}");
                 control.release_turn_started();
                 let first = settled(&mut frame_rx).await;
                 let first_callbacks =
@@ -1993,7 +1979,6 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                     std::fs::read_to_string(prefix.with_extension("streams")).unwrap_or_default(),
                     first_callbacks
                 );
-                eprintln!("RPC009 FRESH RELEASE reload={reload} mutation={mutation} route={fresh_route:?}");
                 control.release_turn_started();
                 let fresh = settled(&mut frame_rx).await;
                 let callbacks =
@@ -2009,12 +1994,12 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                     "fresh_valid": fresh_valid, "callbacks": callbacks, "live_pid": live_pid,
                     "first_frames": first, "fresh_frames": fresh})
             };
-            let (rpc_result, observation) =
-                tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                    tokio::join!(run_rpc_loop(app, input, output), producer)
-                })
-                .await
-                .expect("invalid RPC/barrier/shutdown timeout, not a behavioral red");
+            let (rpc_result, observation) = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                Box::pin(async { tokio::join!(run_rpc_loop(app, input, output), producer) }),
+            )
+            .await
+            .expect("invalid RPC/barrier/shutdown timeout, not a behavioral red");
             rpc_result.expect("invalid RPC dispatcher failure, not a behavioral red");
             let exits = std::fs::read_to_string(prefix.with_extension("exits")).unwrap();
             let exits = exits
@@ -2058,11 +2043,6 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
                 serde_json::to_vec_pretty(&observation).unwrap(),
             )
             .unwrap();
-            eprintln!("RPC009 OUTCOME {observation}");
-            eprintln!(
-                "RPC009 SHUTDOWN directory={} exits={exits:?} acks={acknowledgments}",
-                directory.display()
-            );
             if observation["old_valid"] != true || observation["fresh_valid"] != true {
                 behavioral_failures.push(json!({"reload": reload, "mutation": mutation, "old_valid": observation["old_valid"], "fresh_valid": observation["fresh_valid"]}));
             }
@@ -2125,10 +2105,6 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                     .unwrap()
                     .keep();
                 std::fs::write(directory.join("preentry-evidence"), "enabled").unwrap();
-                eprintln!(
-                    "PREENTRY start reload={reload} mutation={mutation} directory={}",
-                    directory.display()
-                );
                 let mut app = crate::app::bootstrap::provider_reload_hook_test_app(&directory);
                 if reload {
                     app = reload_resources(app).await.unwrap();
@@ -2190,9 +2166,6 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                         }
                     }
                     phase_routes.push(format!("{current:?}"));
-                    eprintln!(
-                    "PREENTRY ACK reload={reload} mutation={mutation} phase={phase} route={current:?}"
-                );
                 }
                 let restored = runtime
                     .registered_route_for_test(&app.model.spec.id)
@@ -2322,7 +2295,6 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                     "error": result.is_err(), "old_callbacks": callbacks, "live_pid": live_pid,
                     "positive": positive, "exact_success": exact_success,
                 });
-                eprintln!("PREENTRY OUTCOME {observation}");
                 std::fs::write(
                     directory.join("observation.json"),
                     serde_json::to_vec_pretty(&observation).unwrap(),
@@ -2368,10 +2340,6 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
         let callbacks =
             std::fs::read_to_string(prefix.with_extension("streams")).unwrap_or_default();
         assert_eq!(callbacks, observation["callbacks"].as_str().unwrap());
-        eprintln!(
-            "PREENTRY SHUTDOWN directory={} exits={exits:?} acks={acknowledgments}",
-            prefix.display()
-        );
         let valid = if observation["positive"] == true {
             observation["exact_success"] == true
                 && observation["old_callback_count"].as_u64().unwrap()

@@ -15,6 +15,7 @@ export function nativeProviderDelegate(model, context, options = {}) {
   if (!bound) unsupported('native provider stream', 'an admitted provider request is required');
   const { runtime, job } = bound;
   runtime.require('provider_inheritance_v1');
+  if (model.api === 'google-generative-ai') runtime.require('provider_google_generative_ai_v1');
   if (!job.entry.inherited || !isDeepStrictEqual(model, job.model.pi)) unsupported('native provider stream', 'the delegate is bound to the selected inherited model');
   if (job.entry.config.baseUrl || job.entry.apiKey !== undefined) unsupported('native provider stream', 'native endpoint and authentication remain host-owned');
   fields(options, ['signal', 'apiKey', 'maxTokens', 'temperature', 'cacheRetention', 'sessionId', 'reasoning', 'onPayload'], 'native provider options');

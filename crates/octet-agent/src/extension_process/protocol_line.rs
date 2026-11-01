@@ -202,6 +202,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "pi/settings/read" | "pi/settings/update" => {
+                pi_settings::dispatch(state, object, method, params)?;
+            }
             "commands/register" => {
                 runtime_commands::register_runtime_commands(state, object, params)?;
             }

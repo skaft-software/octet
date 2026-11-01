@@ -91,8 +91,6 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
         }
         TranscriptBlock::Shell(shell) => {
             let mut text = shell_copy_header(shell);
-            // Output rows are selectable transcript text too. Without their
-            // source, painted-row alignment can only name the command header.
             let output =
                 sanitize_for_terminal(&super::normalize_carriage_return_progress(&shell.output));
             if !output.is_empty() {
@@ -554,9 +552,6 @@ impl CopyRows {
         memo.content_left = Some(geometry.content_left);
         let mut cursor = memo.rows.last().map_or(0, |row| row.cursor_after);
         for (row, line) in content.iter().enumerate().take(to).skip(memo.rows.len()) {
-            // Shell headers paint a different marker/status from their copy
-            // text. Fence the two sources rather than finding output inside
-            // the command (for example, the argument of `printf`).
             let source = match (output_start, row) {
                 (Some(start), 0) => &copy_text[..start.saturating_sub(1).min(copy_text.len())],
                 (Some(start), 1) => {
@@ -566,8 +561,6 @@ impl CopyRows {
                 }
                 _ => copy_text,
             };
-            // Literal shell output names only this painted fragment, not its
-            // entire source line: later visual rows may show the rest of it.
             let metadata = output_start.is_some()
                 && row > 0
                 && geometry
@@ -581,12 +574,9 @@ impl CopyRows {
                 output_start.is_some() && row > 0,
             );
             if metadata {
-                // Elision/placeholder rows are renderer facts, even when the
-                // same wording happens to occur in the command's output.
                 line.clone_into(&mut aligned.painted);
             }
             if output_start.is_some() && row == 0 {
-                // Appended output cannot change a header-only search.
                 aligned.to_text_end = false;
                 aligned.missed.clear();
             }

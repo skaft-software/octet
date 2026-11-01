@@ -430,8 +430,6 @@ impl<'a> TUI<'a> {
         self.terminal.write(&format!("\x1b]2;{clean}\x07"));
     }
 
-    /// Publish semantic program activity through the same terminal output owner
-    /// as frames. Plain/noninteractive terminals never receive these controls.
     pub fn set_program_status(
         &mut self,
         status: crate::program_status::ProgramStatus,

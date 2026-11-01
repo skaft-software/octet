@@ -18,9 +18,6 @@ function cachedTranslation(entries, namespace) {
   if (cached?.length !== entries.length) byKey.set(key, cached = { length: entries.length, result: translateSessionEntries(entries, namespace) });
   return cached.result;
 }
-// Keep the cache cloneable, then restore the same unavailable-fact guards used
-// by live message observers. A footer reading unknown cost must not get either
-// fictional zero accounting or an incidental undefined.total TypeError.
 function observedEntry(entry) {
   if (entry.type === 'message' && entry.message?.role === 'assistant') {
     entry.message = assistantObservation(entry.message);

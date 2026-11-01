@@ -8,8 +8,4 @@ export {
 } from '../lib/children.mjs';
 import { unsupported } from '../lib/errors.mjs';
 export class DefaultResourceLoader { constructor() { unsupported('DefaultResourceLoader', 'child resource discovery, callbacks and system-prompt replacement are not yet bound'); } }
-export class SettingsManager {
-  constructor() { unsupported('SettingsManager', 'native child settings inherit from the owning host'); }
-  static create() { unsupported('SettingsManager.create', 'Pi settings files cannot replace host policy'); }
-  static inMemory() { unsupported('SettingsManager.inMemory', 'native child settings inherit from the owning host'); }
-}
+export { SettingsManager } from '../lib/settings-manager.mjs';

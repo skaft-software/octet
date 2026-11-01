@@ -1820,11 +1820,8 @@ pub(crate) struct ShellState {
     /// Ephemeral tool-owned prompt rendered in place of the editor. Secret
     /// keystrokes never enter `editor` or any transcript/session structure.
     pub(crate) tool_input_prompt: Option<String>,
-    /// Actual host-owned gate, independent of the currently inspected panel.
     terminal_permission_pending: bool,
-    /// Foreground auth/local-shell activity and settlement, never inferred text.
     terminal_operation_status: Option<sexy_tui_rs::program_status::ProgramStatus>,
-    /// Host-local operation identity survives coalesced paints and renderer replacement.
     terminal_operation_generation: u64,
     /// Identity of one exclusive request; edits never change this fence.
     pub(crate) tool_input_epoch: u64,
@@ -3966,8 +3963,6 @@ fn render_shell_output(
     let normalized = normalize_carriage_return_progress(&shell.output);
     let safe = sanitize_for_terminal(&normalized);
     let mut output_rows = Vec::new();
-    // OSC targets are repeated by the wrapper on each physical row. Bound
-    // both the encoded target and total added payload before decorating it.
     let mut link_budget = 64 * 1024;
     let content_width = usize::from(width)
         .saturating_sub(visible_width(output_indent))
@@ -3981,9 +3976,6 @@ fn render_shell_output(
         if line.trim().is_empty() {
             continue;
         }
-        // Retain literal web targets before wrapping, just like rich transcript
-        // links. The terminal backend strips OSC 8 on unsupported terminals;
-        // application-owned hit testing still sees the complete target.
         let linked: String = line
             .split_inclusive(char::is_whitespace)
             .map(|part| {
@@ -3993,7 +3985,6 @@ fn render_shell_output(
                     .flatten()
                     .filter(|url| url.as_str().len() <= 2048);
                 let link_bytes = encoded.as_ref().map_or(0, |url| {
-                    // One extra row allows a token starting after other text.
                     (wrap_text_with_ansi(target, content_width).len() + 1)
                         * (url.as_str().len() + 16)
                 });
@@ -4024,8 +4015,6 @@ fn render_shell_output(
             output_indent,
             width,
         );
-        // Capture the source boundary before clipping, where repeated text is
-        // still unambiguous. Never search omitted rows to locate the tail.
         let mut cursor = 0;
         for row in &rows {
             let plain = strip_terminal_sequences(row);
@@ -4035,8 +4024,6 @@ fn render_shell_output(
                 source_offsets.push(line_start + cursor);
                 cursor += fragment.len();
             } else {
-                // At a one-cell width, fit_line may replace a wide grapheme
-                // with an ellipsis. That decoration consumes no copy bytes.
                 source_offsets.push(line_start + cursor);
             }
         }
@@ -5760,9 +5747,6 @@ impl InteractiveShell {
         }
     }
 
-    /// Real foreground messages awaiting steering or follow-up delivery.
-    /// Recalled steering tombstones, context-only appends and `nextTurn`
-    /// messages do not enter Pi's steering/follow-up queue observation.
     pub(crate) fn has_pending_messages(&self) -> bool {
         use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
         let state = self.state.borrow();

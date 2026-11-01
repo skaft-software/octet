@@ -301,10 +301,16 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert("input_transform_v1");
             }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.pi_settings
+            {
+                allowed.insert(pi_settings::FEATURE);
+            }
             if offered_host_services.provider_proxy {
                 allowed.insert("provider_proxy_v1");
                 if offered_host_services.provider_inheritance {
                     allowed.insert("provider_inheritance_v1");
+                    allowed.insert("provider_google_generative_ai_v1");
                 }
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
@@ -398,6 +404,13 @@ pub(super) fn negotiate_contributions_with_host_services(
                 if offered_host_services.transcript_render {
                     allowed.insert(EXTENSION_FEATURE_TRANSCRIPT_RENDER);
                 }
+            }
+            if features.contains("provider_google_generative_ai_v1")
+                && !features.contains("provider_inheritance_v1")
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_google_generative_ai_v1 requires provider_inheritance_v1".into(),
+                ));
             }
             if features.contains("provider_inheritance_v1")
                 && !features.contains("provider_proxy_v1")

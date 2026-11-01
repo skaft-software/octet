@@ -117,9 +117,10 @@ export class SessionTransport {
     exact(params, ['resource_owner', 'snapshot', 'host'], 'session snapshot prepare');
     const d = descriptor(params.snapshot, params.resource_owner, 'history');
     if (d.preparation !== null) invalid('read-only snapshot preparation');
-    this.runtime.bind({ context: { resource_owner: params.resource_owner, host: params.host } }, store);
     const key = ownerKey(d.owner), previous = this.current.get(key);
     if (previous && previous.revision > d.view_revision) throw unavailable();
+    const host = { ...params.host, ...this.runtime.states.get(key)?.host };
+    this.runtime.bind({ context: { resource_owner: params.resource_owner, host } }, store);
     const barrier = this.invalidate(d.owner, d.view_revision);
     store.preparationBarrier = barrier; store.preparationOwner = key;
     let view;

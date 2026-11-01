@@ -278,7 +278,10 @@ the native slash popup remains available around their projected rows.
   and active-run steering/follow-up queues, including drained but undelivered
   input; `nextTurn` and context-only messages are excluded. This read-only fact
   grants no UI authority. Hosts without a queue consumer omit the optional fact
-  rather than inventing an empty queue.
+  rather than inventing an empty queue. A read-only `session/snapshot/prepare`
+  may seed missing host facts for its exact owner, but does not replace that
+  owner's known live facts with captured metadata. History still advances through
+  the separately checked snapshot revision and head.
 
 Focused component keys/mouse gestures do not also edit the composer or reach
 ordinary terminal-input observers. Host confirmation/input panels retain

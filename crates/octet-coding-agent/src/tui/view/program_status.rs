@@ -1,8 +1,3 @@
-//! Payload-free terminal chrome, projected only from host-owned lifecycle facts.
-//!
-//! Session names still belong exclusively to OSC 2. Never copy prompts, tool
-//! arguments, approval details, OAuth instructions/codes or errors into OSC 7501.
-
 use sexy_tui_rs::program_status::{BlockedKind, ProgramStatus};
 
 use super::{Panel, PanelAction, ShellState, TranscriptBlock};
@@ -15,8 +10,6 @@ pub(super) enum ActivityOwner {
 }
 
 pub(super) fn snapshot(state: &ShellState) -> (ProgramStatus, Option<ActivityOwner>) {
-    // A foreground result cannot settle an active parent. Its owner is used
-    // only while it is the authoritative source of the reported activity.
     let foreground = state
         .terminal_operation_status
         .filter(|status| status.is_transient() || !state.run.is_active());
@@ -51,8 +44,6 @@ fn activity_with_foreground(
         return ProgramStatus::Blocked(BlockedKind::Permission);
     }
     if state.tool_input_prompt.is_some() {
-        // Secret is not synonymous with authentication. A private tool question
-        // is still a question; only a real auth owner reports `kind=auth`.
         return ProgramStatus::Blocked(BlockedKind::Question);
     }
     if let Some(status) = foreground {
@@ -80,9 +71,6 @@ fn activity_with_foreground(
     }
 }
 
-/// Shared by replacement renderers, not by sessions on other ptys. The terminal
-/// owns done/error lifetime; do not reassert them on every paint or clear them
-/// when changing screens, suspending, or leaving the UI.
 #[derive(Default)]
 pub(super) struct Publisher {
     last: Option<ProgramStatus>,
@@ -141,7 +129,6 @@ impl super::InteractiveShell {
                 phase: DeviceLoginPhase::Waiting | DeviceLoginPhase::SlowDown,
                 ..
             } => ProgramStatus::Blocked(BlockedKind::Auth),
-            // Credential commit is not completion of the catalog reload.
             LoginProgress::SignedIn => ProgramStatus::Working,
             _ => ProgramStatus::Working,
         });
