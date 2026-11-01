@@ -437,6 +437,49 @@ async fn silent_startup_lifecycle_keeps_typed_input_and_names_the_phase_off_scre
     );
 }
 
+#[test]
+fn pi_startup_status_requires_an_enabled_process_capable_adapter() {
+    let mut config = terminal_theme_test_config(PathBuf::from("/startup-fixture"));
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+    config.enabled_extensions.push("octet-pi-compat".to_owned());
+    assert_eq!(startup_app_operation(&config), STARTUP_PI_APP_OPERATION);
+    config.start_extension_processes = false;
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+    config.start_extension_processes = true;
+    config.sandbox.allow_process = false;
+    config.sandbox.allow_shell = false;
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+}
+
+#[tokio::test]
+async fn pi_startup_lifecycle_keeps_typing_while_preparing_the_setup() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let mut done_tx = Some(done_tx);
+    let source = tokio_stream::iter([Ok(Event::Paste("retained Pi startup draft".into()))]).chain(
+        futures_util::stream::poll_fn(move |_| {
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(());
+            }
+            std::task::Poll::Ready(None)
+        }),
+    );
+    let mut input = EventStream::from_stream(source);
+    let mut shell = InteractiveShell::test_shell();
+    run_blocking_startup_lifecycle(
+        &mut shell,
+        &mut input,
+        STARTUP_PI_APP_OPERATION,
+        move || {
+            done_rx.recv_timeout(Duration::from_secs(5))?;
+            Ok(())
+        },
+    )
+    .await
+    .expect("Pi preparation completes after input was handled");
+    assert_eq!(shell.pending(), "retained Pi startup draft");
+    assert!(!shell.close_requested());
+}
+
 #[tokio::test]
 async fn osc11_startup_lifecycle_keeps_handed_off_typing_paste_and_shortcuts() {
     use crossterm::event::KeyEvent;

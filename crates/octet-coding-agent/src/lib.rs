@@ -73,6 +73,14 @@ pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// Re-apply the terminal attributes the interactive frontend started with.
+///
+/// Call it after the [`build_runtime`] runtime is dropped: its I/O driver
+/// watches the terminal, and a late readiness check there clears `PENDIN`.
+pub fn restore_starting_terminal_attributes() {
+    tui::terminal::restore_starting_attributes();
+}
+
 /// With no arguments, exit once startup has dispatched to the interactive
 /// frontend. For startup benchmarks only (`benchmarks/startup.sh`).
 const STARTUP_BENCH_ENV: &str = "OCTET_BENCH";

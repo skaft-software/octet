@@ -877,8 +877,11 @@ mod tests {
                 "gpt-6-astra",
                 "gpt-6-sol",
                 "gpt-6.1-sol",
+                "gpt-6.1-terra",
                 "gpt-6-luna",
                 "gpt-6-unverified",
+                "gpt-6.1-terra-pro",
+                "openai/gpt-6.1-terra",
             ] {
                 register_discovered_model(
                     &mut catalog,
@@ -909,7 +912,11 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     model.spec.cache.supports_explicit_prompt_cache_mode,
-                    provider.id == "openai" && id != "gpt-6-unverified",
+                    provider.id == "openai"
+                        && !matches!(
+                            id,
+                            "gpt-6-unverified" | "gpt-6.1-terra-pro" | "openai/gpt-6.1-terra"
+                        ),
                     "{}/{id}",
                     provider.id,
                 );

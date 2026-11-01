@@ -164,15 +164,25 @@ async fn run_prompt(
     for notification in composition.notifications {
         crate::output::stderr_multiline(format!("extension: {notification}"));
     }
-    app.agent.set_system_prompt(composition.system);
-    app.agent.set_prompt_display_text(Some(display_prompt));
     let mut parts = vec![InputPart::Text(composition.prompt)];
     parts.extend(media.into_iter().map(InputPart::Media));
     let mut input = UserInput::from(parts);
     input.custom_messages = composition.custom_messages;
-    let mut events = json.then(|| JsonEventStream::new(app, &input));
     let prior_cache_misses = crate::commands::cache_miss_count(app);
-    let mut run = match app.agent.prompt_with_responses_prewarm(input.clone()).await {
+    let (submission, diagnostics) = app.prepare_submission(input.clone())?;
+    app.agent.set_system_prompt(composition.system);
+    app.agent.set_prompt_display_text(Some(display_prompt));
+    let mut events = json.then(|| JsonEventStream::new(app, &input));
+    for diagnostic in diagnostics {
+        crate::output::stderr_multiline(diagnostic);
+    }
+    let mut run = match submission
+        .start(
+            &mut app.agent,
+            octet_agent::PreparedPromptMode::ResponsesPrewarm,
+        )
+        .await
+    {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
             "{}",

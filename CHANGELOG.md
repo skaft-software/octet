@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pi's `ctx.isProjectTrusted()` applies its plain-repository rule for already
+  enabled factories, allowing repo tooling such as language servers to start
+  when no trust-requiring project resources exist. The signal cannot silently
+  re-promote an owner after resources disappear or native trust is revoked;
+  replacement owners reevaluate it. Native workspace trust, project-resource
+  loading and tool policy are unchanged.
+- Pi hook callback waits now share one bounded deadline, including the late-handler
+  reserve. Resource discovery budgets 4 s for callbacks against the host's 5 s
+  deadline, and tool guards remain fail-closed. Queueing, transport and pending
+  tracked host operations are outside the callback budget.
+- Resource `/reload` ends the old extension session binding with
+  `interrupted` / `reload` and starts the replacement with `reload`, rather than
+  reporting shutdown/resume. Ordinary quit and session resume remain distinct.
+- Interactive shutdown reapplies saved terminal attributes after the runtime
+  stops, preserving macOS `PENDIN` through extension reload and cleanup.
+- Pi automatic-mirror capture and the live runner share one persistent transform
+  and compile-cache directory instead of warming a cache the runner did not use.
+- Explicitly enabled Pi setup preparation displays **Loading your Pi setup**
+  while the native input pump retains typing and resize handling. Cold catalog
+  capture still precedes the fully initialized branded frame; no cold-start
+  performance parity is claimed.
+
+### Known limitations
+
+- Pi extensions require a configured model. **Continue without a provider**
+  starts a read-only native session without the Pi adapter.
+
 ## [0.10.0]
 
 **The first Pi-compatible octet release.** Bring your Pi extensions, skills,
@@ -10,6 +39,14 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 
 ### Added
 
+- Interactive terminal-tab activity via OSC 7501 v0.4: `app=octet`, host-owned
+  working/blocked/done/error, and idle on cancellation. Reports contain no
+  private text or fabricated percentages, preserve OSC 2 session titles, and
+  stay out of plain/print/RPC/redirected output. Rex can consume its documented
+  native status protocol; tab-logo association remains terminal-owned.
+- Direct OpenAI `gpt-6.1-terra` uses Responses for tools, its exact reasoning
+  choices, 1.05M context / 128K output, and reviewed public cache/long-context
+  pricing. This does not grant a Codex route or subscription pricing.
 - The release catalog includes `octet-pi-compat` among six optional bundles,
   all at 0.10.0 with exact `=0.10.0` host pins and API `0.4`. Installation and
   discovery remain inert; enabling the stock bridge imports/runs enabled Pi
@@ -37,6 +74,30 @@ See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries
 
 ### Fixed
 
+- Exiting the interactive TUI restores the terminal attributes it started with,
+  including `pendin` on macOS, matching Pi.
+- Tern progress uses indeterminate working instead of 0%, reflects actual
+  user gates and failure, and shares lifecycle/deduplication with ANSI rendering.
+  Distinct fast foreground operations retain separate results; sign-in settles
+  only after catalog readiness. Suspension/exit retire live activity without
+  erasing persistent OSC 7501 done/error. Existing TSP app identity is retained;
+  an octet tab-logo catalog entry still requires upstream Tern support. Actual
+  Rex/Tern runtime pixels remain unverified.
+- Pi session context/projection helpers tolerate absent historical provider
+  identity without fabricating it or weakening unavailable-usage/cost guards.
+- Shell output selections copy the sanitized, progress-normalized output instead
+  of a fragment of the command header, including wide Unicode text. Wrapped
+  continuation rows retain their own source spans instead of copying the first row.
+  Compact tails start at the renderer's retained source boundary; omitted
+  duplicates and elision labels cannot steal a visible output selection.
+- Literal HTTP(S) URLs in shell output retain their complete click targets across
+  wrapping, including terminals without OSC 8 support; stationary clicks preserve
+  the draft and keep the existing browser-safety and stale-geometry fences.
+  Encoded targets over 2 KiB and links beyond the 64 KiB wrapped-payload budget
+  remain plain text to bound decoration allocation.
+- Copied Pi session entries preserve unavailable-usage/cost diagnostics instead
+  of an incidental `undefined.total` error. Subscription prices remain unknown
+  when not recorded; no zero price is fabricated for custom footers.
 - Pi assistant messages from `ctx.sessionManager` carry their recorded token
   usage, cost and stop reason, so Pi footers and status lines such as the
   `custom-footer` example work once a session has a model reply. Unpriced and
@@ -687,12 +748,10 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
   absolute load deadline (22 s) instead of each getting a minimum wait after the
   20 s budget runs out, so many stalled factories can no longer push the load past
   the host's 30 s limit.
-- Starting with `octet-pi-compat` enabled no longer keeps the screen blank for
-  seconds. The Pi mirror loaded every factory up to three times before the first
-  frame (about 7-11 s for a 20-extension setup) on every start. It now reuses its
-  captured catalog while your Pi setup, its factories, the adapter, Node and the
-  installed Pi are unchanged, and otherwise captures them in one warm process:
-  the same setup draws its first frame in about half a second.
+- Starting with `octet-pi-compat` enabled shows a typeable loading status during
+  mirror preparation. The mirror reuses its captured catalog when the Pi setup,
+  factories, adapter, Node and installed Pi are unchanged; cold capture still
+  precedes the fully initialized frame and Pi-equivalent timing is not established.
 - The Pi mirror applies its skills, prompts and theme again when the interactive
   shell attaches it after the first frame. Its `session_start` arrived before the
   session it belongs to was shared with it, so an extension that read
@@ -700,27 +759,23 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
   startup ended with `reload failed: … requires successful settled session_start`
   while the Pi footer still drew over octet's theme. A Pi default model served by
   one of your extensions' providers is also selected now.
-- Prompts no longer fail with `extension input hook timed out` or `before_prompt
-  hook exceeded 5s` when a Pi extension supplies the editor. Its editor calls are
-  answered by the terminal, which did not serve them while waiting for those
-  hooks, so both sides waited out the deadline; Enter pressed meanwhile showed
-  `operation in progress`.
+- The terminal now serves a Pi editor's calls while waiting for prompt hooks,
+  avoiding a prior deadlock that produced `extension input hook timed out` or
+  `before_prompt hook exceeded 5s` and left Enter showing `operation in progress`.
+  Other delays can still exceed the native deadline.
 - The model picker and `--list-models` show the current OpenCode and OpenCode Go
   model lists instead of only the built-in ones; the live list used to arrive
   only on a later launch, and a failed fetch is now reported.
 - `[Extension issues]` names the error code an extension stopped with (for
   example `pi_anthropic_attribution_host_adapter_missing`) instead of only
   saying its details were redacted; the message itself is still never shown.
-- A stalled Pi extension no longer takes the mirror down with it. Every Pi hook
-  runs on one ordered queue, so one factory whose handler never settled (a network
-  call, a child process, an MCP connection) held it forever: startup failed with
-  `resources_discover failed … requires successful settled session_start`,
-  `/reload` failed, and the next prompt failed with `before_prompt hook exceeded
-  5s` and stayed in the composer. A handler now has a time budget (5 s for
-  lifecycle events; 2 s each and 4 s in total for the prompt hooks). One that
-  outlives it keeps running, is named once in `[Extension issues]`, and is skipped
-  while it stays busy; a tool guard that cannot answer in time blocks the call
-  rather than letting it through. A prompt sent while an extension is still
+- Stalled Pi callbacks now have a bounded wait on the ordered hook queue. A
+  callback that outlives its budget keeps running, is named once in `[Extension
+  issues]`, and is skipped while it stays busy; a tool guard that cannot answer
+  in time blocks the call. Prompt phases each allow 2 s per callback and 4 s
+  total; resource discovery allows 4 s total. Queueing, transport, synchronous
+  JavaScript and the flush of tracked host operations are not covered, so a
+  native deadline can still expire. A prompt sent while an extension is still
   starting waits up to 12 s for it, then continues without it. With
   `OCTET_STARTUP_TRACE=1`, each handler prints one `pi-compat.handler` line with
   its factory and duration, which names the slow one.

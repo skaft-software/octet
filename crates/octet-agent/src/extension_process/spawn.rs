@@ -234,6 +234,7 @@ pub(super) async fn spawn_connection(
         lifecycle_events: BTreeSet::new(),
     }));
     let tool_catalog = Arc::new(StdRwLock::new(Vec::new()));
+    let command_catalog = Arc::new(StdRwLock::new(Vec::new()));
     let health = Arc::new(StdRwLock::new(ConnectionHealth {
         state: ExtensionHealthState::Initializing,
         last_error: None,
@@ -293,6 +294,7 @@ pub(super) async fn spawn_connection(
         provider_owner.clone(),
         Arc::clone(&provider_streams),
         Arc::clone(&tool_catalog),
+        Arc::clone(&command_catalog),
         catalog_updates,
         delegation_service,
         session_lifecycle.clone(),
@@ -355,6 +357,7 @@ pub(super) async fn spawn_connection(
         initialization_changed: Arc::clone(&initialization_changed),
         catalog_guard: StdRwLock::new(()),
         tool_catalog,
+        command_catalog,
         catalog_revision: AtomicU64::new(0),
         health,
         events: events.clone(),
@@ -394,6 +397,12 @@ pub(super) async fn spawn_connection(
         provider_proxy: config.provider_registry.is_some()
             && descriptor.manifest.contributes.providers
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        provider_inheritance: config
+            .provider_registry
+            .as_ref()
+            .is_some_and(|registry| registry.native_catalog().is_some())
+            && descriptor.manifest.contributes.providers
+            && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         remote_ui: config.remote_ui.is_some(),
         transcript_render: config.transcript_render && config.remote_ui.is_some(),
         provider_pipeline: config.provider_pipeline
@@ -429,6 +438,9 @@ pub(super) async fn spawn_connection(
         .collect::<Vec<_>>();
     if offered_host_services.provider_proxy {
         optional_features.push("provider_proxy_v1".to_owned());
+        if offered_host_services.provider_inheritance {
+            optional_features.push("provider_inheritance_v1".to_owned());
+        }
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && descriptor
@@ -454,6 +466,8 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());
         optional_features.push(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1.to_owned());
         optional_features.push(EXTENSION_FEATURE_NOTIFICATION_SOURCE_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1.to_owned());
         if !descriptor
             .manifest
             .capabilities
@@ -523,6 +537,11 @@ pub(super) async fn spawn_connection(
     }
     if offered_host_services.tool_composition {
         optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push("composition_builtin_tools_v1".to_owned());
+            optional_features.push("composition_preflight_v1".to_owned());
+            optional_features.push(nested_inference::FEATURE.to_owned());
+        }
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4
         && offered_host_services.remote_ui
@@ -560,6 +579,7 @@ pub(super) async fn spawn_connection(
     if let Some(profile) = &session_offer {
         optional_features.push(transport::OWNER_ROUTES.to_owned());
         optional_features.push(transport::SNAPSHOT_TRANSPORT.to_owned());
+        optional_features.push(transport::APPEND_RECEIPTS.to_owned());
         debug_assert_eq!(
             SessionSnapshotProfile::for_frame(session_offer_frame)
                 .ok()
@@ -748,6 +768,7 @@ pub(super) async fn spawn_connection(
     *write_std_lock(&connection.protocol) = protocol;
     *write_std_lock(&connection.api_v03_contract) = api_v03_contract;
     *write_std_lock(&connection.tool_catalog) = contributions.tools.clone();
+    *write_std_lock(&connection.command_catalog) = contributions.commands.clone();
     if !defer_post_initialize {
         connection.activate_post_initialize();
     }

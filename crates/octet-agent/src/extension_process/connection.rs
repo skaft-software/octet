@@ -46,9 +46,18 @@ impl ProtocolFrameLimit {
 }
 
 pub(super) struct ProviderStreamIngress {
+    pub(super) delegate: Option<Arc<native_provider::NativeDelegate>>,
     pub(super) sender: mpsc::Sender<api_v03::ProviderStreamEvent>,
     pub(super) next_sequence: usize,
     pub(super) terminal: bool,
+}
+
+impl Drop for ProviderStreamIngress {
+    fn drop(&mut self) {
+        if let Some(delegate) = &self.delegate {
+            delegate.cancelled.notify_one();
+        }
+    }
 }
 
 pub(super) type ProviderStreams = Arc<StdMutex<HashMap<String, ProviderStreamIngress>>>;
@@ -81,6 +90,7 @@ pub(super) struct ProcessConnection {
     pub(super) initialization_changed: Arc<Notify>,
     pub(super) catalog_guard: StdRwLock<()>,
     pub(super) tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
+    pub(super) command_catalog: Arc<StdRwLock<Vec<CommandDefinition>>>,
     pub(super) catalog_revision: AtomicU64,
     pub(super) health: Arc<StdRwLock<ConnectionHealth>>,
     pub(super) events: broadcast::Sender<ExtensionEvent>,
@@ -180,6 +190,7 @@ pub(super) struct ChildResponseState {
     pub(super) changed: Notify,
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
     pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
+    pub(super) inference_id: StdMutex<Option<String>>,
     pub(super) session_leaf_cancel: StdMutex<Option<crate::session_leaf::SessionLeafCancelHandle>>,
 }
 
@@ -790,7 +801,30 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, true, true, None, None, None, None, None, None,
+            method, params, timeout, true, true, None, None, None, None, None, None, None,
+        )
+        .await
+    }
+
+    pub(super) async fn request_provider_stream(
+        self: &Arc<Self>,
+        params: serde_json::Value,
+        timeout: Duration,
+        route: &mut crate::extension_provider::ExtensionProviderRoute,
+    ) -> Result<serde_json::Value, ExtensionRuntimeError> {
+        self.request_inner(
+            methods::PROVIDER_STREAM,
+            params,
+            timeout,
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(route),
         )
         .await
     }
@@ -812,6 +846,7 @@ impl ProcessConnection {
             None,
             None,
             resource_owner,
+            None,
             None,
             None,
         )
@@ -837,6 +872,7 @@ impl ProcessConnection {
             None,
             resource_owner,
             Some(request_started),
+            None,
             None,
         )
         .await
@@ -867,6 +903,7 @@ impl ProcessConnection {
             resource_owner,
             Some(request_started),
             None,
+            None,
         )
         .await
     }
@@ -878,7 +915,7 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, false, false, None, None, None, None, None, None,
+            method, params, timeout, false, false, None, None, None, None, None, None, None,
         )
         .await
     }
@@ -903,6 +940,7 @@ impl ProcessConnection {
             None,
             None,
             Some(resource_owner),
+            None,
             None,
             None,
         )
@@ -938,6 +976,7 @@ impl ProcessConnection {
             owner,
             request_started,
             Some(Arc::clone(&admission)),
+            None,
         )
         .await?;
         let output = lock_std_mutex(&admission.output)
@@ -960,6 +999,7 @@ impl ProcessConnection {
         resource_owner: Option<ExtensionResourceOwner>,
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
         tool_admission: Option<Arc<ToolResultAdmission>>,
+        provider_route: Option<&mut crate::extension_provider::ExtensionProviderRoute>,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&self.protocol));
         // Lifecycle hooks execute factory code too: routed requests cannot use
@@ -1144,12 +1184,27 @@ impl ProcessConnection {
             }
             let mut registration =
                 PendingRegistration::new(&connection, id, Arc::clone(&operation_reason));
-            writer.send(WriterFrame {
+            let frame = WriterFrame {
                 line,
                 state: frame_state,
                 completion: None,
                 bus_delivery: None,
-            });
+            };
+            if let Some(route) = provider_route {
+                let registry = connection
+                    .provider_registry
+                    .as_ref()
+                    .expect("provider registry");
+                *route = registry
+                    .admit_route(route, || writer.send(frame))
+                    .ok_or_else(|| {
+                        ExtensionRuntimeError::Closed(
+                            "provider route changed before admission".into(),
+                        )
+                    })?;
+            } else {
+                writer.send(frame);
+            }
 
             let reply = match reply_rx.await {
                 Ok(reply) => reply,

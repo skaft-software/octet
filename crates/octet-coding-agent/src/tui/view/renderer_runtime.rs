@@ -87,6 +87,7 @@ pub(super) struct SharedState(
     Arc<AtomicBool>,
     Arc<Mutex<super::tern_input::Mailbox>>,
     Arc<AtomicBool>,
+    Arc<Mutex<super::program_status::Publisher>>,
 );
 
 impl SharedState {
@@ -108,6 +109,7 @@ impl SharedState {
             file_index_ready,
             Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
             Arc::new(AtomicBool::new(initial_fullscreen_mode())),
+            Arc::new(Mutex::new(super::program_status::Publisher::default())),
         )
     }
 
@@ -194,6 +196,24 @@ impl SharedState {
 
     fn set_fullscreen(&self, enabled: bool) -> bool {
         self.4.swap(enabled, Ordering::AcqRel)
+    }
+
+    fn sync_program_status(&self, write: impl FnMut(sexy_tui_rs::program_status::ProgramStatus)) {
+        let (status, owner) = super::program_status::snapshot(&self.borrow());
+        self.5
+            .lock()
+            .expect("program status poisoned")
+            .sync(status, owner, write);
+    }
+
+    fn handoff_program_status(
+        &self,
+        write: impl FnMut(sexy_tui_rs::program_status::ProgramStatus),
+    ) {
+        self.5
+            .lock()
+            .expect("program status poisoned")
+            .handoff(write);
     }
 
     pub(super) fn borrow(&self) -> MutexGuard<'_, ShellState> {
@@ -456,6 +476,23 @@ fn sync_window_title(
     *last_title = Some((name, title));
 }
 
+fn sync_terminal_chrome(
+    tui: &mut TUI<'_>,
+    state: &SharedState,
+    last_title: &mut Option<(Option<String>, String)>,
+) {
+    sync_window_title(tui, state, last_title);
+    state.sync_program_status(|status| {
+        tui.set_program_status(status, "octet", octet_tern::client::is_tern());
+    });
+}
+
+fn handoff_program_status(tui: &mut TUI<'_>, state: &SharedState) {
+    state.handoff_program_status(|status| {
+        tui.set_program_status(status, "octet", octet_tern::client::is_tern());
+    });
+}
+
 /// Flush the retained final frame, restore the process terminal, and
 /// acknowledge once. The caller re-enters with a new renderer on resume.
 fn suspend_terminal(tui: &mut TUI<'_>, acknowledged: mpsc::Sender<()>, force_render: bool) {
@@ -712,7 +749,7 @@ pub(super) fn render_loop_with_terminal(
     // Startup waits for resolved session metadata; a newly resumed renderer
     // writes its title once even if the semantic name has not changed.
     let mut last_title = None;
-    sync_window_title(&mut tui, &state, &mut last_title);
+    sync_terminal_chrome(&mut tui, &state, &mut last_title);
 
     let mut last_render: Option<Instant> = None;
     // Capture before each paint: an edit admitted during a slow terminal write
@@ -757,8 +794,9 @@ pub(super) fn render_loop_with_terminal(
             break;
         }
         if let Some(RenderCommand::Suspend(reply)) = command {
-            sync_window_title(&mut tui, &state, &mut last_title);
+            sync_terminal_chrome(&mut tui, &state, &mut last_title);
             let resized = state.borrow().resize_epoch != painted_resize_epoch;
+            handoff_program_status(&mut tui, &state);
             suspend_terminal(&mut tui, reply, resized);
             return;
         }
@@ -818,8 +856,9 @@ pub(super) fn render_loop_with_terminal(
             animations.remaining(Instant::now()),
         ) {
             if let Some(reply) = suspended.take() {
-                sync_window_title(&mut tui, &state, &mut last_title);
+                sync_terminal_chrome(&mut tui, &state, &mut last_title);
                 let resized = state.borrow().resize_epoch != painted_resize_epoch;
+                handoff_program_status(&mut tui, &state);
                 suspend_terminal(&mut tui, reply, resized);
                 return;
             }
@@ -849,7 +888,7 @@ pub(super) fn render_loop_with_terminal(
             last_editor_revision = shell.editor.revision();
             last_startup_pending = shell.startup_pending;
         }
-        sync_window_title(&mut tui, &state, &mut last_title);
+        sync_terminal_chrome(&mut tui, &state, &mut last_title);
         // Dimensions alone miss an away-and-back resize whose final size is
         // unchanged. Capture before writing so a newer resize during the paint
         // remains pending instead of being mistaken for the rendered geometry.
@@ -863,10 +902,11 @@ pub(super) fn render_loop_with_terminal(
 
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
     // latest semantic state before restoring the terminal, not after it.
-    sync_window_title(&mut tui, &state, &mut last_title);
+    sync_terminal_chrome(&mut tui, &state, &mut last_title);
     let resized = state.borrow().resize_epoch != painted_resize_epoch;
     tui.request_render_force(resized);
     state.frame_written_at(tui.rendered_viewport_top());
+    handoff_program_status(&mut tui, &state);
     tui.stop();
 }
 
@@ -909,7 +949,6 @@ fn render_native_loop_with_surface(
         .accepting_input = true;
     terminal.hide_cursor();
     let mut last_title = None;
-    let mut last_progress = false;
     let mut last_resize = Instant::now();
     loop {
         let notifications = std::mem::take(&mut state.borrow_mut().desktop_notifications);
@@ -923,22 +962,20 @@ fn render_native_loop_with_surface(
             synchronize_size(state, size);
             last_resize = Instant::now();
         }
-        let (startup_pending, name, active) = {
+        let (startup_pending, name) = {
             let shell = state.borrow();
             (
                 shell.startup_pending,
                 super::remote_ui::window_title(&shell),
-                shell.run.is_active(),
             )
         };
         if !startup_pending && last_title.as_ref() != Some(&name) {
             terminal.set_title(&name);
             last_title = Some(name);
         }
-        if active != last_progress {
-            terminal.set_progress(active);
-            last_progress = active;
-        }
+        state.sync_program_status(|status| {
+            terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
+        });
         surface.present(state)?;
         match rx.recv_timeout(RENDER_INTERVAL) {
             Ok(RenderCommand::Render) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -948,7 +985,12 @@ fn render_native_loop_with_surface(
             Ok(RenderCommand::Suspend(reply)) => {
                 surface.flush(state)?;
                 surface.close(false)?;
-                terminal.set_progress(false);
+                state.sync_program_status(|status| {
+                    terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
+                });
+                state.handoff_program_status(|status| {
+                    terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
+                });
                 terminal.stop();
                 let _ = reply.send(());
                 return Ok(());
@@ -956,7 +998,12 @@ fn render_native_loop_with_surface(
             Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 surface.flush(state)?;
                 surface.close(true)?;
-                terminal.set_progress(false);
+                state.sync_program_status(|status| {
+                    terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
+                });
+                state.handoff_program_status(|status| {
+                    terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
+                });
                 terminal.stop();
                 return Ok(());
             }

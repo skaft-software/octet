@@ -2352,6 +2352,13 @@ fn native_extensions_empty_and_untrusted_installed_menus_cannot_grant_by_pointer
             .values()
             .any(|node| node["p"]["role"] == "octet.modal")
     });
+    pty.wait(|pty| {
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str)
+            == Some("state=blocked:kind=permission:app=octet")
+    });
+    assert!(String::from_utf8_lossy(&pty.output).contains("\x1b]9;4;4\x1b\\"));
     // Consent is deliberately not an interactive native picker. Forged positive
     // pointer events must not grant even after the synthetic frame ack.
     let modal = pty
@@ -2385,6 +2392,10 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
     let server = SyntheticStream::new();
     let mut pty = server.pty();
     pty.ready();
+    assert!(pty
+        .messages
+        .iter()
+        .any(|(verb, body)| verb == "q" && body["app"] == "octet"));
     pty.command("qualified loopback user prompt");
     pty.wait(|pty| {
         pty.nodes
@@ -2399,6 +2410,13 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
         .as_str()
         .unwrap()
         .to_owned();
+    pty.wait(|pty| {
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str)
+            == Some("state=working:app=octet")
+    });
+    assert!(String::from_utf8_lossy(&pty.output).contains("\x1b]9;4;3\x1b\\"));
     assert_eq!(pty.nodes[&leaf]["p"]["stream"], true);
     let parent = &pty.nodes[&pty.parents[&leaf]];
     assert_eq!(parent["k"], "col");
@@ -2453,7 +2471,19 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
         .unwrap()
         .contains("unsent draft"));
     drop(requests);
+    pty.wait(|pty| {
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str)
+            == Some("state=done:app=octet")
+    });
     pty.close();
+    assert_eq!(
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str),
+        Some("state=done:app=octet")
+    );
 }
 
 #[test]
@@ -2471,6 +2501,12 @@ fn native_loopback_cancel_settles_without_dispatching_followup_and_can_recall_it
     pty.wait(|pty| pty.draft().is_empty() && pty.nodes.contains_key("pending"));
     // Ctrl+C is cancellation without dispatch. A retained answer is not proof
     // of settlement: require the actual run owner to remove Working/Stop.
+    pty.wait(|pty| {
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str)
+            == Some("state=working:app=octet")
+    });
     pty.send(&[3]);
     pty.wait(|pty| {
         !pty.nodes.contains_key("composer.stop")
@@ -2484,7 +2520,19 @@ fn native_loopback_cancel_settles_without_dispatching_followup_and_can_recall_it
     pty.wait(|pty| pty.draft() == "queued followup not authorized for automatic retry");
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     assert!(!pty.nodes.contains_key("pending"));
+    pty.wait(|pty| {
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str)
+            == Some("state=idle:app=octet")
+    });
     pty.close();
+    assert_eq!(
+        program_status_records(&pty.output)
+            .last()
+            .map(String::as_str),
+        Some("state=idle:app=octet")
+    );
 }
 
 #[test]
@@ -2500,4 +2548,12 @@ fn native_close_from_ordinary_input_owner_exits_without_provider_save() {
             .unwrap()
             .contains("unfinished")
     );
+}
+
+fn program_status_records(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .split("\x1b]7501;")
+        .skip(1)
+        .filter_map(|part| part.split_once("\x1b\\").map(|(body, _)| body.to_owned()))
+        .collect()
 }

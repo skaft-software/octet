@@ -29,19 +29,19 @@ test('module: Pi schema and sampling fields are mapped, no inert unsupported def
   assert.deepEqual(wire.constrained_sampling, tool.constrainedSampling);
   assert.equal(wire.outputSchema, undefined);
   validateTool(definition({ prepareArguments: x => x, prepareLoadout: () => ({}) }));
-  for (const field of [{ executionMode: 'parallel' }, { exposure: 'hidden' }, { output_schema: {} }]) {
-    assert.throws(() => validateTool(definition(field)), /unsupported_feature/);
+  for (const field of [{ executionMode: 'parallel' }, { exposure: 'invalid' }, { output_schema: {} }]) {
+    assert.throws(() => validateTool(definition(field)), /unsupported_feature|tool.exposure/);
   }
 });
 
 test('module: unsupported tool schema constraints fail before publication without being stripped', () => {
   const parameters = { type: 'object', properties: { pattern: { type: 'string' }, nested: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'null' }] } } } };
   validateTool(definition({ parameters }));
-  const bad = structuredClone(parameters); bad.properties.nested.items.anyOf[0].pattern = '^[a-z]+$';
-  assert.throws(() => validateTool(definition({ parameters: bad })), /anyOf\[0\].pattern.*not supported/);
-  assert.equal(bad.properties.nested.items.anyOf[0].pattern, '^[a-z]+$');
+  const bad = structuredClone(parameters); bad.properties.nested.items.anyOf[0].pattern = '[z-a]';
+  assert.throws(() => validateTool(definition({ parameters: bad })), /pattern syntax/);
+  assert.equal(bad.properties.nested.items.anyOf[0].pattern, '[z-a]');
   assert.throws(() => validateTool(definition({ parameters: { type: 'object', deprecated: 'yes' } })), /deprecated.*boolean/);
-  assert.throws(() => validateTool(definition({ parameters: { type: 'array', items: false } })), /must be a schema object/);
+  validateTool(definition({ parameters: { type: 'array', items: false } }));
 });
 
 test('module: runtime registration waits for an actual host ACK, replaces names, and preserves local state on refusal', () => {
@@ -66,6 +66,44 @@ test('module: selection and catalog queries use authoritative host state and con
   assert.equal(all[0].namespace.name, 'docs'); assert.equal(all[0].sourceInfo.path, '/actual/probe.ts');
   assert.equal(setActiveTools(rt, '/actual/probe.ts', ['unknown', 'probe', 'probe']), undefined);
   assert.deepEqual(calls.at(-1)[1].names, ['probe']);
+});
+
+test('module: Pi builtin provenance preserves automatic policy and effective override identity', () => {
+  const rt = runtime(), safe = new Set(['read', 'bash', 'powershell', 'grep', 'find', 'ls']);
+  const tool = (name, source) => ({ name, description: `host ${name}`, parameters: { type: 'object', properties: { path: { type: 'string' } } },
+    exposure: 'direct', sourceInfo: { source, path: source === 'builtin' ? `builtin:${name}` : `<native:${name}>`, scope: 'temporary', origin: 'top-level' } });
+  const original = { active_tools: ['read', 'bash', 'edit', 'write', 'custom'],
+    all_tools: [...['read', 'bash', 'edit', 'write', 'grep'].map(name => tool(name, 'builtin')), tool('custom', 'native')] };
+  let snapshot = structuredClone(original);
+  rt.transport = { requestSync(method) { assert.equal(method, 'tools/snapshot'); return snapshot; } };
+  const selected = all => all.filter(entry => snapshot.active_tools.includes(entry.name)
+    && entry.sourceInfo.source === 'builtin' && safe.has(entry.name)).map(entry => entry.name).sort();
+  const catalog = getAllTools(rt, '/observer.ts');
+  assert.deepEqual(selected(catalog), ['bash', 'read']);
+  assert.deepEqual(catalog, original.all_tools);
+  assert.deepEqual(snapshot, original);
+  snapshot.all_tools[0] = tool('read', 'native');
+  const ordinary = structuredClone(snapshot);
+  const ordinaryCatalog = getAllTools(rt, '/observer.ts');
+  assert.deepEqual(ordinaryCatalog[0].sourceInfo, ordinary.all_tools[0].sourceInfo);
+  assert.deepEqual(selected(ordinaryCatalog), ['bash']);
+  assert.deepEqual(snapshot, ordinary);
+  const replacement = definition({ name: 'read', parameters: { type: 'object', properties: { anchor: { type: 'string' } }, required: ['anchor'] } });
+  registerTool(rt, '/override.ts', replacement);
+  snapshot.all_tools[0] = { ...snapshot.all_tools[0], description: 'extension replacement', parameters: replacement.parameters };
+  const overridden = structuredClone(snapshot);
+  const overrideCatalog = getAllTools(rt, '/observer.ts');
+  assert.deepEqual(overrideCatalog[0].sourceInfo, { path: '/override.ts', source: 'extension', scope: 'temporary', origin: 'top-level' });
+  assert.deepEqual(overrideCatalog[0].parameters, replacement.parameters);
+  assert.equal(overrideCatalog[0].description, 'extension replacement');
+  assert.deepEqual(selected(overrideCatalog), ['bash']);
+  assert.deepEqual(snapshot, overridden);
+  rt.tools.delete('read');
+  snapshot = structuredClone(original);
+  const restored = getAllTools(rt, '/observer.ts');
+  assert.deepEqual(restored, original.all_tools);
+  assert.deepEqual(selected(restored), ['bash', 'read']);
+  assert.deepEqual(snapshot, original);
 });
 
 test('module: images are published with exact digest and ownership through the existing artifact service', async () => {

@@ -93,6 +93,44 @@ not evidence of an encoded body or HTTP response. API-0.4 provider catalog and
 stream binding and adapter-local callback routing require the separate
 `provider_proxy_v1` feature integration, not widening canonical API 0.3.
 
-Focused tests are in `tests/runtime_hooks.rs` and the existing agent process
-provider_context tests. Cargo/build execution belongs to the integration owner;
-this lane does not claim unrun tests passed.
+## Captured custom HTTP continuation
+
+A host transport may opt into `custom_http_model(&self, selected: &Model)` instead
+of `native_model()`. It clones the selected model, replaces the endpoint with its
+captured custom HTTP route, and updates only `spec.endpoint` to that private
+endpoint ID. Every other model-spec field must remain identical. Both selected
+and private routes must have `Auth::None`, no endpoint default headers, and no
+model-preset headers. The private endpoint must differ from the active host
+route and cannot have its own registered host transport. Native and custom HTTP
+authorities cannot coexist on one transport.
+
+The existing `stream_native` callback receives the consuming
+`NativeRequestContinuation`. A custom transport opens it with
+`stream_custom_http(request, hooks, Arc<dyn HostHttpSender>)`; ordinary `stream`
+is refused on this lane, and native continuations refuse custom senders. The
+continuation retains the current client's hooks, request overrides, timeout and
+host options, clearing only the already-selected fetch route. A host API-key
+override is refused. Canonical replay normalization is unchanged; redundant
+Responses options are removed only when they exactly represent canonical input.
+
+`AiClient::stream_custom_http_with_host_options` installs a private one-use sender
+on an internal client clone. The callback receives `HostHttpRequest` containing
+the exact codec/hook-produced method, URL, headers and encoded bytes, and returns
+`HostHttpResponse = http::Response<reqwest::Body>`. Named authentication/signing
+headers and sensitive header values are rejected before callback dispatch.
+Request override headers are normally marked sensitive and therefore fail
+closed; non-sensitive headers can use the existing guarded header hooks. The
+admitted extension's fetch adds only its own process-local custom credentials.
+Native host credentials are never resolved for or passed to this callback.
+
+Only final HTTP sending is substituted. Native response decoding, bounded SSE
+and error readers, response hooks, redaction, guarded events, accounting,
+measurements, dispatch tracking and phase timeouts remain shared. Preferred
+WebSockets cannot bypass this sender. No retry, global fetch change, persistent
+registration or detached worker is added. The bridge owns response-byte/channel
+bounds and cancellation; dropping the opening future or body stream releases its
+owned callback/body. Batch, compact and native WebSocket operations are unchanged.
+
+Focused tests are in `src/host_http/tests.rs`, `tests/runtime_hooks.rs` and the
+existing agent process provider_context tests. Cargo/build execution belongs to
+the integration owner; source presence is not a runtime qualification claim.

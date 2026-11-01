@@ -134,7 +134,11 @@ fn run_translates_with_disjoint_metadata_before_dropping_the_live_run() {
     assert!(!events.contains("app.agent"));
 
     let run = source("run");
-    let prompt = run.find("app.agent.prompt(input).await").unwrap();
+    let preparation = run.find("app.prepare_submission(input)?").unwrap();
+    let prompt = run
+        .find(".start(&mut app.agent, octet_agent::PreparedPromptMode::Normal)")
+        .unwrap();
+    let prompt_await = prompt + run[prompt..].find(".await").unwrap();
     let translation = run.find("events::translate(").unwrap();
     let translation_await = translation + run[translation..].find(".await?").unwrap();
     let arguments = &run[translation..translation_await];
@@ -142,7 +146,9 @@ fn run_translates_with_disjoint_metadata_before_dropping_the_live_run() {
     assert!(arguments.contains("&app.model.spec.id.0"));
     let release = run.find("drop(run)").unwrap();
     let settlement = run.find(".settle_turn(extension_turn, &outcome)").unwrap();
+    assert!(preparation < prompt);
     assert!(prompt < translation);
+    assert!(prompt_await < translation);
     assert!(translation_await < release);
     assert!(release < settlement);
 }

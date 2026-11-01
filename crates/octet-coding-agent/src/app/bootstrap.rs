@@ -33,7 +33,7 @@ use crate::codex_context::{
     CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
     CODEX_MAX_OUTPUT_TOKENS,
 };
-use crate::config::{CompactionMode, Config, ResumeSelector};
+use crate::config::{CompactionMode, Config, Mode, ResumeSelector};
 use crate::extensions::{
     provider_preflight_config, ExecutableExtensions, ExtensionProviderRuntime,
     SUBAGENTS_EXTENSION_NAME,
@@ -171,24 +171,48 @@ impl Bootstrap {
             .context("could not create temporary extension-provider bootstrap session")?;
         let session = Session::create(temporary.path().join("provider-bootstrap.jsonl"))
             .context("could not create temporary extension-provider bootstrap session")?;
-        let model = extension_provider_bootstrap_model(&self.catalog);
-        let reasoning = self
-            .config
-            .reasoning
-            .clone()
-            .unwrap_or_else(|| default_reasoning_for_model(&model));
-        let (host, mut extensions) = configured_extensions_with_runtime_manager(
-            &config,
-            &session,
-            &model,
-            &reasoning,
-            &self.sessions,
-            None,
-            self.provider_runtime.clone(),
-            super::resource_paths::ResourceConsumerCapability::Disabled,
-            "startup",
-            crate::extensions::ExtensionStartupTiming::Synchronous,
-        )?;
+        let (host, mut extensions) = if matches!(self.config.mode, Mode::Interactive)
+            && self.catalog.models().next().is_none()
+        {
+            let mut host = ExtensionHost::new();
+            host.load(&CoreTools);
+            let tool_config = config.clone();
+            host.set_tool_policy(move |name| tool_config.tool_available(name));
+            host.finalize_tool_surface();
+            let extensions = ExecutableExtensions::discover_and_start_for_selection(
+                &config,
+                &session,
+                None,
+                &self.sessions,
+                &mut host,
+                None,
+                self.provider_runtime.clone(),
+                super::resource_paths::ResourceConsumerCapability::Disabled,
+                None,
+                "startup",
+                crate::extensions::ExtensionStartupTiming::Synchronous,
+            );
+            (host, extensions)
+        } else {
+            let model = extension_provider_bootstrap_model(&self.catalog);
+            let reasoning = self
+                .config
+                .reasoning
+                .clone()
+                .unwrap_or_else(|| default_reasoning_for_model(&model));
+            configured_extensions_with_runtime_manager(
+                &config,
+                &session,
+                &model,
+                &reasoning,
+                &self.sessions,
+                None,
+                self.provider_runtime.clone(),
+                super::resource_paths::ResourceConsumerCapability::Disabled,
+                "startup",
+                crate::extensions::ExtensionStartupTiming::Synchronous,
+            )?
+        };
         // Populate a throwaway copy now so callers can validate/select the
         // projected models. `build_app` repeats this against its owned catalog.
         let mut catalog = self.catalog.clone();
@@ -218,6 +242,16 @@ impl Bootstrap {
 
     pub(crate) fn take_prepared_session(&self) -> Option<Session> {
         self.prepared_session.borrow_mut().take()
+    }
+
+    pub(crate) fn prepare_modeless_extension_runtime(&mut self) -> ExtensionProviderRuntime {
+        if let Some((_, mut extensions)) = self.prestarted_extensions.get_mut().take() {
+            extensions.clear_provider_catalog(&mut self.catalog, &self.client);
+            extensions.shutdown_blocking();
+        }
+        self.provider_runtime
+            .bind_native_provider_catalog(&self.catalog, &self.client);
+        self.provider_runtime.clone()
     }
 
     fn enter_modeless_mode(&self) {
@@ -290,7 +324,7 @@ pub enum SessionSelection {
 }
 
 impl SessionSelection {
-    fn session_start_reason(&self, initial_launch: bool) -> &'static str {
+    pub(crate) fn session_start_reason(&self, initial_launch: bool) -> &'static str {
         match self {
             Self::CreateNew(_) if initial_launch => "startup",
             Self::CreateNew(_) => "new",
@@ -2510,7 +2544,9 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && known_gpt_6_model(id)
+    // Terra's reviewed public API contract must not expand the independent
+    // Codex fallback, reasoning or entitlement allowlists.
+    declaration.id == "openai" && (known_gpt_6_model(id) || id == "gpt-6.1-terra")
 }
 
 fn anthropic_budget_capability() -> ReasoningCapability {
@@ -2672,7 +2708,7 @@ fn sparse_route_reasoning(
                 Some("medium"),
             ));
         }
-        if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
+        if matches!(id, "gpt-6-sol" | "gpt-6-luna" | "gpt-6.1-terra") {
             return Some(effort_capability(
                 Mode::Standard,
                 &["none", "low", "medium", "high", "xhigh", "max"],
@@ -8061,6 +8097,8 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
     }
     startup_phase("session.marker");
     let client = AiClient::try_new()?;
+    let provider_runtime = ExtensionProviderRuntime::default();
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
     startup_phase("catalog.client");
     startup_phase("bootstrap.ready");
     Ok(Bootstrap {
@@ -8068,7 +8106,7 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         catalog,
         sessions,
         client,
-        provider_runtime: ExtensionProviderRuntime::default(),
+        provider_runtime,
         prestarted_extensions: RefCell::new(None),
         prepared_session: RefCell::new(None),
         prepared_config: RefCell::new(None),
@@ -8503,7 +8541,7 @@ pub async fn resolve_launch_interactive(
     let pick_model = should_pick_interactive_model(&boot.config, &catalog, model.as_ref());
     let model = if no_configured_model {
         boot.enter_modeless_mode();
-        shell.notice("no configured model; opening session read-only");
+        shell.notice("no configured model; opening session with prompts disabled");
         shell.render();
         model.unwrap_or_else(|| ModelId(String::new()))
     } else {
@@ -9020,6 +9058,7 @@ fn build_app_with_consumer(
         extensions.clear_provider_catalog(&mut catalog, &client);
         extensions.shutdown_blocking();
     }
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
 
     let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::new_with_invocation(
         config.workspace.clone(),
@@ -9371,6 +9410,7 @@ pub(super) fn try_select_model_at_idle(
     app.model = model;
     app.reasoning = reasoning;
     app.reasoning_mode = mode;
+    app.executable_extensions.discard_provider_reload();
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -9397,7 +9437,7 @@ pub(super) fn try_select_model_at_idle(
 /// Recreate the Agent at an idle boundary. Taking `App` by value guarantees the
 /// old Agent and its session file are dropped before a session is reopened.
 pub fn rebuild_app(
-    mut app: App,
+    app: App,
     new_model: Option<Model>,
     new_reasoning: Option<ReasoningConfig>,
     new_reasoning_mode: Option<ReasoningMode>,
@@ -9406,6 +9446,30 @@ pub fn rebuild_app(
     let session_start_reason = selection
         .as_ref()
         .map_or("resume", |selection| selection.session_start_reason(false));
+    rebuild_app_with_start_reason(
+        app,
+        new_model,
+        new_reasoning,
+        new_reasoning_mode,
+        selection,
+        session_start_reason,
+    )
+}
+
+/// Rebuild resources at the explicit reload boundary without misreporting the
+/// old binding as shutdown or the replacement as a resumed session.
+pub fn rebuild_app_for_reload(app: App) -> anyhow::Result<App> {
+    rebuild_app_with_start_reason(app, None, None, None, None, "reload")
+}
+
+fn rebuild_app_with_start_reason(
+    mut app: App,
+    new_model: Option<Model>,
+    new_reasoning: Option<ReasoningConfig>,
+    new_reasoning_mode: Option<ReasoningMode>,
+    selection: Option<SessionSelection>,
+    session_start_reason: &'static str,
+) -> anyhow::Result<App> {
     app.synchronize_extension_provider_catalog();
     let resource_consumer = app.resource_paths.capability;
     let mut config = app.original_resource_config();
@@ -9541,8 +9605,18 @@ pub fn rebuild_app(
     let mut released_extensions = std::mem::take(&mut app.executable_extensions);
     let runtime_manager = released_extensions.runtime_manager();
     let provider_runtime = released_extensions.provider_runtime();
+    if session_start_reason == "reload" && same_session {
+        released_extensions.prepare_provider_reload();
+    } else {
+        released_extensions.discard_provider_reload();
+    }
     released_extensions.clear_provider_catalog(&mut catalog, &client);
-    released_extensions.release_binding_blocking();
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
+    if session_start_reason == "reload" {
+        released_extensions.release_binding_for_reload_blocking();
+    } else {
+        released_extensions.release_binding_blocking();
+    }
     // These are actual queue discards, not inferred interruption risks. Use the
     // existing terminal-aware diagnostic route: interactive lifecycle callers
     // defer this queue through final hydration; never print into the raw frame.
@@ -9626,6 +9700,9 @@ pub fn rebuild_app(
         resource_consumer,
     );
     let definitions = extensions.tool_definitions();
+    if session_start_reason == "reload" && same_session {
+        executable_extensions.complete_provider_reload(None);
+    }
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
         && subagents_surface_available(&executable_extensions, &definitions, &model);
@@ -9798,6 +9875,12 @@ mod bounded_env_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use tests::provider_reload_rebind::{
+    provider_app as provider_reload_test_app, provider_hook_app as provider_reload_hook_test_app,
+    set_variant as set_provider_reload_test_variant,
+};
 
 #[cfg(test)]
 #[path = "bootstrap/tests/custom_model_inventory_indexing.rs"]

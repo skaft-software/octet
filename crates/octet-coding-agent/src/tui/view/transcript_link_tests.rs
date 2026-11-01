@@ -59,12 +59,116 @@ fn release(shell: &mut InteractiveShell, row: u16, col: u16) -> Vec<String> {
 }
 
 #[test]
+fn literal_shell_http_url_click_uses_visible_cells_and_preserves_the_draft() {
+    for (threaded, hyperlinks) in [(false, false), (false, true), (true, false), (true, true)] {
+        for target in [
+            format!("{TARGET}&source=shell"),
+            format!("{TARGET}&padding={}", "x".repeat(150)),
+        ] {
+            let (mut shell, _, _) = fixture(threaded, hyperlinks);
+            let id = shell.append_shell_in_progress("echo fixture".into());
+            shell.finalize_shell(&id, format!("界é {target}\n"), 0);
+            let lines = paint(&mut shell);
+            let cells: Vec<_> = lines
+                .iter()
+                .enumerate()
+                .flat_map(|(row, line)| {
+                    (0..80)
+                        .filter_map(|col| {
+                            (sexy_tui_rs::hyperlink_at_column(line, col).as_deref()
+                                == Some(target.as_str()))
+                            .then_some((row as u16, col as u16))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert!(!cells.is_empty(), "painted shell URL");
+            for &(row, col) in [cells.first().unwrap(), cells.last().unwrap()] {
+                assert_eq!(
+                    shell.transcript_link_at_screen_cell(row, col).as_deref(),
+                    Some(target.as_str())
+                );
+                shell.begin_transcript_selection(row, col, false);
+                assert_eq!(release(&mut shell, row, col), [target.as_str()]);
+                assert_eq!(shell.pending(), "kept draft");
+            }
+        }
+    }
+}
+
+#[test]
+fn shell_url_decoration_bounds_encoded_targets_and_total_wrapped_payload() {
+    let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+        true,
+        true,
+        ColorDepth::TrueColor,
+    ));
+    for target in [
+        format!("https://example.test/{}", "x".repeat(8192)),
+        format!("https://example.test/{}", "界".repeat(230)),
+    ] {
+        let output = ShellOutput {
+            id: "bounds".into(),
+            command: "echo fixture".into(),
+            output: target.clone(),
+            exit_code: 0,
+            running: false,
+        };
+        let (rows, _) = render_shell_output(&output, &theme, 40, true, "");
+        assert!(
+            rows.iter().all(|line| !line.contains("\x1b]8;")),
+            "oversized encoded URL stays plain"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|line| strip_terminal_sequences(line))
+                .collect::<String>(),
+            target
+        );
+    }
+    let target = format!("https://example.test/{}", "x".repeat(900));
+    let output = ShellOutput {
+        id: "many-links".into(),
+        command: "echo fixture".into(),
+        output: format!("{target}\n").repeat(100),
+        exit_code: 0,
+        running: false,
+    };
+    let (rows, _) = render_shell_output(&output, &theme, 40, true, "");
+    let osc_bytes: usize = rows
+        .iter()
+        .map(|line| {
+            line.split("\x1b]8;")
+                .skip(1)
+                .map(|part| 4 + part.find("\x1b\\").unwrap() + 2)
+                .sum::<usize>()
+        })
+        .sum();
+    assert!(osc_bytes > 0, "ordinary links remain enabled");
+    assert!(
+        osc_bytes <= 64 * 1024,
+        "OSC allocation exceeded budget: {osc_bytes}"
+    );
+}
+
+#[test]
 fn noninteractive_link_rendering_remains_escape_free() {
     let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
         false,
         true,
         ColorDepth::None,
     ));
+    let output = ShellOutput {
+        id: "plain".into(),
+        command: "echo fixture".into(),
+        output: format!("{TARGET}\n"),
+        exit_code: 0,
+        running: false,
+    };
+    assert!(render_shell_output(&output, &theme, 80, false, "")
+        .0
+        .iter()
+        .all(|line| !line.contains('\x1b')));
     let document = sexy_tui_rs::rich_text::markdown::parse(&format!("see [docs]({TARGET})"));
     for renderer in [theme.rich_renderer(), theme.reasoning_renderer()] {
         let rendered = renderer.render(&document, 100);

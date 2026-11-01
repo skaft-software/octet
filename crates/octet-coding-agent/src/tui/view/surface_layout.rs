@@ -452,6 +452,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             trailing_rows: 0,
             content_left,
             content_width,
+            shell_output: None,
         },
     };
     // A filled cushion row is part of the surface (the card's own top and
@@ -568,6 +569,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         trailing_rows,
         content_left,
         content_width,
+        shell_output: None,
     };
     surface
 }
@@ -806,6 +808,63 @@ mod tests {
         }))
     }
 
+    fn assert_planned_geometry(
+        block: &TranscriptBlock,
+        rendered: SurfaceGeometry,
+        planned: SurfaceGeometry,
+    ) {
+        // Source offsets are discovered while wrapping/clipping shell output,
+        // not by the surface planner. All planned rows and columns still match.
+        assert_eq!(planned.shell_output, None);
+        assert_eq!(
+            rendered.shell_output.is_some(),
+            matches!(block, TranscriptBlock::Shell(_))
+        );
+        assert_eq!(
+            SurfaceGeometry {
+                shell_output: None,
+                ..rendered
+            },
+            planned
+        );
+    }
+
+    #[test]
+    fn shell_source_receipts_preserve_planned_geometry_and_exact_tail_boundaries() {
+        use super::super::transcript_cache::ShellOutputSource;
+
+        let theme = test_theme();
+        let renderer = theme.rich_renderer();
+        for width in [46, 80, 120] {
+            for verbose in [false, true] {
+                for (output, start, metadata_rows) in [
+                    ("row-0", 0, 0),
+                    (
+                        "row-0\nrow-1\nrow-2\nrow-3\nrow-4\nrow-5\nrow-6",
+                        if verbose { 0 } else { 18 },
+                        usize::from(!verbose),
+                    ),
+                    ("", 0, 1),
+                ] {
+                    let block = shell("printf fixture", output);
+                    let planned = compile_surface_plan(None, &block, &theme, width);
+                    let rendered = render_block_planned(
+                        None, &block, &theme, &renderer, &renderer, width, verbose, 0, 0,
+                    );
+                    assert_planned_geometry(&block, rendered.geometry, planned.geometry);
+                    assert_eq!(
+                        rendered.geometry.shell_output,
+                        Some(ShellOutputSource {
+                            start,
+                            metadata_rows,
+                        }),
+                        "width={width}, verbose={verbose}, output={output:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn rendered_with_gutter(
         block: &TranscriptBlock,
         theme: &OctetTheme,
@@ -821,7 +880,7 @@ mod tests {
         let rendered = render_block_planned(
             None, block, theme, &renderer, &renderer, width, verbose, 0, 0,
         );
-        assert_eq!(rendered.geometry, plan.geometry);
+        assert_planned_geometry(block, rendered.geometry, plan.geometry);
         let rows = rendered
             .lines
             .iter()
@@ -897,7 +956,7 @@ mod tests {
         assert_eq!(panel.output, output);
         assert_eq!(
             block_copy_text(&local_shell),
-            format!("$ {command} [completed]")
+            format!("$ {command} [completed]\n{output}")
         );
     }
 
@@ -1280,7 +1339,7 @@ mod tests {
                 let rendered = render_block_planned(
                     None, &block, &theme, &renderer, &renderer, width, true, 0, 0,
                 );
-                assert_eq!(rendered.geometry, plan.geometry);
+                assert_planned_geometry(&block, rendered.geometry, plan.geometry);
                 for row in rendered.lines {
                     assert!(
                         visible_width(&row) <= usize::from(width),
@@ -1363,7 +1422,7 @@ mod tests {
                 0,
                 0,
             );
-            assert_eq!(rendered.geometry, plan.geometry);
+            assert_planned_geometry(&local_shell, rendered.geometry, plan.geometry);
             assert!(rendered
                 .lines
                 .iter()

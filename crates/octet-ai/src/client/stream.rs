@@ -267,6 +267,7 @@ fn bedrock_response_stream(request: BedrockResponseStreamRequest) -> ResponseStr
 
 pub(super) async fn stream_http(
     http: reqwest::Client,
+    host_http_sender: Option<Arc<crate::host_http::OneShotHostHttpSender>>,
     request: HttpStreamRequest,
     request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
     stream_initial_timeout: Duration,
@@ -322,15 +323,34 @@ pub(super) async fn stream_http(
         }
     }
 
+    if host_http_sender.is_some() {
+        crate::host_http::validate_custom_http_headers(&headers)?;
+    }
+
     if let Some(trace) = &trace {
         trace.http_request(&model.spec.api_name, &parts.body);
     }
 
     // 3. Send the HTTP request
-    let builder = http
-        .post(parts.url.clone())
-        .headers(headers)
-        .body(request_body);
+    let send = async move {
+        if let Some(sender) = host_http_sender {
+            sender
+                .send(crate::HostHttpRequest {
+                    method: http::Method::POST,
+                    url: parts.url.clone(),
+                    headers,
+                    body: request_body,
+                })
+                .await
+        } else {
+            http.post(parts.url.clone())
+                .headers(headers)
+                .body(request_body)
+                .send()
+                .await
+                .map_err(|error| request_open_transport_error(error, "request"))
+        }
+    };
 
     // `RequestBuilder::timeout` applies until the response body is fully
     // consumed, which kills valid long-running SSE generations. Bound only
@@ -339,7 +359,7 @@ pub(super) async fn stream_http(
     if let Some(state) = &request_dispatch {
         state.store(true, std::sync::atomic::Ordering::Release);
     }
-    let res = tokio::time::timeout(model.endpoint.timeout, builder.send())
+    let res = tokio::time::timeout(model.endpoint.timeout, send)
         .await
         .map_err(|_| {
             AiError::Transport(TransportError {
@@ -348,7 +368,6 @@ pub(super) async fn stream_http(
                 message: "request timed out waiting for response headers".to_string(),
             })
         })?
-        .map_err(|error| request_open_transport_error(error, "request"))
         .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
 
     // A host response hook observes every provider response (success or error)

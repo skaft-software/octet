@@ -103,12 +103,14 @@ pub mod skills;
 pub mod telemetry;
 pub mod tool;
 pub mod tool_composition;
+#[allow(missing_docs)]
+pub mod tool_inference;
 pub mod tools;
 
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
-    PreparedSteering, RequestContextEstimate, Run, RunControl, RunOutput, SteeringReceipt,
-    TreeNavigationResult,
+    PreparedHostPrompt, PreparedPromptMode, PreparedSteering, RequestContextEstimate, Run,
+    RunControl, RunOutput, SteeringReceipt, TreeNavigationResult,
 };
 pub use artifact::{
     ArtifactError, ArtifactGenerationSettlement, ArtifactId, ArtifactPublication, ArtifactSource,

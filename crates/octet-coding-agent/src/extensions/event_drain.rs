@@ -95,11 +95,13 @@ impl ExecutableExtensions {
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
+        self.refresh_frontend_pending_messages(shell);
         self.schedule_session_hook_starts();
         let mut messages = std::mem::take(&mut self.held_messages);
         messages.extend(self.drain_events_inner(ForegroundAdmission::Shell));
         self.drain_editor_requests_into_shell(shell);
         self.drain_host_requests_into_shell(shell);
+        self.refresh_frontend_pending_messages(shell);
         self.reconcile_terminal_grant_for_shell(shell);
         self.sync_remote_ui(shell);
         self.diagnostics.extend(

@@ -120,6 +120,8 @@ pub const EXTENSION_FEATURE_MESSAGE_INJECTION: &str = "message_injection";
 
 /// API `0.2` coalesced message, compaction, dialog, model, and bash fan-out.
 pub const EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2: &str = "lifecycle_events_v2";
+#[doc(hidden)]
+pub const EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1: &str = "committed_message_events_v1";
 
 /// API `0.2` host-owned active tool selection.
 pub const EXTENSION_FEATURE_ACTIVE_TOOLS: &str = "active_tools";
@@ -353,6 +355,7 @@ pub const MAX_EXTENSION_RESULT_CONTENT_PARTS: usize = 256;
 /// each occurrence.
 pub const MAX_EXTENSION_RESULT_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
+#[cfg(test)]
 pub(super) const MAX_SCHEMA_VALIDATION_STEPS: usize = 65_536;
 
 pub(super) const EXTENSION_EVENT_CAPACITY: usize = 128;

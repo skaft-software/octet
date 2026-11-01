@@ -7,6 +7,7 @@ use crate::tool_composition::{
     MAX_COMPOSITION_STORE_BYTES,
 };
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::OnceLock;
 use tokio::sync::{RwLock, Semaphore};
@@ -20,6 +21,11 @@ pub(super) struct CompositionScope(pub(super) Arc<CompositionDispatcher>);
 impl Drop for CompositionScope {
     fn drop(&mut self) {
         self.0.stop.cancel();
+        self.0
+            .prepared
+            .lock()
+            .expect("composition receipts are not poisoned")
+            .clear();
     }
 }
 
@@ -28,7 +34,8 @@ pub(super) struct CompositionDispatcher {
     nested_prefix: String,
     tool_name: String,
     tools: Vec<Arc<dyn Tool>>,
-    definitions: Vec<ToolDef>,
+    builtin_tools: Vec<Arc<dyn Tool>>,
+    prepared: Mutex<BTreeMap<String, PreparedCall>>,
     sandbox: SandboxConfig,
     tool_scope: String,
     resource_owner: String,
@@ -52,12 +59,20 @@ pub(super) struct CompositionDispatcher {
     remaining_cost: Option<u64>,
 }
 
+struct PreparedCall {
+    name: String,
+    arguments: Value,
+    builtin: bool,
+    index: usize,
+}
+
 impl CompositionDispatcher {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn scope(
         parent_id: octet_ai::ToolCallId,
         tool_name: String,
         tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<Arc<dyn Tool>>,
         sandbox: SandboxConfig,
         tool_scope: String,
         resource_owner: String,
@@ -81,19 +96,27 @@ impl CompositionDispatcher {
         let store = restore_store(session, &tool_name);
         let tools = tools
             .into_iter()
-            .filter(|tool| tool.composition_config().is_none())
+            .filter(|tool| tool.composition_config().is_none() && tool.exposure().callable(true))
             .collect::<Vec<_>>();
-        let definitions = tools
+        let registered_tools = tools
             .iter()
-            .map(|tool| tool.definition())
+            .map(|tool| tool.definition().name)
             .collect::<Vec<_>>();
-        let registered_tools = definitions.iter().map(|tool| tool.name.clone()).collect();
+        let builtin_tools = builtin_tools
+            .into_iter()
+            .filter(|tool| {
+                tool.composition_config().is_none()
+                    && tool.exposure().callable(true)
+                    && registered_tools.contains(&tool.definition().name)
+            })
+            .collect();
         CompositionScope(Arc::new(Self {
             parent_id,
             nested_prefix,
             tool_name,
             tools,
-            definitions,
+            builtin_tools,
+            prepared: Mutex::new(BTreeMap::new()),
             sandbox,
             tool_scope,
             resource_owner,
@@ -128,9 +151,17 @@ impl CompositionDispatcher {
 
     fn ensure_live(&self) -> Result<(), ToolError> {
         if self.cancellation.is_cancelled() || self.stop.is_cancelled() {
+            self.prepared
+                .lock()
+                .expect("composition receipts are not poisoned")
+                .clear();
             return Err(cancelled_tool_error());
         }
         if tokio::time::Instant::now() >= self.deadline() {
+            self.prepared
+                .lock()
+                .expect("composition receipts are not poisoned")
+                .clear();
             return Err(ToolError::new(
                 "composition exceeded the 30 second host deadline",
             ));
@@ -227,6 +258,180 @@ impl CompositionDispatcher {
         self.relay(progress).await;
     }
 
+    fn select_tool(&self, name: &str, builtin: bool) -> Result<Arc<dyn Tool>, ToolError> {
+        let tools = if builtin {
+            &self.builtin_tools
+        } else {
+            &self.tools
+        };
+        tools
+            .iter()
+            .find(|tool| tool.definition().name == name)
+            .cloned()
+            .ok_or_else(|| ToolError::new(format!("unknown or unavailable nested tool: {name}")))
+    }
+
+    fn validate_arguments(tool: &dyn Tool, name: &str, arguments: &Value) -> Result<(), ToolError> {
+        match octet_ai::validate_tool_arguments(name, arguments, &[tool.definition()])
+            .map_err(|_| ToolError::new("nested tool argument validation failed"))?
+        {
+            octet_ai::ToolArgumentValidation::Valid => Ok(()),
+            _ => Err(ToolError::new(SCHEMA_MISMATCH_TOOL_ERROR)),
+        }
+    }
+
+    fn full_outcome(
+        id: &str,
+        name: &str,
+        arguments: &Value,
+        result: &Result<ToolOutput, ToolError>,
+    ) -> Result<Value, ToolError> {
+        let mut outcome = match resolved_tool_output(result) {
+            Some(output) => crate::tool_composition::native_result_value(output)?,
+            None => {
+                serde_json::json!({"content":[{"Text":result.as_ref().expect_err("failed result has an error").message}]})
+            }
+        };
+        outcome["tool_call"] = serde_json::json!({"id":id,"name":name,"arguments":arguments});
+        outcome["is_error"] = Value::Bool(tool_execution_failed(result));
+        Ok(outcome)
+    }
+
+    async fn prepare_call(
+        &self,
+        name: String,
+        mut arguments: Value,
+        builtin: bool,
+        index: usize,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        self.ensure_live()?;
+        let _slot = self
+            .slots
+            .acquire()
+            .await
+            .expect("composition slots stay open");
+        self.ensure_live()?;
+        let id = format!("{}/{index}", self.parent_id.0);
+        let (tx, mut rx) = mpsc::channel(PROGRESS_CHANNEL_CAPACITY);
+        let progress = ToolProgressSink::live(tx)
+            .for_nested_call()
+            .with_tool_call_identity(id.clone(), Some(self.parent_id.0.clone()));
+        let progress = match self.progress.session_driver() {
+            Some(route) => progress.with_session_driver(route),
+            None => progress,
+        };
+        let context = ToolContext {
+            workspace: &self.sandbox.workspace,
+            sandbox: &self.sandbox,
+            execution_scope: &self.tool_scope,
+            resource_owner: &self.resource_owner,
+            active_skills: &self.active_skills,
+            registered_tools: &self.registered_tools,
+            progress,
+            cancellation,
+        };
+        let start = std::time::Instant::now();
+        let operation = async {
+            let result: Result<(), ToolError> = async {
+                let tool = self.select_tool(&name, builtin)?;
+                if tool.prepares_arguments() {
+                    arguments = tool.prepare_arguments(arguments.clone(), &self.resource_owner, context.cancellation.clone()).await?;
+                }
+                Self::validate_arguments(tool.as_ref(), &name, &arguments)?;
+                if (self.remaining_tokens.is_some() || self.remaining_cost.is_some())
+                    && !tool.composition_is_unmetered()
+                {
+                    return Err(ToolError::new("nested tool cannot be admitted under hard session ceilings without an authoritative pre-execution usage and pricing bound"));
+                }
+                for hook in &self.hooks {
+                    arguments = transform_tool_arguments(std::slice::from_ref(hook), tool.as_ref(), &name, arguments.clone(), &context).await?;
+                }
+                crate::tool::validate_tool_detail("prepared nested arguments", &arguments, 128 * 1024, false)
+                    .map_err(|error| ToolError::new(error.to_string()))?;
+                for hook in &self.hooks {
+                    if hook.before_tool_call(&name, &arguments, &context).await.is_err() {
+                        return Err(secondary_hook_denial(&self.sandbox, &self.broker, None).0);
+                    }
+                }
+                self.ensure_live()?;
+                Ok(())
+            }.await;
+            match result {
+                Ok(()) => {
+                    let prepared_id = format!("{}:prepared:{index}", self.nested_prefix);
+                    let mut prepared = self
+                        .prepared
+                        .lock()
+                        .expect("composition receipts are not poisoned");
+                    if self.cancellation.is_cancelled()
+                        || self.stop.is_cancelled()
+                        || context.cancellation.is_cancelled()
+                    {
+                        return Err(cancelled_tool_error());
+                    }
+                    prepared.insert(
+                        prepared_id.clone(),
+                        PreparedCall {
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            builtin,
+                            index,
+                        },
+                    );
+                    Ok(
+                        serde_json::json!({"prepared_id":prepared_id,"tool_call":{"id":id,"name":name,"arguments":arguments}}),
+                    )
+                }
+                Err(error) => {
+                    let reason = error.message.clone();
+                    let denial_code = error.policy_denial_code();
+                    let mut result = Err(error);
+                    for hook in &self.hooks {
+                        result = hook
+                            .transform_tool_result(&name, &arguments, result, &context)
+                            .await;
+                    }
+                    self.record(ToolCompositionRecord::CallStarted {
+                        parent: self.parent_id.0.clone(),
+                        id: id.clone(),
+                        tool: name.clone(),
+                        arguments_hash: content_hash(
+                            &serde_json::to_vec(&arguments)
+                                .map_err(|error| ToolError::new(error.to_string()))?,
+                        ),
+                    })
+                    .await?;
+                    self.record(ToolCompositionRecord::CallFinished {
+                        parent: self.parent_id.0.clone(),
+                        id: id.clone(),
+                        tool: name.clone(),
+                        ok: false,
+                        duration_ms: start.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        effect: None,
+                        allowed: false,
+                        denial_code,
+                        delivery_text: None,
+                    })
+                    .await?;
+                    let outcome = Self::full_outcome(&id, &name, &arguments, &result)?;
+                    Ok(serde_json::json!({"block":true,"reason":reason,"outcome":outcome}))
+                }
+            }
+        };
+        tokio::pin!(operation);
+        let result = loop {
+            tokio::select! {
+                result = &mut operation => break result,
+                progress = rx.recv() => if let Some(progress) = progress { self.relay(progress).await; },
+            }
+        };
+        while let Ok(progress) = rx.try_recv() {
+            self.relay(progress).await;
+        }
+        result
+    }
+
     async fn dispatch(
         &self,
         tool: &dyn Tool,
@@ -234,6 +439,7 @@ impl CompositionDispatcher {
         arguments: Value,
         id: &octet_ai::ToolCallId,
         context: &ToolContext<'_>,
+        prepared: bool,
     ) -> (Result<ToolOutput, ToolError>, Option<ToolPolicyDecision>) {
         let (result, mut decision, executed) = async {
             let admission = reserve_tool_effect(
@@ -259,7 +465,7 @@ impl CompositionDispatcher {
                     return (Err(error), Some(decision), false);
                 }
             };
-            for hook in &self.hooks {
+            for hook in self.hooks.iter().filter(|_| !prepared) {
                 if hook
                     .before_tool_call(name, &arguments, context)
                     .await
@@ -314,6 +520,7 @@ impl CompositionDispatcher {
         (result, decision)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_call(
         &self,
         name: String,
@@ -322,14 +529,12 @@ impl CompositionDispatcher {
         cancellation: CancellationToken,
         full_outcome: bool,
         updates: Option<&mpsc::Sender<Value>>,
+        builtin: bool,
+        prepared: bool,
     ) -> Result<Value, ToolError> {
         self.ensure_live()?;
-        let tool = self
-            .tools
-            .iter()
-            .find(|tool| tool.definition().name == name)
-            .ok_or_else(|| ToolError::new(format!("unknown or unavailable nested tool: {name}")))?;
-        let arguments = if tool.prepares_arguments() {
+        let tool = self.select_tool(&name, builtin)?;
+        let arguments = if !prepared && tool.prepares_arguments() {
             tool.prepare_arguments(arguments, &self.resource_owner, cancellation.clone())
                 .await?
         } else {
@@ -337,11 +542,8 @@ impl CompositionDispatcher {
         };
         // The same validator used by provider normalization; no parse/repair
         // fallback, no hand-written schema subset, and no hook before validation.
-        match octet_ai::validate_tool_arguments(&name, &arguments, &self.definitions)
-            .map_err(|_| ToolError::new("nested tool argument validation failed"))?
-        {
-            octet_ai::ToolArgumentValidation::Valid => {}
-            _ => return Err(ToolError::new(SCHEMA_MISMATCH_TOOL_ERROR)),
+        if !prepared {
+            Self::validate_arguments(tool.as_ref(), &name, &arguments)?;
         }
         if (self.remaining_tokens.is_some() || self.remaining_cost.is_some())
             && !tool.composition_is_unmetered()
@@ -381,9 +583,11 @@ impl CompositionDispatcher {
         };
         // Hooks mutate before scheduling as well as before effect admission:
         // a mutation must not execute under a read lock chosen for old args.
-        let arguments =
-            transform_tool_arguments(&self.hooks, tool.as_ref(), &name, arguments, &context)
-                .await?;
+        let arguments = if prepared {
+            arguments
+        } else {
+            transform_tool_arguments(&self.hooks, tool.as_ref(), &name, arguments, &context).await?
+        };
         // Fair reader/writer admission: overlappable calls (declared safe
         // reads, and self-contained processes while they need no approval)
         // share the lock; every mutation/extension/unknown effect excludes all
@@ -414,7 +618,14 @@ impl CompositionDispatcher {
         self.progress.status(format!(
             "Nested tool {index}/{MAX_COMPOSITION_CALLS}: {name}"
         ));
-        let operation = self.dispatch(tool.as_ref(), &name, arguments.clone(), &id, &context);
+        let operation = self.dispatch(
+            tool.as_ref(),
+            &name,
+            arguments.clone(),
+            &id,
+            &context,
+            prepared,
+        );
         tokio::pin!(operation);
         let (result, decision) = loop {
             tokio::select! {
@@ -456,16 +667,17 @@ impl CompositionDispatcher {
             ));
         }
         if full_outcome {
-            let is_error = tool_execution_failed(&result);
-            let output = resolved_tool_output(&result);
-            let mut outcome = match output {
-                Some(output) => crate::tool_composition::native_result_value(output)?,
-                None => {
-                    serde_json::json!({"content":[{"Text":result.as_ref().expect_err("failed result has an error").message}]})
+            let mut outcome = Self::full_outcome(&id.0, &name, &arguments, &result)?;
+            if builtin {
+                if let Some(value) =
+                    resolved_tool_output(&result).and_then(ToolOutput::programmatic_content)
+                {
+                    outcome["builtin_output"] = serde_json::json!({
+                        "value": value,
+                        "duration_ms": start.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    });
                 }
-            };
-            outcome["tool_call"] = serde_json::json!({"id":id.0,"name":name,"arguments":arguments});
-            outcome["is_error"] = Value::Bool(is_error);
+            }
             return Ok(outcome);
         }
         let output = result?;
@@ -521,7 +733,7 @@ impl ToolCompositionService for CompositionDispatcher {
             _ = self.stop.cancelled() => Err(cancelled_tool_error()),
             _ = cancellation.cancelled() => Err(cancelled_tool_error()),
             _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
-            result = self.execute_call(name, arguments, index, local.0.clone(), false, None) => result,
+            result = self.execute_call(name, arguments, index, local.0.clone(), false, None, false, false) => result,
         }
     }
 
@@ -556,7 +768,7 @@ impl ToolCompositionService for CompositionDispatcher {
                 _ = self.stop.cancelled() => Err(cancelled_tool_error()),
                 _ = cancellation.cancelled() => Err(cancelled_tool_error()),
                 _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
-                result = self.execute_call(name, arguments, index, local.0.clone(), true, updates.as_ref()) => result,
+                result = self.execute_call(name, arguments, index, local.0.clone(), true, updates.as_ref(), false, false) => result,
             }
         };
         match result {
@@ -567,6 +779,115 @@ impl ToolCompositionService for CompositionDispatcher {
             ),
         }
     }
+    async fn call_builtin(
+        &self,
+        name: String,
+        arguments: Value,
+        cancellation: CancellationToken,
+        full_outcome: bool,
+        updates: Option<mpsc::Sender<Value>>,
+    ) -> Result<Value, ToolError> {
+        if full_outcome {
+            let prepared = self
+                .prepare(name.clone(), arguments, true, cancellation.clone())
+                .await?;
+            if prepared["block"] == true {
+                return Ok(prepared["outcome"].clone());
+            }
+            return self
+                .call_prepared(
+                    prepared["prepared_id"]
+                        .as_str()
+                        .expect("preparation has an ID")
+                        .into(),
+                    name,
+                    prepared["tool_call"]["arguments"].clone(),
+                    true,
+                    cancellation,
+                    updates,
+                )
+                .await;
+        }
+        let index = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+        let local = CallCancellation(CancellationToken::default());
+        if index > MAX_COMPOSITION_CALLS {
+            Err(ToolError::new("composition exceeded 256 nested calls"))
+        } else {
+            tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => Err(cancelled_tool_error()),
+                _ = self.stop.cancelled() => Err(cancelled_tool_error()),
+                _ = cancellation.cancelled() => Err(cancelled_tool_error()),
+                _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
+                result = self.execute_call(name, arguments, index, local.0.clone(), false, updates.as_ref(), true, false) => result,
+            }
+        }
+    }
+
+    async fn prepare(
+        &self,
+        name: String,
+        arguments: Value,
+        builtin: bool,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        self.ensure_live()?;
+        let index = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
+        if index > MAX_COMPOSITION_CALLS {
+            return Err(ToolError::new("composition exceeded 256 nested calls"));
+        }
+        let local = CallCancellation(CancellationToken::default());
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = self.stop.cancelled() => Err(cancelled_tool_error()),
+            _ = cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
+            result = self.prepare_call(name, arguments, builtin, index, local.0.clone()) => result,
+        }
+    }
+
+    async fn call_prepared(
+        &self,
+        prepared_id: String,
+        name: String,
+        arguments: Value,
+        builtin: bool,
+        cancellation: CancellationToken,
+        updates: Option<mpsc::Sender<Value>>,
+    ) -> Result<Value, ToolError> {
+        self.ensure_live()?;
+        let prepared = self
+            .prepared
+            .lock()
+            .expect("composition receipts are not poisoned")
+            .remove(&prepared_id)
+            .ok_or_else(|| ToolError::new("unknown or consumed nested preparation"))?;
+        if prepared.name != name || prepared.arguments != arguments || prepared.builtin != builtin {
+            return Err(ToolError::new(
+                "nested preparation target or arguments mismatch",
+            ));
+        }
+        let local = CallCancellation(CancellationToken::default());
+        let result = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = self.stop.cancelled() => Err(cancelled_tool_error()),
+            _ = cancellation.cancelled() => Err(cancelled_tool_error()),
+            _ = tokio::time::sleep_until(self.deadline()) => Err(ToolError::new("composition exceeded the 30 second host deadline")),
+            result = self.execute_call(name.clone(), arguments.clone(), prepared.index, local.0.clone(), true, updates.as_ref(), builtin, true) => result,
+        };
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => Self::full_outcome(
+                &format!("{}/{}", self.parent_id.0, prepared.index),
+                &name,
+                &arguments,
+                &Err(error),
+            ),
+        }
+    }
+
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError> {
         self.ensure_live()?;
         validate_store_writes(&set, &delete)?;

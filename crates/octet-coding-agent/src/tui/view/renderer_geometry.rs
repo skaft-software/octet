@@ -285,6 +285,9 @@ impl RenderedGeometry {
                                     &state.transcript[index],
                                 ),
                                 cache.block_geometries[index],
+                                super::transcript_selection::shell_output_copy_start(
+                                    &state.transcript[index],
+                                ),
                                 start.saturating_sub(cache.block_starts[index])
                                     ..end.saturating_sub(cache.block_starts[index]),
                                 copy_rows.block(id),

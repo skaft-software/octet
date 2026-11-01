@@ -5,6 +5,9 @@
 use super::*;
 use serde_json::{json, Value};
 
+mod append;
+#[cfg(all(test, unix))]
+mod append_tests;
 mod dispatch;
 mod history;
 pub(in crate::extension_process) use dispatch::attach;
@@ -16,6 +19,7 @@ pub(in crate::extension_process) use wire::{Descriptor, Preparation};
 
 pub(crate) const OWNER_ROUTES: &str = "session_owner_routes_v1";
 pub(crate) const SNAPSHOT_TRANSPORT: &str = "session_snapshot_transport_v1";
+pub(crate) const APPEND_RECEIPTS: &str = "session_append_receipts_v1";
 pub(in crate::extension_process) const PREPARE: &str = "session/snapshot/prepare";
 const READ: &str = "session/snapshot/read";
 const RELEASE: &str = "session/snapshot/release";
@@ -76,13 +80,20 @@ struct Projection {
     committed: bool,
     _reservation: Reservation,
 }
+pub(super) struct ParentView {
+    pub(super) owner: ExtensionResourceOwner,
+    pub(super) preparation: Option<Preparation>,
+    pub(super) revision: u64,
+    pub(super) head: Option<String>,
+}
+
 #[derive(Default)]
 pub(in crate::extension_process) struct Store {
     accounting: Arc<StdMutex<Accounting>>,
     revision: u64,
     pub(in crate::extension_process) current: HashMap<ExtensionResourceOwner, Option<Arc<View>>>,
     transfers: HashMap<String, Transfer>,
-    pub(super) parents: HashMap<u64, (ExtensionResourceOwner, Option<Preparation>)>,
+    pub(super) parents: HashMap<u64, ParentView>,
     projections: HashMap<String, Projection>,
 }
 

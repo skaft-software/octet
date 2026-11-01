@@ -20,6 +20,7 @@ http = "1"
 bytes = { version = "1", features = ["serde"] }
 futures-core = "0.3"
 futures-util = "0.3"
+fancy-regex = "0.16.2"
 # Image input is validated and resized before it becomes durable chat history.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 async-stream = "0.3"

@@ -993,7 +993,7 @@ fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
         ModelFilter::All,
         &serde_json::json!({"data": [
             {"id":"gpt-6-astra"}, {"id":"gpt-6-sol"}, {"id":"gpt-6.1-sol"}, {"id":"gpt-6-luna"},
-            {"id":"gpt-6-unverified"}
+            {"id":"gpt-6.1-terra"}, {"id":"gpt-6-unverified"}
         ]}),
     )
     .unwrap();
@@ -1001,6 +1001,7 @@ fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
         ("gpt-6-astra", false),
         ("gpt-6-sol", true),
         ("gpt-6.1-sol", false),
+        ("gpt-6.1-terra", true),
         ("gpt-6-luna", true),
     ] {
         let model = catalog.resolve(&ModelId(format!("openai/{id}"))).unwrap();
@@ -1024,6 +1025,21 @@ fn public_gpt6_discovery_uses_exact_contracts_without_cross_route_inference() {
             assert!(
                 !capability.supports(&ReasoningConfig::Effort(octet_ai::ReasoningEffort::Minimal))
             );
+        }
+        if id == "gpt-6.1-terra" {
+            assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+            assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1 Terra"));
+            assert!(model
+                .spec
+                .capabilities
+                .input_modalities
+                .contains(octet_ai::Modality::Image));
+            assert!(model.spec.cache.supports_explicit_prompt_cache_mode);
+            let builtin = ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&ModelId(id.into()))
+                .unwrap();
+            assert_eq!(model.spec.pricing, builtin.spec.pricing);
         }
         assert!(model.spec.capabilities.responses_features.async_tools);
         // Model authority alone never upgrades an unqualified endpoint.
@@ -1133,6 +1149,20 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
         crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-sol-unverified")
             .is_none()
     );
+    let terra = crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-terra").unwrap();
+    let builtin = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6.1-terra".into()))
+        .unwrap();
+    assert_eq!(Some(&terra), builtin.spec.pricing.as_ref());
+    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-terra").is_none());
+    for alias in [
+        "gpt-6.1-terra-pro",
+        "openai/gpt-6.1-terra",
+        "gpt-6.1-terra-unverified",
+    ] {
+        assert!(crate::providers::pricing_for(&crate::providers::OPENAI, alias).is_none());
+    }
     // Reviewed subscription prices still apply to explicitly allowlisted models,
     // but even a known public API quote must not price an unreviewed OAuth route.
     let astra = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6-astra").unwrap();

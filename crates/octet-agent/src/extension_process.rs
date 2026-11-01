@@ -94,6 +94,7 @@ mod admission;
 mod agent_sessions;
 mod bulk;
 mod composition;
+mod nested_inference;
 mod connection;
 mod contributions;
 mod exec;
@@ -102,8 +103,11 @@ pub use self::exec::ExtensionExecRequest;
 mod mcp;
 pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
+mod message_events;
 mod manifest;
 mod model_control;
+mod native_provider;
+pub use native_provider::NativeProviderCatalog;
 mod negotiation;
 mod presentation;
 mod process_api;
@@ -147,6 +151,8 @@ pub use resources::{
     EXTENSION_FEATURE_RESOURCE_REFS_V1, MAX_RESOURCE_RECORDS,
     MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
 };
+mod runtime_commands;
+pub use runtime_commands::EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1;
 mod runtime_config;
 pub mod session_leaf;
 mod spawn;
@@ -336,6 +342,7 @@ pub use self::process_group::EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS;
 pub use self::process_group::EXTENSION_FEATURE_EDITOR_HANDOFF;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2;
+pub use self::process_group::EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1;
 pub use self::process_group::EXTENSION_FEATURE_MESSAGE_INJECTION;
 pub use self::process_group::EXTENSION_FEATURE_MODEL_CATALOG;
 pub use self::process_group::EXTENSION_FEATURE_PIPELINE_HOOKS_V1;

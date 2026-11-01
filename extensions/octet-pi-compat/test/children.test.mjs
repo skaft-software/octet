@@ -184,7 +184,7 @@ test('unsupported Pi authority/file/callback paths are explicit before any spawn
     }
     assert.throws(() => SessionManager.open('/fake/session.jsonl'), /implicit import/);
     assert.throws(() => SessionManager.create(), /projection is not implemented/);
-    assert.throws(() => createReadTool('/elsewhere'), /inherit/);
+    await assert.rejects(createAgentSession({ tools: [createReadTool('/elsewhere')] }), /inherit/);
     const { session } = await createAgentSession();
     assert.throws(() => { session.agent.beforeToolCall = () => {}; }, /effect admission/);
     await assert.rejects(session.bindExtensions({}), /not yet bound/);

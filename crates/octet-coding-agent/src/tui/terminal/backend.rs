@@ -413,6 +413,7 @@ impl OctetTerminal<Stdout> {
         image_store: TerminalImageStore,
     ) -> Result<Self> {
         crate::output::begin_tui_diagnostics();
+        lifecycle::save_original_termios();
         if let Err(error) = terminal::enable_raw_mode() {
             crate::output::end_tui_diagnostics();
             return Err(error.into());

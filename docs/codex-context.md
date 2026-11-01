@@ -17,7 +17,7 @@ resolution, notice). Bootstrap application:
 
 * long-running Codex sessions were dropping their **websocket** connections as
   context grew;
-* OpenAI **recommends** a 272K Codex context limit; and
+* the original policy used OpenAI's then-current 272K guidance; and
 * usage above 272K is **double-priced** (guidance: about 2x input / 1.5x output
   for the *whole* request, not only the excess).
 
@@ -25,6 +25,15 @@ octet therefore keeps the cap by default. `gpt-5.6-luna` is the one documented
 exception: its conservative working window is 372K. The websocket drop-protection
 work itself lives in `crates/octet-ai` and is owned separately; this document
 only records the budgeting policy and the notice that references it.
+
+The current [official model guide](https://developers.openai.com/codex/models)
+reports a **500,000-token default** for GPT-6.1 Sol in Codex and ChatGPT Work.
+This is a provider default, not octet's working policy or an account entitlement.
+Discovery retains that default separately from the maximum (historically 872K)
+and still applies the 272K cap. A larger provider default alone does not remove
+the consent/entitlement gates below, and a public API context window or tariff
+cannot establish a subscription contract. Changing the deliberate cap remains
+a separate product decision, not a metadata-freshness correction.
 
 ## 2. Working window and entitlement table
 

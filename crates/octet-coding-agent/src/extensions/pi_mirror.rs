@@ -12,25 +12,34 @@ pub(super) fn prepare(
     config: &Config,
     diagnostics: &mut Vec<String>,
 ) -> Option<tempfile::TempDir> {
-    let descriptor = descriptors.iter_mut().find(|descriptor| {
-        descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME
-            && descriptor
-                .manifest
-                .entrypoint
-                .env
-                .get("OCTET_PI_AUTO_MIRROR")
-                == Some(&"1".to_owned())
-    })?;
-    if !config.start_extension_processes
-        || !config.sandbox.process_execution_allowed()
-        || descriptor
+    let descriptor = descriptors
+        .iter_mut()
+        .find(|descriptor| needs_preparation(descriptor, config))?;
+    let result = block_on_runtime(prepare_admitted(descriptor, config)).and_then(|result| result);
+    finish_preparation(descriptor, result, diagnostics)
+}
+
+pub(super) fn needs_preparation(descriptor: &DiscoveredExtension, config: &Config) -> bool {
+    descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME
+        && descriptor
+            .manifest
+            .entrypoint
+            .env
+            .get("OCTET_PI_AUTO_MIRROR")
+            .is_some_and(|value| value == "1")
+        && config.start_extension_processes
+        && config.sandbox.process_execution_allowed()
+        && descriptor
             .activation
             .start_decision(descriptor.source, config.workspace_trusted)
-            != ExtensionStartDecision::Allowed
-    {
-        return None;
-    }
-    let result = block_on_runtime(prepare_admitted(descriptor, config)).and_then(|result| result);
+            == ExtensionStartDecision::Allowed
+}
+
+pub(super) fn finish_preparation(
+    descriptor: &mut DiscoveredExtension,
+    result: anyhow::Result<(tempfile::TempDir, ExtensionManifest)>,
+    diagnostics: &mut Vec<String>,
+) -> Option<tempfile::TempDir> {
     match result {
         Ok((directory, manifest)) => {
             // Keep the selected source and trust identity. Only the session's
@@ -49,7 +58,7 @@ pub(super) fn prepare(
     }
 }
 
-async fn prepare_admitted(
+pub(super) async fn prepare_admitted(
     descriptor: &DiscoveredExtension,
     config: &Config,
 ) -> anyhow::Result<(tempfile::TempDir, ExtensionManifest)> {

@@ -82,6 +82,20 @@ test('callback mutation and custom messages cannot corrupt the run mirror', asyn
   assert.deepEqual(events.at(-2).message.content, [{ type: 'text', text: 'actual assistant' }]);
 });
 
+test('run event members Pi does not declare read as absent while settled assistant facts still refuse', async () => {
+  const seen = [], runtime = { metadata: () => ({ hooks: [] }), runEvent: async (type, value) => {
+    seen.push({ type, reason: value.reason, previousSessionFile: value.previousSessionFile, messages: type === 'agent_start' ? value.messages : undefined });
+    if (type === 'message_end' && value.message.role === 'assistant') assert.throws(() => value.message.usage, /unsupported_feature assistant message\.usage/);
+  } };
+  const store = { state: { host: {}, pendingPrompt: { role: 'user', content: [{ type: 'text', text: 'q' }], timestamp: 1 } } };
+  await handleRunMessage(runtime, 'turn/started', {}, store);
+  await handleRunMessage(runtime, 'message/updated', { delta: 'a' }, store);
+  await handleRunMessage(runtime, 'message/settled', {}, store);
+  await handleRunMessage(runtime, 'turn/settled', {}, store);
+  assert.deepEqual(seen.map(e => e.type), ['agent_start', 'message_start', 'message_end', 'message_start', 'message_update', 'message_end', 'agent_end']);
+  for (const e of seen) assert.deepEqual([e.reason, e.previousSessionFile, e.messages], [undefined, undefined, undefined], e.type);
+});
+
 const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const committedUsage = { input: 9, output: 7, cacheRead: 2, cacheWrite: 0, totalTokens: 18, reasoning: 1,
   cost: { input: 9 / 1e6, output: 7 / 1e6, cacheRead: 2 / 1e6, cacheWrite: 0, total: 18 / 1e6 } };

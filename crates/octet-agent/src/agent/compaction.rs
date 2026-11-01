@@ -156,6 +156,7 @@ pub(super) struct CompactionContext<'a> {
     pub(super) max_network_wait: Option<Duration>,
     pub(super) provider_retries_enabled: bool,
     pub(super) client: &'a AiClient,
+    pub(super) initial_authority: Option<&'a PreparedHostAuthority>,
     /// Active model, used for context-window sizing and the normal request.
     pub(super) model: &'a Model,
     /// Optional configured route used for the summary request itself.
@@ -504,6 +505,10 @@ impl CompactionContext<'_> {
             self.max_session_cost_microdollars,
             request.cache_retention,
         )?;
+        let initial_authority = self.initial_authority;
+        let client = self.client;
+        let compaction_model = self.compaction_model;
+        let max_network_wait = self.max_network_wait;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
                 dispatch: AuxiliaryDispatch::default(),
@@ -535,14 +540,23 @@ impl CompactionContext<'_> {
                 session_id: self.session_id,
             },
             |deadline, dispatch| {
-                auxiliary_complete(
-                    self.client,
-                    self.compaction_model,
-                    request.clone(),
-                    deadline,
-                    self.max_network_wait,
-                    dispatch,
-                )
+                let request = request.clone();
+                async move {
+                    let options = initial_authority
+                        .map(|authority| authority.auxiliary_options(compaction_model))
+                        .transpose()?
+                        .flatten();
+                    auxiliary_complete(
+                        client,
+                        compaction_model,
+                        request,
+                        deadline,
+                        max_network_wait,
+                        dispatch,
+                        options,
+                    )
+                    .await
+                }
             },
             |session, response| {
                 session.record_compaction_usage(
@@ -835,6 +849,11 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
+        if self.initial_authority.is_some() {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "native Responses compact is unsupported for a prepared opaque host route".into(),
+            ));
+        }
         if !self.session_operation_hooks.is_empty() {
             let first_kept = self.session.head().ok_or_else(|| {
                 AgentError::InvalidCompactionPolicy("no history to compact".into())
@@ -2114,6 +2133,7 @@ impl Agent {
             max_network_wait: self.max_network_wait,
             provider_retries_enabled: self.provider_retries_enabled,
             client: &self.client,
+            initial_authority: None,
             model: &self.model,
             compaction_model: model,
             summary_operation: operation,

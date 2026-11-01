@@ -18,11 +18,12 @@ import { tracePhase, traceEnabled } from './startup-trace.mjs';
 // budget, not one per prompt. Handlers that can veto (tool guards) fail closed:
 // a guard that cannot answer in time blocks the call, never lets it through.
 //
-// The totals keep the whole chain under the host's own deadlines for the same
-// hook (before_prompt: 5 s).
+// The callback-wait totals leave time before the host's own deadlines for
+// before_prompt and resources_discover (5 s). They do not bound queueing,
+// transport, synchronous JS or a later flush of tracked host operations.
 
-const PER_HANDLER_MS = { before_agent_start: 2000, input: 2000, tool_call: 10000 };
-const TOTAL_MS = { before_agent_start: 4000, input: 4000, tool_call: 10000 };
+const PER_HANDLER_MS = { before_agent_start: 2000, input: 2000, resources_discover: 4000, tool_call: 10000 };
+const TOTAL_MS = { before_agent_start: 4000, input: 4000, resources_discover: 4000, tool_call: 10000 };
 const DEFAULT_PER_HANDLER_MS = 5000;
 const DEFAULT_TOTAL_MS = 15000;
 const MIN_WAIT_MS = 250;
@@ -97,11 +98,13 @@ export class HookBudget {
     this.detached = new Map(); // factory path -> milliseconds actually waited
   }
 
-  // What this handler may still spend: its own budget, capped by what is left
-  // of the hook's total, but never so little that a healthy handler is starved.
+  // Keep a small shared reserve for healthy handlers reached late, but never
+  // let their individual floors extend the hook's absolute total deadline.
   wait() {
     const left = this.total - (performance.now() - this.started);
-    return Math.max(Math.min(MIN_WAIT_MS, this.perHandler), Math.min(this.perHandler, left));
+    const reserve = Math.min(MIN_WAIT_MS, this.perHandler);
+    const share = Math.max(reserve, Math.min(this.perHandler, left - reserve));
+    return Math.max(0, Math.min(left, share));
   }
 
   describe(entry) {
@@ -117,10 +120,16 @@ export class HookBudget {
       this.trace(entry, 0, 'skipped-busy');
       return { ran: false, busy: true };
     }
+    const waited = this.wait();
+    if (waited === 0) {
+      // No new side effects, timer or per-handler delay after the deadline.
+      // A skipped veto remains fail-closed at its caller, just like a timeout.
+      this.trace(entry, 0, 'skipped-budget');
+      return { ran: false, busy: false };
+    }
     const { store } = this;
     const started = performance.now();
-    const pendingBefore = new Set(store.pending), errorsBefore = store.errors.length;
-    const waited = this.wait();
+    const pendingBefore = new Set(store.pending);
     const timer = nativeTimer(waited);
     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
     entry.busy = true;
@@ -139,7 +148,8 @@ export class HookBudget {
       // own flush, and anything it queues later is observed but never joined.
       child.detached = true;
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
-      store.errors.length = errorsBefore;
+      // Failures recorded while this handler ran may belong to earlier tracked
+      // work. Keep them for the live boundary instead of silently discarding them.
       this.detached.set(this.describe(entry), waited);
       this.trace(entry, performance.now() - started, 'detached');
       return { ran: false, busy: false };

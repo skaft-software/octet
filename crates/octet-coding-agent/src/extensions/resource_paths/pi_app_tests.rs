@@ -6,7 +6,7 @@ use octet_ai::{
     HostStreamTransport, Message, Request, Response, ResponseStream, StopReason, StreamEvent,
     Usage, UserPart,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -147,7 +147,9 @@ fn configured_pi(root: &Path, start: StartBehavior) -> ConfiguredPi {
             let name = format!("pi-{factory}-{current}");
             put(
                 assets.join("skills").join(&name).join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: PI-{factory}-{current}-CATALOG\n---\nPI-{factory}-{current}-BODY\n"),
+                format!(
+                    "---\nname: {name}\ndescription: PI-{factory}-{current}-CATALOG\n---\nPI-{factory}-{current}-BODY\n"
+                ),
             );
             put(
                 assets.join("prompts").join(format!("{name}.md")),
@@ -298,16 +300,23 @@ export default pi => {
       const spread = { ...ctx };
       row.scoped = spread.scopedModels;
       row.available = spread.modelRegistry.getAvailable();
-      const before = JSON.stringify({ scoped: row.scoped, available: row.available });
+      row.all = spread.modelRegistry.getAll();
+      row.found = spread.modelRegistry.find('fixture', 'first');
+      row.missing = spread.modelRegistry.find('fixture', 'missing') === undefined;
+      row.configured = spread.modelRegistry.hasConfiguredAuth(row.found);
+      row.unknownConfigured = spread.modelRegistry.hasConfiguredAuth({ provider: 'missing', id: 'missing' });
+      row.keyUnavailable = await spread.modelRegistry.getApiKeyForProvider('fixture') === undefined;
+      const before = JSON.stringify({ scoped: row.scoped, available: row.available, all: row.all, found: row.found });
       const scoped = ctx.scopedModels, available = ctx.modelRegistry.getAvailable();
+      const all = ctx.modelRegistry.getAll(), found = ctx.modelRegistry.find('fixture', 'first');
       if (scoped.length) scoped[0].model.input.push('mutated');
       if (available.length) available[0].input.push('mutated');
-      row.owned = before === JSON.stringify({ scoped: ctx.scopedModels, available: ctx.modelRegistry.getAvailable() });
+      if (all.length) all[0].input.push('mutated');
+      found.input.push('mutated');
+      row.owned = before === JSON.stringify({ scoped: ctx.scopedModels, available: ctx.modelRegistry.getAvailable(),
+        all: ctx.modelRegistry.getAll(), found: ctx.modelRegistry.find('fixture', 'first') });
       row.refusals = [];
-      for (const read of [() => ctx.modelRegistry.getAll(),
-          () => ctx.modelRegistry.find('fixture', 'first'),
-          () => ctx.modelRegistry.hasConfiguredAuth('fixture'),
-          () => ctx.modelRegistry.getApiKeyAndHeaders({ provider: 'fixture', id: 'first' })]) {
+      for (const read of [() => ctx.modelRegistry.getApiKeyAndHeaders({ provider: 'fixture', id: 'first' })]) {
         try { await read(); row.refusals.push('unexpected success'); }
         catch (error) { row.refusals.push(String(error.message)); }
       }
@@ -435,6 +444,13 @@ async fn headless_model_facts_precede_startup_and_resource_admission() {
             assert_eq!(row["hasUI"], false);
             assert_eq!(row["mode"], "print");
             assert_eq!(row["owned"], true);
+            assert_eq!(row["missing"], true);
+            assert_eq!(row["configured"], true);
+            assert_eq!(row["unknownConfigured"], false);
+            assert_eq!(row["keyUnavailable"], true);
+            assert_eq!(row["found"]["provider"], "fixture");
+            assert_eq!(row["found"]["id"], "first");
+            assert_eq!(row["refusals"].as_array().unwrap().len(), 1);
             assert!(
                 row["refusals"]
                     .as_array()
@@ -444,10 +460,16 @@ async fn headless_model_facts_precede_startup_and_resource_admission() {
                 "{row}"
             );
             let available = row["available"].as_array().unwrap();
-            for id in ["first", "second"] {
-                assert!(available
-                    .iter()
-                    .any(|model| model["provider"] == "fixture" && model["id"] == id));
+            let all = row["all"].as_array().unwrap();
+            assert!(all.len() >= available.len());
+            for models in [available, all] {
+                for id in ["first", "second"] {
+                    assert!(
+                        models
+                            .iter()
+                            .any(|model| model["provider"] == "fixture" && model["id"] == id)
+                    );
+                }
             }
             let scoped = row["scoped"].as_array().unwrap();
             if patterns.is_some() {
@@ -543,16 +565,19 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
     assert_eq!(system.matches("PI-EXPLICIT-CATALOG").count(), 1);
     for factory in ["first", "second"] {
         let name = format!("pi-{factory}-{current}");
-        assert!(app
-            .skills
-            .load(&name.clone())
-            .unwrap()
-            .instructions
-            .contains(&format!("PI-{factory}-{current}-BODY")));
-        assert!(render(app, &name)
-            .unwrap()
-            .text
-            .contains(&format!("PI-{factory}-{current}-PROMPT argument")));
+        assert!(
+            app.skills
+                .load(&name.clone())
+                .unwrap()
+                .instructions
+                .contains(&format!("PI-{factory}-{current}-BODY"))
+        );
+        assert!(
+            render(app, &name)
+                .unwrap()
+                .text
+                .contains(&format!("PI-{factory}-{current}-PROMPT argument"))
+        );
         assert!(!app.prompts.contains(&format!("pi-{factory}-{old}")));
         assert!(app.skills.load(&format!("pi-{factory}-{old}")).is_err());
         assert_eq!(
@@ -578,10 +603,12 @@ fn assert_phase(app: &App, root: &Path, current: &str, captures: &[Request]) {
         selected.glyph("prompt"),
         if current == "a" { ":" } else { ">" }
     );
-    assert!(render(app, "user-proof")
-        .unwrap()
-        .text
-        .contains("USER PROMPT argument"));
+    assert!(
+        render(app, "user-proof")
+            .unwrap()
+            .text
+            .contains("USER PROMPT argument")
+    );
     assert!(!app.resource_paths_pending());
 }
 
@@ -592,6 +619,63 @@ async fn complete_rendered(app: &mut App, name: &str) {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_pi_stalled_discovery_leaves_time_for_native_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    put(
+        workspace.join("skills/late/SKILL.md"),
+        "---\nname: late\ndescription: healthy late discovery\n---\nLATE-SKILL-BODY\n",
+    );
+    let factory = root.join("factory.mjs");
+    put(
+        &factory,
+        r#"export default pi => {
+  pi.on('resources_discover', () => new Promise(() => {}));
+  pi.on('resources_discover', () => ({skillPaths: ['./skills']}));
+};
+"#,
+    );
+    let output = root.join("extensions/octet-pi-compat");
+    let configured = Command::new("node")
+        .arg(adapter_root().join("configure.mjs"))
+        .args(["--reviewed", "--output"])
+        .arg(&output)
+        .arg(&factory)
+        .current_dir(&workspace)
+        .env("PI_OFFLINE", "1")
+        .env("OCTET_PI_AGENT_DIR", root.join("pi-agent"))
+        .output()
+        .expect("existing Node and local adapter dependencies required");
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let mut config = crate::extensions::tests::executable_extension_config(
+        &workspace,
+        &root.join("extensions"),
+        "octet-pi-compat",
+    );
+    config.mode = crate::config::Mode::Print {
+        prompt: "bounded resource discovery".into(),
+    };
+    config.workspace_trusted = true;
+    let mut app = configured_app_from_config(config, true);
+    app.refresh_resource_paths_headless().await.unwrap();
+    assert!(
+        app.skills
+            .load(&"late".into())
+            .unwrap()
+            .instructions
+            .contains("LATE-SKILL-BODY"),
+        "native admission must receive the healthy late handler's actual path"
+    );
+    app.executable_extensions.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -758,9 +842,11 @@ async fn configured_pi_factories_first_provider_reload_and_empty_withdrawal() {
     assert_eq!(fixture.app.config.skill_paths, original.skill_paths);
     assert_eq!(fixture.app.config.prompt_paths, original.prompt_paths);
     assert_eq!(fixture.app.config.theme_paths, original.theme_paths);
-    assert!(crate::tui::theme::load_theme(&fixture.app.config)
-        .source_path()
-        .is_none());
+    assert!(
+        crate::tui::theme::load_theme(&fixture.app.config)
+            .source_path()
+            .is_none()
+    );
     assert!(fixture.app.skills.load(&"pi-explicit".into()).is_ok());
     complete_rendered(&mut fixture.app, "user-proof").await;
     {
@@ -857,12 +943,16 @@ async fn configured_pi_callback_start_error_preserves_discovery_and_reload_witho
         issues[0].level,
         octet_agent::extension_process::ExtensionNotificationLevel::Warning
     );
-    assert!(issues[0]
-        .message
-        .contains(root.join("factories/first.mjs").to_str().unwrap()));
-    assert!(issues[0]
-        .message
-        .contains("session_start callback failed and was skipped"));
+    assert!(
+        issues[0]
+            .message
+            .contains(root.join("factories/first.mjs").to_str().unwrap())
+    );
+    assert!(
+        issues[0]
+            .message
+            .contains("session_start callback failed and was skipped")
+    );
     assert!(!issues[0].message.contains("private start failure details"));
     let rows = trace(&root);
     assert_eq!(
@@ -909,10 +999,12 @@ async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_
         .find(|row| row["kind"] == "start_refused")
         .unwrap();
     assert_eq!(refusal["code"], -32602);
-    assert!(refusal["message"]
-        .as_str()
-        .unwrap()
-        .contains("no foreground session"));
+    assert!(
+        refusal["message"]
+            .as_str()
+            .unwrap()
+            .contains("no foreground session")
+    );
     assert_eq!(
         fixture
             .app
@@ -958,9 +1050,11 @@ async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|row| row["kind"] == "started" || row["kind"] == "discover"));
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["kind"] == "started" || row["kind"] == "discover")
+    );
     assert_unchanged_capture(&root, &fixture);
     fixture.app.executable_extensions.shutdown().await;
 }

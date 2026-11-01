@@ -17,7 +17,13 @@ fn models() -> Vec<Model> {
         .filter(|spec| spec.protocol == Protocol::OpenAiResponses)
         .map(|spec| catalog.resolve(&spec.id).unwrap())
         .collect();
-    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+    for name in [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+    ] {
         assert!(models.iter().any(|model| model.spec.api_name == name));
     }
     models

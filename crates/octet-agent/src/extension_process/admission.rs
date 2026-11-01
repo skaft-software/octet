@@ -508,6 +508,7 @@ pub(super) fn insert_child_request(
         changed: Notify::new(),
         cancel_on_response_abort: StdMutex::new(None),
         composition_cancellation: StdMutex::new(None),
+        inference_id: StdMutex::new(None),
         session_leaf_cancel: StdMutex::new(None),
     });
     match children.entry(id) {
@@ -1086,7 +1087,9 @@ pub(super) fn validate_identifier(
     };
     let rest_valid = characters.all(|character| {
         if extended {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '-' | '.')
+                || kind == "command" && character == ':'
         } else {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         }
@@ -1281,3 +1284,63 @@ pub(super) fn valid_environment_name(name: &str) -> bool {
         .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
         && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
+
+#[cfg(test)]
+mod command_identifier_tests {
+    use super::*;
+
+    #[test]
+    fn pi_namespaced_commands_pass_manifest_and_initialize_admission() {
+        let manifest = ExtensionManifest::parse(
+            r#"name = "pi-commands"
+version = "0.1.0"
+api_version = "0.1"
+[entrypoint]
+command = "node"
+[contributes]
+commands = ["mcp:start", "mcp:stop", "anthropic-auth:status"]
+"#,
+        )
+        .unwrap();
+        let response: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "api_version": "0.1",
+            "commands": manifest.contributes.commands.iter().map(|name| serde_json::json!({
+                "name": name, "description": "Pi command"
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        let (contributions, _) = negotiate_contributions_with_host_services(
+            &manifest,
+            response,
+            8,
+            OfferedHostServices::default(),
+        )
+        .unwrap();
+        assert_eq!(contributions.commands.len(), 3);
+    }
+
+    #[test]
+    fn command_colons_do_not_relax_other_identifiers_or_command_boundaries() {
+        for kind in ["tool", "tool renderer", "secret", "shortcut"] {
+            assert!(validate_identifier(kind, "mcp:start", true).is_err());
+        }
+        for name in [
+            "",
+            ":start",
+            "mcp start",
+            "mcp/start",
+            "mcp\nstart",
+            "mcp\u{1b}start",
+        ] {
+            assert!(
+                validate_identifier("command", name, true).is_err(),
+                "{name:?}"
+            );
+        }
+        assert!(validate_identifier("command", &format!("mcp:{}", "s".repeat(61)), true).is_err());
+    }
+}
+
+#[cfg(test)]
+#[path = "runtime_command_tests.rs"]
+mod runtime_command_tests;

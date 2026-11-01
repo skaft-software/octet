@@ -6,20 +6,47 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PiProviderModelMetadata {
+    #[allow(missing_docs)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_provider: Option<String>,
+    #[allow(missing_docs)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_model_id: Option<String>,
     /// Explicit credential-free URL passed only to the process-owned streamer.
     pub base_url: String,
     /// Declared input modalities (text, and optionally image).
     pub input: Vec<String>,
     /// Host-accounted immutable per-million-token rates, in microdollars.
-    pub pricing: octet_ai::Pricing,
+    pub pricing: Option<octet_ai::Pricing>,
 }
 impl PiProviderModelMetadata {
     /// Validate this system boundary before recording or projecting a route.
     pub fn validate(&self) -> Result<(), String> {
+        if self.inherit_provider.as_ref().is_some_and(|provider| {
+            provider.is_empty()
+                || provider.len() > 64
+                || !provider.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_')
+                })
+        }) {
+            return Err("invalid inherited provider".into());
+        }
         if self.base_url.len() > 8192 {
             return Err("provider URL exceeds bounds".into());
         }
-        if !self.base_url.is_empty() {
+        let opaque_endpoint = self.base_url.len() <= 64
+            && self
+                .base_url
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+            && self
+                .base_url
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if !self.base_url.is_empty() && !opaque_endpoint {
             let url = url::Url::parse(&self.base_url).map_err(|_| "invalid provider URL")?;
             if !matches!(url.scheme(), "http" | "https")
                 || !url.username().is_empty()
@@ -38,12 +65,25 @@ impl PiProviderModelMetadata {
         {
             return Err("provider input must contain text and optionally image".into());
         }
-        if !self.pricing.tiers.is_empty()
-            || self.pricing.cache_write_1h.is_some()
-            || self.pricing.reasoning.is_some()
+        if self.inherit_provider.is_none()
+            && self.pricing.as_ref().is_none_or(|pricing| {
+                pricing.tiers.len() > 256
+                    || pricing.cache_write_1h.is_some()
+                    || pricing.reasoning.is_some()
+                    || pricing.tiers.iter().any(|tier| {
+                        tier.min_input_tokens == 0
+                            || tier.min_input_tokens > 9_007_199_254_740_991
+                            || tier.input.is_none()
+                            || tier.output.is_none()
+                            || tier.cache_read.is_none()
+                            || tier.cache_write_5m.is_none()
+                            || tier.cache_write_1h.is_some()
+                            || tier.reasoning.is_some()
+                    })
+            })
         {
             return Err(
-                "provider pricing has unsupported tiers or separate reasoning/cache-write rates"
+                "provider pricing requires complete bounded tiers without separate reasoning/cache-write rates"
                     .into(),
             );
         }
@@ -74,6 +114,9 @@ pub(super) fn parse_provider_proxy_registration(
             .ok_or(ProviderHostResponseError::Invalid)?;
         let fact: PiProviderModelMetadata =
             serde_json::from_value(fact).map_err(|_| ProviderHostResponseError::Invalid)?;
+        if fact.native_model_id.is_some() {
+            return Err(ProviderHostResponseError::Invalid);
+        }
         fact.validate()
             .map_err(|_| ProviderHostResponseError::Invalid)?;
         facts.push(fact);
@@ -99,8 +142,51 @@ pub(super) fn register_provider_proxy(
     value: serde_json::Value,
     update: bool,
 ) -> Result<api_v03::ProviderCatalogResult, ProviderHostResponseError> {
-    let (request, metadata) = parse_provider_proxy_registration(value)?;
-    provider_registry_for_request(state)?
+    let (mut request, mut metadata) = parse_provider_proxy_registration(value)?;
+    if metadata.values().any(|metadata| {
+        metadata
+            .inherit_provider
+            .as_ref()
+            .is_some_and(|provider| provider != &request.provider.id)
+    }) || (metadata
+        .values()
+        .any(|metadata| metadata.inherit_provider.is_some())
+        && !read_std_lock(&state.protocol).supports("provider_inheritance_v1"))
+    {
+        return Err(ProviderHostResponseError::Invalid);
+    }
+    let registry = provider_registry_for_request(state)?;
+    for model in &mut request.models {
+        let fact = metadata
+            .get_mut(&model.id)
+            .ok_or(ProviderHostResponseError::Invalid)?;
+        if fact.inherit_provider.is_none() {
+            continue;
+        }
+        let native = registry
+            .native_catalog()
+            .and_then(|catalog| catalog.model(&request.provider.id, &model.api_name))
+            .ok_or(ProviderHostResponseError::Unavailable)?;
+        model.protocol = match native.spec.protocol {
+            Protocol::AnthropicMessages => "anthropic_messages",
+            Protocol::OpenAiChat => "openai_chat",
+            Protocol::OpenAiResponses => "openai_responses",
+            _ => return Err(ProviderHostResponseError::Unavailable),
+        }
+        .to_owned();
+        model.display_name = native.spec.display_name.clone();
+        model.context_window = usize::try_from(native.spec.limits.context_window)
+            .map_err(|_| ProviderHostResponseError::Invalid)?;
+        model.max_output_tokens = usize::try_from(native.spec.limits.max_output_tokens)
+            .map_err(|_| ProviderHostResponseError::Invalid)?;
+        model.capabilities.tools = native.spec.capabilities.tools;
+        model.capabilities.parallel_tool_calls = native.spec.capabilities.parallel_tool_calls;
+        model.capabilities.structured_output = native.spec.capabilities.structured_output;
+        model.capabilities.reasoning = native.spec.capabilities.reasoning.is_some();
+        fact.native_model_id = Some(native.spec.id.0.clone());
+        fact.pricing = native.spec.pricing.clone();
+    }
+    registry
         .replace_pi_provider(state.provider_owner.clone(), request, metadata, update)
         .map_err(provider_registry_response_error)
 }

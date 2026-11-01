@@ -128,6 +128,13 @@ impl ExtensionProcess {
         &self.inner.contributions
     }
 
+    /// Returns the active generation's complete live command catalog.
+    pub fn command_definitions(&self) -> Vec<CommandDefinition> {
+        let connection = read_std_lock(&self.inner.connection);
+        let commands = read_std_lock(&connection.command_catalog).clone();
+        commands
+    }
+
     /// Returns the active generation's complete live tool catalog.
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let connection = read_std_lock(&self.inner.connection);
@@ -228,12 +235,14 @@ impl ExtensionProcess {
         mut retired_owner: Option<String>,
     ) {
         let replaced_session;
+        let pending_messages_changed;
         {
             let mut current = write_std_lock(&self.inner.host_state);
             if *current == state && !mirror_changed {
                 return;
             }
             replaced_session = current.session_id != state.session_id || retired_owner.is_some();
+            pending_messages_changed = current.has_pending_messages != state.has_pending_messages;
             if replaced_session && !mirror_refreshed {
                 if let Some(previous) = lock_std_mutex(&connection.session_leaf.mirror).take() {
                     retired_owner = Some(previous.owner.session_id);
@@ -258,6 +267,28 @@ impl ExtensionProcess {
             connection.resource_cleanup_changed.notify_one();
         }
         let protocol = read_std_lock(&connection.protocol);
+        // Retained session contexts need real queue changes even without a UI
+        // mount. Publish only this observed fact to the live issued mirror owner;
+        // it grants no editor, foreground or session mutation authority.
+        if pending_messages_changed
+            && !replaced_session
+            && session_leaf::owner_routes_enabled(&protocol)
+            && connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+        {
+            let owner = lock_std_mutex(&connection.session_leaf.mirror)
+                .as_ref()
+                .map(|mirror| mirror.owner.clone());
+            if let (Some(owner), Some(pending)) = (owner, state.has_pending_messages) {
+                if lock_std_mutex(&connection.issued_resource_owners).contains(&owner)
+                    && !connection.queue_notification(methods::CONTEXT_UPDATED,
+                        serde_json::json!({"resource_owner":owner,"host":{"has_pending_messages":pending}}))
+                {
+                    connection.begin_drain();
+                    connection.kill_process_group();
+                }
+            }
+        }
         if protocol.version != EXTENSION_API_VERSION_0_4
             || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
             || !connection_is_usable(&connection)
@@ -322,14 +353,78 @@ impl ExtensionProcess {
     /// headers, or credentials through this handle.
     pub fn provider_stream_transport(
         &self,
-        provider_id: impl Into<String>,
-        model_id: impl Into<String>,
+        route: crate::extension_provider::ExtensionProviderRoute,
     ) -> Arc<dyn HostStreamTransport> {
         Arc::new(ExtensionProviderStreamTransport {
             process: Arc::downgrade(&self.inner),
-            provider_id: provider_id.into(),
-            model_id: model_id.into(),
+            binding: provider_stream::ProviderRouteBinding::Projected(route),
         })
+    }
+
+    #[allow(missing_docs)]
+    pub fn prepare_provider_stream_transport(
+        &self,
+        projected: &crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+    ) -> Result<Arc<dyn HostStreamTransport>, AiError> {
+        self.prepare_provider_stream_transport_inner(
+            projected,
+            selected,
+            #[cfg(test)]
+            || {},
+        )
+    }
+
+    pub(super) fn prepare_provider_stream_transport_inner(
+        &self,
+        projected: &crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+        #[cfg(test)] after_resolve: impl FnOnce(),
+    ) -> Result<Arc<dyn HostStreamTransport>, AiError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        {
+            let protocol = read_std_lock(&connection.protocol);
+            if protocol.version != EXTENSION_API_VERSION_0_3
+                && (protocol.version != EXTENSION_API_VERSION_0_4
+                    || !protocol.supports("provider_proxy_v1"))
+            {
+                return Err(provider_unavailable_error());
+            }
+        }
+        if !connection_is_usable(&connection)
+            || connection
+                .require_api_v03_host_method(methods::PROVIDER_STREAM)
+                .is_err()
+            || projected.owner != connection.provider_owner
+        {
+            return Err(provider_unavailable_error());
+        }
+        let registry = connection
+            .provider_registry
+            .as_ref()
+            .ok_or_else(provider_unavailable_error)?;
+        let captured = registry
+            .resolve(&projected.provider.id, &projected.model.id)
+            .ok_or_else(provider_unavailable_error)?;
+        #[cfg(test)]
+        after_resolve();
+        if captured.owner != projected.owner
+            || captured.provider != projected.provider
+            || captured.model != projected.model
+            || captured.model_metadata != projected.model_metadata
+            || provider_protocol_name(selected.protocol) != Some(captured.model.protocol.as_str())
+            || selected.pricing
+                != captured
+                    .model_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.pricing.clone())
+        {
+            return Err(provider_unavailable_error());
+        }
+        Ok(Arc::new(ExtensionProviderStreamTransport {
+            process: Arc::downgrade(&self.inner),
+            binding: provider_stream::ProviderRouteBinding::Prepared { captured, selected },
+        }))
     }
 
     /// Builds the current ambient execution context for command, hook,
@@ -450,6 +545,22 @@ impl ExtensionProcess {
         session_id: &str,
         outcome: ExtensionLifecycleOutcome,
     ) -> Result<(), ExtensionRuntimeError> {
+        self.settle_session_hook_binding_with_reason(
+            session_id,
+            outcome,
+            session_hook_shutdown_reason(outcome),
+        )
+        .await
+    }
+
+    /// Settles a binding with the actual host transition. A product resource
+    /// reload releases its binding without calling process-generation reload.
+    pub async fn settle_session_hook_binding_with_reason(
+        &self,
+        session_id: &str,
+        outcome: ExtensionLifecycleOutcome,
+        reason: &'static str,
+    ) -> Result<(), ExtensionRuntimeError> {
         if !self.declares_session_hooks() {
             return Err(self.undeclared("session hook", "session_start/session_end".to_owned()));
         }
@@ -458,13 +569,8 @@ impl ExtensionProcess {
         let Some(binding) = binding else {
             return Ok(());
         };
-        self.dispatch_session_hook_end(
-            &binding,
-            &binding.endpoint,
-            outcome,
-            session_hook_shutdown_reason(outcome),
-        )
-        .await
+        self.dispatch_session_hook_end(&binding, &binding.endpoint, outcome, reason)
+            .await
     }
 
     pub(super) async fn settle_all_session_hook_bindings_locked(
@@ -507,6 +613,7 @@ impl ExtensionProcess {
         &self,
         settled_bindings: Vec<ActiveSessionHookBinding>,
         endpoint: LifecycleEndpoint,
+        start_reason: &'static str,
     ) -> Vec<ActiveSessionHookBinding> {
         let mut bindings = lock_std_mutex(&self.inner.session_hooks);
         settled_bindings
@@ -515,7 +622,7 @@ impl ExtensionProcess {
                 let replacement = ActiveSessionHookBinding {
                     start_outcome: Arc::new(SessionHookStartOutcome::default()),
                     session_id: binding.session_id,
-                    start_reason: "resume",
+                    start_reason,
                     started_at: Instant::now(),
                     endpoint: endpoint.clone(),
                 };
@@ -928,16 +1035,13 @@ impl ExtensionProcess {
         progress: Option<ToolProgressSink>,
         timeout: Duration,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
-        if !self
-            .inner
-            .contributions
-            .commands
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if !read_std_lock(&connection.command_catalog)
             .iter()
             .any(|command| command.name == name)
         {
             return Err(self.undeclared("command", name));
         }
-        let connection = read_std_lock(&self.inner.connection).clone();
         connection.require_api_v03_host_method(methods::COMMAND_EXECUTE)?;
         let mut context = context;
         context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
@@ -2882,6 +2986,7 @@ impl ExtensionProcess {
         let replacement_session_hook_bindings = self.install_replacement_session_hook_bindings(
             settled_session_hook_bindings,
             replacement_endpoint,
+            if previous_crashed { "resume" } else { "reload" },
         );
         let session_hook_starts = futures_util::future::join_all(
             replacement_session_hook_bindings

@@ -126,7 +126,15 @@ pub(in crate::extension_process) fn attach(
         let preparation: Option<Preparation> =
             serde_json::from_value(params[field]["preparation"].clone())
                 .map_err(|_| unavailable())?;
-        store.parents.insert(id, (owner.clone(), preparation));
+        store.parents.insert(
+            id,
+            ParentView {
+                owner: owner.clone(),
+                preparation,
+                revision: view.descriptor.view_revision,
+                head: view.descriptor.head.clone(),
+            },
+        );
         if let Some(payload) = params.as_object_mut().and_then(|p| p.remove("payload")) {
             let invocation = store.invocation(&payload, &view, &profile)?;
             let mut descriptor = store.transfer(id, invocation, &profile)?;

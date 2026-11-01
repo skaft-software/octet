@@ -390,6 +390,44 @@ resolved policy is published once before the frontend starts, so the renderer
 thread and the shared input filter always make the same decision. Outside Tern
 with the default policy, the existing ANSI renderer is unchanged.
 
+## Tab and pane identity
+
+The production adapter already sends `hello` with `app:"octet"`, version, and
+`features:["edit"]`; it opens the listening `octet.session` surface with title
+`octet`. The [current official handshake](https://docs.stencil.so/tern/protocol/handshake.md)
+specifies that `app` becomes the pane's program (including its tab/palette icon)
+while a listening surface is open, and survives snapshot/window reattachment.
+OSC 2 independently preserves `octet · <session name>` and extension-owned titles.
+No extra handshake, input owner, or native surface is introduced for tab status.
+
+The shared host activity publisher now also uses Tern's existing OSC 9;4 channel,
+which the [official Window API](https://docs.stencil.so/tern/reference/api-window.html)
+documents as the source of working/idle and paused/waiting-input state. Working
+is **indeterminate**, not the previous fabricated 0%; real permission/question/
+auth gates are paused, failure is error, and done/cancel/idle remove progress.
+These reports use no percentage. The same channel is used with `--tern off`
+inside a Tern pane. OSC 7501 carries the richer `app=octet` identity, state and
+blocked kind, but current Tern docs do not establish that it consumes OSC 7501.
+No successful-run or blocked-kind detail is invented for OSC 9;4's smaller
+vocabulary. Normal exit/suspension clears only live activity; persistent OSC 7501
+done/error is not erased.
+
+**Tab logo remains an upstream prerequisite.** The documented
+[built-in icons](https://docs.stencil.so/tern/elements/data.md#icon-names) list app
+marks but no `app-octet`. The public TSP hello/open contracts expose no arbitrary
+tab-icon image property. Tern needs a built-in program/icon association for
+`octet`, using the existing [contiguous `01101111` mark](assets/octet/README.md),
+not a new glyph or a screenshot of the welcome. The existing native welcome
+already uses that real mark; it is conversation content, not terminal chrome.
+[Plugin chrome](https://docs.stencil.so/tern/guides/chrome.md) provides tab-title
+strings and named-icon status segments, not a plugin-free TSP tab-logo upload.
+No global plugin or stylesheet is installed by octet.
+
+Synthetic PTY checks cover native hello identity, indeterminate working,
+completion/cancellation and exit records. Actual Tern/Rex tab pixels, icon catalog
+resolution and background/pane interactions for this feature remain **unverified**;
+they must be qualified in an isolated Cua Space, not the owner's desktop.
+
 ## Verification without desktop controls
 
 ```console

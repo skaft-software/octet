@@ -1327,6 +1327,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "fancy-regex",
  "futures-core",
  "futures-util",
  "http",

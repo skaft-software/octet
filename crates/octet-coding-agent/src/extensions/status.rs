@@ -179,7 +179,11 @@ impl ExecutableExtensions {
                     models: entry
                         .models
                         .iter()
-                        .map(|model| extension_provider_model_id(&entry.provider.id, &model.id).0)
+                        .map(|model| {
+                            self.provider_runtime
+                                .projected_model_id(&entry.provider.id, &model.id)
+                                .0
+                        })
                         .collect(),
                     live: complete,
                 })
@@ -417,8 +421,7 @@ impl ExecutableExtensions {
                 process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
                     && process.is_running()
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == "subagents")
             })
@@ -595,8 +598,7 @@ commands = ["subagents"]
                 process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
                     && process.is_running()
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == "subagents")
             })?

@@ -170,6 +170,7 @@ impl ExtensionRuntimeConfig {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct OfferedHostServices {
     pub(super) provider_proxy: bool,
+    pub(super) provider_inheritance: bool,
     pub(super) remote_ui: bool,
     pub(super) transcript_render: bool,
     pub(super) agent_sessions: bool,

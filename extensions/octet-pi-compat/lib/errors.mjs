@@ -21,17 +21,26 @@ export function fields(value, allowed, name) {
 // added by a later release). Members Pi 1.0.2 has but octet deliberately does
 // not honor are registered at the facade as explicit refusing functions, so an
 // unsupported *operation* still fails loudly.
-export function facade(object, label) {
+export function facade(object, label, symbols) {
   return new Proxy(object, {
     get(target, key, receiver) {
       if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
-      if (typeof key === 'symbol' || key === 'then' || key === 'toJSON') return undefined;
+      if (typeof key === 'symbol') return symbols?.get(key);
       return undefined;
     },
     set(target, key, value, receiver) {
+      if (typeof key === 'symbol' && symbols && !Reflect.has(target, key)) { symbols.set(key, value); return true; }
       if (Reflect.has(target, key) || typeof key === 'symbol') return Reflect.set(target, key, value, receiver);
       return unsupported(`${label}.${String(key)}`, 'the facade has no such member to assign');
     },
+    deleteProperty(target, key) {
+      if (typeof key === 'symbol' && symbols && !Reflect.has(target, key)) { symbols.delete(key); return true; }
+      return Reflect.deleteProperty(target, key);
+    },
+    has: (target, key) => Reflect.has(target, key) || typeof key === 'symbol' && Boolean(symbols?.has(key)),
+    ownKeys: target => [...new Set([...Reflect.ownKeys(target), ...symbols?.keys() ?? []])],
+    getOwnPropertyDescriptor: (target, key) => Reflect.getOwnPropertyDescriptor(target, key) ??
+      (typeof key === 'symbol' && symbols?.has(key) ? { value: symbols.get(key), writable: true, enumerable: true, configurable: true } : undefined),
   });
 }
 // An octet-built *data* object (an observed message, a native receipt, stream

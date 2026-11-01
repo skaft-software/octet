@@ -11,6 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { bounded, fields, invalid, ownerKey, rpcError, strict, unsupported } from './errors.mjs';
 import { ChildEventProjection } from './child-events.mjs';
+import { createBuiltinDefinition } from './builtin-tools.mjs';
 
 const localHost = new AsyncLocalStorage();
 let installedRuntime;
@@ -54,18 +55,19 @@ function live(binding) {
   ownerKey(binding.owner); binding.assertLive();
   for (const feature of CHILD_FEATURES) if (!binding.features?.has(feature)) unsupported(feature, 'host child contract was not negotiated');
 }
-function tool(name) { return Object.freeze({ name, [TOOL]: true, execute() { unsupported(`direct ${name}.execute`, 'only the native child agent may execute host tools'); } }); }
+function tool(name, cwd, options) { return Object.defineProperty(createBuiltinDefinition(name, cwd, options), TOOL, { value: Object.freeze({ cwd }) }); }
 export const readTool = tool('read'), bashTool = tool('bash'), editTool = tool('edit'), writeTool = tool('write');
 export const codingTools = Object.freeze([readTool, bashTool, editTool, writeTool]);
-function toolsAt(cwd, tools) {
-  if (cwd !== undefined && cwd !== captureChildHost().cwd) unsupported('child tools cwd', 'child cwd must inherit the authenticated host workspace');
-  return tools;
-}
-export const createCodingTools = cwd => [...toolsAt(cwd, codingTools)];
-export const createReadTool = cwd => toolsAt(cwd, readTool);
-export const createBashTool = cwd => toolsAt(cwd, bashTool);
-export const createEditTool = cwd => toolsAt(cwd, editTool);
-export const createWriteTool = cwd => toolsAt(cwd, writeTool);
+export const createReadTool = (cwd, options) => tool('read', cwd, options);
+export const createBashTool = (cwd, options) => tool('bash', cwd, options);
+export const createEditTool = (cwd, options) => tool('edit', cwd, options);
+export const createWriteTool = (cwd, options) => tool('write', cwd, options);
+export const createPowerShellTool = (cwd, options) => tool('powershell', cwd, options);
+export const createGrepTool = (cwd, options) => tool('grep', cwd, options);
+export const createFindTool = (cwd, options) => tool('find', cwd, options);
+export const createLsTool = (cwd, options) => tool('ls', cwd, options);
+export const createCodingTools = cwd => [createReadTool(cwd), createBashTool(cwd), createEditTool(cwd), createWriteTool(cwd)];
+export const createReadOnlyTools = cwd => [createReadTool(cwd), createGrepTool(cwd), createFindTool(cwd), createLsTool(cwd)];
 
 // This selector is a Pi-facing view, not a second session store. Native durable
 // persistence is mandatory even for an in-memory Pi view; no Pi JSONL is written.
@@ -82,10 +84,14 @@ export class SessionManager {
   appendMessage() { unsupported('SessionManager.appendMessage', 'native child persistence cannot be edited through a local JS mirror'); }
 }
 
-function policyFor(options) {
+function policyFor(options, cwd) {
   const requested = options.tools ?? codingTools;
   if (!Array.isArray(requested) || requested.length === 0 || requested.length > STANDARD.length) invalid('child tools must be a nonempty standard-tool allowlist');
-  let tools = requested.map(t => { if (!t?.[TOOL] || !STANDARD.includes(t.name)) unsupported('custom child tool', 'registered JS child callbacks have no host-mediated execution binding yet'); return t.name; });
+  let tools = requested.map(t => {
+    if (!t?.[TOOL] || !STANDARD.includes(t.name)) unsupported('custom child tool', 'registered JS child callbacks have no host-mediated execution binding yet');
+    if (t[TOOL].cwd !== undefined && t[TOOL].cwd !== cwd) unsupported('child tools cwd', 'child cwd must inherit the authenticated host workspace');
+    return t.name;
+  });
   if (new Set(tools).size !== tools.length) invalid('duplicate child tool');
   if (options.excludeTools !== undefined) {
     if (!Array.isArray(options.excludeTools) || options.excludeTools.some(n => typeof n !== 'string')) invalid('excludeTools');
@@ -116,7 +122,7 @@ export async function createAgentSession(options = {}) {
   const manager = options.sessionManager ?? SessionManager.inMemory(binding.cwd);
   if (!manager?.[MANAGER] || manager.session) invalid('fresh host-backed SessionManager required');
   if (manager.cwd !== undefined && manager.cwd !== binding.cwd) unsupported('SessionManager cwd', 'host workspace must be inherited');
-  const policy = policyFor(options);
+  const policy = policyFor(options, binding.cwd);
   if (policy.model_selection && !binding.features.has('agent_model_selection_v1')) unsupported('child model selection', 'agent_model_selection_v1 was not negotiated');
   const session = new AgentSession(SECRET, binding, manager, policy, options.model, options.thinkingLevel);
   let owned = sessions.get(binding.identity ?? binding); if (!owned) { owned = new Set(); sessions.set(binding.identity ?? binding, owned); }

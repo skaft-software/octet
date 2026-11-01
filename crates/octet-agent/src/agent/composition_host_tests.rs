@@ -12,6 +12,8 @@ use std::sync::atomic::AtomicUsize;
 struct Probe {
     name: String,
     effect: ToolEffect,
+    exposure: crate::tool::ToolExposure,
+    schema: Option<Value>,
     parallel: bool,
     process: bool,
     composition: Option<ToolCompositionConfig>,
@@ -27,6 +29,8 @@ impl Probe {
         Self {
             name: name.into(),
             effect,
+            exposure: crate::tool::ToolExposure::Direct,
+            schema: None,
             parallel: true,
             process: false,
             composition: None,
@@ -48,13 +52,16 @@ impl Drop for Active {
 
 #[async_trait::async_trait]
 impl Tool for Probe {
+    fn exposure(&self) -> crate::tool::ToolExposure {
+        self.exposure
+    }
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: self.name.clone(),
             description: "Probe tool".into(),
             async_execution: false,
             constrained_sampling: None,
-            parameters: json!({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}),
+            parameters: self.schema.clone().unwrap_or_else(|| json!({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})),
         }
     }
     fn effect(&self, _: &Value, _: &ToolContext<'_>) -> Result<ToolEffect, ToolError> {
@@ -118,12 +125,25 @@ fn scope(
     hooks: Vec<Arc<dyn ToolCallHook>>,
     broker: EffectBroker,
 ) -> (CompositionScope, mpsc::Receiver<ToolProgress>) {
+    scope_with_builtins(tools, Vec::new(), session, sandbox, model, hooks, broker)
+}
+
+fn scope_with_builtins(
+    tools: Vec<Arc<dyn Tool>>,
+    builtin_tools: Vec<Arc<dyn Tool>>,
+    session: &Session,
+    sandbox: SandboxConfig,
+    model: Model,
+    hooks: Vec<Arc<dyn ToolCallHook>>,
+    broker: EffectBroker,
+) -> (CompositionScope, mpsc::Receiver<ToolProgress>) {
     let (progress, receiver) = ToolProgressSink::bounded_channel();
     (
         CompositionDispatcher::scope(
             octet_ai::ToolCallId("outer".into()),
             "codemode".into(),
             tools,
+            builtin_tools,
             sandbox,
             "composition-test".into(),
             "owner".into(),
@@ -726,6 +746,7 @@ async fn failed_script_usage_is_billed_durably_and_cannot_reset_the_next_script_
             octet_ai::ToolCallId("next".into()),
             "codemode".into(),
             vec![probe.clone()],
+            Vec::new(),
             sandbox.clone(),
             "test".into(),
             "owner".into(),
@@ -785,6 +806,7 @@ async fn core_tools_keep_programmatic_results_under_hard_session_ceilings() {
         octet_ai::ToolCallId("budgeted".into()),
         "codemode".into(),
         vec![tools[0].clone()],
+        Vec::new(),
         sandbox,
         "test".into(),
         "owner".into(),
@@ -929,6 +951,820 @@ fn only_mode_changes_advertising_not_the_authority_snapshot_and_aliases_match_pi
     assert_eq!(crate::tool_composition::direct_surface(&tools).len(), 1);
     assert_eq!(crate::tool_composition::callable_catalog(&tools).len(), 2);
     assert_eq!(crate::tool_composition::identifier("9abc"), "_abc");
+}
+
+struct PreparingProbe {
+    probe: Probe,
+    preparations: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Tool for PreparingProbe {
+    fn definition(&self) -> ToolDef {
+        self.probe.definition()
+    }
+    fn effect(&self, args: &Value, context: &ToolContext<'_>) -> Result<ToolEffect, ToolError> {
+        self.probe.effect(args, context)
+    }
+    fn prepares_arguments(&self) -> bool {
+        true
+    }
+    fn composition_is_unmetered(&self) -> bool {
+        true
+    }
+    async fn prepare_arguments(
+        &self,
+        args: Value,
+        _: &str,
+        _: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        self.preparations.fetch_add(1, Ordering::AcqRel);
+        Ok(if args.is_number() {
+            json!({"value":args})
+        } else {
+            args
+        })
+    }
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.probe.execute(args, context).await
+    }
+}
+
+#[derive(Default)]
+struct PreflightHook {
+    calls: AtomicUsize,
+    before: AtomicUsize,
+    results: AtomicUsize,
+    after: AtomicUsize,
+    veto: bool,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl ToolCallHook for PreflightHook {
+    async fn transform_tool_call(
+        &self,
+        _: &str,
+        args: &Value,
+        context: &ToolContext<'_>,
+    ) -> Result<Option<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        tokio::time::sleep(self.delay).await;
+        assert!(context
+            .progress
+            .tool_call_identity()
+            .0
+            .unwrap()
+            .starts_with("outer/"));
+        if self.veto {
+            return Err(ToolError::policy_denied(
+                ToolPolicyDenialCode::SecondaryHookDenied,
+                "native veto",
+            ));
+        }
+        Ok(Some(json!({"value":args["value"].as_i64().unwrap() + 1})))
+    }
+    async fn before_tool_call(
+        &self,
+        _: &str,
+        _: &Value,
+        _: &ToolContext<'_>,
+    ) -> Result<(), ToolError> {
+        self.before.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+    async fn transform_tool_result(
+        &self,
+        _: &str,
+        _: &Value,
+        result: Result<ToolOutput, ToolError>,
+        _: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let count = self.results.fetch_add(1, Ordering::AcqRel) + 1;
+        let failed = tool_execution_failed(&result);
+        Ok(ToolOutput::new(format!("native result {count}")).with_is_error(failed))
+    }
+    async fn after_tool_call(&self, _: &str, _: &Value, _: &str, _: bool, _: &ToolContext<'_>) {
+        self.after.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[test]
+fn composition_builtin_snapshot_requires_this_hosts_exact_registration() {
+    let mut host = ExtensionHost::default();
+    host.builtin_tool(Probe::new("base", ToolEffect::Pure));
+    let mut sibling = host.clone();
+    host.builtin_tool(Probe::new("sibling", ToolEffect::Pure));
+    sibling.tool(Probe::new("sibling", ToolEffect::Pure));
+    assert_eq!(sibling.composition_builtin_tools().len(), 1);
+    assert_eq!(
+        sibling.composition_builtin_tools()[0].definition().name,
+        "base"
+    );
+    host.tools[0] = Arc::new(Probe::new("base", ToolEffect::Pure));
+    assert_eq!(host.composition_builtin_tools().len(), 1);
+    assert_eq!(
+        host.composition_builtin_tools()[0].definition().name,
+        "sibling"
+    );
+}
+
+#[tokio::test]
+async fn composition_builtin_uses_native_base_preparation_and_not_replacement() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let mut replacement = Probe::new("probe", ToolEffect::Pure);
+    replacement.schema = Some(
+        json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}),
+    );
+    let replacement = Arc::new(replacement);
+    let builtin = Arc::new(PreparingProbe {
+        probe: Probe::new("probe", ToolEffect::Pure),
+        preparations: AtomicUsize::new(0),
+    });
+    let (scope, mut receiver) = scope_with_builtins(
+        vec![replacement.clone()],
+        vec![builtin.clone()],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    let effective = journal(
+        scope.0.call_outcome(
+            "probe".into(),
+            json!({"value":"replacement input"}),
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(effective["is_error"], false);
+    let native = journal(
+        scope.0.call_builtin(
+            "probe".into(),
+            json!(3),
+            CancellationToken::default(),
+            true,
+            None,
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(native["tool_call"]["arguments"], json!({"value":3}));
+    assert_eq!(native["is_error"], false);
+    assert_eq!(builtin.preparations.load(Ordering::Acquire), 1);
+    assert_eq!(builtin.probe.executions.load(Ordering::Acquire), 1);
+    assert_eq!(replacement.executions.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn composition_builtin_cannot_reintroduce_absent_or_hidden_logical_names() {
+    for hidden in [false, true] {
+        let (_directory, mut session, sandbox, model) = fixture();
+        let builtin = Arc::new(Probe::new("probe", ToolEffect::Pure));
+        let mut replacement = Probe::new("probe", ToolEffect::Pure);
+        replacement.exposure = crate::tool::ToolExposure::Hidden;
+        let tools: Vec<Arc<dyn Tool>> = if hidden {
+            vec![Arc::new(replacement)]
+        } else {
+            Vec::new()
+        };
+        let (scope, mut receiver) = scope_with_builtins(
+            tools,
+            vec![builtin.clone()],
+            &session,
+            sandbox,
+            model,
+            Vec::new(),
+            EffectBroker::default(),
+        );
+        let outcome = journal(
+            scope.0.call_builtin(
+                "probe".into(),
+                json!({"value":1}),
+                CancellationToken::default(),
+                true,
+                None,
+            ),
+            &mut receiver,
+            &mut session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome["is_error"], true);
+        assert!(outcome["content"][0]["Text"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"));
+        assert_eq!(builtin.executions.load(Ordering::Acquire), 0);
+        assert!(scope.0.context().await.unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn native_preflight_has_no_effects_and_prepared_execution_runs_hooks_once() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let builtin = Arc::new(PreparingProbe {
+        probe: Probe::new("probe", ToolEffect::Pure),
+        preparations: AtomicUsize::new(0),
+    });
+    let hook = Arc::new(PreflightHook::default());
+    let (scope, mut receiver) = scope_with_builtins(
+        vec![builtin.clone()],
+        vec![builtin.clone()],
+        &session,
+        sandbox,
+        model,
+        vec![hook.clone()],
+        EffectBroker::default(),
+    );
+    let prepared = journal(
+        scope
+            .0
+            .prepare("probe".into(), json!(3), true, CancellationToken::default()),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        prepared["tool_call"],
+        json!({"id":"outer/1","name":"probe","arguments":{"value":4}})
+    );
+    assert_eq!(builtin.probe.executions.load(Ordering::Acquire), 0);
+    assert_eq!(hook.results.load(Ordering::Acquire), 0);
+    assert!(session.entries().is_empty());
+    let receipt = prepared["prepared_id"].as_str().unwrap().to_owned();
+    let outcome = journal(
+        scope.0.call_prepared(
+            receipt.clone(),
+            "probe".into(),
+            prepared["tool_call"]["arguments"].clone(),
+            true,
+            CancellationToken::default(),
+            None,
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome["tool_call"], prepared["tool_call"]);
+    assert_eq!(outcome["content"][0]["Text"], "native result 1");
+    assert_eq!(outcome["is_error"], false);
+    assert_eq!(builtin.preparations.load(Ordering::Acquire), 1);
+    assert_eq!(builtin.probe.executions.load(Ordering::Acquire), 1);
+    assert_eq!(hook.calls.load(Ordering::Acquire), 1);
+    assert_eq!(hook.before.load(Ordering::Acquire), 1);
+    assert_eq!(hook.results.load(Ordering::Acquire), 1);
+    assert_eq!(hook.after.load(Ordering::Acquire), 1);
+    assert!(scope
+        .0
+        .call_prepared(
+            receipt,
+            "probe".into(),
+            json!({"value":4}),
+            true,
+            CancellationToken::default(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .message
+        .contains("consumed"));
+    assert_eq!(builtin.probe.executions.load(Ordering::Acquire), 1);
+    assert_eq!(session.entries().len(), 2);
+}
+
+#[tokio::test]
+async fn native_preflight_veto_and_schema_failure_settle_results_without_execution() {
+    for invalid_schema in [false, true] {
+        let (_directory, mut session, sandbox, model) = fixture();
+        let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+        let hook = Arc::new(PreflightHook {
+            veto: true,
+            ..PreflightHook::default()
+        });
+        let first = Arc::new(PreflightHook::default());
+        let (scope, mut receiver) = scope(
+            vec![probe.clone()],
+            &session,
+            sandbox,
+            model,
+            vec![first.clone(), hook.clone()],
+            EffectBroker::default(),
+        );
+        let args = if invalid_schema {
+            json!({"value":"wrong"})
+        } else {
+            json!({"value":1})
+        };
+        let prepared = journal(
+            scope
+                .0
+                .prepare("probe".into(), args, false, CancellationToken::default()),
+            &mut receiver,
+            &mut session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared["block"], true);
+        assert!(prepared.get("prepared_id").is_none());
+        assert_eq!(prepared["outcome"]["is_error"], true);
+        assert_eq!(prepared["outcome"]["content"][0]["Text"], "native result 1");
+        assert_eq!(
+            prepared["reason"],
+            if invalid_schema {
+                SCHEMA_MISMATCH_TOOL_ERROR
+            } else {
+                "native veto"
+            }
+        );
+        assert_eq!(
+            hook.calls.load(Ordering::Acquire),
+            usize::from(!invalid_schema)
+        );
+        assert_eq!(hook.results.load(Ordering::Acquire), 1);
+        assert_eq!(hook.before.load(Ordering::Acquire), 0);
+        assert_eq!(hook.after.load(Ordering::Acquire), 0);
+        assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+    }
+}
+
+#[tokio::test]
+async fn native_preflight_receipts_are_single_use_and_bind_exact_target_and_arguments() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+    let (scope, mut receiver) = scope_with_builtins(
+        vec![probe.clone()],
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    for (name, args, builtin) in [
+        ("other", json!({"value":1}), false),
+        ("probe", json!({"value":2}), false),
+        ("probe", json!({"value":1}), true),
+    ] {
+        let prepared = journal(
+            scope.0.prepare(
+                "probe".into(),
+                json!({"value":1}),
+                false,
+                CancellationToken::default(),
+            ),
+            &mut receiver,
+            &mut session,
+        )
+        .await
+        .unwrap();
+        let receipt = prepared["prepared_id"].as_str().unwrap().to_owned();
+        let error = scope
+            .0
+            .call_prepared(
+                receipt.clone(),
+                name.into(),
+                args,
+                builtin,
+                CancellationToken::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("mismatch"));
+        assert!(scope
+            .0
+            .call_prepared(
+                receipt,
+                "probe".into(),
+                json!({"value":1}),
+                false,
+                CancellationToken::default(),
+                None
+            )
+            .await
+            .unwrap_err()
+            .message
+            .contains("consumed"));
+    }
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+    assert!(session.entries().is_empty());
+}
+
+#[tokio::test]
+async fn native_preflight_preserves_policy_denial_and_result_hook_settlement() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::HostProcess));
+    let hook = Arc::new(PreflightHook::default());
+    let (scope, mut receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        vec![hook.clone()],
+        EffectBroker::default(),
+    );
+    let prepared = journal(
+        scope.0.prepare(
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert!(prepared["prepared_id"].is_string());
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+    let outcome = journal(
+        scope.0.call_prepared(
+            prepared["prepared_id"].as_str().unwrap().into(),
+            "probe".into(),
+            prepared["tool_call"]["arguments"].clone(),
+            false,
+            CancellationToken::default(),
+            None,
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome["is_error"], true);
+    assert_eq!(outcome["content"][0]["Text"], "native result 1");
+    assert_eq!(hook.calls.load(Ordering::Acquire), 1);
+    assert_eq!(hook.results.load(Ordering::Acquire), 1);
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+    assert!(matches!(
+        session
+            .entries()
+            .last()
+            .unwrap()
+            .metadata
+            .as_ref()
+            .unwrap()
+            .tool_composition,
+        Some(ToolCompositionRecord::CallFinished {
+            allowed: false,
+            denial_code: Some(_),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn native_preflight_receipts_cannot_cross_scopes_or_survive_cancellation() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+    let (first, mut receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox.clone(),
+        model.clone(),
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    let prepared = journal(
+        first.0.prepare(
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    let receipt = prepared["prepared_id"].as_str().unwrap().to_owned();
+    let (second, _) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    assert!(second
+        .0
+        .call_prepared(
+            receipt.clone(),
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .message
+        .contains("unknown"));
+    let stale = first.0.clone();
+    drop(first);
+    assert!(stale
+        .call_prepared(
+            receipt,
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+            None
+        )
+        .await
+        .is_err());
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn native_preflight_bounds_receipts_and_does_not_charge_execution_twice() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+    let (scope, mut receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    let mut last = Value::Null;
+    for _ in 0..crate::tool_composition::MAX_COMPOSITION_CALLS {
+        last = scope
+            .0
+            .prepare(
+                "probe".into(),
+                json!({"value":1}),
+                false,
+                CancellationToken::default(),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(scope
+        .0
+        .prepare(
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default()
+        )
+        .await
+        .unwrap_err()
+        .message
+        .contains("256"));
+    let outcome = journal(
+        scope.0.call_prepared(
+            last["prepared_id"].as_str().unwrap().into(),
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+            None,
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome["is_error"], false);
+    assert_eq!(probe.executions.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_preflight_deadline_revokes_prepared_and_inflight_work() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+    let (ready, mut receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox.clone(),
+        model.clone(),
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    let prepared = journal(
+        ready.0.prepare(
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(
+        crate::tool_composition::COMPOSITION_TIMEOUT_MS,
+    ))
+    .await;
+    assert!(ready
+        .0
+        .call_prepared(
+            prepared["prepared_id"].as_str().unwrap().into(),
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .message
+        .contains("30 second host deadline"));
+    let hook = Arc::new(PreflightHook {
+        delay: std::time::Duration::from_secs(60),
+        ..PreflightHook::default()
+    });
+    let (inflight, mut receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        vec![hook.clone()],
+        EffectBroker::default(),
+    );
+    let error = journal(
+        inflight.0.prepare(
+            "probe".into(),
+            json!({"value":1}),
+            false,
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("30 second host deadline"));
+    assert_eq!(hook.calls.load(Ordering::Acquire), 1);
+    assert_eq!(hook.results.load(Ordering::Acquire), 0);
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn native_preflight_reverse_cancellation_drops_inflight_hooks() {
+    let (_directory, session, sandbox, model) = fixture();
+    let probe = Arc::new(Probe::new("probe", ToolEffect::Pure));
+    let hook = Arc::new(PreflightHook {
+        delay: std::time::Duration::from_secs(60),
+        ..PreflightHook::default()
+    });
+    let (scope, _receiver) = scope(
+        vec![probe.clone()],
+        &session,
+        sandbox,
+        model,
+        vec![hook.clone()],
+        EffectBroker::default(),
+    );
+    let service = scope.0.clone();
+    let cancellation = CancellationToken::default();
+    let reverse = cancellation.clone();
+    let task = tokio::spawn(async move {
+        service
+            .prepare("probe".into(), json!({"value":1}), false, reverse)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while hook.calls.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(hook.results.load(Ordering::Acquire), 0);
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn native_preflight_rejects_metered_tools_under_hard_session_ceilings() {
+    let (_directory, mut session, sandbox, model) = fixture();
+    let mut probe = Probe::new("probe", ToolEffect::Pure);
+    probe.usage = Some(Usage {
+        output_tokens: 1,
+        ..Usage::default()
+    });
+    let probe = Arc::new(probe);
+    let (progress, mut receiver) = ToolProgressSink::bounded_channel();
+    let scope = CompositionDispatcher::scope(
+        octet_ai::ToolCallId("outer".into()),
+        "codemode".into(),
+        vec![probe.clone()],
+        vec![probe.clone()],
+        sandbox,
+        "test".into(),
+        "owner".into(),
+        "run:test".into(),
+        1,
+        Vec::new(),
+        Vec::new(),
+        EffectBroker::default(),
+        progress,
+        CancellationToken::default(),
+        &session,
+        model,
+        Some(1000),
+        Some(1000),
+    );
+    let prepared = journal(
+        scope.0.prepare(
+            "probe".into(),
+            json!({"value":1}),
+            true,
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared["block"], true);
+    assert!(prepared["reason"]
+        .as_str()
+        .unwrap()
+        .contains("hard session ceilings"));
+    assert_eq!(prepared["outcome"]["is_error"], true);
+    assert_eq!(probe.executions.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn composition_builtin_read_returns_private_unformatted_text_without_replacing_canonical_content(
+) {
+    let (directory, mut session, mut sandbox, model) = fixture();
+    sandbox.workspace = directory.path().canonicalize().unwrap();
+    std::fs::write(directory.path().join("pi.txt"), "alpha\nbeta\n").unwrap();
+    let read: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
+    let (scope, mut receiver) = scope_with_builtins(
+        vec![read.clone()],
+        vec![read],
+        &session,
+        sandbox,
+        model,
+        Vec::new(),
+        EffectBroker::default(),
+    );
+    let result = journal(
+        scope.0.call_builtin(
+            "read".into(),
+            json!({"path":"pi.txt"}),
+            CancellationToken::default(),
+            true,
+            None,
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["is_error"], false);
+    assert_eq!(
+        result["builtin_output"]["value"]["content"],
+        "alpha\nbeta\n"
+    );
+    assert!(result["builtin_output"]["duration_ms"].is_u64());
+    assert!(result["content"][0]["Text"]
+        .as_str()
+        .unwrap()
+        .contains("hash="));
+    assert!(session.context().unwrap().is_empty());
+    let ordinary = journal(
+        scope.0.call_outcome(
+            "read".into(),
+            json!({"path":"pi.txt"}),
+            CancellationToken::default(),
+        ),
+        &mut receiver,
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert!(ordinary.get("builtin_output").is_none());
 }
 
 #[test]

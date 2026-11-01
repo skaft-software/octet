@@ -202,6 +202,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "commands/register" => {
+                runtime_commands::register_runtime_commands(state, object, params)?;
+            }
             "model/select"
                 if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
             {
@@ -226,8 +229,15 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             "resource/register" | "resource/release" => {
                 dispatch_resource_request(state, object, method, params)?;
             }
+            "provider/infer" => {
+                nested_inference::dispatch(state, object, params)?;
+            }
+            "provider/infer/cancel" => {
+                nested_inference::cancel(state, object, params)?;
+            }
             methods::COMPOSITION_CONTEXT
             | methods::COMPOSITION_CALL
+            | "composition/prepare"
             | methods::COMPOSITION_STORE => {
                 dispatch_composition_request(state, object, method)?;
             }
@@ -619,6 +629,26 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 let registry = provider_registry_for_request(state)
                     .map_err(|_| "provider registry is unavailable".to_owned())?;
                 registry.complete_initial_catalog(&state.provider_owner);
+            }
+            "providers/inherit" => {
+                require_declared(state.declared.providers, "provider catalogs")?;
+                if !read_std_lock(&state.protocol).supports("provider_inheritance_v1") {
+                    return Err("provider inheritance unavailable".into());
+                }
+                let id = parse_child_request_id(object, "providers/inherit")?;
+                insert_child_request(state, id.clone(), None, None)?;
+                queue_provider_host_response(
+                    state,
+                    &id,
+                    native_provider::inherited_models(state, params),
+                )?;
+            }
+            "provider/delegate" => {
+                require_declared(state.declared.providers, "provider streams")?;
+                if !read_std_lock(&state.protocol).supports("provider_inheritance_v1") {
+                    return Err("provider inheritance unavailable".into());
+                }
+                native_provider::dispatch_delegate(state, object, params)?;
             }
             methods::PROVIDERS_REGISTER => {
                 require_declared(state.declared.providers, "provider catalogs")?;

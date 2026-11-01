@@ -39,6 +39,16 @@ its own distribution terms. Ben Vinegar's `pi-stuff` drawing extension and
 `pi-agent-extensions` retain their upstream MIT notices. Keep those notices
 with separately installed packages; compatibility does not relicense them.
 
+## TypeBox
+
+Native JSON Schema format checks in `crates/octet-ai/src/json_repair/formats.rs`
+are adapted from TypeBox 1.3.27's default format registry, as shipped by Pi 1.0.2.
+The Rust implementation does not load Node or TypeBox at runtime.
+
+- Copyright (c) 2017-2026 Haydn Paterson
+- License: MIT
+- [License text](third_party/licenses/TYPEBOX-MIT.txt)
+
 ## Pi codemode and QuickJS WASI
 
 The optional [octet-codemode](extensions/octet-codemode/README.md) extension

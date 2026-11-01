@@ -9,6 +9,8 @@ pub(super) const MAX_PENDING_CONTROL_INPUTS: usize = 64;
 pub(super) const MAX_PENDING_CONTROL_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct ControlReservation {
+    // Release the narrower reservation before returning shared input capacity.
+    _message: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(super) _count: tokio::sync::OwnedSemaphorePermit,
     pub(super) _bytes: tokio::sync::OwnedSemaphorePermit,
 }
@@ -236,11 +238,24 @@ pub struct RunControl {
     pub(super) admission: Arc<std::sync::Mutex<bool>>,
     pub(super) tx: mpsc::Sender<Control>,
     pub(super) pending_count: Arc<tokio::sync::Semaphore>,
+    pub(super) pending_messages: Arc<tokio::sync::Semaphore>,
     pub(super) pending_bytes: Arc<tokio::sync::Semaphore>,
     pub(super) abort: Arc<AbortFlag>,
 }
 
 impl RunControl {
+    /// Whether steering or follow-up input is reserved but not yet delivered.
+    /// Includes prepared inputs and drained batches; excludes context-only
+    /// appends, finish-now requests, and non-message control operations.
+    pub fn has_pending_messages(&self) -> bool {
+        !self.tx.is_closed()
+            && *self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+            && self.pending_messages.available_permits() < MAX_PENDING_CONTROL_INPUTS
+    }
+
     /// Reconcile the user-owned warming mode while a run is active. This
     /// coalesces without queueing prompt data; the session owner applies it on
     /// its next poll. Persistence errors are reported by the run's event stream.
@@ -306,8 +321,12 @@ impl RunControl {
         Ok(())
     }
 
-    pub(super) fn reserve_input(&self, input: UserInput) -> Result<ReservedInput, AgentError> {
-        let reservation = self.reserve_input_capacity(&input)?;
+    pub(super) fn reserve_input(
+        &self,
+        input: UserInput,
+        message: bool,
+    ) -> Result<ReservedInput, AgentError> {
+        let reservation = self.reserve_input_capacity(&input, message)?;
         Ok(ReservedInput::Ready(ReservedPayload {
             input,
             reservation: Some(reservation),
@@ -317,6 +336,7 @@ impl RunControl {
     pub(super) fn reserve_input_capacity(
         &self,
         input: &UserInput,
+        message: bool,
     ) -> Result<ControlReservation, AgentError> {
         let bytes = control_input_bytes(input);
         if bytes > MAX_PENDING_CONTROL_BYTES {
@@ -332,9 +352,16 @@ impl RunControl {
             .clone()
             .try_acquire_many_owned(bytes as u32)
             .map_err(|_| AgentError::ControlQueueFull)?;
+        let message = message.then(|| {
+            self.pending_messages
+                .clone()
+                .try_acquire_owned()
+                .expect("message reservations are bounded by control reservations")
+        });
         Ok(ControlReservation {
             _count: count,
             _bytes: bytes,
+            _message: message,
         })
     }
 
@@ -351,9 +378,13 @@ impl RunControl {
             return Err(AgentError::RunEnded);
         }
         Ok(match control {
-            UnreservedControl::Steer(input) => Control::Steer(self.reserve_input(input)?),
-            UnreservedControl::FollowUp(input) => Control::FollowUp(self.reserve_input(input)?),
-            UnreservedControl::FinishNow(input) => Control::FinishNow(self.reserve_input(input)?),
+            UnreservedControl::Steer(input) => Control::Steer(self.reserve_input(input, true)?),
+            UnreservedControl::FollowUp(input) => {
+                Control::FollowUp(self.reserve_input(input, true)?)
+            }
+            UnreservedControl::FinishNow(input) => {
+                Control::FinishNow(self.reserve_input(input, false)?)
+            }
             UnreservedControl::SetSteeringMode(mode) => Control::SetSteeringMode(mode),
             UnreservedControl::SetFollowUpMode(mode) => Control::SetFollowUpMode(mode),
             UnreservedControl::Abort => Control::Abort,
@@ -380,7 +411,7 @@ impl RunControl {
         &self,
         message: crate::session::CustomMessage,
     ) -> Result<(), AgentError> {
-        let input = self.reserve_input(UserInput::from_custom(message))?;
+        let input = self.reserve_input(UserInput::from_custom(message), false)?;
         let permit = self.tx.try_reserve().map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => AgentError::ControlQueueFull,
             mpsc::error::TrySendError::Closed(_) => AgentError::RunEnded,
@@ -435,7 +466,7 @@ impl RunControl {
             return Err(AgentError::RunEnded);
         }
         let input = input.into();
-        let reservation = self.reserve_input_capacity(&input)?;
+        let reservation = self.reserve_input_capacity(&input, true)?;
         let (mut prepared, receipt) = PreparedSteering::new(input);
         prepared
             .receipt
@@ -486,7 +517,7 @@ impl RunControl {
                 return Ok(());
             };
             if payload.reservation.is_none() {
-                payload.reservation = Some(self.reserve_input_capacity(&payload.input)?);
+                payload.reservation = Some(self.reserve_input_capacity(&payload.input, true)?);
             }
         }
         let permit = tokio::select! {

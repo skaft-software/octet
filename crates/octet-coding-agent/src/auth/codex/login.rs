@@ -36,6 +36,8 @@ pub(crate) enum LoginProgress {
         user_code: String,
         phase: DeviceLoginPhase,
     },
+    /// A verified browser callback arrived; exchanging its authorization code.
+    Exchanging,
     /// Authorization succeeded; waiting for the existing private-store lock.
     Saving,
     /// The credential commit has completed; cancellation cannot undo it.
@@ -70,6 +72,10 @@ tokio::task_local! {
 
 fn publish_progress(progress: LoginProgress) {
     let _ = NATIVE_LOGIN_PROGRESS.try_with(|sender| sender.send_replace(progress));
+}
+
+pub(super) fn browser_exchange_started() {
+    publish_progress(LoginProgress::Exchanging);
 }
 
 fn native_presentation() -> bool {
@@ -406,6 +412,8 @@ mod tests {
         NATIVE_LOGIN_PROGRESS
             .scope(sender, async {
                 assert!(native_presentation());
+                browser_exchange_started();
+                assert_eq!(*receiver.borrow(), LoginProgress::Exchanging);
                 publish_progress(LoginProgress::Fallback(LoginFallback::NoBrowserOpener));
                 publish_progress(LoginProgress::Device {
                     user_code: "INERT-1234".into(),

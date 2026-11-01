@@ -196,6 +196,36 @@ fn startup_lifecycle_waits_paint_the_draft_without_provisional_model_chrome() {
 }
 
 #[test]
+fn pi_setup_loading_label_keeps_startup_draft_and_identity_boundary() {
+    for application_viewport in [false, true] {
+        let mut shell = pending_shell();
+        shell.set_run_label("Loading your Pi setup…");
+        shell.state.borrow_mut().editor.set_text("retained draft");
+        let component = ShellComponent::new(shell.state.clone(), application_viewport);
+        for (width, height) in [(24, 4), (46, 8), (96, 18), (120, 40)] {
+            shell.set_size(width, height);
+            let frame = component.render(width);
+            let text = plain(&frame);
+            assert_unbranded(&frame);
+            assert_eq!(composer_rules(&frame, width), 0);
+            assert!(frame.len() <= usize::from(height));
+            assert!(frame
+                .iter()
+                .all(|line| visible_width(line) <= usize::from(width)));
+            assert!(text.contains("retained draft"), "{text}");
+            if height >= 8 {
+                assert!(text.contains("Loading your Pi setup"), "{text}");
+            }
+            assert!(!text.contains("changelog"), "{text}");
+            assert!(!text.contains("full access"), "{text}");
+            assert!(frame.iter().any(|line| line.contains(CURSOR_MARKER)));
+            assert_eq!(shell.pending(), "retained draft");
+            assert!(shell.state.borrow().startup_card_started_at.is_none());
+        }
+    }
+}
+
+#[test]
 fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     let mut shell = pending_shell();
     shell.set_workspace(PathBuf::from("/startup-fixture/workspace"));

@@ -1820,6 +1820,12 @@ pub(crate) struct ShellState {
     /// Ephemeral tool-owned prompt rendered in place of the editor. Secret
     /// keystrokes never enter `editor` or any transcript/session structure.
     pub(crate) tool_input_prompt: Option<String>,
+    /// Actual host-owned gate, independent of the currently inspected panel.
+    terminal_permission_pending: bool,
+    /// Foreground auth/local-shell activity and settlement, never inferred text.
+    terminal_operation_status: Option<sexy_tui_rs::program_status::ProgramStatus>,
+    /// Host-local operation identity survives coalesced paints and renderer replacement.
+    terminal_operation_generation: u64,
     /// Identity of one exclusive request; edits never change this fence.
     pub(crate) tool_input_epoch: u64,
     /// Ordinary temporary input only. Secrets remain in the picker driver.
@@ -2252,6 +2258,9 @@ impl ShellState {
             composer_preferred_column: Default::default(),
             tool_input_revision: Default::default(),
             tool_input_prompt: Default::default(),
+            terminal_permission_pending: false,
+            terminal_operation_status: None,
+            terminal_operation_generation: 0,
             tool_input_epoch: Default::default(),
             tool_input_editor: Default::default(),
             tool_input_overflowed: Default::default(),
@@ -3953,19 +3962,88 @@ fn render_shell_output(
     width: u16,
     verbose: bool,
     output_indent: &str,
-) -> Vec<String> {
+) -> (Vec<String>, transcript_cache::ShellOutputSource) {
     let normalized = normalize_carriage_return_progress(&shell.output);
     let safe = sanitize_for_terminal(&normalized);
     let mut output_rows = Vec::new();
-    for line in safe.lines().filter(|line| !line.trim().is_empty()) {
-        output_rows.extend(wrap_hanging(
-            &understated_tool_output(theme, line),
+    // OSC targets are repeated by the wrapper on each physical row. Bound
+    // both the encoded target and total added payload before decorating it.
+    let mut link_budget = 64 * 1024;
+    let content_width = usize::from(width)
+        .saturating_sub(visible_width(output_indent))
+        .max(1);
+    let mut source_offsets = Vec::new();
+    let mut source_cursor = 0;
+    for chunk in safe.split_inclusive('\n') {
+        let line_start = source_cursor;
+        source_cursor += chunk.len();
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Retain literal web targets before wrapping, just like rich transcript
+        // links. The terminal backend strips OSC 8 on unsupported terminals;
+        // application-owned hit testing still sees the complete target.
+        let linked: String = line
+            .split_inclusive(char::is_whitespace)
+            .map(|part| {
+                let target = part.trim_end();
+                let encoded = (theme.capabilities().interactive && target.len() <= 2048)
+                    .then(|| sexy_tui_rs::SafeUrl::parse(target))
+                    .flatten()
+                    .filter(|url| url.as_str().len() <= 2048);
+                let link_bytes = encoded.as_ref().map_or(0, |url| {
+                    // One extra row allows a token starting after other text.
+                    (wrap_text_with_ansi(target, content_width).len() + 1)
+                        * (url.as_str().len() + 16)
+                });
+                if encoded.is_some()
+                    && link_bytes <= link_budget
+                    && url::Url::parse(target)
+                        .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+                {
+                    link_budget -= link_bytes;
+                    format!(
+                        "{}{}",
+                        sexy_tui_rs::safe_hyperlink(
+                            target,
+                            target,
+                            theme.capabilities().interactive,
+                            !theme.unicode()
+                        ),
+                        &part[target.len()..]
+                    )
+                } else {
+                    part.to_owned()
+                }
+            })
+            .collect();
+        let rows = wrap_hanging(
+            &understated_tool_output(theme, &linked),
             output_indent,
             output_indent,
             width,
-        ));
+        );
+        // Capture the source boundary before clipping, where repeated text is
+        // still unambiguous. Never search omitted rows to locate the tail.
+        let mut cursor = 0;
+        for row in &rows {
+            let plain = strip_terminal_sequences(row);
+            let fragment = plain.strip_prefix(output_indent).unwrap_or(&plain);
+            if let Some(relative) = line[cursor..].find(fragment) {
+                cursor += relative;
+                source_offsets.push(line_start + cursor);
+                cursor += fragment.len();
+            } else {
+                // At a one-cell width, fit_line may replace a wide grapheme
+                // with an ellipsis. That decoration consumes no copy bytes.
+                source_offsets.push(line_start + cursor);
+            }
+        }
+        output_rows.extend(rows);
     }
-    if output_rows.is_empty() {
+    let placeholder = output_rows.is_empty();
+    if placeholder {
         let placeholder = if shell.running {
             "(waiting for output)"
         } else {
@@ -3979,12 +4057,25 @@ fn render_shell_output(
         ));
     }
 
+    let hidden = if !verbose && output_rows.len() > COMPACT_EXEC_OUTPUT_ROWS {
+        output_rows.len() - (COMPACT_EXEC_OUTPUT_ROWS - 1)
+    } else {
+        0
+    };
+    let mut source = transcript_cache::ShellOutputSource {
+        start: source_offsets.get(hidden).copied().unwrap_or(safe.len()),
+        metadata_rows: if placeholder {
+            output_rows.len()
+        } else {
+            usize::from(hidden > 0)
+        },
+    };
     if verbose {
-        return output_rows;
+        return (output_rows, source);
     }
 
     let ellipsis = if theme.unicode() { "…" } else { "..." };
-    bounded_tail_rows(
+    let rows = bounded_tail_rows(
         output_rows,
         COMPACT_EXEC_OUTPUT_ROWS,
         false,
@@ -4001,7 +4092,11 @@ fn render_shell_output(
                 width,
             )
         },
-    )
+    );
+    if placeholder {
+        source.metadata_rows = rows.len();
+    }
+    (rows, source)
 }
 
 #[cfg(test)]
@@ -4702,6 +4797,7 @@ impl InteractiveShell {
     /// waiting for a provider event.
     pub fn begin_run(&mut self, provider: &str) -> RunId {
         let mut state = self.state.borrow_mut();
+        state.terminal_operation_status = None;
         state.run_label.clear();
         state.clear_turn_telemetry();
         // The session roster and its committed-cost watermarks outlive a run.
@@ -5664,6 +5760,25 @@ impl InteractiveShell {
         }
     }
 
+    /// Real foreground messages awaiting steering or follow-up delivery.
+    /// Recalled steering tombstones, context-only appends and `nextTurn`
+    /// messages do not enter Pi's steering/follow-up queue observation.
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
+        let state = self.state.borrow();
+        !state.follow_up_queue.is_empty()
+            || state.steering_queue.iter().any(|queued| {
+                queued
+                    .recall
+                    .as_ref()
+                    .is_none_or(octet_agent::SteeringReceipt::is_pending)
+            })
+            || state
+                .extension_messages
+                .iter()
+                .any(|message| message.delivery != Delivery::NextTurn && !message.context_only)
+    }
+
     /// Number of follow-up messages queued but not yet admitted to the Agent.
     /// This is the exact queue `session/send_user_message` feeds.
     pub fn queued_follow_up_len(&self) -> usize {
@@ -6414,6 +6529,12 @@ impl InteractiveShell {
 
     pub fn set_run_label(&mut self, label: &str) {
         let mut state = self.state.borrow_mut();
+        if !state
+            .terminal_operation_status
+            .is_some_and(sexy_tui_rs::program_status::ProgramStatus::is_transient)
+        {
+            state.terminal_operation_status = None;
+        }
         let was_compacting = state.run_label == "compacting";
         let run_label = if label == "idle" || label.starts_with("run:") {
             String::new()
@@ -8952,6 +9073,7 @@ impl InteractiveShell {
     /// activity marker supplies its restrained pulse.
     /// Returns the block id so the caller can update and finalize it.
     pub fn append_shell_in_progress(&mut self, command: String) -> String {
+        self.begin_terminal_operation();
         let mut state = self.state.borrow_mut();
         state.event_dot_visible = true;
         let id = format!("shell-{}", state.transcript.len());
@@ -8996,6 +9118,11 @@ impl InteractiveShell {
                 shell.output = output;
                 shell.exit_code = exit_code;
             }
+            state.terminal_operation_status = Some(if exit_code == 0 {
+                sexy_tui_rs::program_status::ProgramStatus::Done
+            } else {
+                sexy_tui_rs::program_status::ProgramStatus::Error
+            });
             state.unregister_active_event(index);
             state.touch_block(index);
         }
@@ -9207,6 +9334,8 @@ impl InteractiveShell {
         state.run_cost_microdollars = checkpoint_cost.unwrap_or_default();
         state.run_cost_available = checkpoint_cost.is_some();
         state.run.clear();
+        state.terminal_operation_status = None;
+        state.terminal_permission_pending = false;
         // Session hydration may reuse this shell, so clear the roster pointer;
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
@@ -9396,6 +9525,7 @@ mod ordinary_surface;
 mod outcome_render;
 mod output_window;
 mod panel_render;
+mod program_status;
 mod reasoning_render;
 mod remote_ui;
 mod renderer_geometry;

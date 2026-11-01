@@ -77,6 +77,15 @@ pub(super) async fn settle_session_hooks_all(
     resource_owner: &str,
     outcome: ExtensionLifecycleOutcome,
 ) -> Vec<String> {
+    settle_session_hooks_all_with_reason(processes, resource_owner, outcome, None).await
+}
+
+pub(super) async fn settle_session_hooks_all_with_reason(
+    processes: &[ExtensionProcess],
+    resource_owner: &str,
+    outcome: ExtensionLifecycleOutcome,
+    reason: Option<&'static str>,
+) -> Vec<String> {
     futures_util::future::join_all(
         processes
             .iter()
@@ -85,10 +94,23 @@ pub(super) async fn settle_session_hooks_all(
                 let process = process.clone();
                 let resource_owner = resource_owner.to_owned();
                 async move {
-                    match process
-                        .settle_session_hook_binding(&resource_owner, outcome)
-                        .await
-                    {
+                    let result = match reason {
+                        Some(reason) => {
+                            process
+                                .settle_session_hook_binding_with_reason(
+                                    &resource_owner,
+                                    outcome,
+                                    reason,
+                                )
+                                .await
+                        }
+                        None => {
+                            process
+                                .settle_session_hook_binding(&resource_owner, outcome)
+                                .await
+                        }
+                    };
+                    match result {
                         Ok(()) => None,
                         Err(_) => Some(format!(
                             "warning: extension {:?} session_end hook failed",
@@ -421,10 +443,19 @@ pub(super) fn extension_execution_context(
     )
 }
 
+#[cfg(test)]
 pub(super) fn host_state(
     session: &Session,
     model: &Model,
     reasoning: &ReasoningConfig,
+    sessions: &SessionStore,
+) -> ExtensionHostState {
+    host_state_for_selection(session, Some((model, reasoning)), sessions)
+}
+
+pub(super) fn host_state_for_selection(
+    session: &Session,
+    selection: Option<(&Model, &ReasoningConfig)>,
     sessions: &SessionStore,
 ) -> ExtensionHostState {
     let session_id = session
@@ -458,15 +489,22 @@ pub(super) fn host_state(
         theme: None,
         // This coding host supplies the usage query even when no current
         // measurement exists. Explicit null clears retained prior facts.
-        context_usage: Some(model_control::context_usage(session, model).unwrap_or(Value::Null)),
+        context_usage: Some(
+            selection
+                .and_then(|(model, _)| model_control::context_usage(session, model))
+                .unwrap_or(Value::Null),
+        ),
         project_trusted: None,
+        has_pending_messages: None,
         has_ui: None,
         mode: None,
         session_id,
         session_name,
-        model: Some(model.spec.id.0.clone()),
-        model_view: extension_model_view(model),
-        reasoning: pi_thinking_level(model, reasoning).map(serde_json::Value::String),
+        model: selection.map(|(model, _)| model.spec.id.0.clone()),
+        model_view: selection.and_then(|(model, _)| extension_model_view(model)),
+        reasoning: selection
+            .and_then(|(model, reasoning)| pi_thinking_level(model, reasoning))
+            .map(serde_json::Value::String),
         pi_models: None,
         active_skills,
     }

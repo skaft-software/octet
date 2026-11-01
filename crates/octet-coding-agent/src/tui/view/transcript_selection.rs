@@ -29,6 +29,24 @@ pub(super) struct TranscriptSelection {
 /// Clean semantic text used by the application-owned selection/copy path.
 /// It intentionally never uses visual rows, ANSI styling, borders, elision,
 /// composer text, or footer text.
+fn shell_copy_header(shell: &super::ShellOutput) -> String {
+    let status = if shell.running {
+        "running"
+    } else if shell.exit_code == 0 {
+        "completed"
+    } else {
+        "failed"
+    };
+    sanitize_for_terminal(&format!("$ {} [{status}]", shell.command))
+}
+
+pub(super) fn shell_output_copy_start(block: &TranscriptBlock) -> Option<usize> {
+    match block {
+        TranscriptBlock::Shell(shell) => Some(shell_copy_header(shell).len() + 1),
+        _ => None,
+    }
+}
+
 pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
     match block {
         TranscriptBlock::Subagents(summary) => summary.label(),
@@ -72,14 +90,16 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             text
         }
         TranscriptBlock::Shell(shell) => {
-            let status = if shell.running {
-                "running"
-            } else if shell.exit_code == 0 {
-                "completed"
-            } else {
-                "failed"
-            };
-            sanitize_for_terminal(&format!("$ {} [{status}]", shell.command))
+            let mut text = shell_copy_header(shell);
+            // Output rows are selectable transcript text too. Without their
+            // source, painted-row alignment can only name the command header.
+            let output =
+                sanitize_for_terminal(&super::normalize_carriage_return_progress(&shell.output));
+            if !output.is_empty() {
+                text.push('\n');
+                text.push_str(&output);
+            }
+            text
         }
         TranscriptBlock::Outcome(outcome) => match &outcome.outcome {
             // Both completed variants copy as `completed`: the warning wording is
@@ -173,6 +193,7 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
             &cache.lines[block_start..block_end],
             &text,
             geometry,
+            shell_output_copy_start(&state.transcript[index]),
             start_row.saturating_sub(block_start)
                 ..(start_row + lines.len()).saturating_sub(block_start),
         );
@@ -321,6 +342,8 @@ impl AlignedCopyRow {
 pub(super) struct BlockCopyMemo {
     copy_text: String,
     content_left: Option<u16>,
+    output_start: Option<usize>,
+    shell_output: Option<super::transcript_cache::ShellOutputSource>,
     rows: Vec<AlignedCopyRow>,
 }
 
@@ -364,7 +387,13 @@ impl CopyRowsMemo {
 }
 
 /// Align one painted row with the copy text, searching from `cursor`.
-fn align_copy_row(line: &str, copy_text: &str, cursor: usize, content_left: u16) -> AlignedCopyRow {
+fn align_copy_row(
+    line: &str,
+    copy_text: &str,
+    cursor: usize,
+    content_left: u16,
+    literal: bool,
+) -> AlignedCopyRow {
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),
@@ -385,7 +414,7 @@ fn align_copy_row(line: &str, copy_text: &str, cursor: usize, content_left: u16)
             continue;
         };
         let matched = cursor + relative;
-        if candidate.line {
+        if candidate.line && !literal {
             // The copy text spells its own marker for this row (`-`,
             // `1.`, `#`), so the row names that complete copy line. The
             // copy line starts where its own marker starts, one painted
@@ -457,20 +486,27 @@ pub(super) struct CopyRows {
 }
 
 impl CopyRows {
-    fn build(painted: &[String], copy_text: &str, geometry: SurfaceGeometry) -> Self {
-        Self::build_visible(painted, copy_text, geometry, 0..painted.len())
+    fn build(
+        painted: &[String],
+        copy_text: &str,
+        geometry: SurfaceGeometry,
+        output_start: Option<usize>,
+    ) -> Self {
+        Self::build_visible(painted, copy_text, geometry, output_start, 0..painted.len())
     }
 
     fn build_visible(
         painted: &[String],
         copy_text: &str,
         geometry: SurfaceGeometry,
+        output_start: Option<usize>,
         visible: std::ops::Range<usize>,
     ) -> Self {
         Self::build_visible_with(
             painted,
             copy_text,
             geometry,
+            output_start,
             visible,
             &mut BlockCopyMemo::default(),
         )
@@ -487,6 +523,7 @@ impl CopyRows {
         painted: &[String],
         copy_text: &str,
         geometry: SurfaceGeometry,
+        output_start: Option<usize>,
         visible: std::ops::Range<usize>,
         memo: &mut BlockCopyMemo,
     ) -> Self {
@@ -502,15 +539,57 @@ impl CopyRows {
             .unwrap_or_default();
         let from = visible.start.saturating_sub(first).min(content.len());
         let to = visible.end.saturating_sub(first).min(content.len());
-        let reusable = memo.reusable_rows(content, copy_text, geometry.content_left);
+        let reusable =
+            if memo.output_start == output_start && memo.shell_output == geometry.shell_output {
+                memo.reusable_rows(content, copy_text, geometry.content_left)
+            } else {
+                0
+            };
+        memo.output_start = output_start;
+        memo.shell_output = geometry.shell_output;
         memo.rows.truncate(reusable);
         if memo.copy_text != copy_text {
             copy_text.clone_into(&mut memo.copy_text);
         }
         memo.content_left = Some(geometry.content_left);
         let mut cursor = memo.rows.last().map_or(0, |row| row.cursor_after);
-        for line in content.iter().take(to).skip(memo.rows.len()) {
-            let aligned = align_copy_row(line, copy_text, cursor, geometry.content_left);
+        for (row, line) in content.iter().enumerate().take(to).skip(memo.rows.len()) {
+            // Shell headers paint a different marker/status from their copy
+            // text. Fence the two sources rather than finding output inside
+            // the command (for example, the argument of `printf`).
+            let source = match (output_start, row) {
+                (Some(start), 0) => &copy_text[..start.saturating_sub(1).min(copy_text.len())],
+                (Some(start), 1) => {
+                    cursor = (start + geometry.shell_output.map_or(0, |source| source.start))
+                        .min(copy_text.len());
+                    copy_text
+                }
+                _ => copy_text,
+            };
+            // Literal shell output names only this painted fragment, not its
+            // entire source line: later visual rows may show the rest of it.
+            let metadata = output_start.is_some()
+                && row > 0
+                && geometry
+                    .shell_output
+                    .is_some_and(|source| row <= source.metadata_rows);
+            let mut aligned = align_copy_row(
+                if metadata { "" } else { line },
+                source,
+                cursor,
+                geometry.content_left,
+                output_start.is_some() && row > 0,
+            );
+            if metadata {
+                // Elision/placeholder rows are renderer facts, even when the
+                // same wording happens to occur in the command's output.
+                line.clone_into(&mut aligned.painted);
+            }
+            if output_start.is_some() && row == 0 {
+                // Appended output cannot change a header-only search.
+                aligned.to_text_end = false;
+                aligned.missed.clear();
+            }
             cursor = aligned.cursor_after;
             memo.rows.push(aligned);
         }
@@ -698,10 +777,11 @@ pub(super) fn visible_copy_rows(
     painted: &[String],
     text: &str,
     geometry: SurfaceGeometry,
+    output_start: Option<usize>,
     visible: std::ops::Range<usize>,
     memo: &mut BlockCopyMemo,
 ) -> Option<CopyRows> {
-    let rows = CopyRows::build_visible_with(painted, text, geometry, visible, memo);
+    let rows = CopyRows::build_visible_with(painted, text, geometry, output_start, visible, memo);
     (!rows.is_empty()).then_some(rows)
 }
 
@@ -732,7 +812,12 @@ fn painted_copy_rows(
         let cache = state.transcript_cache.borrow();
         cache.lines.get(start..start.checked_add(length)?)?.to_vec()
     };
-    let rows = CopyRows::build(&painted, copy_text, geometry);
+    let rows = CopyRows::build(
+        &painted,
+        copy_text,
+        geometry,
+        shell_output_copy_start(&state.transcript[block]),
+    );
     (!rows.is_empty()).then_some(rows)
 }
 

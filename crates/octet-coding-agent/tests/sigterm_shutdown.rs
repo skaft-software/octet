@@ -120,6 +120,21 @@ impl PtyOctet {
         Self::spawn_with_mode_and_mouse_at(root, &[], true, false, "app", None, None, None, false)
     }
 
+    fn spawn_with_starting_local_flags(root: &Path, local_flags: libc::tcflag_t) -> Self {
+        Self::spawn_pty(
+            root,
+            &[],
+            true,
+            true,
+            "app",
+            None,
+            None,
+            Some("auto"),
+            false,
+            local_flags,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_with_mode_and_mouse_at(
         root: &Path,
@@ -131,6 +146,33 @@ impl PtyOctet {
         command_line: Option<&str>,
         appearance: Option<&str>,
         startup_trace: bool,
+    ) -> Self {
+        Self::spawn_pty(
+            root,
+            extra_args,
+            interactive,
+            wait_for_app,
+            mouse,
+            invocation_cwd,
+            command_line,
+            appearance,
+            startup_trace,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pty(
+        root: &Path,
+        extra_args: &[String],
+        interactive: bool,
+        wait_for_app: bool,
+        mouse: &str,
+        invocation_cwd: Option<&Path>,
+        command_line: Option<&str>,
+        appearance: Option<&str>,
+        startup_trace: bool,
+        starting_local_flags: libc::tcflag_t,
     ) -> Self {
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -185,6 +227,18 @@ impl PtyOctet {
 
         let master = unsafe { File::from_raw_fd(master_fd) };
         let slave_probe = unsafe { File::from_raw_fd(slave_fd) };
+        if starting_local_flags != 0 {
+            let mut starting = terminal_attributes(slave_probe.as_raw_fd());
+            starting.c_lflag |= starting_local_flags;
+            let applied =
+                unsafe { libc::tcsetattr(slave_probe.as_raw_fd(), libc::TCSANOW, &starting) };
+            assert_eq!(
+                applied,
+                0,
+                "tcsetattr failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         let original_termios = terminal_attributes(slave_probe.as_raw_fd());
         let stdin = duplicate_stdio(slave_probe.as_raw_fd());
         let stdout = duplicate_stdio(slave_probe.as_raw_fd());
@@ -399,6 +453,49 @@ fn ctrl_d_prints_one_resume_command_after_terminal_restoration() {
     assert_eq!(status.code(), Some(0));
     assert!(elapsed < EXIT_DEADLINE, "Ctrl-D shutdown took {elapsed:?}");
     let _ = assert_resume_notice(directory.path(), &output);
+}
+
+#[test]
+fn ctrl_d_restores_the_exact_starting_terminal_attributes() {
+    let _guard = PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let mut octet = PtyOctet::spawn_with_starting_local_flags(directory.path(), libc::PENDIN);
+    let original = octet.original_termios;
+    assert_ne!(
+        original.c_lflag & libc::PENDIN,
+        0,
+        "starting PENDIN was not applied"
+    );
+    let started = Instant::now();
+    octet.write_input(&[4]);
+
+    let slave = octet.slave_probe.try_clone().expect("slave probe");
+    let _master = octet.master.try_clone().expect("PTY master");
+    let (status, _, _) = octet.wait_for_exit(started);
+    assert_eq!(status.code(), Some(0));
+    let restored = terminal_attributes(slave.as_raw_fd());
+    assert_eq!(
+        restored.c_lflag, original.c_lflag,
+        "local flags differ after exit"
+    );
+    assert_eq!(
+        restored.c_iflag, original.c_iflag,
+        "input flags differ after exit"
+    );
+    assert_eq!(
+        restored.c_oflag, original.c_oflag,
+        "output flags differ after exit"
+    );
+    assert_eq!(
+        restored.c_cflag, original.c_cflag,
+        "control flags differ after exit"
+    );
+    assert_eq!(
+        restored.c_cc, original.c_cc,
+        "control characters differ after exit"
+    );
 }
 
 #[test]

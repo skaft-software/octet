@@ -46,7 +46,13 @@ fn request() -> Request {
 
 #[test]
 fn public_gpt6_cache_options_encode_documented_mode_and_ttl() {
-    for name in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+    for name in [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+    ] {
         let model = crate::ModelCatalog::builtin()
             .unwrap()
             .resolve(&ModelId(name.into()))
@@ -407,6 +413,55 @@ fn sol_luna_sampling_depends_on_effective_not_baseline_effort_and_checks_presets
             url::Url::parse("https://third-party.invalid/v1/").unwrap();
         assert!(build_request(&model, &req).is_ok());
     }
+}
+
+#[test]
+fn public_terra_encodes_exact_efforts_tools_and_route_scoped_sampling() {
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6.1-terra".into()))
+        .unwrap();
+    let mut req = request();
+    req.tools.push(tool());
+    req.reasoning = model
+        .spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .unwrap()
+        .default_selection()
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+    assert_eq!(body["model"], "gpt-6.1-terra");
+    assert_eq!(body["reasoning"]["effort"], "medium");
+    assert_eq!(body["tools"][0]["type"], "function");
+    assert_eq!(body["tools"][0]["async"], true);
+    for effort in ["none", "low", "medium", "high", "xhigh", "max"] {
+        req.reasoning = ReasoningConfig::from_provider_value(effort).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], effort);
+    }
+    for effort in [
+        crate::ReasoningEffort::Minimal,
+        crate::ReasoningEffort::Ultra,
+    ] {
+        req.reasoning = ReasoningConfig::Effort(effort);
+        assert!(build_request(&model, &req).is_err());
+    }
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Low);
+    req.temperature = Some(0.7);
+    assert!(build_request(&model, &req).is_err());
+    req.reasoning = ReasoningConfig::Off;
+    assert!(build_request(&model, &req).is_ok());
+    req.reasoning = ReasoningConfig::Effort(crate::ReasoningEffort::Low);
+    Arc::make_mut(&mut model.endpoint).base_url =
+        url::Url::parse("https://third-party.invalid/v1/").unwrap();
+    assert!(
+        build_request(&model, &req).is_ok(),
+        "a copied ID is not public route authority"
+    );
 }
 
 #[test]

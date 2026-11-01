@@ -497,6 +497,37 @@ pub fn slash_commands() -> &'static [SlashCommandSuggestion] {
     SLASH_COMMANDS
 }
 
+pub(crate) fn is_pi_reserved_slash_command_name(name: &str) -> bool {
+    matches!(
+        name,
+        "settings"
+            | "model"
+            | "tree"
+            | "thinking"
+            | "scoped-models"
+            | "export"
+            | "import"
+            | "share"
+            | "bug"
+            | "copy"
+            | "name"
+            | "session"
+            | "changelog"
+            | "hotkeys"
+            | "fork"
+            | "clone"
+            | "trust"
+            | "login"
+            | "logout"
+            | "new"
+            | "compact"
+            | "resume"
+            | "reload"
+            | "quit"
+            | "debug"
+    )
+}
+
 /// Whether an unknown slash invocation names, or abbreviates, a built-in
 /// command. Malformed built-ins must not fall through to prompt templates or
 /// extension dispatch.
@@ -931,6 +962,7 @@ pub fn parse(input: &str) -> Command {
     let Some(body) = input.strip_prefix('/') else {
         return Command::Unknown(input.to_owned());
     };
+    let body = body.strip_prefix("octet:").unwrap_or(body);
     let mut parts = body.split_whitespace();
     let name = parts.next().unwrap_or_default();
 
@@ -1983,6 +2015,7 @@ pub fn cost_text(session: &Session, model: &Model) -> String {
                 format!("sub:{}", agent_id.trim_start_matches("agent-"))
             }
             UsageRecordKind::ToolComposition { .. } => "tools".to_owned(),
+            UsageRecordKind::ToolInference { .. } => "infer".to_owned(),
             UsageRecordKind::Compaction => "cmp".to_owned(),
             UsageRecordKind::CacheWarm => "warm".to_owned(),
             UsageRecordKind::RejectedResponsesTurn => "rejected".to_owned(),

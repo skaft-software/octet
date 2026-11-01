@@ -612,3 +612,102 @@ async fn same_mode_idle_thinking_preserves_the_existing_terminal_grant_and_proce
     app.executable_extensions.shutdown().await;
     assert_revoked_before_shutdown(&wire);
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_reload_preserves_native_lifecycle_reasons() {
+    let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    let root = directory.path().join("extensions");
+    let extension = root.join("reload-reason-probe");
+    std::fs::create_dir_all(&extension).unwrap();
+    let log = directory.path().join("reload-hooks.jsonl");
+    let script = extension.join("probe.py");
+    std::fs::write(
+        &script,
+        r#"import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if "id" not in request:
+        continue
+    result = {}
+    if method == "initialize":
+        protocol = request["params"]["protocol"]
+        result = {"api_version":"0.4", "tools":[], "commands":[],
+            "protocol":{"version":"0.4", "features":protocol["required_features"],
+                "limits":{"max_concurrent_requests":2}}}
+    elif method == "hook/run":
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps(request["params"]) + "\n")
+    print(json.dumps({"jsonrpc":"2.0", "id":request["id"], "result":result}), flush=True)
+    if method == "shutdown":
+        break
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        extension.join("extension.toml"),
+        format!(
+            r#"name = "reload-reason-probe"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "python3"
+args = [{}, {}]
+[contributes]
+hooks = ["session_start", "session_end"]
+"#,
+            serde_json::to_string(&script).unwrap(),
+            serde_json::to_string(&log).unwrap()
+        ),
+    )
+    .unwrap();
+    app.config.extension_paths = vec![root];
+    app.config.enabled_extensions = vec!["reload-reason-probe".into()];
+    app.config.invocation_trusted_extensions = vec!["reload-reason-probe".into()];
+    app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    app.config.sandbox.allow_process = true;
+    app.config.sandbox.allow_shell = true;
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    assert!(
+        app.executable_extensions
+            .summaries()
+            .iter()
+            .any(|summary| summary.name == "reload-reason-probe" && summary.running),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    let session = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = EventStream::from_stream(futures_util::stream::pending());
+    let (mut app, applied) = reload_resources_announcing(app, &mut shell, &mut input, true)
+        .await
+        .unwrap();
+    assert!(applied);
+    assert_eq!(app.agent.session().path(), session);
+    app.executable_extensions.shutdown().await;
+    let hooks: Vec<serde_json::Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let reasons: Vec<_> = hooks
+        .iter()
+        .map(|hook| {
+            (
+                hook["hook"].as_str().unwrap(),
+                hook["payload"]["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            ("session_start", "resume"),
+            ("session_end", "reload"),
+            ("session_start", "reload"),
+            ("session_end", "shutdown")
+        ]
+    );
+    assert_eq!(hooks[1]["payload"]["outcome"], "interrupted");
+}

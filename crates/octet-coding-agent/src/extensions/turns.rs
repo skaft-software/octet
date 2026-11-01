@@ -547,6 +547,46 @@ impl ExecutableExtensions {
         }
     }
 
+    /// Observe this session's active run alongside its foreground shell queues.
+    pub(crate) fn bind_pending_message_control(&mut self, control: &octet_agent::RunControl) {
+        self.pending_message_control = self
+            .resource_owner
+            .as_ref()
+            .map(|owner| (owner.clone(), control.clone()));
+    }
+
+    /// Publish actual shell and active-run queues to retained extension contexts.
+    pub(crate) fn refresh_frontend_pending_messages(&self, shell: &InteractiveShell) {
+        let pending = Some(
+            shell.has_pending_messages()
+                || self
+                    .pending_message_control
+                    .as_ref()
+                    .is_some_and(|(owner, control)| {
+                        Some(owner) == self.resource_owner.as_ref()
+                            && control.has_pending_messages()
+                    }),
+        );
+        let state = {
+            let mut state = self
+                .host_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.has_pending_messages == pending {
+                return;
+            }
+            state.has_pending_messages = pending;
+            state.clone()
+        };
+        for process in &self.processes {
+            if process.descriptor().manifest.runtime.sharing
+                == octet_agent::extension_process::ExtensionRuntimeSharing::Isolated
+            {
+                process.set_host_state(state.clone());
+            }
+        }
+    }
+
     /// Publish the actual shell manager, including user overrides, to retained UI.
     pub(crate) fn refresh_frontend_keybindings(&self, shell: &InteractiveShell) {
         let keybindings = Some(shell.extension_keybindings());
@@ -577,7 +617,20 @@ impl ExecutableExtensions {
         reasoning: &ReasoningConfig,
         sessions: &SessionStore,
     ) {
-        let mut state = host_state(session, model, reasoning, sessions);
+        self.refresh_host_state_for_selection(session, Some((model, reasoning)), sessions);
+    }
+
+    pub(crate) fn is_modeless(&self) -> bool {
+        self.modeless
+    }
+
+    pub(crate) fn refresh_host_state_for_selection(
+        &mut self,
+        session: &Session,
+        selection: Option<(&Model, &ReasoningConfig)>,
+        sessions: &SessionStore,
+    ) {
+        let mut state = host_state_for_selection(session, selection, sessions);
         {
             let previous = self
                 .host_state
@@ -586,6 +639,7 @@ impl ExecutableExtensions {
             state.pi_models = previous.pi_models.clone();
             state.project_trusted = previous.project_trusted;
             state.has_ui = previous.has_ui;
+            state.has_pending_messages = previous.has_pending_messages;
             state.keybindings = previous.keybindings.clone();
             state.theme = previous.theme.clone();
             state.mode = previous.mode.clone();

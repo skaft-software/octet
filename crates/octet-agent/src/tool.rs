@@ -46,6 +46,29 @@ pub enum ToolConcurrency {
     ParallelProcess,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[allow(missing_docs)]
+pub enum ToolExposure {
+    #[default]
+    Direct,
+    Codemode,
+    Deferred,
+    ModelOnly,
+    Hidden,
+}
+
+#[allow(missing_docs)]
+impl ToolExposure {
+    pub fn activated_on_registration(self) -> bool {
+        matches!(self, Self::Direct | Self::ModelOnly)
+    }
+
+    pub fn callable(self, active: bool) -> bool {
+        matches!(self, Self::Codemode | Self::Deferred) || self == Self::Direct && active
+    }
+}
+
 /// A tool the model can call.
 ///
 /// Core tools (`read`, `edit`, `write`, `bash`) and third-party tools
@@ -58,6 +81,11 @@ pub enum ToolConcurrency {
 /// a normal one. Either way the run continues; tools cannot terminate a run.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
+    #[allow(missing_docs)]
+    fn exposure(&self) -> ToolExposure {
+        ToolExposure::Direct
+    }
+
     /// Returns the tool definition used for provider function-calling.
     /// The definition's `name` must be unique across all registered tools.
     fn definition(&self) -> ToolDef;
@@ -591,6 +619,7 @@ pub struct ToolProgressSink {
     dropped_events: Arc<AtomicU64>,
     invocation: Option<crate::tools::durability::InvocationHandle>,
     composition: Option<Arc<dyn crate::tool_composition::ToolCompositionService>>,
+    inference: Option<Arc<dyn crate::tool_inference::ToolInferenceService>>,
     tool_call_id: Option<String>,
     parent_tool_call_id: Option<String>,
     programmatic: bool,
@@ -608,6 +637,7 @@ impl ToolProgressSink {
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
             composition: None,
+            inference: None,
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
@@ -634,6 +664,7 @@ impl ToolProgressSink {
             dropped_events: Arc::new(AtomicU64::new(0)),
             invocation: None,
             composition: None,
+            inference: None,
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
@@ -676,6 +707,20 @@ impl ToolProgressSink {
         self.composition.clone()
     }
 
+    pub(crate) fn with_inference(
+        mut self,
+        service: Arc<dyn crate::tool_inference::ToolInferenceService>,
+    ) -> Self {
+        self.inference = Some(service);
+        self
+    }
+
+    pub(crate) fn inference_service(
+        &self,
+    ) -> Option<Arc<dyn crate::tool_inference::ToolInferenceService>> {
+        self.inference.clone()
+    }
+
     pub(crate) fn with_session_driver(
         mut self,
         route: crate::extension_process::session_leaf::driver::SessionDriverRoute,
@@ -695,6 +740,7 @@ impl ToolProgressSink {
         // Nested calls must not inherit replay memos or recursive authority.
         sink.invocation = None;
         sink.composition = None;
+        sink.inference = None;
         sink.programmatic = true;
         sink
     }

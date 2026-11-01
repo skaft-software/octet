@@ -35,6 +35,8 @@ mod openrouter_discovery;
 mod openrouter_offline_catalog;
 #[cfg(test)]
 mod pinned_metadata;
+#[cfg(all(test, unix))]
+pub(crate) mod provider_reload_rebind;
 #[cfg(test)]
 mod reasoning_ingress_and_loopback;
 #[cfg(test)]

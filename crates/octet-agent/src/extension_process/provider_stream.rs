@@ -2,14 +2,17 @@
 
 use super::*;
 
-/// Host-facing adapter for one extension-owned provider/model route.
-///
-/// It resolves the active process generation for every request so a stale
-/// catalog route cannot continue to call a replaced process.
 pub(super) struct ExtensionProviderStreamTransport {
     pub(super) process: Weak<ExtensionProcessInner>,
-    pub(super) provider_id: String,
-    pub(super) model_id: String,
+    pub(super) binding: ProviderRouteBinding,
+}
+
+pub(super) enum ProviderRouteBinding {
+    Projected(crate::extension_provider::ExtensionProviderRoute),
+    Prepared {
+        captured: crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+    },
 }
 
 pub(super) struct ProviderStreamCancellation {
@@ -345,7 +348,32 @@ pub(super) fn extension_provider_response_stream(
                     yield event;
                 }
                 DecodedProviderStreamEvent::Finish(stop_reason) => {
-                    let response = assembler.finish(stop_reason)?;
+                    let mut response = assembler.finish(stop_reason)?;
+                    let delegate = lock_std_mutex(&connection.provider_streams).get(&stream_id).and_then(|ingress| ingress.delegate.clone());
+                    if let Some(delegate) = delegate.filter(|delegate| delegate.used.load(Ordering::Acquire)) {
+                        let native = { lock_std_mutex(&delegate.response).take() };
+                        let mut native = native.ok_or_else(invalid_provider_stream_event)?;
+                        let expected = native.usage;
+                        let actual = response.usage;
+                        if (expected.input_tokens, expected.output_tokens, expected.cache_read_tokens, expected.cache_write_tokens, expected.total_tokens)
+                            != (actual.input_tokens, actual.output_tokens, actual.cache_read_tokens, actual.cache_write_tokens, actual.total_tokens) {
+                            Err(invalid_provider_stream_event())?;
+                        }
+                        for (index, part) in native.message.content.iter().enumerate() {
+                            if let octet_ai::AssistantPart::Reasoning(reasoning) = part {
+                                if let Some(state) = &reasoning.state {
+                                    let expected = if matches!(state.kind, octet_ai::ReasoningStateKind::AnthropicRedacted { .. }) { Some("[Reasoning redacted]") } else { reasoning.text.as_deref().or(Some("")) };
+                                    if !matches!(response.message.content.get(index), Some(octet_ai::AssistantPart::Reasoning(actual)) if actual.text.as_deref() == expected && actual.state.is_none()) {
+                                        Err(invalid_provider_stream_event())?;
+                                    }
+                                    response.message.content[index] = part.clone();
+                                }
+                            }
+                        }
+                        native.message = response.message;
+                        native.diagnostics.extend(response.diagnostics);
+                        response = native;
+                    }
                     connection.settle_provider_stream(&stream_id);
                     cancellation.disarm();
                     yield StreamEvent::Finished(response);
@@ -367,11 +395,94 @@ pub(super) fn extension_provider_response_stream(
 
 #[async_trait::async_trait]
 impl HostStreamTransport for ExtensionProviderStreamTransport {
+    fn custom_http_model(&self, selected: &octet_ai::Model) -> Option<octet_ai::Model> {
+        let captured = match &self.binding {
+            ProviderRouteBinding::Projected(route) => route,
+            ProviderRouteBinding::Prepared { captured, .. } => captured,
+        };
+        let metadata = captured.model_metadata.as_ref()?;
+        if metadata.inherit_provider.is_some() || metadata.base_url.is_empty() {
+            return None;
+        }
+        let process = self.process.upgrade()?;
+        let connection = read_std_lock(&process.connection).clone();
+        if !connection_is_usable(&connection) || captured.owner != connection.provider_owner {
+            return None;
+        }
+        if !connection
+            .provider_registry
+            .as_ref()?
+            .route_is_active(captured)
+        {
+            return None;
+        }
+        let id = octet_ai::EndpointId(format!("{}/custom-http", selected.endpoint.id.0));
+        let mut model = selected.clone();
+        Arc::make_mut(&mut model.spec).endpoint = id.clone();
+        model.endpoint = Arc::new(octet_ai::Endpoint {
+            id,
+            base_url: url::Url::parse(&metadata.base_url).ok()?,
+            auth: octet_ai::Auth::None,
+            default_headers: reqwest::header::HeaderMap::new(),
+            transport: octet_ai::EndpointTransport::Http,
+            runtime: Default::default(),
+            timeout: selected.endpoint.timeout,
+        });
+        Some(model)
+    }
+
+    fn native_model(&self) -> Option<octet_ai::Model> {
+        let captured = match &self.binding {
+            ProviderRouteBinding::Projected(route) => route,
+            ProviderRouteBinding::Prepared { captured, .. } => captured,
+        };
+        captured
+            .model_metadata
+            .as_ref()?
+            .inherit_provider
+            .as_ref()?;
+        let process = self.process.upgrade()?;
+        let connection = read_std_lock(&process.connection).clone();
+        if !connection_is_usable(&connection) || captured.owner != connection.provider_owner {
+            return None;
+        }
+        let registry = connection.provider_registry.as_ref()?;
+        if !registry.route_is_active(captured) {
+            return None;
+        }
+        registry
+            .native_catalog()?
+            .model(&captured.provider.id, &captured.model.api_name)
+    }
+
     async fn stream(
         &self,
         model: HostStreamModel,
         request: octet_ai::Request,
         diagnostics: Vec<Diagnostic>,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, None).await
+    }
+
+    async fn stream_native(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        continuation: octet_ai::NativeRequestContinuation,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, Some(continuation))
+            .await
+    }
+}
+
+impl ExtensionProviderStreamTransport {
+    async fn stream_inner(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        mut continuation: Option<octet_ai::NativeRequestContinuation>,
     ) -> Result<ResponseStream, AiError> {
         let process = self
             .process
@@ -397,13 +508,33 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         let Some(registry) = connection.provider_registry.clone() else {
             return Err(provider_unavailable_error());
         };
-        let Some(route) = registry.resolve(&self.provider_id, &self.model_id) else {
-            return Err(provider_unavailable_error());
+        let (projected, mut route) = match &self.binding {
+            ProviderRouteBinding::Projected(projected) => {
+                let route = registry
+                    .resolve(&projected.provider.id, &projected.model.id)
+                    .ok_or_else(provider_unavailable_error)?;
+                (projected, route)
+            }
+            ProviderRouteBinding::Prepared { captured, selected } => {
+                if model.id != selected.id
+                    || model.protocol != selected.protocol
+                    || model.pricing != selected.pricing
+                {
+                    return Err(provider_unavailable_error());
+                }
+                (captured, captured.clone())
+            }
         };
         let Some(provider_protocol) = provider_protocol_name(model.protocol) else {
             return Err(provider_unavailable_error());
         };
-        if route.owner != connection.provider_owner || route.model.protocol != provider_protocol {
+        if route.owner != connection.provider_owner
+            || route.owner != projected.owner
+            || route.provider != projected.provider
+            || route.model != projected.model
+            || route.model_metadata != projected.model_metadata
+            || route.model.protocol != provider_protocol
+        {
             return Err(provider_unavailable_error());
         }
 
@@ -434,8 +565,8 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         }
         let params = api_v03::ProviderStreamRequest {
             stream_id: stream_id.clone(),
-            provider_id: self.provider_id.clone(),
-            model_id: self.model_id.clone(),
+            provider_id: route.provider.id.clone(),
+            model_id: route.model.id.clone(),
             request: request_value,
             authorization_lease: None,
         };
@@ -466,6 +597,26 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             streams.insert(
                 stream_id.clone(),
                 ProviderStreamIngress {
+                    delegate: if continuation.is_some() {
+                        let custom_http = route.model_metadata.as_ref().is_some_and(|metadata| {
+                            metadata.inherit_provider.is_none() && !metadata.base_url.is_empty()
+                        });
+                        Some(Arc::new(native_provider::NativeDelegate {
+                            continuation: StdMutex::new(Some(
+                                continuation.take().ok_or_else(provider_unavailable_error)?,
+                            )),
+                            max_output_tokens: route.model.max_output_tokens as u64,
+                            custom_http,
+                            original: request.clone(),
+                            connection: Arc::downgrade(&connection),
+                            route: route.clone(),
+                            used: AtomicBool::new(false),
+                            response: StdMutex::new(None),
+                            cancelled: Arc::new(Notify::new()),
+                        }))
+                    } else {
+                        None
+                    },
                     sender,
                     next_sequence: 0,
                     terminal: false,
@@ -478,11 +629,7 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         let mut opening_cancellation =
             ProviderStreamCancellation::new(&connection, stream_id.clone());
         let accepted = match connection
-            .request(
-                methods::PROVIDER_STREAM,
-                params,
-                connection.provider_stream_idle_timeout,
-            )
+            .request_provider_stream(params, connection.provider_stream_idle_timeout, &mut route)
             .await
         {
             Ok(value) => api_v03::parse_provider_stream_accepted(value).map_err(|_| {

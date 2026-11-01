@@ -64,6 +64,12 @@ oversized requests dominate latency and cost. A zero or unset
 the model-specific Codex route cap. A smaller explicit ceiling stays a separate
 setting.
 
+The public [Codex model guide](https://developers.openai.com/codex/models) lists
+a 500K default for GPT-6.1 Sol in Codex/Work. This is distinct from octet's 272K
+working policy and the separately discovered maximum. It does not automatically
+raise octet's cap or establish an account entitlement; the existing acknowledged,
+entitlement-checked [override](codex-context.md) remains opt-in.
+
 </details>
 
 ## Settings

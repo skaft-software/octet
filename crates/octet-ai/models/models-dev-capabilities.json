@@ -1607,6 +1607,7 @@
       {
         "type": "effort",
         "values": [
+          "none",
           "low",
           "medium",
           "xhigh"
@@ -1634,7 +1635,13 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ]
       }
     ],
     "structured_output": true,
@@ -2110,7 +2117,13 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ]
       }
     ],
     "structured_output": true,
@@ -2530,6 +2543,39 @@
     "reasoning": true,
     "reasoning_options": [],
     "structured_output": true,
+    "tool_call": true
+  },
+  "huggingface/MiniMaxAI/MiniMax-M3.1-Flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 512000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M3.1-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "huggingface/Qwen/Qwen2.5-Coder-32B-Instruct": {
@@ -6602,6 +6648,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openai/gpt-6.1-terra": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openai/gpt-daybreak-blue-latest": {
     "limit": {
       "context": 1050000,
@@ -6668,25 +6748,6 @@
     ],
     "structured_output": true,
     "tool_call": true
-  },
-  "openai/gpt-image-1": {
-    "limit": {
-      "context": 0,
-      "input": 0,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "image"
-      ]
-    },
-    "name": "gpt-image-1",
-    "reasoning": false,
-    "tool_call": false
   },
   "openai/gpt-image-1-mini": {
     "limit": {
@@ -12926,7 +12987,7 @@
   "openrouter/deepseek/deepseek-chat-v3.1": {
     "limit": {
       "context": 163840,
-      "output": 32768
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -13068,7 +13129,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -14045,7 +14106,7 @@
   "openrouter/google/gemma-3-4b-it": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -14219,24 +14280,6 @@
     "structured_output": true,
     "tool_call": false
   },
-  "openrouter/ibm-granite/granite-4.0-h-micro": {
-    "limit": {
-      "context": 131000,
-      "output": 117900
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Granite 4.0 Micro",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/ibm-granite/granite-4.2-8b": {
     "limit": {
       "context": 131072,
@@ -14402,8 +14445,8 @@
   },
   "openrouter/inclusionai/ling-3.1-flash": {
     "limit": {
-      "context": 262144,
-      "output": 235929
+      "context": 1000000,
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -14671,7 +14714,7 @@
   },
   "openrouter/meta-llama/llama-4-scout": {
     "limit": {
-      "context": 1310720,
+      "context": 327680,
       "output": 16384
     },
     "modalities": {
@@ -14907,7 +14950,7 @@
   "openrouter/meta/muse-spark-open": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -15051,7 +15094,7 @@
     "name": "MiniMax-M2",
     "reasoning": true,
     "reasoning_options": [],
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/minimax/minimax-m2-her": {
@@ -16051,8 +16094,8 @@
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
-      "context": 262144,
-      "output": 235929
+      "context": 1048576,
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -16063,37 +16106,6 @@
       ]
     },
     "name": "Nemotron 3 Super 120B A12B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "low",
-          "medium"
-        ]
-      },
-      {
-        "type": "budget_tokens"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/nvidia/nemotron-3-super-120b-a12b:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nemotron 3 Super (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -16368,26 +16380,7 @@
     },
     "name": "GPT-4",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/gpt-4-turbo": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-4 Turbo",
-    "reasoning": false,
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/openai/gpt-4.1": {
@@ -16892,26 +16885,6 @@
         ]
       }
     ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/gpt-5.2-chat": {
-    "limit": {
-      "context": 128000,
-      "output": 32000
-    },
-    "modalities": {
-      "input": [
-        "pdf",
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-5.2 Chat",
-    "reasoning": false,
     "structured_output": true,
     "tool_call": true
   },
@@ -17705,6 +17678,72 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/openai/gpt-6.1-terra": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6.1-terra-pro": {
+    "limit": {
+      "context": 1050000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "pdf",
+        "image",
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/openai/gpt-audio": {
     "limit": {
       "context": 128000,
@@ -17849,56 +17888,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/o1": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o1-pro": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o1-pro",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": false
-  },
   "openrouter/openai/o3": {
     "limit": {
       "context": 200000,
@@ -17924,57 +17913,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/o3-mini": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o3-mini",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o3-mini-high": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o3 Mini High",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/openai/o3-pro": {
     "limit": {
       "context": 200000,
@@ -17995,59 +17933,6 @@
     "reasoning_options": [
       {
         "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o4-mini": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o4-mini",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o4-mini-high": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o4 Mini High",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "high"
-        ]
       }
     ],
     "structured_output": true,
@@ -18151,6 +18036,39 @@
     "reasoning": false,
     "structured_output": false,
     "tool_call": false
+  },
+  "openrouter/particle-ai/particle-1": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Particle-1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
   "openrouter/perceptron/perceptron-mk1": {
     "limit": {
@@ -18431,6 +18349,30 @@
           "medium",
           "xhigh"
         ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/prism-ml/ternary-bonsai-2-9b": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ternary Bonsai 2 9B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
       }
     ],
     "structured_output": true,
@@ -18741,25 +18683,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3-Next 80B-A3B (Thinking)",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-235b-a22b-instruct": {
     "limit": {
       "context": 262144,
@@ -18865,7 +18788,7 @@
   "openrouter/qwen/qwen3.5-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -19216,7 +19139,7 @@
   "openrouter/qwen/qwen3.8-2.4t-a95b": {
     "limit": {
       "context": 1048576,
-      "output": 909000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -20228,36 +20151,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/upstage/solar-pro-3": {
-    "limit": {
-      "context": 131072,
-      "output": 117964
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Solar Pro 3",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/upstage/solar-pro4": {
     "limit": {
       "context": 524288,
@@ -20514,7 +20407,7 @@
     },
     "limit": {
       "context": 1050000,
-      "output": 945000
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -20543,7 +20436,7 @@
     },
     "limit": {
       "context": 1050000,
-      "output": 945000
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -20974,7 +20867,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943717
+      "output": 131072
     },
     "modalities": {
       "input": [

@@ -10,7 +10,9 @@ import { isDeepStrictEqual } from 'node:util';
 // Delay linking adapter dependencies until the runtime prerequisite has passed.
 const { hookEvents } = await import('./lib/api.mjs');
 const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
-const { locateInstalledPi } = await import('./lib/installed-pi.mjs');
+const { locateInstalledPi, scanPiImportGaps } = await import('./lib/installed-pi.mjs');
+const { createJiti } = await import('jiti');
+const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs');
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
 const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
@@ -41,8 +43,8 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
     const config = captureConfig(dir, extensions, routes, { piAgentDir, piTheme });
     // The review capture runs every reviewed factory once, so it warms the
     // runtime's own transform cache: the first real launch must not pay a cold
-    // factory transform. `cacheDir` is the `.cache` under the extension
-    // directory the generated manifest will be launched from.
+    // factory transform. `cacheDir` is pinned in the generated entrypoint's
+    // environment so automatic per-launch manifests share this same cache.
     return spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', config, '--inspect'],
       { cwd, env: cacheDir ? { ...env, OCTET_PI_COMPAT_CACHE: cacheDir } : env,
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
@@ -110,6 +112,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
     'description = "Optional reviewed Pi factories; Rust owns the agent and terminal"', '',
     '[entrypoint]', `command = ${quoted(realpathSync(process.execPath))}`,
     `args = ${list([runner, '--config', join(output, 'bridge.json')])}`, '',
+    ...(captureCacheDir ? ['[entrypoint.env]', `OCTET_PI_COMPAT_CACHE = ${quoted(resolve(captureCacheDir))}`, ''] : []),
     '# Trusted factories retain normal OS authority. Declarations are consent metadata, not a sandbox.',
     '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true',
     'system_prompt = true',
@@ -216,12 +219,25 @@ function adapterIdentity() {
 // factories each failure is isolated and named on stderr, so this one run
 // settles the common case that probing each factory separately took seconds
 // for. `undefined` when the capture itself failed: probe as before.
-function captureCombined(extensions, options) {
-  if (extensions.length < 2) return undefined;
-  let entries;
-  try { entries = extensions.map(entry => realpathSync(entry)); } catch { return undefined; }
-  const captured = capture(entries, Object.fromEntries(entries.map(entry => [entry, 'shims'])), options);
-  if (captured.error || captured.status !== 0) return undefined;
+async function captureCombined(extensions, options) {
+  if (!extensions.length) return undefined;
+  let entries, routes;
+  try {
+    entries = extensions.map(entry => realpathSync(entry));
+    const jiti = createJiti(import.meta.url, { alias: { ...typeboxAliases(), ...emulatedPiAliases() },
+      moduleCache: true, tryNative: false, ...(options.cacheDir ? { fsCache: join(options.cacheDir, 'jiti') } : {}) });
+    routes = Object.fromEntries(await Promise.all(entries.map(async entry => {
+      const gaps = await scanPiImportGaps(entry, jiti);
+      return [entry, gaps.missing.length || gaps.subpaths.length || gaps.direct_tools.length ? 'installed' : 'shims'];
+    })));
+  } catch { return undefined; }
+  const captured = capture(entries, routes, options);
+  if (captured.error && entries.length === 1) throw new Error(`registration capture failed: ${captured.error.message}`);
+  if (captured.error || captured.status !== 0) {
+    if (entries.length !== 1) return undefined;
+    const error = captured.stderr.trim().split('\n')[0]?.replace(/^\[pi-compat startup\] /, '') || `exit ${captured.status}`;
+    return { skipped: new Map([[extensions[0], error]]), routes, singleFailure: true };
+  }
   const skipped = new Map();
   for (const line of captured.stderr.split('\n')) {
     if (!line.startsWith('[pi-compat] skipped ')) continue;
@@ -233,7 +249,7 @@ function captureCombined(extensions, options) {
   try {
     const frames = captured.stdout.trim().split('\n').map(line => JSON.parse(line));
     if (frames.length !== 1 || !frames[0].result) return undefined;
-    return { registrations: frames[0].result, skipped };
+    return { registrations: frames[0].result, skipped, routes };
   } catch { return undefined; }
 }
 
@@ -302,16 +318,18 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   // The automatic mirror's output is a fresh per-launch directory, so its
   // .cache would transform every factory cold at each capture. Its captures use
   // the adapter's persistent startup cache instead.
-  const captureCacheDir = cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache');
-  const combined = reused || !cache || activeNativeTools.size ? undefined : captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir });
+  const captureCacheDir = resolve(cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache'));
+  const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir });
   let routed = reused?.routed;
   if (!routed && combined) {
     // Only what the combined capture skipped is probed on its own, for the
     // installed-Pi route; a factory that ran out of time is not tried twice.
-    const retry = setup.extensions.filter(entry => combined.skipped.has(entry) && !/^setup did not finish within /.test(combined.skipped.get(entry)));
-    const probed = new Map((retry.length ? await routeExtensions(retry, { ...options, expectedSourceHashes: prepared.sourceHashes }) : []).map(result => [result.entry, result]));
+    const retry = setup.extensions.filter(entry => combined.skipped.has(entry)
+      && combined.routes[realpathSync(entry)] === 'shims' && !/^setup did not finish within /.test(combined.skipped.get(entry)));
+    const probed = new Map((retry.length ? await routeExtensions(retry, { ...options, expectedSourceHashes: prepared.sourceHashes,
+      capturedShimFailures: combined.singleFailure ? combined.skipped : undefined }) : []).map(result => [result.entry, result]));
     routed = setup.extensions.map(entry => probed.get(entry)
-      ?? (combined.skipped.has(entry) ? { entry, route: null, error: combined.skipped.get(entry) } : { entry, route: 'shims' }));
+      ?? (combined.skipped.has(entry) ? { entry, route: null, error: combined.skipped.get(entry) } : { entry, route: combined.routes[realpathSync(entry)] }));
   }
   routed ??= await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
   const refused = routed.filter(result => !result.route);
@@ -411,7 +429,7 @@ async function probe(entry, route, { cwd, env, owners = new Map(), piAgentDir, p
 
 // Chooses each extension's route: octet's emulated path when it loads there,
 // otherwise the installed Pi; an extension that loads on neither is skipped.
-export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map(), expectedSourceHashes } = {}) {
+export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map(), expectedSourceHashes, capturedShimFailures } = {}) {
   if (!Array.isArray(extensions) || extensions.length > 64) throw new Error('Supply at most 64 entrypoints');
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) throw new Error('concurrency must be 1..64');
   // Only an authoritative selected/active owner catalog can establish a
@@ -426,7 +444,8 @@ export async function routeExtensions(extensions, { installed = true, concurrenc
         results[index] = { entry, route: null, error: 'factory sources changed since mirror preparation; prepare and review again' };
         continue;
       }
-      const emulated = await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
+      const emulated = capturedShimFailures?.has(entry) ? { ok: false, error: capturedShimFailures.get(entry) }
+        : await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
       if (emulated.ok) { results[index] = { entry, route: 'shims' }; continue; }
       // A setup that ran out of time is not a missing Pi helper; the installed
       // route would only stall again and double the wait.

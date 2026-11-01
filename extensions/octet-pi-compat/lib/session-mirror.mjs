@@ -2,6 +2,7 @@ import { contextBytes, historyItems } from './context-limits.mjs';
 // Translate host-owned native records; never read/write the Session JSONL here.
 import { canonicalToPi } from './provider-context.mjs';
 import { assistantMetadata } from './model-turns.mjs';
+import { assistantObservation } from './run-messages.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
 // Translating walks each message's ancestry, so a host view is translated once
@@ -17,10 +18,19 @@ function cachedTranslation(entries, namespace) {
   if (cached?.length !== entries.length) byKey.set(key, cached = { length: entries.length, result: translateSessionEntries(entries, namespace) });
   return cached.result;
 }
-export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace));
+// Keep the cache cloneable, then restore the same unavailable-fact guards used
+// by live message observers. A footer reading unknown cost must not get either
+// fictional zero accounting or an incidental undefined.total TypeError.
+function observedEntry(entry) {
+  if (entry.type === 'message' && entry.message?.role === 'assistant') {
+    entry.message = assistantObservation(entry.message);
+  }
+  return entry;
+}
+export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace)).map(observedEntry);
 export function sessionEntryCopy(entries, namespace, id) {
   const entry = cachedTranslation(entries, namespace).find(candidate => candidate.id === id);
-  return entry === undefined ? undefined : structuredClone(entry);
+  return entry === undefined ? undefined : observedEntry(structuredClone(entry));
 }
 
 export function translateSessionEntries(entries, namespace) {

@@ -90,14 +90,14 @@ function syntheticInstall(agent) {
     const pkg = join(agent, 'install/releases/1.0.2/node_modules/@earendil-works', name);
     put(join(pkg, 'package.json'), JSON.stringify({ name: '@earendil-works/' + name, version: '1.0.2', type: 'module',
       exports: { '.': './dist/index.js', ...(name === 'pi-ai' ? { './compat': './dist/index.js', './oauth': './dist/index.js', './providers/*': './dist/providers/*.js' } : {}) } }));
-    put(join(pkg, 'dist/index.js'), name === 'pi-coding-agent' ? 'export const parseSkillBlock = text => ({text});' : 'export {};');
+    put(join(pkg, 'dist/index.js'), name === 'pi-coding-agent' ? 'export const formatReadLineRange = text => ({text});' : 'export {};');
     put(join(pkg, 'dist/providers/all.js'), 'export {};');
   }
 }
 
 test('mirror review captures installed-only helper route; recorded root survives HOME relocation', async t => {
-  const f = fixture(t, `import {parseSkillBlock,getAgentDir} from '@earendil-works/pi-coding-agent';
-    export default pi => pi.registerCommand('kept',{description:parseSkillBlock(getAgentDir()).text,handler(){}});`);
+  const f = fixture(t, `import {formatReadLineRange,getAgentDir} from '@earendil-works/pi-coding-agent';
+    export default pi => pi.registerCommand('kept',{description:formatReadLineRange(getAgentDir()).text,handler(){}});`);
   syntheticInstall(f.agent);
   const captured = await configureMirror(f.options);
   assert.deepEqual(captured.config.extension_runtimes, { [f.entry]: 'installed' });
@@ -264,7 +264,7 @@ test('snapshot active command collisions refuse rather than dropping unrelated c
   const other = put(join(f.agent, 'extensions/other.js'), 'export default pi => {pi.registerCommand("unrelated",{handler(){}});pi.registerCommand("kept",{handler(){}});};');
   syntheticInstall(f.agent);
   const codingAgent = join(f.agent, 'install/releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
-  put(codingAgent, `export const parseSkillBlock = text => ({text});
+  put(codingAgent, `export const formatReadLineRange = text => ({text});
     export class SettingsManager {static create(){return {getThemeSetting(){},getDefaultThinkingLevel(){}};}}
     export class DefaultPackageManager {async resolve(){return {extensions:[{path:${JSON.stringify(f.entry)},enabled:true},{path:${JSON.stringify(other)},enabled:true}],themes:[]};}}`);
   await assert.rejects(configureFromPi(f.options), /active registration collision.*|no partial import/);
@@ -280,8 +280,8 @@ test('legacy unfrozen mirror configuration refuses before executing factories', 
   assert.doesNotMatch(inspected.stderr, /executed legacy factory/);
 });
 
-// The automatic mirror prepares at every start, before octet's first frame. An
-// unchanged setup must reuse its captured catalog instead of importing every
+// The automatic mirror prepares at every start. An unchanged setup must
+// reuse its captured catalog instead of importing every
 // factory again; any change to a factory's sources reruns the capture.
 test('automatic mirror reuses its capture for an unchanged setup and recaptures a changed one', async t => {
   const f = fixture(t);
@@ -293,6 +293,10 @@ test('automatic mirror reuses its capture for an unchanged setup and recaptures 
   const options = { ...f.options, env: { ...f.env, OCTET_PI_COMPAT_CACHE: cacheDir }, cache: true, overwrite: true };
   const count = () => existsSync(imports) ? readFileSync(imports, 'utf8').length : 0;
   const first = await configureMirror(options);
+  const manifest = readFileSync(join(f.output, 'extension.toml'), 'utf8');
+  const runtimeCache = manifest.match(/^\[entrypoint\.env\]\nOCTET_PI_COMPAT_CACHE = (.+)$/m)?.[1];
+  assert.ok(runtimeCache, 'the live runner must reuse the persistent capture cache, not its per-launch extension directory');
+  assert.equal(JSON.parse(runtimeCache), cacheDir);
   const imported = count();
   assert.ok(imported > 0, 'a cold start captures the factories');
   const second = await configureMirror(options);

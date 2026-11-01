@@ -56,6 +56,71 @@ fn gpt_6_capability_fallback_is_limited_to_public_openai() {
 }
 
 #[test]
+fn terra_public_contract_does_not_expand_codex_or_other_provider_fallbacks() {
+    let openai = &crate::providers::OPENAI;
+    assert!(public_openai_gpt_6_model(openai, "gpt-6.1-terra"));
+    assert!(!known_gpt_6_model("gpt-6.1-terra"));
+    assert!(!crate::auth::codex::MODELS.contains(&"gpt-6.1-terra"));
+    for declaration in [
+        &crate::providers::CODEX,
+        &crate::providers::OPENCODE,
+        &crate::providers::OPENROUTER,
+    ] {
+        assert!(!public_openai_gpt_6_model(declaration, "gpt-6.1-terra"));
+        assert!(
+            sparse_route_reasoning(declaration, Protocol::OpenAiResponses, "gpt-6.1-terra")
+                .is_none()
+        );
+    }
+    for id in [
+        "openai/gpt-6.1-terra",
+        "gpt-6.1-terra-pro",
+        "gpt-6.1-terra-unverified",
+    ] {
+        assert!(!public_openai_gpt_6_model(openai, id));
+        assert!(sparse_route_reasoning(openai, Protocol::OpenAiResponses, id).is_none());
+    }
+    assert!(sparse_route_reasoning(openai, Protocol::OpenAiChat, "gpt-6.1-terra").is_none());
+    assert!(!codex_supports_image_input("gpt-6.1-terra"));
+}
+
+#[test]
+fn terra_discovery_preserves_endpoint_denials_and_smaller_limits() {
+    let declaration = &crate::providers::OPENAI;
+    let mut catalog = metadata_fixture_catalog(declaration, declaration.base_url);
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data": [{
+            "id": "gpt-6.1-terra", "context_window": 64_000,
+            "max_output_tokens": 4_096, "input_modalities": ["text"],
+            "supports_tools": false, "supports_reasoning": false,
+            "structured_output": false
+        }]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("openai/gpt-6.1-terra".into()))
+        .unwrap();
+    assert_eq!(model.spec.limits.context_window, 64_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 4_096);
+    assert!(model.spec.capabilities.reasoning.is_none());
+    assert!(!model.spec.capabilities.tools);
+    assert!(!model.spec.capabilities.parallel_tool_calls);
+    assert!(!model.spec.capabilities.structured_output);
+    assert!(!model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(octet_ai::Modality::Image));
+    assert!(!model.spec.capabilities.responses_features.async_tools);
+    assert!(catalog
+        .resolve(&ModelId("codex/gpt-6.1-terra".into()))
+        .is_err());
+}
+
+#[test]
 fn azure_openai_configuration_routes_deployments_through_versioned_responses_base() {
     let declaration = BUILTIN_PROVIDER_DECLARATIONS
         .iter()

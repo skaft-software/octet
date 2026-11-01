@@ -25,7 +25,7 @@ export const PI_PREFIXES = ['@earendil-works', '@mariozechner'];
 // pi-ai root to its compat entry, a strict superset of the core entry.
 export const PI_MODULES = {
   'pi-coding-agent': { pkg: 'pi-coding-agent', key: 'coding-agent', exportKey: '.', shim: 'coding-agent' },
-  'pi-agent-core': { pkg: 'pi-agent-core', key: 'agent-core', exportKey: '.' },
+  'pi-agent-core': { pkg: 'pi-agent-core', key: 'agent-core', exportKey: '.', shim: 'agent-core' },
   'pi-tui': { pkg: 'pi-tui', key: 'tui', exportKey: '.', shim: 'tui' },
   'pi-ai': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
   'pi-ai/compat': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
@@ -33,7 +33,7 @@ export const PI_MODULES = {
   // supported release, so it is served by the same guarded namespace.
   'pi-ai/models': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
   'pi-ai/oauth': { pkg: 'pi-ai', key: 'ai-oauth', exportKey: './oauth' },
-  'pi-ai/providers/all': { pkg: 'pi-ai', key: 'ai-providers', exportKey: './providers/all' },
+  'pi-ai/providers/all': { pkg: 'pi-ai', key: 'ai-providers', exportKey: './providers/all', shim: 'ai-providers' },
 };
 
 // Pi resolves both TypeBox spellings to its single TypeBox 1.x install.

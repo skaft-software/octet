@@ -131,6 +131,7 @@ impl Agent {
         input: UserInput,
         tools_enabled: bool,
         prewarm_responses: bool,
+        prepared_authority: Option<PreparedHostAuthority>,
     ) -> Result<Run<'_>, AgentError> {
         if self.reasoning == octet_ai::ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
             && self.delegation.is_none()
@@ -159,8 +160,9 @@ impl Agent {
         // This snapshot is both the preflight boundary and the first provider
         // request's frozen tool surface. Refusing it before the prompt append
         // leaves a frontend free to revise and retry the same draft.
-        let (initial_tool_revision, initial_tools) =
-            self.extensions.model_tool_snapshot(&self.resource_owner);
+        let (initial_tool_revision, initial_tools, initial_callable_tools) = self
+            .extensions
+            .model_and_callable_tool_snapshot(&self.resource_owner);
         let initial_tool_defs: Vec<ToolDef> = if tools_enabled {
             advertised_tool_surface(&initial_tools, &self.model)
         } else {
@@ -170,7 +172,7 @@ impl Agent {
         // Capture only settled context, before appending this submission.
         // Opening is deferred until the first request passes run admission;
         // merely constructing a Run (or an idle RPC host) performs no I/O.
-        let mut responses_prewarm = if prewarm_responses {
+        let mut responses_prewarm = if prewarm_responses && prepared_authority.is_none() {
             self.responses_prewarm_request().ok().flatten()
         } else {
             None
@@ -206,6 +208,7 @@ impl Agent {
         let lifecycle = Arc::new(RunLifecycle {
             finished: AtomicBool::new(false),
             dropped: AtomicBool::new(false),
+            trailing_inference: Mutex::new((Usage::default(), 0)),
         });
         self.last_run_lifecycle = Some(lifecycle.clone());
         let context = Arc::new(ContextTracker::default());
@@ -226,6 +229,7 @@ impl Agent {
             admission: control_admission.clone(),
             tx: control_tx,
             pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+            pending_messages: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
             pending_bytes: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_BYTES)),
             abort: abort.clone(),
         };
@@ -239,6 +243,7 @@ impl Agent {
             &self.resource_owner,
         )?;
         let model = self.model.clone();
+        let inference_resolver = self.tool_inference_resolver.clone();
         let compaction_model = self
             .compaction_model
             .clone()
@@ -364,6 +369,7 @@ impl Agent {
 
             let mut tool_revision = initial_tool_revision;
             let mut composition_tools = initial_tools;
+            let mut callable_tools = initial_callable_tools;
             let tools = crate::tool_composition::direct_surface(&composition_tools);
             let mut tool_defs = initial_tool_defs;
             let mut tool_map: HashMap<String, Arc<dyn Tool>> =
@@ -383,7 +389,7 @@ impl Agent {
 
             let mut native = native_steering::NativeState::default();
             let (native_updates_tx, mut native_updates_rx) = mpsc::channel(128);
-            let native_enabled = model.responses_features().steering
+            let native_enabled = prepared_authority.is_none() && model.responses_features().steering
                 && extension_host.provider_request_hooks.is_empty()
                 && extension_host.provider_context_hooks.is_empty()
                 && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
@@ -405,6 +411,7 @@ impl Agent {
             let mut model_turn_hooks = model_turn::ModelTurnHooks::new(
                 &extension_host.session_operation_hooks, &effect_run_id,
             );
+            let mut initial_authority = prepared_authority;
             let mut context_retries = 0usize;
             // Shared by open/body retries, re-preparation and transport fallback.
             // Reset only on a complete successful assistant response.
@@ -729,7 +736,7 @@ impl Agent {
                 // control and steering have settled but before context sizing.
                 // Every call emitted by this request resolves against exactly
                 // the tool set the provider saw.
-                let (current_revision, current_tools) = extension_host.model_tool_snapshot(&resource_owner);
+                let (current_revision, current_tools, current_callable_tools) = extension_host.model_and_callable_tool_snapshot(&resource_owner);
                 if current_revision != tool_revision {
                     tool_revision = current_revision;
                     if tools_enabled && !answer_only {
@@ -742,6 +749,7 @@ impl Agent {
                         }
                         tool_defs = next_tool_defs;
                         composition_tools = current_tools;
+                        callable_tools = current_callable_tools;
                         let current_tools = crate::tool_composition::direct_surface(&composition_tools);
                         tool_map.clear();
                         tool_map.reserve(current_tools.len());
@@ -767,6 +775,7 @@ impl Agent {
                     mpsc::unbounded_channel::<AgentEvent>();
                 let capacity = {
                     let mut compaction = CompactionContext {
+                        initial_authority: initial_authority.as_ref(),
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
@@ -999,6 +1008,10 @@ impl Agent {
                 // Anchor first-token-latency measurement for consumers that
                 // track it per attempt: the first OutputDelta of this stream
                 // measured from this event is the attempt's TTFT.
+                let host_options = match initial_authority.as_ref().map(|authority| authority.host_options_for(&model)).transpose() {
+                    Ok(options) => options,
+                    Err(error) => break 'run FinishReason::Failed(error.into()),
+                };
                 let ev = AgentEvent::TurnStarted;
                 notify_observers(&observers, &ev);
                 yield ev;
@@ -1032,7 +1045,9 @@ impl Agent {
                     // Pin once: a warm/control wake must never drop an opening
                     // future and replay an already accepted main POST.
                     let opening = async {
-                        if let Some(connection) = native.connection.take() {
+                        if host_options.is_some() {
+                            open_provider_stream(&opening_client, &model, request, &abort, host_options).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
+                        } else if let Some(connection) = native.connection.take() {
                             Ok(Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
                         } else if native_enabled {
                             opening_client.steerable_responses(&model, request).await.map(|connection| Some(native_steering::ProviderStream::Native(connection, native_updates_tx.clone(), None)))
@@ -1042,7 +1057,7 @@ impl Agent {
                             Box::pin(opening_client.stream_with_responses_prewarm(&model, request, warm_request))
                                 .await.map(|stream| Some(native_steering::ProviderStream::Ordinary(stream)))
                         } else {
-                            open_provider_stream(&opening_client, &model, request, &abort).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
+                            open_provider_stream(&opening_client, &model, request, &abort, None).await.map(|stream| stream.map(native_steering::ProviderStream::Ordinary))
                         }
                     };
                     tokio::pin!(opening);
@@ -1127,6 +1142,7 @@ impl Agent {
                         context_retries += 1;
                         let compacted = {
                             let mut compaction = CompactionContext {
+                        initial_authority: initial_authority.as_ref(),
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
@@ -1394,6 +1410,7 @@ impl Agent {
                                 context_retries += 1;
                                 let compacted = {
                                     let mut compaction = CompactionContext {
+                        initial_authority: initial_authority.as_ref(),
                         run_id: &effect_run_id,
                         resource_owner: &resource_owner,
                         retry_hooks: &provider_retry_hooks,
@@ -1515,10 +1532,13 @@ impl Agent {
                             // `octet-ai` assembles and validates the complete
                             // message. Tool deltas are provisional: execute only
                             // after the assistant turn is durably persisted.
-                            StreamEvent::ToolCallStart { .. }
+                            event @ (StreamEvent::ToolCallStart { .. }
                             | StreamEvent::ToolCallArgsDelta { .. }
-                            | StreamEvent::ToolCallEnd { .. } => {
+                            | StreamEvent::ToolCallEnd { .. }) => {
                                 attempt_saw_generation = true;
+                                for observer in &observers.observers {
+                                    observer.on_tool_call_stream(&event, &resource_owner);
+                                }
                             }
                             StreamEvent::MediaCompleted { index, media } => {
                                 attempt_saw_generation = true;
@@ -1560,6 +1580,7 @@ impl Agent {
                 // turn. A successful response proves the current compacted
                 // prefix is accepted and restores the recovery budget for a
                 // later autonomous turn in the same run.
+                initial_authority = None;
                 context_retries = 0;
                 stream_retries = 0;
                 recovery_budget = ProviderRecoveryBudget::default();
@@ -1763,6 +1784,20 @@ impl Agent {
                     Ok(entry) => entry,
                     Err(error) => break 'run FinishReason::Failed(error.into()),
                 };
+                let committed_metadata = crate::compaction::ModelTurnAssistantMetadata {
+                    assistant_entry_id: assistant_entry.clone(),
+                    model: Some(model.spec.id.clone()),
+                    usage: turn_usage,
+                    cost: response.cost,
+                    stop_reason: Some(stop_reason.clone()),
+                };
+                for observer in &observers.observers {
+                    observer.on_assistant_message_committed(
+                        session.entry(&assistant_entry).expect("committed assistant exists"),
+                        &committed_metadata,
+                        &resource_owner,
+                    );
+                }
                 model_turn_hooks.committed(session, completed_turns - 1, &assistant_entry, &calls);
                 if let Err(error) = native.settle_successor(session, &model, assistant_entry) { break 'run FinishReason::Failed(error); }
                 native.completed_prefix();
@@ -2746,9 +2781,24 @@ impl Agent {
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
                                 let (mut session_driver, session_route) = crate::extension_process::session_leaf::driver::SessionDriver::new(resource_owner.clone());
+                                let mut inference_binding = inference_resolver.as_ref().map(|resolver| {
+                                    tool_inference::InferenceDriver::new(
+                                        session.resource_owner_key(), call.id.0.clone(), session_id.clone(),
+                                        resolver.clone(), client.clone(), abort.cancellation.clone(),
+                                        tool_inference::InferenceLimits {
+                                            tokens: max_session_tokens, cost: max_session_cost_microdollars,
+                                            max_output_tokens: provider_output_ceiling, cache_retention,
+                                        },
+                                    )
+                                });
                                 let routed_progress = progress_sink.clone().with_session_driver(session_route);
+                                let routed_progress = match &inference_binding {
+                                    Some((_, scope)) => routed_progress.with_inference(scope.service.clone()),
+                                    None => routed_progress,
+                                };
                                 let composition_scope = tool.nested_execution().then(|| CompositionDispatcher::scope(
-                                    call.id.clone(), call.name.clone(), composition_tools.clone(),
+                                    call.id.clone(), call.name.clone(), callable_tools.clone(),
+                                    extension_host.composition_builtin_tools(),
                                     sandbox.clone(), tool_scope.clone(), resource_owner.clone(),
                                     effect_run_id.clone(), tool_revision, active_skills.clone(),
                                     tool_call_hooks.clone(), effect_broker.clone(), routed_progress.clone(),
@@ -2928,6 +2978,28 @@ impl Agent {
                                             }
                                         },
                                         r = &mut operation => break Some(r),
+                                        step = async { inference_binding.as_mut().expect("inference branch is enabled").0.next_step().await }, if inference_binding.is_some() => {
+                                            match inference_binding.as_mut().expect("inference branch is enabled").0.advance(step, session) {
+                                                Ok(Some(settled)) => {
+                                                    if settled.uncertain {
+                                                        run_cost.add(None);
+                                                        let event = AgentEvent::ProviderUsageUncertain;
+                                                        notify_observers(&observers, &event);
+                                                        yield event;
+                                                    } else if settled.reported {
+                                                        add_usage(&mut run_usage, &settled.usage);
+                                                        run_cost.add(settled.cost);
+                                                        {
+                                                            let mut trailing = stream_lifecycle.trailing_inference.lock().unwrap();
+                                                            add_usage(&mut trailing.0, &settled.usage);
+                                                            trailing.1 = run_cost.microdollars;
+                                                        }
+                                                    }
+                                                }
+                                                Ok(None) => {}
+                                                Err(error) => break 'run FinishReason::Failed(error.into()),
+                                            }
+                                        },
                                         step = cache_warmer.next_step() => {
                                             // Tool polling may synchronously
                                             // cancel while returning Pending.
@@ -3032,6 +3104,18 @@ impl Agent {
                                         },
                                     }
                                 };
+                                if let Some((driver, _)) = inference_binding.as_mut() {
+                                    match driver.cancel(session) {
+                                        Ok(Some(settled)) if settled.uncertain => {
+                                            run_cost.add(None);
+                                            let event = AgentEvent::ProviderUsageUncertain;
+                                            notify_observers(&observers, &event);
+                                            yield event;
+                                        }
+                                        Ok(_) => {}
+                                        Err(error) => break 'run FinishReason::Failed(error.into()),
+                                    }
+                                }
                                 let result = match outcome {
                                     Some(_) if abort.is_set() => {
                                         cancellation_won = true;

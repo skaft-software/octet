@@ -361,6 +361,10 @@ pub(super) struct ProcessTool {
 
 #[async_trait::async_trait]
 impl Tool for ProcessTool {
+    fn exposure(&self) -> crate::tool::ToolExposure {
+        self.definition.exposure.unwrap_or_default()
+    }
+
     fn operation(&self) -> Option<crate::extension_operations::OperationSnapshot> {
         Some(crate::extension_operations::OperationSnapshot {
             descriptor: self.definition.operation.clone()?,

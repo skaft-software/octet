@@ -231,6 +231,7 @@ pub(super) fn render_block_planned_with_rainbow(
         TranscriptBlock::Reasoning(reasoning)
             if !reasoning.reasoning_expanded && !verbose_tools
     );
+    let mut geometry = plan.geometry;
     let mut lines = match block {
         TranscriptBlock::User {
             text,
@@ -566,7 +567,9 @@ pub(super) fn render_block_planned_with_rainbow(
                 width,
             )];
             let nested_width = width.saturating_sub(2).max(1);
-            let output = render_shell_output(shell, theme, nested_width, verbose_tools, "");
+            let (output, source) =
+                render_shell_output(shell, theme, nested_width, verbose_tools, "");
+            geometry.shell_output = Some(source);
             append_nested_tool_output(&mut lines, output, theme, width);
             finish_transcript_block(lines)
         }
@@ -616,10 +619,7 @@ pub(super) fn render_block_planned_with_rainbow(
         collapsed_reasoning,
         marker,
     );
-    RenderedTranscriptBlock {
-        lines,
-        geometry: plan.geometry,
-    }
+    RenderedTranscriptBlock { lines, geometry }
 }
 
 #[cfg(test)]

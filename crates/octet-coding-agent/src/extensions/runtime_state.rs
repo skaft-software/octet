@@ -21,7 +21,7 @@ pub struct ExtensionTurnLifecycle {
 /// lets the rest of the test suite continue to run in parallel.
 #[cfg(test)]
 #[derive(Default)]
-pub(super) struct LifecycleDeliveryTestControl {
+pub(crate) struct LifecycleDeliveryTestControl {
     pub(super) gate_turn_started: std::sync::atomic::AtomicBool,
     pub(super) turn_started_entered: tokio::sync::Notify,
     pub(super) turn_started_release: tokio::sync::Notify,
@@ -37,17 +37,17 @@ impl LifecycleDeliveryTestControl {
     /// hook itself stays everywhere because the product code that calls
     /// `wait_before_delivery` is not platform-specific.
     #[cfg(unix)]
-    pub(super) fn gate_turn_started(&self) {
+    pub(crate) fn gate_turn_started(&self) {
         self.gate_turn_started.store(true, Ordering::Release);
     }
 
     #[cfg(unix)]
-    pub(super) fn release_turn_started(&self) {
+    pub(crate) fn release_turn_started(&self) {
         self.turn_started_release.notify_one();
     }
 
     #[cfg(unix)]
-    pub(super) async fn turn_started_entered(&self) {
+    pub(crate) async fn turn_started_entered(&self) {
         self.turn_started_entered.notified().await;
     }
 

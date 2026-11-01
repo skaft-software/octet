@@ -114,7 +114,7 @@ fn rejects_ambiguous_or_unbounded_tool_schemas() {
         description: String::new(),
         parameters: serde_json::json!({
             "type": "object",
-            "properties": {"value": {"type": "string", "pattern": "secret"}}
+            "properties": {"value": {"type": "string", "pattern": "["}}
         }),
     }])
     .is_err());

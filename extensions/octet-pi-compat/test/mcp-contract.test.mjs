@@ -43,7 +43,9 @@ test('real adapter does not claim native startup without the negotiated registra
   const h = nativeWireFixture(t);
   await h.init([]);
   const result = await h.request('hook/run', {hook: 'session_start', payload: {binding: owner}, context: h.context()}).response;
-  assert.equal(result.error.code, -32601);
+  assert.ok(result.result, JSON.stringify(result));
+  const issue = await h.wait(frame => frame.method === 'notification' && frame.params.message.includes('MCP servers: connection_unavailable'));
+  assert.ok(issue);
   assert.ok(!h.seen.some(frame => frame.method === 'mcp/replace'));
   await h.close();
 });
@@ -141,8 +143,9 @@ test('native refusal is observed at the live boundary, not optimistic connection
   const f = fixture(); f.runtime.loaded = true;
   f.runtime.hostCall = async () => { throw new Error('resident octet-mcp is not enabled'); };
   f.run(() => f.a.registerMcpServer('late', stdio('/server')));
-  await assert.rejects(f.flush(), /not enabled/);
-  // Pi still stores the registration; connection failure does not erase it.
+  await f.flush();
+  assert.equal(f.errors.length, 1);
+  assert.equal(f.errors[0].message, 'MCP servers: connection_unavailable');
   assert.equal(f.run(() => f.a.getMcpServers()).length, 1);
 });
 

@@ -47,7 +47,7 @@ use tokio::sync::mpsc;
 
 use crate::app::bootstrap::{
     build_app_with_resource_consumer as build_app, effective_compaction_threshold_fraction,
-    rebuild_app, resolve_launch_print, Bootstrap,
+    rebuild_app_for_reload, resolve_launch_print, Bootstrap,
 };
 use crate::app::{
     apply_reconfig, reasoning_label, supported_levels_with_subagents,
@@ -612,9 +612,12 @@ fn input_from_command(command: &Value, text: String) -> anyhow::Result<UserInput
 async fn prepare_prompt(
     app: &mut App,
     command: &Value,
-) -> anyhow::Result<(UserInput, usize, Value)> {
+) -> anyhow::Result<(crate::app::PreparedAppSubmission, usize, Value)> {
     let original = required_string(command, "message")?.to_owned();
     crate::commands::reject_tui_changelog(&original)?;
+    for diagnostic in app.synchronize_extension_provider_catalog_for_request()? {
+        crate::output::stderr_line(diagnostic);
+    }
     let mut expanded = expand_skill_command(
         app.skills.as_ref(),
         &original,
@@ -666,8 +669,8 @@ async fn prepare_prompt(
     for notification in composition.notifications {
         crate::output::stderr_line(format!("extension: {notification}"));
     }
-    app.agent.set_system_prompt(composition.system);
-    app.agent.set_prompt_display_text(Some(original.clone()));
+
+    let prompt_display_text = original.clone();
     let mut input = input_from_command(command, composition.prompt)?;
     input.custom_messages = composition.custom_messages;
     let mut display_input = input.clone();
@@ -675,7 +678,13 @@ async fn prepare_prompt(
         *text = original;
     }
     let display_message = user_input_value(&display_input);
-    Ok((input, composition.pending_context_count, display_message))
+    let (prepared, diagnostics) = app.prepare_submission(input)?;
+    app.agent.set_system_prompt(composition.system);
+    app.agent.set_prompt_display_text(Some(prompt_display_text));
+    for diagnostic in diagnostics {
+        crate::output::stderr_line(diagnostic);
+    }
+    Ok((prepared, composition.pending_context_count, display_message))
 }
 
 fn rpc_error_diagnostic(model: &Model, error: &AgentError) -> String {
@@ -1121,7 +1130,7 @@ fn command_error(
 async fn reload_resources(mut app: App) -> anyhow::Result<App> {
     app.system = compose_instructions(&app.config)?;
     app.system_tokens = estimate_text_tokens(&app.system);
-    let mut app = rebuild_app(app, None, None, None, None)?;
+    let mut app = rebuild_app_for_reload(app)?;
     app.mark_resource_paths_reload();
     app.refresh_resource_paths_headless().await?;
     Ok(app)
@@ -1810,7 +1819,13 @@ async fn run_rpc_loop(
         app.agent
             .set_provider_retries_enabled(settings.auto_retry_enabled);
         let prior_cache_misses = crate::commands::cache_miss_count(&app);
-        let mut run = match app.agent.prompt_with_responses_prewarm(prompt).await {
+        let mut run = match prompt
+            .start(
+                &mut app.agent,
+                octet_agent::PreparedPromptMode::ResponsesPrewarm,
+            )
+            .await
+        {
             Ok(run) => run,
             Err(error) => {
                 output.error(

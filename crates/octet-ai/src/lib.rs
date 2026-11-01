@@ -43,10 +43,13 @@ pub mod deferred;
 pub mod discovery;
 pub mod error;
 pub mod faux;
+#[allow(missing_docs)]
+pub mod host_http;
 pub mod host_transport;
 pub mod images;
 pub mod inference;
 mod json_repair;
+pub use json_repair::{validate_json_schema_definition, validate_json_schema_value};
 pub mod media;
 pub mod model_metadata;
 pub mod pricing;
@@ -104,7 +107,8 @@ pub use faux::{
     FauxDeferredStatus, FauxMessage, FauxOptions, FauxProvider, FauxResponse, FauxState,
     FauxToolCall,
 };
-pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use host_http::{HostHttpRequest, HostHttpResponse, HostHttpSender};
+pub use host_transport::{HostStreamModel, HostStreamTransport, NativeRequestContinuation};
 pub use inference::{
     ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
     InferenceMetrics, OutputRateSample, ReportedTimingUnit, ServerGenerationMetrics,

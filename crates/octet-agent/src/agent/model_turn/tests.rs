@@ -57,9 +57,11 @@ impl SessionOperationInvocation for Invocation {
             return Err("private persistence failed".into());
         }
         let (consumer, binding) = self.leaf.as_mut().unwrap();
-        assert!(consumer
-            .consume_next(session, binding)
-            .map_err(|e| e.to_string())?);
+        assert!(
+            consumer
+                .consume_next(session, binding)
+                .map_err(|e| e.to_string())?
+        );
         Ok(())
     }
 }
@@ -744,4 +746,127 @@ async fn cancellation_while_end_callback_waits_retains_assistant_tools_and_ackno
             .count(),
         2
     );
+}
+
+struct EventParityObserver(Trace);
+impl crate::EventObserver for EventParityObserver {
+    fn on_event(&self, event: &AgentEvent) {
+        let label = match event {
+            AgentEvent::ToolStarted { .. } => "pi:tool-start",
+            AgentEvent::ToolFinished { .. } => "pi:tool-end",
+            _ => return,
+        };
+        self.0.lock().unwrap().push(label.into());
+    }
+    fn on_assistant_message_committed(
+        &self,
+        entry: &Entry,
+        metadata: &ModelTurnAssistantMetadata,
+        owner: &str,
+    ) {
+        assert_eq!(metadata.assistant_entry_id, entry.id);
+        assert!(!owner.is_empty());
+        assert!(matches!(
+            entry.value,
+            EntryValue::Message(Message::Assistant(_))
+        ));
+        self.0.lock().unwrap().push("pi:assistant-end".into());
+    }
+}
+
+struct EventParityBlocker(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl crate::ToolCallHook for EventParityBlocker {
+    async fn before_tool_call(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+        _: &ToolContext<'_>,
+    ) -> Result<(), ToolError> {
+        Err(ToolError::new("blocked by extension"))
+    }
+    async fn transform_tool_result(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+        result: Result<ToolOutput, ToolError>,
+        _: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        result
+    }
+    async fn after_tool_call(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+        _: &str,
+        _: bool,
+        _: &ToolContext<'_>,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn event_parity_committed_assistant_precedes_execution_and_blocked_call_skips_result_hook() {
+    for blocked in [false, true] {
+        let mut f = fixture(
+            vec![vec![call("fast", false)], text("done")],
+            Behavior::Continue,
+            false,
+            false,
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        if blocked {
+            f.agent
+                .extension_host_mut()
+                .tool_call_hook(EventParityBlocker(count.clone()));
+        }
+        f.agent.observe(EventParityObserver(f.trace.clone()));
+        let mut run = f.agent.prompt("observe").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = run.next().await {
+                if let AgentEvent::RunFinished { reason, .. } = event {
+                    assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(run);
+        let trace = f.trace.lock().unwrap();
+        let pi = trace
+            .iter()
+            .filter(|line| line.starts_with("pi:"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pi,
+            [
+                "pi:assistant-end",
+                "pi:tool-start",
+                "pi:tool-end",
+                "pi:assistant-end"
+            ]
+        );
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(trace.iter().any(|line| line == "tool:fast"), !blocked);
+        let first = f.seen.lock().unwrap();
+        let result = first
+            .iter()
+            .find_map(|operation| match operation {
+                SessionOperation::ModelTurnEnd {
+                    tool_result_entries,
+                    ..
+                } if !tool_result_entries.is_empty() => Some(&tool_result_entries[0]),
+                _ => None,
+            })
+            .unwrap();
+        let EntryValue::Message(Message::User(user)) = &result.value else {
+            panic!("tool result")
+        };
+        let UserPart::ToolResult(result) = &user.content[0] else {
+            panic!("tool result content")
+        };
+        assert_eq!(result.is_error, blocked);
+    }
 }

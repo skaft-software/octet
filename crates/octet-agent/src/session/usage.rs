@@ -40,7 +40,7 @@ impl Session {
     /// cache warm, a compaction, a rejected Responses turn, a terminal gate or
     /// a delegated child. The two session-total fields stay `None` because
     /// `record_usage` is the single owner of the picodollar carry.
-    fn provider_usage_record(
+    pub(super) fn provider_usage_record(
         kind: UsageRecordKind,
         endpoint: EndpointId,
         model: ModelId,
@@ -321,7 +321,7 @@ impl Session {
         ))
     }
 
-    fn record_usage(&mut self, mut record: UsageRecord) -> Result<(), SessionError> {
+    pub(super) fn record_usage(&mut self, mut record: UsageRecord) -> Result<(), SessionError> {
         let request_remainder = record
             .cost
             .map(|cost| cost.total_picodollars_remainder)
@@ -434,6 +434,7 @@ impl Session {
     /// unpriced, even if its token bound is known.
     pub fn usage_uncertainty_exposure(&self) -> Option<UsageUncertaintyBound> {
         if self.has_unsettled_native_steering()
+            || !self.tool_inference_attempts.is_empty()
             || self
                 .cache_warm_records
                 .last()
@@ -464,6 +465,7 @@ impl Session {
     /// cumulative ceilings fail closed only when admission exposure lacks a bound.
     pub fn has_uncertain_usage(&self) -> bool {
         !self.usage_uncertainty_records.is_empty()
+            || !self.tool_inference_attempts.is_empty()
             || self.has_unsettled_native_steering()
             || self
                 .cache_warm_records

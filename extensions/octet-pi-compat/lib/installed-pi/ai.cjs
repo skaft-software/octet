@@ -11,3 +11,5 @@ if ('AssistantMessageEventStream' in module.exports) module.exports.AssistantMes
 if ('AssistantMessageFrameEncoder' in module.exports) module.exports.AssistantMessageFrameEncoder = module.exports.AssistantMessageFrameEncoder;
 if ('EventStream' in module.exports) module.exports.EventStream = module.exports.EventStream;
 if ('ModelsError' in module.exports) module.exports.ModelsError = module.exports.ModelsError;
+if ('InMemoryModelsStore' in module.exports) module.exports.InMemoryModelsStore = module.exports.InMemoryModelsStore;
+if ('InMemoryCredentialStore' in module.exports) module.exports.InMemoryCredentialStore = module.exports.InMemoryCredentialStore;

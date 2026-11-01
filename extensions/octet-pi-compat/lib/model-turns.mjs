@@ -46,7 +46,7 @@ export function assistantMetadata(message, entry, data) {
   }
 }
 
-function messageEntry(entry, calls, assistantFacts) {
+export function messageEntry(entry, calls, assistantFacts) {
   if (entry?.value?.type !== 'message') invalid('model turn requires durable message entries');
   bounded(entry.id, 'model turn entry id', 256);
   if (entry.parent !== null) bounded(entry.parent, 'model turn parent id', 256);
@@ -128,6 +128,8 @@ function turnEvent(hook, body) {
       }
       if (results.size !== calls.size) invalid('model turn contains unsettled tool calls');
       event.message = assistant[0]; event.toolResults = toolResults;
+      event.messageEntryId = body.assistant_entry.id;
+      event.toolResultEntryIds = body.tool_result_entries.map(entry => entry.id);
     }
     return event;
 }

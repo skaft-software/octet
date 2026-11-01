@@ -303,6 +303,7 @@ impl TerminalGateContext<'_> {
                         deadline,
                         self.max_network_wait,
                         dispatch,
+                        None,
                     )
                 },
                 |session, response| {

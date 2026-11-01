@@ -29,3 +29,6 @@ if ('Spacer' in module.exports) module.exports.Spacer = module.exports.Spacer;
 if ('TUI' in module.exports) module.exports.TUI = module.exports.TUI;
 if ('Text' in module.exports) module.exports.Text = module.exports.Text;
 if ('TruncatedText' in module.exports) module.exports.TruncatedText = module.exports.TruncatedText;
+if ('StdinBuffer' in module.exports) module.exports.StdinBuffer = module.exports.StdinBuffer;
+if ('TuiAltScreen' in module.exports) module.exports.TuiAltScreen = module.exports.TuiAltScreen;
+if ('TuiMainScreen' in module.exports) module.exports.TuiMainScreen = module.exports.TuiMainScreen;

@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 fn definition() -> ToolDefinition {
     ToolDefinition {
         default_active: None,
+        exposure: None,
         nested_execution: false,
         prepare_arguments: false,
         prompt_snippet: None,
@@ -28,7 +29,7 @@ fn definition() -> ToolDefinition {
     }
 }
 
-fn manifest(version: &str) -> ExtensionManifest {
+pub(super) fn manifest(version: &str) -> ExtensionManifest {
     ExtensionManifest::parse(&format!(
         r#"name = "generic-composition-probe"
 version = "0.1.0"
@@ -42,7 +43,7 @@ tools = ["compose"]
     .unwrap()
 }
 
-fn initialize(version: &str, feature: bool) -> InitializeResponse {
+pub(super) fn initialize(version: &str, feature: bool) -> InitializeResponse {
     let mut features = API_0_2_REQUIRED_FEATURES
         .iter()
         .map(|feature| (*feature).to_owned())

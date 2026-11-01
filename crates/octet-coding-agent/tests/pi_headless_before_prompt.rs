@@ -35,7 +35,8 @@ async fn headless_before_prompt_answers_pi_tool_snapshot_without_hook_timeout() 
     let workspace = root_path.join("workspace");
     let extensions = root_path.join("extensions");
     std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(workspace.join(".pi")).unwrap();
+    std::fs::write(workspace.join(".pi/settings.json"), "{}").unwrap();
     let credential = home.join(".octet/credentials/custom.json");
     std::fs::write(
         &credential,

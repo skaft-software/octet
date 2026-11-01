@@ -251,6 +251,112 @@ fn builtin_gpt_6_1_sol_uses_the_exact_public_contract_and_whole_request_tier() {
 }
 
 #[test]
+fn builtin_terra_matches_exact_public_contract_and_whole_request_cache_tier() {
+    let catalog = ModelCatalog::builtin().unwrap();
+    let model = catalog.resolve(&ModelId("gpt-6.1-terra".into())).unwrap();
+    assert_eq!(model.spec.api_name, "gpt-6.1-terra");
+    assert_eq!(model.spec.display_name.as_deref(), Some("GPT-6.1 Terra"));
+    assert_eq!(model.spec.endpoint.0, "openai");
+    assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+    assert_eq!(model.spec.limits.context_window, 1_050_000);
+    assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+    assert!(model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(Modality::Image));
+    assert!(!model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(Modality::Audio));
+    assert!(model.spec.capabilities.tools && model.spec.capabilities.parallel_tool_calls);
+    assert!(model.spec.capabilities.structured_output);
+    assert!(!model.spec.capabilities.responses_lite);
+    assert_eq!(model.spec.capabilities.agent_delegation, None);
+    assert!(model.spec.cache.supports_explicit_prompt_cache_mode);
+    let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+    let options = reasoning.options.as_ref().unwrap();
+    assert_eq!(
+        options.values,
+        ["none", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(options.default.as_deref(), Some("medium"));
+    assert!(reasoning.supports(&crate::ReasoningConfig::Off));
+    for unsupported in [
+        crate::ReasoningEffort::Minimal,
+        crate::ReasoningEffort::Ultra,
+    ] {
+        assert!(!reasoning.supports(&crate::ReasoningConfig::Effort(unsupported)));
+    }
+    let pricing = model.spec.pricing.as_ref().unwrap();
+    assert_eq!((pricing.input.0, pricing.output.0), (1_000_000, 5_000_000));
+    assert_eq!(
+        (pricing.cache_read.0, pricing.cache_write_5m.0),
+        (50_000, 1_250_000)
+    );
+    assert_eq!(pricing.cache_write_1h, None);
+    assert_eq!(pricing.tiers.len(), 1);
+    let tier = &pricing.tiers[0];
+    assert_eq!(tier.min_input_tokens, 272_001);
+    assert_eq!(
+        (tier.input.unwrap().0, tier.output.unwrap().0),
+        (2_000_000, 7_500_000)
+    );
+    assert_eq!(
+        (tier.cache_read.unwrap().0, tier.cache_write_5m.unwrap().0),
+        (100_000, 2_500_000)
+    );
+    let usage = crate::Usage {
+        input_tokens: 200_000,
+        cache_read_tokens: 62_000,
+        cache_write_tokens: 10_000,
+        output_tokens: 10_000,
+        ..Default::default()
+    };
+    let below = crate::pricing::cost_of(pricing, &usage).unwrap();
+    assert_eq!(
+        (
+            below.input,
+            below.cache_read,
+            below.cache_write,
+            below.output
+        ),
+        (200_000, 3_100, 12_500, 50_000)
+    );
+    assert_eq!(below.total, 265_600);
+    let above = crate::pricing::cost_of(
+        pricing,
+        &crate::Usage {
+            cache_read_tokens: 62_001,
+            ..usage
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            above.input,
+            above.cache_read,
+            above.cache_write,
+            above.output
+        ),
+        (400_000, 6_200, 25_000, 75_000)
+    );
+    assert_eq!(above.total, 506_200);
+    for alias in [
+        "gpt-6.1-terra-pro",
+        "codex/gpt-6.1-terra",
+        "openai/gpt-6.1-terra",
+    ] {
+        assert!(catalog.resolve(&ModelId(alias.into())).is_err());
+    }
+    assert!(model.responses_features().async_tools);
+    assert!(model.responses_features().steering);
+    assert!(model.responses_features().reasoning_effort_updates);
+    assert!(!model.responses_features().compact_reasoning_effort_updates);
+}
+
+#[test]
 fn builtin_gpt6_controls_and_sol_luna_prices_are_route_qualified() {
     let catalog = ModelCatalog::builtin().unwrap();
     for (id, input) in [

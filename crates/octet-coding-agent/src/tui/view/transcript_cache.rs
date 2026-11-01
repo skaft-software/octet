@@ -8,6 +8,13 @@ use super::welcome_card::{render_welcome_card, welcome_row_budget};
 use super::{ShellState, TranscriptBlock};
 use sexy_tui_rs::text_editor::{PromptZone, PromptZones};
 
+/// Source boundary of the literal shell tail retained by the renderer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ShellOutputSource {
+    pub(super) start: usize,
+    pub(super) metadata_rows: usize,
+}
+
 /// Final block-local geometry shared by transcript rendering and semantic
 /// selection. Decorative rows and columns never enter copy offsets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -17,6 +24,7 @@ pub(super) struct SurfaceGeometry {
     pub(super) trailing_rows: usize,
     pub(super) content_left: u16,
     pub(super) content_width: u16,
+    pub(super) shell_output: Option<ShellOutputSource>,
 }
 
 impl SurfaceGeometry {

@@ -296,6 +296,7 @@ impl PendingResponsesCompact {
 #[derive(Clone)]
 pub struct AiClient {
     http: reqwest::Client,
+    host_http_sender: Option<Arc<crate::host_http::OneShotHostHttpSender>>,
     proxy_environment: Option<Arc<crate::declarations::proxy::ProxyEnvironment>>,
     responses_ws: ResponsesWsPool,
     host_stream_transports: Arc<StdMutex<HashMap<EndpointId, Arc<dyn HostStreamTransport>>>>,
@@ -400,6 +401,7 @@ impl AiClient {
                 )
                 .build()?,
             cache_trace: Arc::default(),
+            host_http_sender: None,
             proxy_environment: Some(proxy_environment),
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
@@ -416,6 +418,7 @@ impl AiClient {
         Self {
             http,
             cache_trace: Arc::default(),
+            host_http_sender: None,
             proxy_environment: None,
             responses_ws: ResponsesWsPool::default(),
             host_stream_transports: Arc::new(StdMutex::new(HashMap::new())),
@@ -501,6 +504,40 @@ impl AiClient {
             .await
     }
 
+    #[allow(missing_docs)]
+    pub async fn stream_custom_http_with_host_options(
+        &self,
+        model: &Model,
+        request: Request,
+        overrides: crate::RequestOverrides,
+        host_options: HostRequestOptions,
+        sender: Arc<dyn crate::HostHttpSender>,
+    ) -> Result<ResponseStream, AiError> {
+        crate::host_http::validate_custom_http_model(model)?;
+        if host_options.api_key.is_some()
+            || host_options.fetch.is_some()
+            || overrides.azure.is_some()
+            || self.host_http_sender.is_some()
+            || self
+                .host_stream_transports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&model.endpoint.id)
+        {
+            return Err(crate::ConfigError::Parse(
+                "custom HTTP sender cannot replace credentials or another host route".into(),
+            )
+            .into());
+        }
+        let mut client = self.clone();
+        client.host_http_sender = Some(Arc::new(crate::host_http::OneShotHostHttpSender::new(
+            sender,
+        )));
+        client
+            .stream_with_host_options(model, request, overrides, host_options)
+            .await
+    }
+
     /// Executes one inference attempt with private request-local configuration.
     ///
     /// Sampling overrides replace model defaults (explicit canonical stop wins).
@@ -562,13 +599,35 @@ impl AiClient {
             )
             .into());
         }
-        let host_transport = host_options.fetch.is_some()
-            || self
-                .host_stream_transports
+        let transport = host_options.fetch.clone().or_else(|| {
+            self.host_stream_transports
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .contains_key(&model.endpoint.id);
+                .get(&model.endpoint.id)
+                .cloned()
+        });
+        let host_transport = transport.is_some();
+        let native = transport
+            .as_ref()
+            .and_then(|transport| transport.native_model());
+        let custom_http = transport
+            .as_ref()
+            .and_then(|transport| transport.custom_http_model(model));
+        if native.is_some() && custom_http.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "a host route cannot select native and custom HTTP continuations together".into(),
+            )
+            .into());
+        }
+        if custom_http.is_some() && host_options.api_key.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "custom HTTP continuation cannot accept a host api key".into(),
+            )
+            .into());
+        }
         if host_transport
+            && native.is_none()
+            && custom_http.is_none()
             && (!overrides.headers.is_empty()
                 || !overrides.env.is_empty()
                 || !overrides.sampling_params.is_empty()
@@ -581,7 +640,11 @@ impl AiClient {
             )
             .into());
         }
-        if host_transport && (host_options.has_wire_hooks() || self.has_provider_request_hooks()) {
+        if host_transport
+            && native.is_none()
+            && custom_http.is_none()
+            && (host_options.has_wire_hooks() || self.has_provider_request_hooks())
+        {
             return Err(crate::ConfigError::Parse(
                 "per-request api key, metadata, and payload/header/response hooks are unsupported by a host stream transport".into(),
             )
@@ -589,15 +652,17 @@ impl AiClient {
         }
         let mut model = model.clone();
         if !overrides.sampling_params.is_empty() || !overrides.headers.is_empty() {
-            let preset = &mut Arc::make_mut(&mut model.spec).preset;
-            preset
-                .sampling_params
-                .extend(overrides.sampling_params.clone());
-            for (name, value) in &overrides.headers {
+            if custom_http.is_none() {
+                let preset = &mut Arc::make_mut(&mut model.spec).preset;
                 preset
-                    .headers
-                    .retain(|old, _| !old.eq_ignore_ascii_case(name));
-                preset.headers.insert(name.clone(), value.clone());
+                    .sampling_params
+                    .extend(overrides.sampling_params.clone());
+                for (name, value) in &overrides.headers {
+                    preset
+                        .headers
+                        .retain(|old, _| !old.eq_ignore_ascii_case(name));
+                    preset.headers.insert(name.clone(), value.clone());
+                }
             }
             // Explicit sampling temperature is a per-call control, not a model
             // default; materialize it before ordinary canonical validation.
@@ -971,17 +1036,113 @@ impl AiClient {
                 .get(&model.endpoint.id)
                 .cloned()
         });
+        if self.host_http_sender.is_some() && host_transport.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "custom HTTP sender cannot replace another host route".into(),
+            )
+            .into());
+        }
         if let Some(transport) = host_transport {
             // Keep host-mediated transports on the canonical side of the same
             // replay-history and capability boundary as HTTP codecs. Unlike a
             // protocol codec they cannot safely perform lossy wire-specific
             // degradation, so validate strictly rather than exposing an
             // unsupported canonical feature to an extension transport.
-            let (request, diagnostics) = prepare_host_request(model, req)?;
+            let (mut request, diagnostics) = prepare_host_request(model, req)?;
+            let native_model = transport.native_model();
+            let custom_http_model = transport.custom_http_model(model);
+            let custom_http = custom_http_model.is_some();
+            if native_model.is_some() && custom_http {
+                return Err(crate::ConfigError::Parse(
+                    "a host route cannot select native and custom HTTP continuations together"
+                        .into(),
+                )
+                .into());
+            }
+            if let Some(custom) = &custom_http_model {
+                crate::host_http::validate_custom_http_projection(model, custom)?;
+                if host_options.api_key.is_some() {
+                    return Err(crate::ConfigError::Parse(
+                        "custom HTTP continuation cannot accept a host api key".into(),
+                    )
+                    .into());
+                }
+            }
+            if native_model.is_none()
+                && request.responses.as_ref().is_some_and(|options| {
+                    options.previous_response_id.is_none()
+                        && options.context_management.is_none()
+                        && !options.store
+                        && options.service_tier.is_none()
+                        && options.computer_use.is_none()
+                        && options.input.as_ref().is_none_or(|input| {
+                            input
+                                == &crate::responses::encode_canonical_responses_input(
+                                    model,
+                                    request.system.as_deref(),
+                                    &request.messages,
+                                    request.compatibility,
+                                )
+                        })
+                })
+            {
+                request.responses = None;
+            }
             self.mark_request_dispatch();
-            let stream = transport
-                .stream(HostStreamModel::from(model), request, diagnostics)
-                .await?;
+            let stream = if let Some(native) = native_model.or(custom_http_model) {
+                if native.spec.id != model.spec.id
+                    || native.spec.protocol != model.spec.protocol
+                    || native.spec.pricing != model.spec.pricing
+                    || native.spec.capabilities != model.spec.capabilities
+                    || native.endpoint.id == model.endpoint.id
+                    || self
+                        .host_stream_transports
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .contains_key(&native.endpoint.id)
+                {
+                    return Err(
+                        crate::ConfigError::Parse("native request route changed".into()).into(),
+                    );
+                }
+                let client = self.clone();
+                let overrides = overrides.clone();
+                let mut options = HostRequestOptions {
+                    api_key: host_options.api_key.clone(),
+                    metadata: host_options.metadata.clone(),
+                    transform_headers: host_options.transform_headers.clone(),
+                    on_payload: host_options.on_payload.clone(),
+                    on_response: host_options.on_response.clone(),
+                    provider_hooks: host_options.provider_hooks.clone(),
+                    fetch: None,
+                };
+                let continuation = crate::NativeRequestContinuation {
+                    open: Box::new(move |request, hooks, sender| {
+                        options.provider_hooks.extend(hooks);
+                        if custom_http {
+                            hooks::open_custom_http_continuation(
+                                client, native, request, overrides, options, sender,
+                            )
+                        } else {
+                            hooks::open_native_continuation(
+                                client, native, request, overrides, options, sender,
+                            )
+                        }
+                    }),
+                };
+                transport
+                    .stream_native(
+                        HostStreamModel::from(model),
+                        request,
+                        diagnostics,
+                        continuation,
+                    )
+                    .await?
+            } else {
+                transport
+                    .stream(HostStreamModel::from(model), request, diagnostics)
+                    .await?
+            };
             return Ok(trace_usage(crate::stream::guard(stream), trace));
         }
 
@@ -1139,7 +1300,8 @@ impl AiClient {
             false, // The pool owns its per-key fallback latch.
             session_key.is_some(),
         );
-        if transport.uses_websocket()
+        if self.host_http_sender.is_none()
+            && transport.uses_websocket()
             && fallback_request.provider_hooks.is_none()
             && model.spec.protocol == Protocol::OpenAiResponses
             && !request_aware_signer
@@ -1226,6 +1388,7 @@ impl AiClient {
 
         let stream = stream_http(
             self.http.clone(),
+            self.host_http_sender.clone(),
             fallback_request,
             self.request_dispatch.clone(),
             self.stream_initial_timeout,

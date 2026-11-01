@@ -12,6 +12,7 @@ pub mod glyphs;
 pub mod images;
 pub mod layout;
 pub mod mouse;
+pub mod program_status;
 pub mod rich_text;
 pub mod sanitize;
 mod scrollback;

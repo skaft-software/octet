@@ -867,3 +867,49 @@ async fn native_pi_custom_editor_busy_admission_precedes_terminal_consumers() {
         app.executable_extensions.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_ambient_status_uses_default_footer_without_duplicate_custom_footer_rows() {
+    let factory = r#"
+export default pi => {
+  pi.on('session_start', (_, ctx) => ctx.ui.setStatus('ponytail', '○ 🐴 ponytail: ⚡ FULL'));
+  pi.registerCommand('ultra', {handler: (_, ctx) => ctx.ui.setStatus('ponytail', '○ 🐴 ponytail: 🔥 ULTRA')});
+  pi.registerCommand('custom-footer', {handler: (_, ctx) => ctx.ui.setFooter(() => ({render: () => ['STATUS-CUSTOM-FOOTER'], invalidate() {}}))});
+  pi.registerCommand('default-footer', {handler: (_, ctx) => ctx.ui.setFooter(undefined)});
+  pi.registerCommand('clear-status', {handler: (_, ctx) => ctx.ui.setStatus('ponytail', undefined)});
+};
+"#;
+    let (_directory, mut app, mut shell) =
+        pi_ui_app_with_native_command(factory, "first-owner", "shared");
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .expect("status fixture startup timed out")
+    .unwrap();
+    shell.finish_startup();
+    shell.set_size(96, 24);
+    pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: ⚡ FULL")).await;
+    command(&mut app, &mut shell, "ultra").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: 🔥 ULTRA")).await;
+    for columns in [40, 120] {
+        shell.set_size(columns, 12);
+        app.executable_extensions.observe_terminal_resize(columns, 12);
+        pump_until(&mut app, &mut shell, |frame| frame.contains("ponytail: 🔥 ULTRA")).await;
+        let frame = rendered(&mut shell).await;
+        assert!(frame.lines().all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns)));
+    }
+    command(&mut app, &mut shell, "custom-footer").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("STATUS-CUSTOM-FOOTER") && !frame.contains("ponytail:")
+    }).await;
+    command(&mut app, &mut shell, "default-footer").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("ponytail: 🔥 ULTRA") && !frame.contains("STATUS-CUSTOM-FOOTER")
+    }).await;
+    command(&mut app, &mut shell, "clear-status").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| !frame.contains("ponytail:")).await;
+    app.executable_extensions.shutdown().await;
+}

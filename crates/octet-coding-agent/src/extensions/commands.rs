@@ -6,6 +6,24 @@ use octet_agent::extension_process::{
 };
 
 impl ExecutableExtensions {
+    pub fn shadows_native_command(&self, name: &str) -> bool {
+        self.command_registry().iter().any(|command| {
+            command.owner == super::lifecycle::PI_BRIDGE_EXTENSION_NAME
+                && command.public_name == name
+        })
+    }
+
+    pub fn parse_command(&self, raw: &str) -> crate::commands::Command {
+        let input = raw.trim();
+        if let Some(body) = input.strip_prefix('/') {
+            let name = body.split_whitespace().next().unwrap_or_default();
+            if self.shadows_native_command(name) {
+                return crate::commands::Command::Unknown(input.to_owned());
+            }
+        }
+        crate::commands::parse(raw)
+    }
+
     /// Resolve a host-validated extension shortcut from one terminal event.
     /// Static manifest contributions win over runtime registrations.
     pub(super) fn shortcut_for_event(&self, event: &Event) -> Option<ExtensionShortcutInvocation> {
@@ -124,20 +142,23 @@ impl ExecutableExtensions {
             .collect()
     }
 
-    /// The one slash-command registry. Native and product commands keep their
-    /// own precedence; every executable extension registration lands here, and
-    /// a name claimed twice is namespaced on the later owner rather than
-    /// silently shadowed by registration order.
     pub(crate) fn command_registry(&self) -> Vec<RegisteredExtensionCommand> {
         let mut registry: Vec<RegisteredExtensionCommand> = Vec::new();
         for process in &self.processes {
             let owner = process.descriptor().manifest.name.clone();
-            for command in &process.contributions().commands {
+            for command in process.command_definitions() {
                 let mut public_name = command.name.clone();
-                if crate::commands::slash_commands()
-                    .iter()
-                    .any(|entry| entry.name == public_name)
-                    || public_name == "debug"
+                let native_reserved = if owner == super::lifecycle::PI_BRIDGE_EXTENSION_NAME {
+                    crate::commands::is_pi_reserved_slash_command_name(&public_name)
+                } else {
+                    crate::commands::slash_commands()
+                        .iter()
+                        .any(|entry| entry.name == public_name)
+                        || public_name == "debug"
+                };
+                if native_reserved
+                    || public_name.starts_with("octet:")
+                    || public_name == "subagents" && owner != SUBAGENTS_EXTENSION_NAME
                     || registry
                         .iter()
                         .any(|entry| entry.public_name == public_name)
@@ -180,9 +201,8 @@ impl ExecutableExtensions {
             })
             .flat_map(|process| {
                 process
-                    .contributions()
-                    .commands
-                    .iter()
+                    .command_definitions()
+                    .into_iter()
                     .filter(|command| command.name == "subagents")
                     .map(|command| (command.name.clone(), command.description.clone()))
             })
@@ -497,8 +517,7 @@ impl ExecutableExtensions {
             .find(|process| {
                 extension.is_none_or(|extension| process.descriptor().manifest.name == extension)
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == name)
             })?
@@ -619,8 +638,7 @@ impl ExecutableExtensions {
             .find(|process| {
                 extension.is_none_or(|extension| process.descriptor().manifest.name == extension)
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == name)
             })
@@ -766,7 +784,42 @@ impl OwnedExtensionCommand {
         extensions: &mut ExecutableExtensions,
         confirmations: &mut H,
         mutations: bool,
+        session_owner: Option<(&mut Agent, &SessionStore)>,
+    ) -> anyhow::Result<Option<ExtensionSessionLifecycleRequest>>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        self.advance_for_owner(extensions, confirmations, mutations, session_owner, None)
+            .await
+    }
+
+    pub(crate) async fn advance_without_model<H>(
+        &mut self,
+        extensions: &mut ExecutableExtensions,
+        confirmations: &mut H,
+        session: &mut Session,
+        sessions: &SessionStore,
+    ) -> anyhow::Result<Option<ExtensionSessionLifecycleRequest>>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        self.advance_for_owner(
+            extensions,
+            confirmations,
+            false,
+            None,
+            Some((session, sessions)),
+        )
+        .await
+    }
+
+    async fn advance_for_owner<H>(
+        &mut self,
+        extensions: &mut ExecutableExtensions,
+        confirmations: &mut H,
+        mutations: bool,
         mut session_owner: Option<(&mut Agent, &SessionStore)>,
+        mut modeless_owner: Option<(&mut Session, &SessionStore)>,
     ) -> anyhow::Result<Option<ExtensionSessionLifecycleRequest>>
     where
         H: ExtensionConfirmationHandler + ?Sized,
@@ -820,6 +873,9 @@ impl OwnedExtensionCommand {
                 // after session replacement; retained old contexts stay fenced.
                 if let Some((agent, sessions)) = session_owner.as_mut() {
                     extensions.apply_session_host_requests(agent, sessions);
+                }
+                if let Some((session, sessions)) = modeless_owner.as_mut() {
+                    extensions.apply_modeless_session_host_requests(session, sessions);
                 }
                 if extensions.sync_semantic_ui(shell) {
                     shell.render();
@@ -1057,3 +1113,7 @@ impl Drop for OwnedExtensionCommand {
         self.cancellation_token.cancel();
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "slash_precedence_tests.rs"]
+mod slash_precedence_tests;

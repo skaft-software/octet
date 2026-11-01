@@ -1520,6 +1520,49 @@ mod tests {
     }
 
     #[test]
+    fn remote_ui_multisurface_close_and_parent_failure_preserve_other_lifetimes() {
+        for cancelled in [false, true] {
+            let mailbox = Arc::new(RemoteUiMailbox::new(None));
+            open(&mailbox, "retained", 1, None);
+            for (request_id, surface_id) in [(2, "editor"), (3, "footer"), (4, "widget")] {
+                open(&mailbox, surface_id, request_id, Some(7));
+            }
+            let close = mailbox
+                .reserve(
+                    ExtensionRequestId::Number(5),
+                    owner("session"),
+                    ExtensionRemoteUiOperation::Close {
+                        surface_id: "footer".into(),
+                    },
+                    Some(7),
+                )
+                .unwrap();
+            close
+                .prepare_response(Some(&serde_json::json!({})))
+                .unwrap()
+                .unwrap()
+                .commit()
+                .unwrap();
+            assert!(!mailbox.contains(&owner("session"), "footer"));
+            for surface_id in ["editor", "widget", "retained"] {
+                assert!(mailbox.contains(&owner("session"), surface_id));
+                mailbox.accept(frame(surface_id, 0), 1).unwrap();
+            }
+            mailbox.settle_parent(7, cancelled);
+            for surface_id in ["editor", "widget"] {
+                assert_eq!(mailbox.contains(&owner("session"), surface_id), !cancelled);
+                assert_eq!(mailbox.accept(frame(surface_id, 1), 1).is_err(), cancelled);
+            }
+            assert!(mailbox.contains(&owner("session"), "retained"));
+            mailbox.accept(frame("retained", 1), 1).unwrap();
+            mailbox.settle_parent(7, true);
+            assert_eq!(mailbox.contains(&owner("session"), "editor"), !cancelled);
+            mailbox.discard_owner(&owner("session"));
+            assert!(mailbox.surface_ids().is_empty());
+        }
+    }
+
+    #[test]
     fn remote_ui_pending_slots_cancellation_and_owner_identity_are_bounded() {
         let mailbox = Arc::new(RemoteUiMailbox::new(None));
         let mut requests = Vec::new();

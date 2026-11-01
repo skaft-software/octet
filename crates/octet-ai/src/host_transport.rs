@@ -33,6 +33,40 @@ impl From<&Model> for HostStreamModel {
     }
 }
 
+#[allow(missing_docs)]
+pub struct NativeRequestContinuation {
+    pub(crate) open: Box<
+        dyn FnOnce(
+                Request,
+                Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
+                Option<std::sync::Arc<dyn crate::HostHttpSender>>,
+            )
+                -> futures_util::future::BoxFuture<'static, Result<ResponseStream, AiError>>
+            + Send,
+    >,
+}
+
+impl NativeRequestContinuation {
+    #[allow(missing_docs)]
+    pub async fn stream(
+        self,
+        request: Request,
+        hooks: Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
+    ) -> Result<ResponseStream, AiError> {
+        (self.open)(request, hooks, None).await
+    }
+
+    #[allow(missing_docs)]
+    pub async fn stream_custom_http(
+        self,
+        request: Request,
+        hooks: Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
+        sender: std::sync::Arc<dyn crate::HostHttpSender>,
+    ) -> Result<ResponseStream, AiError> {
+        (self.open)(request, hooks, Some(sender)).await
+    }
+}
+
 /// Host-owned transport for a selected catalog endpoint.
 ///
 /// The client validates and normalizes the request before invoking this trait.
@@ -54,6 +88,27 @@ pub trait HostStreamTransport: Send + Sync {
         request: Request,
         diagnostics: Vec<Diagnostic>,
     ) -> Result<ResponseStream, AiError>;
+
+    #[allow(missing_docs)]
+    fn native_model(&self) -> Option<Model> {
+        None
+    }
+
+    #[allow(missing_docs)]
+    fn custom_http_model(&self, _selected: &Model) -> Option<Model> {
+        None
+    }
+
+    #[allow(missing_docs)]
+    async fn stream_native(
+        &self,
+        _model: HostStreamModel,
+        _request: Request,
+        _diagnostics: Vec<Diagnostic>,
+        _continuation: NativeRequestContinuation,
+    ) -> Result<ResponseStream, AiError> {
+        Err(crate::ConfigError::Parse("native request continuation unavailable".into()).into())
+    }
 
     /// Starts one canonical request that may be parked by the provider.
     ///

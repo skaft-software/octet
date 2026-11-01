@@ -194,8 +194,7 @@ pub struct ExtensionOptions {
 
 pub(super) fn generated_options(process: &ExtensionProcess) -> ExtensionOptions {
     let items = process
-        .contributions()
-        .commands
+        .command_definitions()
         .iter()
         // A missing or failed menu must not move worker runtime controls back
         // into extension management. Preserve all unrelated configuration commands.

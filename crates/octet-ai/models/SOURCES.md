@@ -235,6 +235,101 @@ limit. All route counts, names, modalities and other assertions are unchanged.
 These remain aggregator quotes, not independently verified direct tariffs.
 The prior exact-head freshness failures and raw sources remain retained.
 
+### Isolated v0.10.0 continuation refresh
+
+The owner-refreshed four outputs were independently reproduced from a retained
+5,946,884-byte public response, SHA-256
+`45d36ccf77a56796cf48b2df99fc96e3b53034feaca1fa8d20101f7cec68de75`.
+Relative to rc6, pricing has 912 routes (6 added, 12 absent, 28 changed), names
+have 378 records (2 added, 3 absent, none changed), and capabilities have 932
+routes (6 added, 13 absent, 19 changed). Absence is not endpoint retirement.
+
+Additions include direct/OpenRouter GPT-6.1 Terra metadata, OpenRouter Terra Pro,
+Particle 1 and Ternary Bonsai 2 9B, and Hugging Face MiniMax M3.1 Flash. All 28
+changed quotes belong to OpenRouter: DeepSeek V4 Pro now quotes $1.60/$3.20/$0.135
+per million input/output/cache-read tokens; Kimi K3 quotes $0.239/$10.80/$0.21.
+They are aggregator quotes, not direct-provider tariffs. Source zero cache rates
+remain source assertions, not independent evidence of free service.
+
+Fourteen capability changes are limit corrections, including Llama 4 Scout's
+context reduction to 327,680 and MiMo 2.5's output reduction to 65,536. Three
+Fireworks Qwen routes change their exact source reasoning choices; OpenRouter
+GPT-4 and MiniMax M2 lose their structured-output assertions. Those assertions
+never grant runtime reasoning, tools or structured output. Existing names are
+unchanged. The unchanged generator, provider mappings, exclusions, subscription
+allowlists and endpoint precedence remain in force; direct DeepSeek pricing
+stays unverified/excluded. The raw response and complete key-level review are
+local continuation evidence. This intermediate review does not waive final
+metadata freshness, exact-head CI or live qualification.
+
+The local closeout reran the unchanged generator over a newly retained
+5,946,881-byte response, SHA-256
+`010bc3f01340f1fb33d4c7e3dc9b08d15bcad8c3a1838bd98d5b26b178c80b1d`.
+All four outputs were regenerated and reproduced. Six further OpenRouter quotes
+changed, in dollars per million input/output/cache-read tokens:
+
+| Exact OpenRouter model | Input | Output | Cache read |
+| --- | ---: | ---: | ---: |
+| `~deepseek/deepseek-pro-latest` | 0.1125 | 8 | 0.11 |
+| `~deepseek/deepseek-v4-flash-latest` | 0.0363 | 0.30 | 0.0353 |
+| `z-ai/glm-5.3-flash` | 0.15 | 0.50 | 0.03 |
+| `~moonshotai/kimi-latest` | 0.1529 | 9.3388 | 0.15 |
+| `~deepseek/deepseek-flash-latest` | 0.0409 | 1.25 | 0.0405 |
+| `~z-ai/glm-flash-latest` | 0.0513 | 0.0701 | 0.03 |
+
+GLM-5.3-Flash's output ceiling also returns to 943,717 within its unchanged
+1,048,576 context. Membership, names and all other capability assertions are
+unchanged. Relative to rc6 there are now 27 changed price records and 18 changed
+capability records, because that GLM quote/limit returned to their rc6 values.
+The direct DeepSeek exclusion and all extraction/precedence policies remain
+unchanged. Saved-source reproduction and the live projection check passed at
+this local development closeout; a later frozen release head still needs its
+own freshness and exact-head CI checks.
+
+### Overnight readiness refresh (2026-10-30)
+
+The next local freshness check failed after supported upstream projections
+changed. All four outputs were regenerated together from the retained
+5,949,872-byte public response, SHA-256
+`075a1ad41a1a7915431b91732103efe01a4031dcc92ee4e169762aa5dedb64c5`.
+The saved response and complete key-level delta remain local release evidence;
+reproduce with the unchanged generator's `--source FILE`, then `--check`.
+
+There are 912 pricing routes, 379 canonical names and 932 capability routes.
+No route is added or removed. The one added canonical name is Mistral Large
+4.0.8. Fifteen OpenRouter quotes change; DeepSeek V4 Pro now quotes
+$0.816234/$1.632468/$0.068020 per million input/output/cache-read tokens,
+Kimi K3 quotes $0.192/$15/$0.182, and Particle 1's cache read becomes $0.003/M.
+These are aggregator-route quotes, not direct-provider tariffs or free-service
+claims. Five OpenRouter output limits change: DeepSeek V4 Pro to 384,000,
+Qwen3.6 27B to 81,920, Qwen3.8 2.4T A95B to 131,072, Qwen3.8 27B to 235,929,
+and GLM-5.3-Flash to 131,072. Contexts, modalities and capability flags do not
+change. No existing canonical name changes.
+
+Generator policy, exclusions, endpoint precedence and subscription allowlists
+are unchanged; direct DeepSeek pricing stays unverified and excluded. This
+refresh does not qualify live inference or waive later exact-head freshness CI.
+
+A later local check caught four further OpenRouter quote changes. All four
+outputs were regenerated together from the retained 5,950,611-byte public
+response, SHA-256
+`059adabf7ce6cb54b43961aae46ad3fadd54bfdded77f7a9f1f81102cd95b4cb`.
+The exact new rates, in dollars per million tokens, are:
+
+| Exact OpenRouter model | Input | Output | Cache read |
+| --- | ---: | ---: | ---: |
+| `z-ai/glm-5.3-flash` | 0.0497 | 0.0701 | 0.03 |
+| `~deepseek/deepseek-v4-flash-latest` | 0.0522 | 0.30 | 0.0512 |
+| `~moonshotai/kimi-latest` | 0.1529 | 9.7471 | 0.15 |
+| `~z-ai/glm-flash-latest` | 0.0497 | 0.0701 | 0.03 |
+
+Names and capabilities are byte-identical; route membership and record counts
+are unchanged. The DeepSeek V4 Pro and Mistral regression quotes do not change.
+Generator policy, exclusions and endpoint precedence are unchanged; direct
+DeepSeek pricing remains unverified and excluded. These are aggregator quotes,
+not direct tariffs or inference acceptance. The matching response and complete
+delta remain local evidence; this refresh does not waive later hosted freshness.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256
@@ -584,6 +679,36 @@ working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
 The model-only test fixture
 `crates/octet-coding-agent/fixtures/providers/gpt-6.1-sol.json` is a
 bundled-catalog projection, not a live OAuth inference result.
+
+## GPT-6.1 Terra API and Sol context review (2026-10-29)
+
+The public [GPT-6.1 Terra model page](https://developers.openai.com/api/docs/models/gpt-6.1-terra)
+qualifies only exact direct OpenAI ID `gpt-6.1-terra`: Responses is required for
+tools, text/image input, text output, 1,050,000 context, 128,000 max output, and
+`none`, `low`, `medium` (default), `high`, `xhigh`, `max` reasoning. Minimal and
+Ultra are not public API choices. Standard input/output/cache-read/30-minute
+cache-write rates are $1/$5/$0.05/$1.25 per million tokens; **above 272K input**,
+the whole request uses $2/$7.50/$0.10/$2.50. The legacy `cache_write_5m` field
+stores the selected 30-minute rate, not a five-minute retention promise. The
+12-hour write rate is not represented or advertised by this preset.
+
+The [async-tools](https://developers.openai.com/api/docs/guides/async-tool-calling),
+[steering](https://developers.openai.com/api/docs/guides/steering), and
+[reasoning](https://developers.openai.com/api/docs/guides/reasoning) guides
+independently qualify GPT-6-family public endpoint controls. Model and endpoint
+must both opt in; standalone compact reasoning updates remain unqualified.
+Terra's exact public fallback does not expand the Codex model, reasoning,
+context/entitlement or subscription-pricing allowlists. Copied names and suffix
+aliases on other routes gain no public API authority. These are contract
+observations and deterministic tests, not live inference/cache-hit evidence.
+
+The current [Codex model guide](https://developers.openai.com/codex/models)
+reports **500,000** as GPT-6.1 Sol's default in Codex/ChatGPT Work, superseding the
+historical bundled default above. Octet retains account discovery defaults
+separately from maximums and its deliberate 272K working cap. The existing
+acknowledged, entitlement-checked override remains opt-in; neither the guide nor
+API context/pricing establishes an account's entitlement or subscription price.
+See [context policy](../../../docs/codex-context.md).
 
 ## Reasoning contract supplement (2026-09-05)
 

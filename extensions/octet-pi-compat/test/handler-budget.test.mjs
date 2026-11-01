@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { launch, root, owner, noPiAgent } from './helper.mjs';
+import { HookBudget, budgetFor } from '../lib/handler-budget.mjs';
+import { Runtime } from '../lib/runtime.mjs';
+import { transformInput } from '../lib/context-api.mjs';
 
 // One stalled factory must never wedge the ordered hook queue, the prompt, or
 // resource discovery. The budget is shortened for the suite; the product
@@ -108,6 +111,182 @@ test('a module whose top-level await never settles is skipped like a stalled fac
   assert.ok(Date.now() - begun < 5000);
   assert.ok(JSON.parse(result.stdout).result.hooks.includes('before_prompt'), 'the healthy factory still loads');
   assert.match(result.stderr, /stalled-import\.mjs: .*did not finish within/);
+});
+
+test('many stalled hook handlers share one deadline and do not start after it', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '25';
+  try {
+    const reports = [];
+    const runtime = { config: { extensions: [] }, issues: { slow: (event, items) => reports.push({ event, items }) } };
+    const store = { pending: new Set(), errors: [] };
+    const budget = new HookBudget(runtime, store, 'input');
+    const begun = Date.now();
+    let invoked = 0;
+    for (let index = 0; index < 30; index += 1) {
+      const result = await budget.run({ label: `handler-${index}` }, { ...store }, () => {
+        invoked += 1;
+        return new Promise(() => {});
+      });
+      assert.equal(result.ran, false);
+    }
+    budget.finish();
+    assert.ok(Date.now() - begun < 450, `handler floors must not accumulate (${Date.now() - begun} ms)`);
+    assert.equal(budget.wait(), 0);
+    assert.ok(invoked < 30, 'no new handler starts once the shared deadline is exhausted');
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].event, 'input');
+    assert.ok(reports[0].items.length > 0);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('a healthy late handler can use the shared reserve without extending the deadline', async () => {
+  const runtime = { config: { extensions: [] }, issues: { slow() {} } };
+  const store = { pending: new Set(), errors: [] };
+  const budget = new HookBudget(runtime, store, 'input');
+  budget.perHandler = 100; budget.total = 160;
+  const stalled = await budget.run({ label: 'stalled' }, { ...store }, () => new Promise(() => {}));
+  assert.equal(stalled.ran, false);
+  const healthy = await budget.run({ label: 'healthy' }, { ...store }, () => 'kept');
+  assert.deepEqual(healthy, { ran: true, value: 'kept' });
+  budget.finish();
+});
+
+test('a later timeout does not discard an earlier tracked host-operation failure', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '70';
+  const failure = new Error('earlier host mutation failed');
+  let rejectHost;
+  const pendingHost = new Promise((_, reject) => { rejectHost = reject; });
+  const runtime = new Runtime({ extensions: ['/earlier.ts', '/later.ts'], pi_agent_dir: noPiAgent }, {
+    request: () => pendingHost,
+    notify: async () => {},
+  });
+  runtime.uninstallChildren();
+  runtime.issues.slow = () => {};
+  runtime.features.add('composer');
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.active.set(store.id, store);
+  runtime.bind({ context: { resource_owner: owner, workspace: process.cwd(), host: { project_trusted: false } } }, store, { foreground: true });
+  let laterCalled = false;
+  runtime.events.set('input', [
+    { factory: 0, handler: (_event, ctx) => { void ctx.ui.setEditorText('draft'); } },
+    { factory: 1, handler: () => { laterCalled = true; rejectHost(failure); return new Promise(() => {}); } },
+  ]);
+  try {
+    await assert.rejects(transformInput(runtime, { phase: 'input', text: 'hello', source: 'interactive' }, store), error => error === failure);
+    assert.equal(laterCalled, true);
+    assert.deepEqual(store.errors, [failure]);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+function trackedHostFixture() {
+  let rejectHost;
+  const pendingHost = new Promise((_, reject) => { rejectHost = reject; });
+  const runtime = new Runtime({ extensions: ['/first.ts', '/second.ts'], pi_agent_dir: noPiAgent }, {
+    request: () => pendingHost, notify: async () => {},
+  });
+  runtime.uninstallChildren();
+  runtime.issues.slow = () => {};
+  runtime.features.add('composer');
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.active.set(store.id, store);
+  runtime.bind({ context: { resource_owner: owner, workspace: process.cwd(), host: { project_trusted: false } } }, store, { foreground: true });
+  return { runtime, store, rejectHost };
+}
+
+const inputPayload = { phase: 'input', text: 'hello', source: 'interactive' };
+
+test('a timed-out callback cannot erase its own already-recorded host failure', async () => {
+  const { runtime, store, rejectHost } = trackedHostFixture();
+  const failure = new Error('timed-out handler host mutation failed');
+  runtime.events.set('input', [{ factory: 0, handler: (_event, ctx) => {
+    void ctx.ui.setEditorText('draft');
+    rejectHost(failure);
+    return new Promise(() => {});
+  } }]);
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '40';
+  try {
+    await assert.rejects(transformInput(runtime, inputPayload, store), error => error === failure);
+    assert.deepEqual(store.errors, [failure]);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('a tracked operation rejected after timeout still fails the live input boundary', async () => {
+  const { runtime, store, rejectHost } = trackedHostFixture();
+  const failure = new Error('late host mutation failed');
+  runtime.events.set('input', [
+    { factory: 0, handler: (_event, ctx) => { void ctx.ui.setEditorText('draft'); return new Promise(() => {}); } },
+    { factory: 1, handler: () => { rejectHost(failure); } },
+  ]);
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '40';
+  try {
+    await assert.rejects(transformInput(runtime, inputPayload, store), error => error === failure);
+    assert.deepEqual(store.errors, [failure]);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('a previously tracked host failure after the boundary becomes a background error', async () => {
+  const { runtime, store, rejectHost } = trackedHostFixture();
+  const failure = new Error('host mutation failed after boundary');
+  const background = [];
+  runtime.backgroundError = error => background.push(error);
+  runtime.events.set('input', [{ factory: 0, handler: (_event, ctx) => {
+    void ctx.ui.setEditorText('draft');
+    return new Promise(() => {});
+  } }]);
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '40';
+  try {
+    assert.deepEqual(await transformInput(runtime, inputPayload, store), { action: 'continue' });
+    store.live = false;
+    runtime.active.delete(store.id);
+    rejectHost(failure);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(background, [failure]);
+    assert.deepEqual(store.errors, []);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('cancellation interrupts a waiting callback and does not start the next handler', async () => {
+  const { runtime, store } = trackedHostFixture();
+  let ready, settle, nextCalled = false;
+  const started = new Promise(resolve => { ready = resolve; });
+  runtime.events.set('input', [
+    { factory: 0, handler: () => { ready(); return new Promise(resolve => { settle = resolve; }); } },
+    { factory: 1, handler: () => { nextCalled = true; } },
+  ]);
+  const reason = new Error('input cancelled');
+  const operation = transformInput(runtime, inputPayload, store);
+  await started;
+  store.controller.abort(reason);
+  await assert.rejects(operation, error => error === reason);
+  settle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nextCalled, false);
+});
+
+test('resource discovery leaves time before the native five-second deadline', () => {
+  const { perHandler, total } = budgetFor('resources_discover');
+  assert.ok(perHandler > 0 && perHandler <= total);
+  assert.ok(total <= 4000, `discovery aggregate ${total} ms must leave native processing time`);
 });
 
 test('many stalled factory setups end the load by one absolute deadline, not one floor each', async () => {

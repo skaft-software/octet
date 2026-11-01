@@ -1212,9 +1212,9 @@ pub(super) fn dispatch_append_request(
         && !lock_std_mutex(&state.session_leaf.transport)
             .parents
             .get(&request.parent_request_id)
-            .is_some_and(|(owner, preparation)| {
-                owner == &admitted.owner
-                    && preparation.as_ref().is_some_and(|p| {
+            .is_some_and(|parent| {
+                parent.owner == admitted.owner
+                    && parent.preparation.as_ref().is_some_and(|p| {
                         p.activation_epoch == request.session_leaf.activation_epoch
                             && p.operation_id == request.session_leaf.operation_id
                     })

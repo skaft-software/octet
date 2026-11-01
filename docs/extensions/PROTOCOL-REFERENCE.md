@@ -239,11 +239,13 @@ add:
 any subset of the advertised optional features, but missing required,
 unknown, or duplicate feature names reject initialization. The accepted
 `max_concurrent_requests` must be greater than zero and is capped by the host.
-`runtime_commands` is initialization-only: the returned command list is fixed
-for the generation, there are no `commands/register` or `commands/unregister`
-methods, and reload still requires an identical command catalog. It exists for
-compatibility runtimes that cannot know foreign command names before loading
-that runtime.
+`runtime_commands` alone is initialization-only: the returned command list is
+fixed for the generation and reload requires an identical initialization catalog.
+It exists for compatibility runtimes that cannot know foreign command names
+before loading that runtime. API `0.4` may additionally negotiate
+`runtime_command_registration_v1` (which requires `runtime_commands`) for the
+owner-fenced `commands/register` method below. Earlier API versions and peers
+without that additive feature retain the fixed catalog contract.
 
 If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
@@ -1540,6 +1542,31 @@ catalogs.
 
 ---
 
+### Live commands (API `0.4`, feature `runtime_command_registration_v1`)
+
+Requires both `runtime_commands` and `runtime_command_registration_v1`.
+`commands/register` takes a closed params object containing numeric
+`parent_request_id`, optional `resource_owner`, and a nonempty `commands` array
+of complete `CommandDefinition` objects. A live parent supplies the authoritative
+owner; an explicit owner must match it. A settled parent needs the exact
+previously issued session/instance/generation owner. Cancelled parents, retired
+owners and closed/draining generations are refused, not coerced.
+
+The complete catalog and each batch are bounded to 256 commands. Names use the
+command identifier grammar (including `:`); duplicate names within one batch,
+empty descriptions and malformed definitions reject the entire request.
+Descriptions and optional usage are control-free plain text, at most 4 KiB each.
+Existing names replace complete definitions in this extension's catalog only.
+The host reserves acknowledgement capacity, rechecks owner/parent lifetime and
+publishes atomically before returning `{"commands":["all","accepted","names"]}`.
+A refused or backpressured request does not mutate the catalog. Dispatch and
+command discovery consult the same live generation catalog. Clients must commit
+handlers only after the acknowledgement; lost delivery does not authorize replay.
+There is no unregister method; replacing the process resets its live catalog to
+its initialize response.
+
+---
+
 ### 2.12 `tools/unregister` (API `0.2`)
 
 Requires `dynamic_tools`. Remove extension-owned names transactionally:
@@ -1942,6 +1969,19 @@ of bounded plain JSON (no functions, exotic prototypes, non-finite numbers, or
 nesting beyond the protocol limit), the entry id to 256 bytes, and the name and
 label to 4 KiB. Every method is owner-scoped through `parent_request_id` and is
 refused with `-32002` `not_foreground_owner` for any other owner.
+
+API `0.4` may additionally negotiate `session_append_receipts_v1`, requiring
+`session_entries`, `session_owner_routes_v1`, and
+`session_snapshot_transport_v1`. Grant-less appends then return the compact native
+receipt `{ entry_id, head, successor: null, entry, previous_revision,
+view_revision, previous_head }`. `entry` is the actual durable record filtered to
+the extension's namespace, including its real parent and timestamp. The live
+parent's pinned head and revision fence each append; successful receipts advance
+that invocation's counted view before synchronous getters return. ACK capacity
+and receipt bounds are checked before mutation. A cancelled/stale parent or
+mismatched durable head refuses without a write. This feature never issues a
+session-leaf grant and does not change grant-bound append authority or replies.
+Without the feature, the grant-less result remains exactly `{ entry_id }`.
 
 <a id="session-control-v1"></a>
 
@@ -2693,7 +2733,8 @@ The encoded menu is at most 256 KiB.
 | `lifecycle_events` | no | Subscribed session/turn/tool observations |
 | `policy_intents` | no | Correlated `policy/evaluate` requests |
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
-| `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
+| `runtime_commands` | no | Initialize-time authoritative command catalog; no live mutations without the additive API 0.4 feature |
+| `runtime_command_registration_v1` | API 0.4, optional | Owner-fenced atomic `commands/register`; requires `runtime_commands` |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
 | `agent_session_events_v1` | API 0.4, conditional | Bounded native `agent/events` cursor observations; requires `agent_sessions` |
 | `agent_session_lifetime_v1` | API 0.4, conditional | Explicit issued-owner retained child calls and owned-tree `agent/stop`; requires `agent_sessions` |

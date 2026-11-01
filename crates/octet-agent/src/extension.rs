@@ -57,6 +57,18 @@ pub trait EventObserver: Send + Sync {
     /// Called for every [`AgentEvent`] the run emits.
     fn on_event(&self, event: &AgentEvent);
 
+    #[doc(hidden)]
+    fn on_tool_call_stream(&self, _event: &octet_ai::StreamEvent, _resource_owner: &str) {}
+
+    #[doc(hidden)]
+    fn on_assistant_message_committed(
+        &self,
+        _entry: &crate::session::Entry,
+        _metadata: &crate::compaction::ModelTurnAssistantMetadata,
+        _resource_owner: &str,
+    ) {
+    }
+
     /// Called with the host-derived durable resource owner of the Agent that
     /// emitted the event. Implementations that do not own session-scoped
     /// state retain the original unscoped callback by default.
@@ -617,6 +629,7 @@ pub(crate) struct RegisteredPersistenceMetadataHook {
 #[derive(Default)]
 pub(crate) struct DynamicToolRegistry {
     static_names: HashSet<String>,
+    static_default_names: HashSet<String>,
     // Only CoreTools marks these identities. A familiar name is not authority
     // to replace another native/external tool or a reserved host name.
     builtin_names: HashSet<String>,
@@ -1060,14 +1073,16 @@ impl DynamicToolReservation {
                 group
                     .tools
                     .iter()
-                    .filter(|tool| tool.default_active())
+                    .filter(|tool| {
+                        tool.default_active() && tool.exposure().activated_on_registration()
+                    })
                     .map(|tool| tool.definition().name)
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
         let mut active = registry.active_names.clone().unwrap_or_else(|| {
             registry
-                .static_names
+                .static_default_names
                 .iter()
                 .cloned()
                 .chain(
@@ -1075,7 +1090,9 @@ impl DynamicToolReservation {
                         .groups
                         .iter()
                         .flat_map(|group| group.tools.iter())
-                        .filter(|tool| tool.default_active())
+                        .filter(|tool| {
+                            tool.default_active() && tool.exposure().activated_on_registration()
+                        })
                         .map(|tool| tool.definition().name),
                 )
                 .collect()
@@ -1090,10 +1107,16 @@ impl DynamicToolReservation {
         for tool in &tools {
             let name = tool.definition().name;
             if tool.default_active()
+                && tool.exposure().activated_on_registration()
                 && !registry.builtin_names.contains(&name)
                 && !previously_default.contains(&name)
             {
                 active.insert(name);
+            }
+        }
+        for tool in &tools {
+            if tool.exposure() == crate::tool::ToolExposure::Hidden {
+                active.remove(&tool.definition().name);
             }
         }
         registry.active_names = Some(active);
@@ -1205,6 +1228,7 @@ pub struct ExtensionHost {
     pub(crate) duplicate_tools: Vec<String>,
     pub(crate) invalid_metadata_namespaces: Vec<String>,
     dynamic_tools: Arc<RwLock<DynamicToolRegistry>>,
+    pi_builtin_registrations: HashMap<String, Weak<dyn Tool>>,
 }
 
 impl Default for ExtensionHost {
@@ -1224,6 +1248,7 @@ impl Default for ExtensionHost {
             duplicate_tools: Vec::new(),
             invalid_metadata_namespaces: Vec::new(),
             dynamic_tools: Arc::new(RwLock::new(DynamicToolRegistry::default())),
+            pi_builtin_registrations: HashMap::new(),
         }
     }
 }
@@ -1248,6 +1273,19 @@ impl ExtensionHost {
         self.register_tool_arc(Arc::new(tool), true);
     }
 
+    pub(crate) fn composition_builtin_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .filter(|tool| {
+                self.pi_builtin_registrations
+                    .get(&tool.definition().name)
+                    .and_then(Weak::upgrade)
+                    .is_some_and(|registered| Arc::ptr_eq(&registered, tool))
+            })
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn tool_arc(&mut self, tool: Arc<dyn Tool>) {
         self.register_tool_arc(tool, false);
     }
@@ -1270,6 +1308,26 @@ impl ExtensionHost {
         } else {
             if builtin {
                 dynamic.builtin_names.insert(name.clone());
+                self.pi_builtin_registrations
+                    .insert(name.clone(), Arc::downgrade(&tool));
+            } else {
+                self.pi_builtin_registrations.remove(&name);
+            }
+            let default_active =
+                tool.default_active() && tool.exposure().activated_on_registration();
+            if default_active {
+                dynamic.static_default_names.insert(name.clone());
+            } else {
+                dynamic.static_default_names.remove(&name);
+            }
+            if !dynamic.ready {
+                if let Some(active) = dynamic.active_names.as_mut() {
+                    if default_active {
+                        active.insert(name.clone());
+                    } else {
+                        active.remove(&name);
+                    }
+                }
             }
             dynamic.static_names.insert(name);
             self.tools.push(tool);
@@ -1289,6 +1347,7 @@ impl ExtensionHost {
                 self.duplicate_tools.push(name.to_owned());
             } else {
                 dynamic.static_names.insert(name.to_owned());
+                dynamic.static_default_names.insert(name.to_owned());
             }
         }
     }
@@ -1424,7 +1483,9 @@ impl ExtensionHost {
             let retained = keep(&name);
             if !retained {
                 dynamic.static_names.remove(&name);
+                dynamic.static_default_names.remove(&name);
                 dynamic.builtin_names.remove(&name);
+                self.pi_builtin_registrations.remove(&name);
             }
             retained
         });
@@ -1440,7 +1501,14 @@ impl ExtensionHost {
     /// live extension catalogs.
     pub fn set_tool_policy(&mut self, keep: impl Fn(&str) -> bool + Send + Sync + 'static) {
         let keep = Arc::new(keep);
-        self.tools.retain(|tool| keep(&tool.definition().name));
+        self.tools.retain(|tool| {
+            let name = tool.definition().name;
+            let retained = keep(&name);
+            if !retained {
+                self.pi_builtin_registrations.remove(&name);
+            }
+            retained
+        });
         let mut dynamic = self
             .dynamic_tools
             .write()
@@ -1451,6 +1519,7 @@ impl ExtensionHost {
                 .any(|tool| tool.definition().name == *name)
         });
         dynamic.builtin_names.retain(|name| keep(name));
+        dynamic.static_default_names.retain(|name| keep(name));
         for group in &mut dynamic.groups {
             group.tools.retain(|tool| keep(&tool.definition().name));
         }
@@ -1506,6 +1575,7 @@ impl ExtensionHost {
                 "requested child tool scope has no tools available after parent policy".into(),
             );
         }
+        scoped.set_active_tools(Some(&effective.iter().cloned().collect()))?;
         scoped.finalize_tool_surface();
         Ok((scoped, effective))
     }
@@ -1547,7 +1617,12 @@ impl ExtensionHost {
                 ));
             }
         }
-        dynamic.active_names = names.cloned();
+        let hidden = self
+            .policed_tools(&dynamic)
+            .filter(|tool| tool.exposure() == crate::tool::ToolExposure::Hidden)
+            .map(|tool| tool.definition().name)
+            .collect::<BTreeSet<_>>();
+        dynamic.active_names = names.map(|names| names.difference(&hidden).cloned().collect());
         dynamic.revision = dynamic.revision.saturating_add(1);
         dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
         Ok(())
@@ -1600,11 +1675,20 @@ impl ExtensionHost {
         let mut names = Vec::new();
         let tools = self.policed_tools(&dynamic).map(|tool| {
             let definition = tool.definition();
-            if active.is_none_or(|active| active.contains(&definition.name)) { names.push(definition.name.clone()); }
+            if tool.exposure() != crate::tool::ToolExposure::Hidden && active.map_or_else(|| tool.default_active() && tool.exposure().activated_on_registration(), |active| active.contains(&definition.name)) { names.push(definition.name.clone()); }
             let prompt = tool.prompt_metadata();
+            let builtin = self.pi_builtin_registrations.get(&definition.name)
+                .and_then(Weak::upgrade)
+                .is_some_and(|registered| Arc::ptr_eq(&registered, tool))
+                && !dynamic.overridden_tools.contains_key(&definition.name);
+            let (source, path) = if builtin {
+                ("builtin", format!("builtin:{}", definition.name))
+            } else {
+                ("native", format!("<native:{}>", definition.name))
+            };
             serde_json::json!({"name":definition.name,"description":definition.description,"parameters":definition.parameters,
-                "promptGuidelines":prompt.map(|prompt| prompt.guidelines),"exposure":"direct",
-                "sourceInfo":{"path":format!("<native:{}>",definition.name),"source":"native","scope":"temporary","origin":"top-level"}})
+                "promptGuidelines":prompt.map(|prompt| prompt.guidelines),"exposure":tool.exposure(),
+                "sourceInfo":{"path":path,"source":source,"scope":"temporary","origin":"top-level"}})
         }).collect::<Vec<_>>();
         serde_json::json!({"active_tools":names,"all_tools":tools})
     }
@@ -1635,7 +1719,13 @@ impl ExtensionHost {
         let active = dynamic.active_names.as_ref();
         let tools = self
             .policed_tools(&dynamic)
-            .filter(|tool| active.is_none_or(|active| active.contains(&tool.definition().name)))
+            .filter(|tool| {
+                tool.exposure() != crate::tool::ToolExposure::Hidden
+                    && active.map_or_else(
+                        || tool.default_active() && tool.exposure().activated_on_registration(),
+                        |active| active.contains(&tool.definition().name),
+                    )
+            })
             .cloned()
             .collect::<Vec<_>>();
         (dynamic.revision, tools)
@@ -1704,7 +1794,12 @@ impl ExtensionHost {
                 .policed_tools(&dynamic)
                 .filter(|tool| {
                     let name = tool.definition().name;
-                    if !dynamic.permits(&name) {
+                    if tool.exposure() == crate::tool::ToolExposure::Hidden
+                        || !dynamic.permits(&name)
+                        || dynamic.active_names.is_none()
+                            && !(tool.default_active()
+                                && tool.exposure().activated_on_registration())
+                    {
                         return false;
                     }
                     match tool.operation() {
@@ -1721,6 +1816,49 @@ impl ExtensionHost {
                 .cloned()
                 .collect();
             return (dynamic.revision, tools);
+        }
+    }
+
+    pub(crate) fn model_and_callable_tool_snapshot(
+        &self,
+        owner: &str,
+    ) -> (u64, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>) {
+        loop {
+            let (revision, model) = self.model_tool_snapshot(owner);
+            let mut dynamic = self
+                .dynamic_tools
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            dynamic.retire_closed_groups();
+            if revision != dynamic.revision {
+                continue;
+            }
+            let callable = self
+                .policed_tools(&dynamic)
+                .filter(|tool| {
+                    let name = tool.definition().name;
+                    let active = dynamic.active_names.as_ref().map_or_else(
+                        || tool.default_active() && tool.exposure().activated_on_registration(),
+                        |names| names.contains(&name),
+                    );
+                    if !tool.exposure().callable(active)
+                        || dynamic.policy.as_ref().is_some_and(|policy| !policy(&name))
+                    {
+                        return false;
+                    }
+                    match tool.operation() {
+                        Some(operation) if !operation.descriptor.resource_inputs.is_empty() => {
+                            dynamic
+                                .operation_selection
+                                .as_ref()
+                                .is_some_and(|selection| selection.includes(&operation, owner))
+                        }
+                        _ => true,
+                    }
+                })
+                .cloned()
+                .collect();
+            return (revision, model, callable);
         }
     }
 
@@ -2286,3 +2424,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "extension_exposure_tests.rs"]
+mod exposure_tests;

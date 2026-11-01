@@ -44,14 +44,15 @@ test('unchanged Doom at wide terminal geometry stays within the bounded Pi UI fr
   await peer.wait(f => f.method === 'ui/close'); await peer.close();
 });
 
-test('unchanged powerline-footer 0.5.4: real factory, owner-retained getters and host-state replacement', { skip: existsSync(footer) ? false : 'set PI_FOOTER_PATH to the unchanged installed extension' }, async t => {
+test('unchanged pi-agent-extensions 0.5.4 powerline footer: real factory, owner-retained getters and host-state replacement', { skip: existsSync(footer) ? false : 'set PI_FOOTER_PATH to the unchanged installed extension' }, async t => {
   const peer = launch(t, [footer], { columns: 140 }); await peer.init();
-  const facts = { context_usage: { tokens: 8000, contextWindow: 32768, percent: 24.4 }, session_entries: [{ type: 'message', message: { role: 'assistant', usage: { cost: { total: 0.125 } } } }], using_oauth: false };
+  const facts = { context_usage: { tokens: 8000, contextWindow: 32768, percent: 24.4 }, session_entries: [{ type: 'message', message: { role: 'assistant', usage: { cost: { total: 0.125 } } } }], model_view: { ...host.model_view, oauth: false } };
   await peer.start(facts);
   const open = await peer.wait(f => f.method === 'ui/open'); assert.equal(open.params.placement, 'footer');
   const first = await peer.wait(frame('Test Model')); assert.match(first.params.lines[0], /8K\/32K/); assert.match(first.params.lines[0], /\$0\.125/);
-  peer.notify('context/updated', { resource_owner: owner, host: { ...host, ...facts, model_view: { ...host.model_view, name: 'Updated Model' }, session_name: 'Updated Session' } });
-  const updated = await peer.wait(frame('Updated Model')); assert.match(updated.params.lines[0], /\[Updated Session\]/);
+  const updatedFacts = { ...facts, context_usage: { tokens: 16000, contextWindow: 32768, percent: 48.8 }, session_entries: [{ type: 'message', message: { role: 'assistant', usage: { cost: { total: 0.250 } } } }], model_view: { ...facts.model_view, name: 'Updated Model' } };
+  peer.notify('context/updated', { resource_owner: owner, host: { ...host, ...updatedFacts, session_name: 'Updated Session' } });
+  const updated = await peer.wait(frame('Updated Model')); assert.match(updated.params.lines[0], /\[Updated Session\]/); assert.match(updated.params.lines[0], /16K\/32K/); assert.match(updated.params.lines[0], /\$0\.250/);
   peer.notify('ui/resize', { surface_id: open.params.surface_id, columns: 80, rows: 24 }); await peer.wait(f => f.method === 'ui/frame' && f.params.columns === 80);
   await peer.close();
 });

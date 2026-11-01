@@ -1279,41 +1279,47 @@ async fn confirmation_prompt_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    loop {
-        let (mut items, decisions) = if default {
-            (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
-        } else {
-            (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
-        };
-        if technical_detail.is_some() {
-            items.push("Technical details".into());
-        }
-        let descriptions = vec![detail.map(str::to_owned); items.len()];
-        let selected = pick_list(
-            shell,
-            input,
-            OrdinarySurfaceMetadata::new(prompt),
-            items,
-            descriptions,
-            0,
-            PanelAction::Confirmation,
-        )
-        .await?;
-        if selected == Some(2) {
-            read_only_document(
+    shell.set_terminal_permission_pending(true);
+    let result = async {
+        loop {
+            let (mut items, decisions) = if default {
+                (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
+            } else {
+                (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
+            };
+            if technical_detail.is_some() {
+                items.push("Technical details".into());
+            }
+            let descriptions = vec![detail.map(str::to_owned); items.len()];
+            let selected = pick_list(
                 shell,
                 input,
-                "Technical details · Esc to return",
-                technical_detail.unwrap().into(),
+                OrdinarySurfaceMetadata::new(prompt),
+                items,
+                descriptions,
+                0,
+                PanelAction::Confirmation,
             )
             .await?;
-            if shell.close_requested() {
-                return Ok(false);
+            if selected == Some(2) {
+                read_only_document(
+                    shell,
+                    input,
+                    "Technical details · Esc to return",
+                    technical_detail.unwrap().into(),
+                )
+                .await?;
+                if shell.close_requested() {
+                    return Ok(false);
+                }
+                continue;
             }
-            continue;
+            return Ok(selected.map(|index| decisions[index]).unwrap_or(false));
         }
-        return Ok(selected.map(|index| decisions[index]).unwrap_or(false));
     }
+    .await;
+    shell.set_terminal_permission_pending(false);
+    result
 }
 
 /// Build a human-facing label from the same cached metadata boundary used by

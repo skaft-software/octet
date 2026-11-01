@@ -59,7 +59,7 @@ test('replacement uses native update, unregister uses native owner-fenced remova
   await assert.rejects(prepareProviderStream(value.runtime, params(value), value.store), /route unavailable/);
 });
 
-test('custom stream receives logical selection, canonical context and only the explicitly supplied key', async () => {
+for (const choice of ['auto', 'none']) test(`custom stream receives logical selection, canonical context and only the explicitly supplied key with ${choice}`, async () => {
   let observed;
   const value = await registered((model, context, options) => (async function* () {
     observed = { model, context, key: options.apiKey };
@@ -70,15 +70,25 @@ test('custom stream receives logical selection, canonical context and only the e
     yield { type: 'text_end', contentIndex: 0, content: 'local', partial };
     yield { type: 'done', reason: 'stop', message: { content: partial.content, usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 } } };
   })());
-  assert.deepEqual(await prepareProviderStream(value.runtime, params(value), value.store), { stream_id: 'stream-1', accepted: true });
+  const input = params(value); input.request.tool_choice = choice;
+  assert.deepEqual(await prepareProviderStream(value.runtime, input, value.store), { stream_id: 'stream-1', accepted: true });
   assert.equal(observed, undefined, 'callback starts only after host stream acceptance reply');
   startProviderStream(value.runtime, 'stream-1');
   await until(() => value.frames.some(frame => frame.params.kind === 'finished'));
   assert.equal(observed.model.id, 'virtual/model'); assert.equal(observed.key, 'explicit-local-dummy');
   assert.equal(observed.context.messages[0].content[0].text, 'native input');
+  assert.equal(observed.context.tools, undefined);
   const events = value.frames.filter(frame => frame.method === 'provider/event');
   assert.deepEqual(events.map(frame => frame.params.kind), ['started', 'text_start', 'text_delta', 'text_end', 'usage', 'finished']);
   assert.deepEqual(events.map(frame => frame.params.sequence), [0, 1, 2, 3, 4, 5]);
+});
+
+test('a none constraint with declared tools is refused before custom stream execution', async () => {
+  const value = await registered(() => { assert.fail('constrained tools cannot enter a custom callback'); });
+  const input = params(value); input.request.tool_choice = 'none';
+  input.request.tools = [{ name: 'forbidden', description: 'not callable', parameters: { type: 'object' } }];
+  await assert.rejects(prepareProviderStream(value.runtime, input, value.store), /provider request/);
+  assert.equal(value.frames.some(frame => frame.method === 'provider/event'), false);
 });
 
 test('oversized native payload becomes a contiguous terminal error, not an invalid wire frame', async () => {
@@ -187,4 +197,30 @@ test('modelRegistry lists registered provider ids and returns their configs', as
   assert.equal(registry.getRegisteredProviderConfig('missing'), undefined);
   unregisterProvider(value.runtime, 0, 'pi-local-provider'); await Promise.all(value.pending);
   assert.deepEqual(registry.getRegisteredProviderIds(), []);
+});
+
+
+test('model provider is rebased and per-model baseUrl overrides provider endpoint', async () => {
+  let selected;
+  const value = fixture(), config = definition((model) => { selected = model; return []; });
+  config.models[0].provider = 'ignored-provider';
+  config.models[0].baseUrl = 'https://model.invalid/v1/';
+  registerProvider(value.runtime, 0, 'pi-local-provider', config);
+  value.runtime.initialized = true; startProviderRegistration(value.runtime);
+  await until(() => value.frames.some(frame => frame.method === 'providers/complete'));
+  assert.equal(value.frames[0].params.models[0].pi_metadata.base_url, 'https://model.invalid/v1/');
+  await prepareProviderStream(value.runtime, params(value), value.store);
+  startProviderStream(value.runtime, 'stream-1');
+  await until(() => selected !== undefined);
+  assert.equal(selected.provider, 'pi-local-provider');
+  assert.equal(selected.baseUrl, 'https://model.invalid/v1/');
+});
+
+test('custom stream opaque endpoint labels remain data without granting HTTP authority', async () => {
+  const value = fixture(), config = definition(() => []);
+  config.baseUrl = 'claude-bridge';
+  registerProvider(value.runtime, 0, 'pi-local-provider', config);
+  value.runtime.initialized = true; startProviderRegistration(value.runtime);
+  await until(() => value.frames.some(frame => frame.method === 'providers/complete'));
+  assert.equal(value.frames[0].params.models[0].pi_metadata.base_url, 'claude-bridge');
 });

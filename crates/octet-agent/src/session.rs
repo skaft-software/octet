@@ -121,6 +121,8 @@ pub enum UsageRecordKind {
         /// The owning outer model tool call.
         parent: String,
     },
+    #[allow(missing_docs)]
+    ToolInference { attempt: u64, parent: String },
     /// A tool-free call used to produce a context-compaction summary.
     Compaction,
     /// Isolated Anthropic prompt-cache keepalive; never an assistant turn.
@@ -1123,6 +1125,15 @@ pub enum SessionRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bound: Option<UsageUncertaintyBound>,
     },
+    #[allow(missing_docs)]
+    ToolInferenceStarted {
+        attempt: u64,
+        parent: String,
+        endpoint: EndpointId,
+        model: ModelId,
+    },
+    #[allow(missing_docs)]
+    ToolInferenceSettled { attempt: u64 },
     /// Cache-warm lifecycle; independent from provider usage and context.
     CacheWarm {
         /// Sanitized status record.
@@ -1158,6 +1169,13 @@ pub enum SessionRecord {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRecordRef<'a> {
+    ToolInferenceStarted {
+        #[serde(flatten)]
+        record: &'a tool_inference::ToolInferenceAttempt,
+    },
+    ToolInferenceSettled {
+        attempt: u64,
+    },
     UsageUncertainty {
         record: &'a UsageUncertaintyRecord,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1484,6 +1502,8 @@ pub struct Session {
     usage_uncertainty_bounds: Vec<Option<UsageUncertaintyBound>>,
     /// Separate cache-warm lifecycle, session-global and never model-visible.
     cache_warm_records: Vec<CacheWarmRecord>,
+    next_tool_inference_attempt: u64,
+    tool_inference_attempts: BTreeMap<u64, tool_inference::ToolInferenceAttempt>,
     /// Replaceable parked deferred-run leaves, keyed by operation id. The
     /// store owns its own descriptor-bound append line so a durable change is
     /// one synced record.
@@ -1527,7 +1547,12 @@ mod entries;
 mod journal;
 mod replay;
 mod store;
+mod tool_inference;
 mod usage;
+
+#[cfg(test)]
+#[path = "session/tests/tool_inference.rs"]
+mod tool_inference_tests;
 
 #[cfg(test)]
 mod tests;

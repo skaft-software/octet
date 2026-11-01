@@ -109,6 +109,20 @@ palettes are diagnosed; disabling the extension withdraws them. The built-in
 Missing packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
+### Command names and native access
+
+Pi commands retain names such as `/mcp:start`. Commands registered during
+`session_start` become discoverable and callable after the host acknowledges
+the registration. Pi extensions may use octet-only built-in names such as `/goal`;
+`/octet:goal` still invokes octet's native command. Pi 1.0.2 built-in command
+names retain native precedence; conflicting
+extension commands are available as `/<extension-owner>:<command>`.
+
+A Pi tool takes precedence over an optional first-party octet extension's tool
+with the same name, without disabling either process or unrelated tools.
+Overrides of native tools such as `read` and `bash` still require their explicit
+reviewed builtin-override grants.
+
 <a id="mirror-your-pi-setup"></a>
 
 ### Mirror your Pi setup
@@ -160,7 +174,17 @@ provider/model and `defaultThinkingLevel`, package/resource path lists), user
 `extensions|skills|prompts|themes` directories, installed managed npm package
 resources, `keybindings.json` and the global context file. Project `.pi` resources
 require authoritative host workspace trust; it defaults to false, independently
-of factory review. Scoped/versioned npm references resolve only to an existing
+of factory review. `ctx.isProjectTrusted()` separately applies Pi's plain-repository
+rule to already enabled factories: a newly bound owner can report true without
+native workspace trust when there are no trust-requiring `.pi` entries or
+project/ancestor `.agents/skills` (excluding user-global `~/.agents/skills`).
+Adding a resource can narrow this signal; removing one cannot silently restore it
+within the same owner, and an explicit native trust revocation takes precedence.
+A replacement owner reevaluates it. This conservative lifecycle behavior is not
+identical to Pi's retained trust setting. Enabled factories may start repo tooling
+such as language servers, which can execute project code. The signal does not
+admit project resources, change native trust or grant tool permissions.
+Scoped/versioned npm references resolve only to an existing
 matching installed identity. Supported bounded exact/glob selectors and resource
 empty lists retain their selection semantics; unsupported patterns are diagnosed
 rather than broadened. Explicit invocation model/thinking choices win over these
@@ -200,17 +224,39 @@ the generated manifest references it. Node dependencies are extension-local.
 
 ## Slow or stalled extensions
 
-Every hook the host sends runs on one ordered queue, so a single factory that
-never answers (a network call, a child process, an MCP connection) must not hold
-everything else. Each handler gets a time budget: 5 s for lifecycle,
-notification, provider and discovery callbacks; 2 s each and 4 s in total for the
-prompt hooks (`before_agent_start`, `input`), which share the host's 5 s prompt
-deadline. A handler that outlives its budget keeps running but is no longer
-waited for. It is named once in `[Extension issues]`, and later hooks skip it
-while it is still busy instead of waiting on it again. A tool-call guard that
-cannot answer in time blocks the call rather than letting it through. A prompt
-sent while an extension is still starting waits up to 12 s for it, then
-continues without it. A factory's own setup (the work its default export does
+Automatic-mirror registration capture runs asynchronously without blocking the
+native branded input frame. While the explicitly enabled adapter prepares and
+attaches, the native input pump keeps typing in the draft and handles resize.
+First-frame readiness is not full extension-UI readiness or a claim that cold
+startup matches Pi.
+**Continue without a provider** opens the native session and loads normally enabled,
+admitted extensions, including their commands and UI. The current model and context
+usage remain unavailable. Prompts and model-dependent operations stay disabled;
+configuring or selecting a provider requires restarting with the displayed session
+resume command before chatting.
+
+Handlers on the ordered hook queue have callback-wait budgets. The default is
+5 s per handler and 15 s across its chain. Each prompt phase (`input` and
+`before_agent_start`) instead has 2 s per handler and 4 s across its chain;
+resource discovery has 4 s per handler and 4 s across its chain; tool-call
+guards have 10 s per handler and 10 s total. Input and before-agent-start are
+separate host requests, each with a 5 s native deadline.
+A handler that outlives its share keeps running but is no longer waited for. It
+is named once in `[Extension issues]`, and later hooks skip it while it is still
+busy. A tool-call guard that cannot answer in time blocks the call rather than
+letting it through.
+
+These budgets do not bound the whole request. Queueing, setup, transport and
+tracked host operations can take additional time; a pending host operation can
+hold the hook's flush after its callback returns. Synchronously blocked JavaScript
+cannot be preempted either. The native deadline may therefore still be exceeded.
+A callback returning does not itself certify a host mutation. A later callback
+timeout does not discard host-operation failures already recorded at the live
+boundary, including failures from an earlier callback. A failure arriving after
+that boundary settles cannot retroactively change its response. A prompt sent
+while its extension hooks or Pi setup capture are still starting waits up to
+30 s. If they remain unavailable, the prompt is refused for retry rather than
+running without those hooks. A factory's own setup (the work its default export does
 before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts.
@@ -219,8 +265,18 @@ To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and
 redirect stderr, for example `OCTET_STARTUP_TRACE=1 octet 2>trace.txt`. Each
 handler prints one line, such as
 `octet-startup: pi-compat.handler elapsed=… event=session_start factory=pi-lens/dist/index.js took=99ms outcome=ok`
-(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed` or
-`skipped-busy`).
+(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed`,
+`skipped-busy` or `skipped-budget`).
+
+Explicit provider models retain their full `cost.tiers` rates. The highest
+`inputTokensAbove` threshold strictly exceeded by input plus cache-read/write
+tokens selects the request-wide tariff; native accounting preserves fractional
+costs and the two-times-input rate for one-hour cache writes.
+
+Equivalent selected extension models rebind after a successful provider reload.
+An unrelated model's catalog update does not revoke the selected model's continuous
+authority; selected declaration changes (including change-and-restore), authorization
+revocation and owner retirement still fence the captured selection.
 
 ## Message observations
 
@@ -331,8 +387,10 @@ with `--provider-credentials` only after reviewing the loaded factories and impo
 the generated capability is negotiated explicitly, and the host resolves each
 request against exactly one native provider/model. Values are returned only to the
 requesting factory and omitted from status/diagnostics. OAuth request signers that
-cannot be represented as Pi key/header results remain refused; builtin provider
-inheritance and the original Anthropic-attribution provider remain unsupported.
+cannot be represented as Pi key/header results remain refused. Separately
+negotiated native-provider overrides inherit native model identity and delegate
+through the current host client without disclosing its credentials. That seam is
+not a blanket qualification of OAuth-dependent package behavior.
 See the [adapter README](../extensions/octet-pi-compat/README.md) for configuration
 and security limits.
 

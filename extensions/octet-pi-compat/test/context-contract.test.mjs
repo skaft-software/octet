@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-function harness(method = 'hook/run', host = {}) {
+function harness(method = 'hook/run', host = {}, workspace = '/actual') {
   const errors = [];
   const runtime = new Runtime({ extensions: ['/reviewed/first.ts', '/reviewed/second.ts'] }, {
     notify: async (method, params) => { if (method === 'notification') errors.push(params); },
@@ -17,7 +17,7 @@ function harness(method = 'hook/run', host = {}) {
   runtime.uninstallChildren(); // This harness does not exercise the child facade.
   runtime.backgroundError = error => errors.push(error);
   const store = { id: 1, method, controller: new AbortController(), pending: new Set(), errors: [], live: true };
-  runtime.bind({ context: { workspace: '/actual', resource_owner: owner, host } }, store, { foreground: true });
+  runtime.bind({ context: { workspace, resource_owner: owner, host } }, store, { foreground: true });
   return { runtime, store, errors };
 }
 const image = { Image: { source: { Inline: 'eA==' }, media_type: 'image/png', detail: null } };
@@ -189,6 +189,122 @@ test('facts refuse absent snapshots and preserve false project trust', () => {
   assert.equal(getSettings(runtime, store).defaultProvider, 'actual');
   store.method = 'hook/run'; assert.throws(() => facts.getSystemPromptOptions(), /command context only/);
 });
+test('isProjectTrusted follows Pi in a plain repo without admitting project settings', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-context-trust-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { runtime, store } = harness('command/execute', { project_trusted: false }, root);
+  runtime.config.pi_agent_dir = join(root, 'agent');
+  const facts = contextFacts(runtime, store);
+  assert.equal(facts.isProjectTrusted(), true);
+  assert.equal(store.state.host.project_trusted, false);
+  mkdirSync(join(root, '.pi'));
+  writeFileSync(join(root, '.pi', 'settings.json'), JSON.stringify({ theme: 'project-private' }));
+  assert.equal(facts.isProjectTrusted(), false);
+  assert.notEqual(getSettings(runtime, store).theme, 'project-private');
+  store.state.host.project_trusted = true;
+  assert.equal(facts.isProjectTrusted(), true);
+  assert.equal(getSettings(runtime, store).theme, 'project-private');
+  store.state.alive = false;
+  assert.throws(() => facts.isProjectTrusted(), /not_foreground_owner/);
+});
+
+test('Pi trust cannot rise when a previously blocked resource disappears within an owner', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-context-latched-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.pi'));
+  const resource = join(root, '.pi', 'settings.json');
+  writeFileSync(resource, '{}');
+  const { runtime, store } = harness('command/execute', { project_trusted: false }, root);
+  const facts = contextFacts(runtime, store);
+  // Remove the resource before the extension's first query: the owner was
+  // already bound untrusted, so lazy first-query discovery is not sufficient.
+  rmSync(resource);
+  assert.equal(facts.isProjectTrusted(), false);
+  runtime.features.add('remote_ui');
+  runtime.updated({ resource_owner: owner, host: { project_trusted: false } });
+  assert.equal(facts.isProjectTrusted(), false);
+  const next = { ...owner, session_id: 'replacement' };
+  const nextStore = { id: 2, method: 'command/execute', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.bind({ context: { workspace: root, resource_owner: next, host: { project_trusted: false } } }, nextStore, { foreground: true });
+  assert.throws(() => facts.isProjectTrusted(), /not_foreground_owner/);
+  assert.equal(contextFacts(runtime, nextStore).isProjectTrusted(), true, 'a newly bound plain workspace gets a fresh decision');
+});
+
+test('Pi trust may tighten on new resources and cannot override a later native revocation', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-context-revoke-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { runtime, store } = harness('command/execute', { project_trusted: false }, root);
+  const facts = contextFacts(runtime, store);
+  assert.equal(facts.isProjectTrusted(), true);
+  mkdirSync(join(root, '.pi'));
+  const resource = join(root, '.pi', 'settings.json');
+  writeFileSync(resource, '{}');
+  assert.equal(facts.isProjectTrusted(), false, 'a newly created resource narrows the compatibility signal');
+  rmSync(resource);
+  assert.equal(facts.isProjectTrusted(), false, 'removing it cannot silently promote the owner again');
+  runtime.features.add('remote_ui');
+  runtime.updated({ resource_owner: owner, host: { project_trusted: true } });
+  assert.equal(facts.isProjectTrusted(), true, 'the authoritative host can explicitly grant trust');
+  runtime.updated({ resource_owner: owner, host: { project_trusted: false } });
+  assert.equal(facts.isProjectTrusted(), false, 'revocation takes precedence even for a now-plain workspace');
+});
+
+test('a native grant and revocation between context queries cannot be missed', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-context-unseen-revoke-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { runtime, store } = harness('command/execute', { project_trusted: false }, root);
+  const facts = contextFacts(runtime, store);
+  assert.equal(facts.isProjectTrusted(), true);
+  runtime.features.add('remote_ui');
+  runtime.updated({ resource_owner: owner, host: { project_trusted: true } });
+  runtime.updated({ resource_owner: owner, host: { project_trusted: false } });
+  assert.equal(facts.isProjectTrusted(), false);
+});
+
+test('Pi trust follows workspace changes on the same owner without reviving stale contexts', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-context-workspace-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const plain = join(root, 'plain'), guarded = join(root, 'guarded');
+  mkdirSync(plain); mkdirSync(join(guarded, '.pi'), { recursive: true });
+  const resource = join(guarded, '.pi', 'settings.json');
+  writeFileSync(resource, '{}');
+  const { runtime, store } = harness('command/execute', { project_trusted: false }, plain);
+  const facts = contextFacts(runtime, store);
+  assert.equal(facts.isProjectTrusted(), true);
+  const rebound = { id: 2, method: 'command/execute', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.bind({ context: { workspace: guarded, resource_owner: owner, host: { project_trusted: false } } }, rebound);
+  rmSync(resource);
+  assert.equal(facts.isProjectTrusted(), false, 'binding a guarded workspace narrows the existing owner before a query');
+  assert.equal(contextFacts(runtime, rebound).isProjectTrusted(), false);
+  const next = { ...owner, session_id: 'next-workspace-owner' };
+  const fresh = { id: 3, method: 'command/execute', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.bind({ context: { workspace: guarded, resource_owner: next, host: { project_trusted: false } } }, fresh, { foreground: true });
+  assert.throws(() => facts.isProjectTrusted(), /not_foreground_owner/);
+  runtime.features.add('remote_ui');
+  assert.throws(() => runtime.updated({ resource_owner: owner, host: { project_trusted: true } }), /not_foreground_owner/);
+  assert.equal(contextFacts(runtime, fresh).isProjectTrusted(), true);
+});
+
+test('exhausting the shared budget before a tool guard fails closed', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '5';
+  try {
+    const { runtime, store } = harness();
+    let secondCalled = false;
+    runtime.events.set('tool_call', [
+      { factory: 0, handler() { const until = performance.now() + 30; while (performance.now() < until) {} } },
+      { factory: 1, handler() { secondCalled = true; } },
+    ]);
+    const disposition = await runtime.runEvent('tool_call', {}, store, { veto: true });
+    assert.equal(disposition.action, 'deny');
+    assert.match(disposition.reason, /did not answer in time/);
+    assert.equal(secondCalled, false, 'an exhausted guard must not start after the shared deadline');
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
 test('getSettings reads the user Pi settings the way Pi merges them; a host snapshot wins', () => {
   // macOS TMPDIR may traverse /var -> /private/var. Keep this positive
   // fixture canonical: linked ancestors are intentionally refused by discovery.

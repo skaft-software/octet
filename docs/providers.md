@@ -268,6 +268,14 @@ version while Codex 0.159.2 listed it for the same account. Discovery therefore
 sends 0.159.2, and cache schema 10 refreshes older inventories. Its subscription
 price stays unknown.
 
+The current [Codex model guide](https://developers.openai.com/codex/models)
+reports a **500,000-token default** for GPT-6.1 Sol in Codex and ChatGPT Work.
+That supersedes the historical bundled default above, not octet's deliberate
+272K working policy. Discovery retains the backend default separately from its
+maximum; neither the public guide nor a public API window grants an account a
+larger working window. The entitlement-checked, acknowledged override remains
+opt-in; see [Codex context policy](codex-context.md).
+
 </details>
 
 <details>
@@ -907,14 +915,22 @@ recovery qualification.
 
 ## GPT-6 contracts and execution
 
-Direct `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol` and `gpt-6-luna` are declared
+Direct `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6.1-terra` and
+`gpt-6-luna` are declared
 on Responses with text and image input, a 1.05M-token context window and 128K
 output. Astra accepts `low` through `max` (default low). Sol and Luna also
 accept Off/`none` and default to medium. 6.1 Sol defaults to medium but accepts
 only `low` through `max` (no `none` or `minimal`), and its tools need the
-Responses API. Exact public pricing and its above-272K tier are recorded in [the
-catalog sources](../crates/octet-ai/models/SOURCES.md). New public prices aren't
-borrowed for Codex Sol, Luna or 6.1 Sol, whose subscription cost stays unknown.
+Responses API. **6.1 Terra** accepts `none`, `low`, `medium` (default), `high`,
+`xhigh` and `max`; tools also require Responses. Its standard input/output/cache
+read/30-minute cache write rates are **$1/$5/$0.05/$1.25 per million tokens**.
+Above 272K input, the whole request uses $2/$7.50/$0.10/$2.50. The legacy
+`cache_write_5m` accounting field carries the route's 30-minute write rate; it
+does not advertise a five-minute retention contract.
+Exact public pricing is recorded in [the catalog sources](../crates/octet-ai/models/SOURCES.md).
+These declarations do not establish Codex Terra availability, controls, context
+or pricing. Public prices aren't borrowed for Codex Sol, Luna or 6.1 Sol, whose
+subscription cost stays unknown.
 
 Model and endpoint feature declarations must **both** opt in:
 
@@ -1051,6 +1067,14 @@ bytes are the uncompressed JSON before compression/signing, not TLS bytes.
 Opaque host transports expose only the canonical stage. Special native steering,
 prewarm and standalone compact operations retain shape-only tracing where
 available, not this three-stage comparison contract.
+
+App-prepared extension-provider prompts retain their initial opaque route through
+retries and same-model summary compaction. Native Responses compaction is refused
+while that initial route is bound: the standalone compact endpoint cannot carry
+the opaque provider-stream authority, and falling back to HTTP would bypass it.
+This is a conservative restriction, not native-compact parity. Ordinary unbound
+Agent/native-provider compact behavior is unchanged; summary compaction with a
+distinct configured model still uses that model's own transport.
 
 Events include client-private salted digests, tools/system/message segment
 paths and lengths, exact raw JSON common-prefix offsets, a diagnostic

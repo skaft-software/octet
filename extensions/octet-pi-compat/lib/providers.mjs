@@ -2,23 +2,26 @@
 // route authorization, selection and stream assembly remain authoritative.
 import { bounded, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { canonicalToPi } from './provider-context.mjs';
+import { providerPricing } from './provider-pricing.mjs';
+import { streamRegistryModel } from './model-registry-stream.mjs';
+import { nativeProviderDelegate, withNativeProvider, ingestNativeProviderEvent, isNativeProviderFacade } from './native-provider.mjs';
+import { providerState, snapshotCustomProvider, abortProviderEntry, startCustomProviderRefresh, resolveCustomProviderAuth, hasCustomProvider, customProviderModels, getCustomProviderApiKey, getCustomProviderAuth } from './custom-provider.mjs';
+import { openCustomProviderHttp, pullCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const protocols = { 'openai-completions': 'openai_chat', 'openai-responses': 'openai_responses', 'anthropic-messages': 'anthropic_messages' };
-const runtimes = new WeakMap();
-function providers(runtime) {
-  let value = runtimes.get(runtime);
-  // registered mirrors Pi's synchronous extensionProviders map: name -> config as given.
-  if (!value) { value = { desired: new Map(), committed: new Map(), registered: new Map(), jobs: new Map(), tail: Promise.resolve() }; runtimes.set(runtime, value); }
-  return value;
-}
+const providers = providerState;
 // Loading is sequential and no providers have been committed yet. Restore the
 // preceding declarations, including ones a failing factory replaced or removed.
 export function checkpointFactoryProviders(runtime) {
-  const before = new Map(providers(runtime).desired);
-  return () => { providers(runtime).desired = before; };
+  const before = new Map(providers(runtime).desired), registered = new Map(providers(runtime).registered), nativeRegistered = new Map(providers(runtime).nativeRegistered);
+  return () => {
+    for (const entry of providers(runtime).desired.values()) if (before.get(entry.name) !== entry) abortProviderEntry(entry);
+    for (const entry of before.values()) if (entry.controller?.signal.aborted) entry.controller = new AbortController();
+    providers(runtime).desired = before; providers(runtime).registered = registered; providers(runtime).nativeRegistered = nativeRegistered;
+  };
 }
 function snapshot(host, key, api) {
   const value = host.pi_models?.[key];
@@ -55,14 +58,28 @@ export function scopedModels(host) {
     model: modelView(entry.model), ...(entry.thinkingLevel === undefined ? {} : { thinkingLevel: entry.thinkingLevel }),
   }));
 }
-export function modelRegistry(getHost, runtime) {
-  const all = () => snapshot(getHost(), 'all_models', 'ctx.modelRegistry.getAll');
-  return strict({
-    getRegisteredProviderIds: () => [...providers(runtime).registered.keys()],
+export function modelRegistry(getHost, runtime = {}) {
+  const all = () => [...snapshot(getHost(), 'all_models', 'ctx.modelRegistry.getAll')
+    .filter(model => !hasCustomProvider(runtime, model.provider)).map(modelView), ...customProviderModels(runtime)];
+  const explicitProvider = provider => {
+    const entry = providers(runtime).desired.get(provider);
+    if (entry?.apiKey === undefined) return undefined;
+    if (!runtime.initialized || runtime.stopping) unsupported('registered provider auth', 'an admitted invocation is required');
+    runtime.current().controller.signal.throwIfAborted();
+    entry.controller.signal.throwIfAborted();
+    return entry;
+  };
+  const registry = {
+    getRegisteredProviderIds: () => [...new Set([...providers(runtime).registered.keys(), ...providers(runtime).nativeRegistered.keys()])],
     getRegisteredProviderConfig: name => providers(runtime).registered.get(name),
-    getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').map(modelView),
-    getAll: () => all().map(modelView),
-    find: (provider, id) => modelView(all().find(model => model.provider === provider && model.id === id)),
+    getRegisteredNativeProvider: name => providers(runtime).nativeRegistered.get(name),
+    getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').flatMap(model => {
+      if (!hasCustomProvider(runtime, model.provider)) return [modelView(model)];
+      return customProviderModels(runtime, model.provider).filter(local => local.id === model.id);
+    }),
+    getAll: () => all(),
+    find: (provider, id) => all().find(model => model.provider === provider && model.id === id),
+    streamSimple: (model, context, options) => streamRegistryModel(runtime, model, context, options),
     // Pi: whether the model's provider authenticates with a subscription login.
     // The host states it, from the provider's own authentication resolver, for
     // every model it describes. A model it did not describe, or one whose
@@ -75,12 +92,49 @@ export function modelRegistry(getHost, runtime) {
       if (!stated) unsupported('ctx.modelRegistry.isUsingOAuth', 'the host did not state whether this provider uses OAuth');
       return stated.oauth;
     },
-    hasConfiguredAuth() {
-      unsupported('ctx.modelRegistry.hasConfiguredAuth', 'provider-level configured-auth status is not supplied by the host');
+    hasConfiguredAuth(model) {
+      if (!model || typeof model !== 'object') invalid('modelRegistry model');
+      const configured = snapshot(getHost(), 'configured_auth', 'ctx.modelRegistry.hasConfiguredAuth');
+      return configured[model.provider] === true;
+    },
+    async getApiKeyForProvider(provider) {
+      try {
+        identifier(provider, 'provider id');
+        if (hasCustomProvider(runtime, provider)) return await getCustomProviderApiKey(runtime, provider);
+        const explicit = explicitProvider(provider);
+        if (explicit) return explicit.apiKey;
+        runtime.require('provider_credentials');
+        const host = getHost();
+        const candidates = snapshot(host, 'available_models', 'ctx.modelRegistry.getApiKeyForProvider');
+        const model = candidates.find(model => model.provider === provider && model.id === host.model_view?.id)
+          ?? candidates.find(model => model.provider === provider);
+        if (!model) return undefined;
+        const result = await registry.getApiKeyAndHeaders(modelView(model));
+        return result.ok ? result.apiKey : undefined;
+      } catch {
+        return undefined;
+      }
     },
     async getApiKeyAndHeaders(model) {
       if (!model || typeof model !== 'object') invalid('modelRegistry model');
       const provider = identifier(model.provider, 'provider id'), id = identifier(model.id, 'model id');
+      if (hasCustomProvider(runtime, provider)) {
+        try {
+          const local = customProviderModels(runtime, provider).find(value => value.id === id);
+          if (!local) return { ok: false, error: 'Custom provider model unavailable' };
+          const resolution = await getCustomProviderAuth(runtime, provider);
+          if (!resolution) return { ok: false, error: 'Custom provider authentication unavailable' };
+          return { ok: true, ...resolution.auth, headers: { ...resolution.auth.headers, ...local.headers },
+            ...(resolution.env === undefined ? {} : { env: resolution.env }) };
+        } catch {
+          return { ok: false, error: 'Custom provider authentication unavailable' };
+        }
+      }
+      const explicit = explicitProvider(provider);
+      if (explicit) {
+        if (!explicit.models?.some(model => model.pi.id === id)) return { ok: false, error: 'Registered provider model unavailable' };
+        return { ok: true, apiKey: explicit.apiKey, headers: {} };
+      }
       runtime.require('provider_credentials');
       const store = runtime.current();
       const result = await runtime.hostCall('provider/credentials', { provider, model: id }, store);
@@ -96,52 +150,49 @@ export function modelRegistry(getHost, runtime) {
         ...(result.baseUrl === undefined ? {} : { baseUrl: result.baseUrl }),
         ...(result.env === undefined ? {} : { env: result.env }) };
     },
-  }, 'ctx.modelRegistry');
+  };
+  return strict(registry, 'ctx.modelRegistry');
 }
 function identifier(value, label) {
   bounded(value, label, 256);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) invalid(`${label} is not a native provider identifier`);
   return value;
 }
-function rate(value) {
-  const exact = value * 1e6, rounded = Math.round(exact);
-  if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(rounded) || Math.abs(exact - rounded) > 1e-7) invalid('provider cost must be exactly representable in native microdollars');
-  return rounded;
+function providerBaseUrl(value) {
+  const baseUrl = bounded(value ?? '', 'provider baseUrl', 8192);
+  if (!baseUrl || /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(baseUrl)) return baseUrl;
+  let url; try { url = new URL(baseUrl); } catch { invalid('provider baseUrl'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) unsupported('provider baseUrl', 'credential/query/fragment URLs cannot enter host facts');
+  return baseUrl;
 }
-function declaration(name, config, factory) {
+function declaration(name, config, factory, inherited = false) {
   bounded(name, 'provider name', 64);
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) unsupported('provider name', 'native provider names must be lowercase ASCII identifiers');
-  // Deliberately bounded first unit: no built-in overrides, OAuth, environment
-  // key lookup, arbitrary API codecs or silently ignored compatibility options.
   fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
-  // Pi permits omitted models: inherit the catalog and override only supplied
-  // provider fields. Public model facts are not authority to replace native
-  // routes or inherit their HTTP/auth configuration through providers/register.
-  if (config.models === undefined) unsupported('registerProvider partial override', 'Pi permits omitted models, but native provider catalog, authentication and transport inheritance has no negotiated contract; this adapter requires explicit models and a process-owned streamSimple');
-  if (typeof config.streamSimple !== 'function') unsupported('registerProvider', 'a custom streamSimple is required; native HTTP overrides are not supported by this unit');
-  const baseUrl = bounded(config.baseUrl ?? '', 'provider baseUrl', 8192);
-  if (baseUrl) {
-    let url; try { url = new URL(baseUrl); } catch { invalid('provider baseUrl'); }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) unsupported('provider baseUrl', 'credential/query/fragment URLs cannot enter host facts');
-  }
+  if (config.streamSimple !== undefined && typeof config.streamSimple !== 'function') invalid('provider streamSimple');
+  if (!inherited && config.streamSimple && !config.api) invalid('provider api is required with streamSimple');
+  if (config.api !== undefined && !protocols[config.api]) unsupported(`provider API ${config.api}`);
+  const baseUrl = providerBaseUrl(config.baseUrl);
   if (config.apiKey !== undefined) bounded(config.apiKey, 'explicit provider key', 16384, { controls: true });
+  if (config.models === undefined) return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, inherited: true };
+  if (typeof config.streamSimple !== 'function') unsupported('registerProvider', 'a custom streamSimple is required for explicit models');
   if (!Array.isArray(config.models) || !config.models.length || config.models.length > 256) invalid('provider models must contain 1..256 explicit definitions');
   const ids = new Set();
   const models = config.models.map(model => {
-    fields(model, ['id', 'name', 'api', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'], 'provider model');
-    bounded(model.id, 'model id', 64); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
+    fields(model, ['id', 'name', 'api', 'provider', 'baseUrl', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'], 'provider model');
+    const modelBaseUrl = providerBaseUrl(model.baseUrl ?? baseUrl);
+    bounded(model.id, 'model id', inherited ? 256 : 64); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
     bounded(model.name, 'model name', 128);
     const api = model.api ?? config.api;
     if (!protocols[api]) unsupported(`provider API ${api}`, 'only native chat/responses/anthropic identities are representable');
     if (typeof model.reasoning !== 'boolean') invalid('model reasoning must be boolean');
     if (!Array.isArray(model.input) || !model.input.includes('text') || model.input.length > 2 || new Set(model.input).size !== model.input.length || model.input.some(x => !['text', 'image'].includes(x))) invalid('model input must be text and optionally image');
     if (![model.contextWindow, model.maxTokens].every(x => Number.isSafeInteger(x) && x > 0) || model.maxTokens > model.contextWindow) invalid('model token limits');
-    fields(model.cost, ['input', 'output', 'cacheRead', 'cacheWrite'], 'model cost');
-    const pricing = { input: rate(model.cost.input), output: rate(model.cost.output), cache_read: rate(model.cost.cacheRead), cache_write_5m: rate(model.cost.cacheWrite), cache_write_1h: null, reasoning: null, tiers: [] };
-    return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocols[api], context_window: model.contextWindow, max_output_tokens: model.maxTokens,
-      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: baseUrl, input: [...model.input], pricing } } };
+    const pricing = inherited && model.cost == null ? null : providerPricing(model.cost);
+    return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocols[api], context_window: model.contextWindow, max_output_tokens: model.maxTokens,
+      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl, input: [...model.input], pricing } } };
   });
-  return { name, factory, stream: config.streamSimple, apiKey: config.apiKey, models,
+  return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, models,
     wire: { provider: { id: name, label: name, auth: { kind: 'none' } }, models: models.map(model => model.wire) } };
 }
 function enqueue(runtime, action) {
@@ -153,44 +204,127 @@ function enqueue(runtime, action) {
 }
 async function commit(runtime, entry) {
   const state = providers(runtime);
+  if (entry.inherited) {
+    runtime.require('provider_inheritance_v1');
+    const result = await runtime.transport.request('providers/inherit', { provider_id: entry.name });
+    fields(result, ['models'], 'inherited provider');
+    if (!Array.isArray(result.models) || result.models.length > 256) invalid('inherited provider models');
+    const models = result.models.filter(model => !entry.nativeModelIds || entry.nativeModelIds.has(model.id)).map(({ provider, baseUrl, ...model }) => model);
+    if (models.length) {
+      const inherited = declaration(entry.name, { ...entry.config, models, streamSimple: entry.stream ?? nativeProviderDelegate }, entry.factory, true);
+      entry = { ...entry, ...inherited, inherited: true, config: entry.config, native: entry.native };
+      for (const model of entry.wire.models) model.pi_metadata.inherit_provider = entry.name;
+    } else {
+      entry = { ...entry, models: [], wire: { provider: { id: entry.name, label: entry.name, auth: { kind: 'none' } }, models: [] } };
+    }
+  }
   await runtime.transport.request(state.committed.has(entry.name) ? 'providers/update' : 'providers/register', entry.wire);
   for (const job of state.jobs.values()) if (job.entry.name === entry.name) job.controller.abort();
   state.committed.set(entry.name, entry);
+  if (entry.inherited && state.desired.get(entry.name)?.controller === entry.controller) state.desired.set(entry.name, entry);
+  refreshProvider(runtime, entry);
+}
+function refreshProvider(runtime, entry) {
+  startCustomProviderRefresh(runtime, entry, () => snapshotCustomProvider(entry.custom, entry.factory, declaration), action => enqueue(runtime, action));
+}
+function localRegistration(state, name, entry) {
+  state.registered.delete(name);
+  state.nativeRegistered.delete(name);
+  if (!entry) { state.desired.delete(name); return; }
+  state.desired.set(name, entry);
+  if (entry.nativeObject) state.nativeRegistered.set(name, entry.nativeObject);
+  else state.registered.set(name, entry.config);
+}
+function mutation(runtime, factory, name, entry) {
+  const state = providers(runtime);
+  let store;
+  if (runtime.initialized) {
+    runtime.require('provider_proxy_v1');
+    if (entry?.inherited) runtime.require('provider_inheritance_v1');
+    store = runtime.current(factory);
+    store.controller.signal.throwIfAborted();
+  }
+  const revision = Symbol();
+  state.revisions.set(name, revision);
+  abortProviderEntry(state.desired.get(name));
+  for (const job of state.jobs.values()) if (job.entry.name === name) job.controller.abort();
+  if (entry) entry.controller = new AbortController();
+  localRegistration(state, name, entry);
+  if (!runtime.initialized) return;
+  runtime.track(enqueue(runtime, async () => {
+    try {
+      if (entry) await commit(runtime, entry);
+      else {
+        await runtime.transport.request('providers/unregister', { provider_id: name });
+        state.committed.delete(name);
+      }
+    } catch (error) {
+      if (state.revisions.get(name) === revision) {
+        abortProviderEntry(entry);
+        const previous = state.committed.get(name);
+        if (previous) { previous.controller = new AbortController(); previous.refreshStarted = false; }
+        localRegistration(state, name, previous);
+        if (previous) refreshProvider(runtime, previous);
+      }
+      throw error;
+    }
+  }), store);
 }
 export function registerProvider(runtime, factory, name, config) {
-  const entry = declaration(name, config, factory), state = providers(runtime);
-  state.registered.set(name, config);
-  if (!runtime.initialized) { state.desired.set(name, entry); return; }
-  runtime.require('provider_proxy_v1');
-  const store = runtime.current(factory); store.controller.signal.throwIfAborted();
-  runtime.track(enqueue(runtime, () => commit(runtime, entry)), store);
+  const state = providers(runtime);
+  if (typeof name !== 'string') {
+    const provider = name;
+    if (!provider || typeof provider !== 'object' || Array.isArray(provider)) invalid('native provider must be an object');
+    const id = identifier(provider.id, 'native provider id');
+    if (id.length > 64 || !/^[a-z][a-z0-9_-]*$/.test(id)) invalid('native provider id');
+    if (typeof provider.getModels !== 'function' || typeof provider.streamSimple !== 'function' || typeof provider.stream !== 'function' || !provider.auth || typeof provider.auth !== 'object') invalid('native provider contract');
+    let entry;
+    if (isNativeProviderFacade(provider)) {
+      const models = provider.getModels();
+      if (!Array.isArray(models) || models.length > 256) invalid('native provider models');
+      const nativeModelIds = new Set(models.map(model => identifier(model?.id, 'native model id')));
+      entry = { name: id, factory, config: {}, stream: provider.streamSimple.bind(provider), inherited: true, native: true, nativeModelIds };
+    } else entry = snapshotCustomProvider(provider, factory, declaration);
+    entry.nativeObject = provider;
+    mutation(runtime, factory, id, entry);
+    return;
+  }
+  fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
+  if (config.streamSimple && !config.api) invalid('provider api is required with streamSimple');
+  const effective = { ...state.registered.get(name) };
+  for (const [key, value] of Object.entries(config)) if (value !== undefined) effective[key] = value;
+  const entry = declaration(name, effective, factory);
+  mutation(runtime, factory, name, entry);
 }
 export function unregisterProvider(runtime, factory, name) {
-  identifier(name, 'provider name'); const state = providers(runtime);
-  state.registered.delete(name);
-  if (!runtime.initialized) { state.desired.delete(name); return; }
-  runtime.require('provider_proxy_v1');
-  const store = runtime.current(factory); store.controller.signal.throwIfAborted();
-  runtime.track(enqueue(runtime, async () => {
-    await runtime.transport.request('providers/unregister', { provider_id: name });
-    state.committed.delete(name);
-    for (const job of state.jobs.values()) if (job.entry.name === name) job.controller.abort();
-  }), store);
+  identifier(name, 'provider name');
+  mutation(runtime, factory, name);
 }
 export function validateProviderInitialization(runtime) {
   if (providers(runtime).desired.size) runtime.require('provider_proxy_v1');
+  if ([...providers(runtime).desired.values()].some(entry => entry.inherited)) runtime.require('provider_inheritance_v1');
 }
 export function startProviderRegistration(runtime) {
   if (!runtime.features.has('provider_proxy_v1')) return;
   // Reverse RPC starts after the initialize reply, never while the native host
   // is blocked awaiting it. Completion is the existing native startup barrier.
   enqueue(runtime, async () => {
-    for (const entry of providers(runtime).desired.values()) await commit(runtime, entry);
+    const state = providers(runtime);
+    for (const entry of [...state.desired.values()]) {
+      try { await commit(runtime, entry); }
+      catch (error) {
+        if (state.desired.get(entry.name)?.controller === entry.controller) {
+          abortProviderEntry(entry);
+          localRegistration(state, entry.name, state.committed.get(entry.name));
+        }
+        throw error;
+      }
+    }
     await runtime.transport.notify('providers/complete', {});
   }).catch(error => runtime.backgroundError(error));
 }
 function requestContext(request) {
-  if (request.tool_choice !== 'auto' || request.stop?.length || request.responses != null || request.output_format?.type !== 'text' || (request.reasoning_mode !== undefined && request.reasoning_mode !== 'standard')) unsupported('provider request', 'tool constraints, stop sequences, Responses replay and structured output are not supported by streamSimple');
+  if ((request.tool_choice !== 'auto' && !(request.tool_choice === 'none' && !request.tools?.length)) || request.stop?.length || request.responses != null || request.output_format?.type !== 'text' || (request.reasoning_mode !== undefined && request.reasoning_mode !== 'standard')) unsupported('provider request', 'tool constraints, stop sequences, Responses replay and structured output are not supported by streamSimple');
   const tools = (request.tools || []).map(tool => {
     if (tool.async || tool.constrained_sampling != null) unsupported('provider tool', 'async/constrained sampling cannot be dropped');
     return { name: tool.name, description: tool.description, parameters: tool.parameters };
@@ -207,15 +341,18 @@ export async function prepareProviderStream(runtime, params, store) {
   if (!model || state.jobs.has(params.stream_id) || state.jobs.size >= 8) throw rpcError(-32002, 'provider route unavailable or stream limit reached');
   const context = requestContext(params.request), controller = new AbortController();
   const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: params.request.max_output_tokens ?? undefined,
-    temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: params.request.session_id ?? undefined };
+    temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: params.request.session_id ?? undefined,
+    reasoning: undefined, onPayload: undefined };
   const reasoning = params.request.reasoning;
   if (reasoning?.type === 'effort' && levels.has(reasoning.value)) options.reasoning = reasoning.value;
   else if (reasoning?.type !== 'off') unsupported('provider reasoning', 'only portable effort controls are supported');
-  state.jobs.set(params.stream_id, { entry, model, context, options, controller, store, sequence: 0 });
+  state.jobs.set(params.stream_id, { id: params.stream_id, request: params.request, entry, model, context, options, controller, store, sequence: 0 });
   return { stream_id: params.stream_id, accepted: true };
 }
 export function cancelProviderStream(runtime, id, owner) {
-  for (const [key, job] of providers(runtime).jobs) if ((id === undefined || id === key) && (owner === undefined || job.store.state === owner)) job.controller.abort();
+  const state = providers(runtime);
+  for (const [key, job] of state.jobs) if ((id === undefined || id === key) && (owner === undefined || job.store.state === owner)) job.controller.abort();
+  if (id === undefined && owner === undefined) for (const entry of state.desired.values()) abortProviderEntry(entry);
 }
 export function startProviderStream(runtime, id) {
   const state = providers(runtime), job = state.jobs.get(id); if (!job) return;
@@ -227,7 +364,17 @@ export function startProviderStream(runtime, id) {
   const run = async () => {
     job.controller.signal.throwIfAborted();
     const blocks = new Map(); let started = false, finished = false;
-    const stream = job.entry.stream(structuredClone(job.model.pi), job.context, strict(job.options, 'provider stream options'));
+    let model = structuredClone(job.model.pi);
+    if (job.entry.custom) {
+      const signal = AbortSignal.any([job.controller.signal, job.entry.controller.signal]);
+      const resolution = await resolveCustomProviderAuth(job.entry, job.options, signal);
+      signal.throwIfAborted();
+      if (!resolution) unsupported('custom provider auth', 'provider is not configured');
+      if (resolution?.auth.baseUrl) model.baseUrl = resolution.auth.baseUrl;
+      job.options = { ...job.options, apiKey: resolution?.auth.apiKey, headers: { ...resolution?.auth.headers, ...model.headers }, env: resolution?.env };
+    }
+    const callback = job.entry.inherited && !job.entry.native && job.entry.config.api !== job.model.pi.api ? nativeProviderDelegate : job.entry.stream;
+    const stream = callback(model, job.context, strict(job.options, 'provider stream options'));
     if (!stream?.[Symbol.asyncIterator]) invalid('streamSimple must return an async iterable');
     const iterator = stream[Symbol.asyncIterator]();
     const abort = new Promise((_, reject) => job.controller.signal.addEventListener('abort', () => reject(rpcError(-32800, 'provider stream cancelled')), { once: true }));
@@ -239,7 +386,7 @@ export function startProviderStream(runtime, id) {
         const next = await Promise.race([iterator.next(), abort]);
         if (next.done) invalid('provider stream missing terminal event');
         const event = next.value;
-        if (event.partial?.content?.some(part => part.thinkingSignature || part.textSignature || part.redacted)) unsupported('provider opaque replay signatures');
+        if (event.partial?.content?.some((part, index) => (part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider opaque replay signatures');
         if (event.type === 'error') throw rpcError(-32002, 'custom provider returned an error');
         if (event.type === 'start') {
           if (started) invalid('duplicate provider start'); started = true; await emit('started', {}); continue;
@@ -251,7 +398,7 @@ export function startProviderStream(runtime, id) {
           if (!Array.isArray(message?.content) || message.content.length !== blocks.size) invalid('provider final content differs from stream');
           for (let index = 0; index < message.content.length; index++) {
             const part = message.content[index], block = blocks.get(index);
-            if (!block || part.thinkingSignature || part.textSignature || part.redacted) unsupported('provider final content/signatures');
+            if (!block || ((part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider final content/signatures');
             if (block.kind === 'toolcall' ? !isDeepStrictEqual(part, block.final) : part.type !== (block.kind === 'thinking' ? 'thinking' : 'text') || (part.text ?? part.thinking) !== block.text) invalid('provider final content differs from stream');
           }
           const usage = message.usage;
@@ -288,7 +435,43 @@ export function startProviderStream(runtime, id) {
       Promise.resolve(iterator.return?.()).catch(() => {});
     }
   };
-  runtime.scope.run(job.store, run).catch(async () => {
+  runtime.scope.run(job.store, () => withNativeProvider(runtime, job, run)).catch(async () => {
     if (!job.controller.signal.aborted && !runtime.stopping) await emit('error', {}).catch(() => {});
-  }).finally(() => state.jobs.delete(id));
+  }).finally(() => { closeCustomProviderHttp(job); state.jobs.delete(id); });
+}
+
+export async function nativeProviderPayload(runtime, params) {
+  runtime.require('provider_inheritance_v1');
+  fields(params, ['stream_id', 'payload'], 'native provider payload');
+  const job = providers(runtime).jobs.get(params.stream_id);
+  if (!job?.delegated || !job.onPayload) unsupported('native provider payload', 'no live delegate callback');
+  job.controller.signal.throwIfAborted();
+  const payload = plainJSON(params.payload, 'native provider payload', 786432);
+  const before = job.customHttp ? structuredClone(payload) : undefined;
+  const result = await runtime.scope.run(job.store, () => job.onPayload(payload, structuredClone(job.model.pi)));
+  job.controller.signal.throwIfAborted();
+  const after = plainJSON(result ?? payload, 'native provider payload', 786432);
+  if (before) {
+    const editable = new Set(['prompt_cache_key', ...['messages', 'input', 'instructions', 'system'].filter(key => Object.hasOwn(before, key))]);
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) if (!editable.has(key) && !isDeepStrictEqual(before[key], after[key])) unsupported('custom provider payload', 'encoded request authority cannot change');
+    if (after.prompt_cache_key !== undefined) bounded(after.prompt_cache_key, 'custom prompt cache key', 8192);
+  }
+  return { payload: after };
+}
+
+export function nativeProviderEvent(runtime, params) {
+  runtime.require('provider_inheritance_v1');
+  return ingestNativeProviderEvent(providers(runtime).jobs.get(params.stream_id), params);
+}
+export async function customProviderHttp(runtime, params) {
+  runtime.require('provider_inheritance_v1');
+  const job = providers(runtime).jobs.get(params.stream_id);
+  if (!job) unsupported('custom provider HTTP', 'no live provider stream');
+  return runtime.scope.run(job.store, () => openCustomProviderHttp(job, params));
+}
+export async function customProviderHttpChunk(runtime, params) {
+  runtime.require('provider_inheritance_v1');
+  const job = providers(runtime).jobs.get(params.stream_id);
+  if (!job) unsupported('custom provider HTTP pull', 'no live provider stream');
+  return runtime.scope.run(job.store, () => pullCustomProviderHttp(job, params));
 }

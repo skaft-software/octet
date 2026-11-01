@@ -553,8 +553,12 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
         return false;
     };
     current.endpoint.id == active.endpoint.id
-        && current.spec.id == active.spec.id
         && current.spec.endpoint == active.spec.endpoint
+        && same_model_facts(&current, active)
+}
+
+fn same_model_facts(current: &Model, active: &Model) -> bool {
+    current.spec.id == active.spec.id
         && current.spec.api_name == active.spec.api_name
         && current.spec.display_name == active.spec.display_name
         && current.spec.protocol == active.spec.protocol
@@ -564,7 +568,59 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
         && current.spec.cache == active.spec.cache
 }
 
+pub(crate) enum PreparedAppSubmission {
+    Ordinary(octet_agent::UserInput),
+    Host(octet_agent::PreparedHostPrompt),
+}
+
+impl PreparedAppSubmission {
+    pub(crate) async fn start(
+        self,
+        agent: &mut Agent,
+        mode: octet_agent::PreparedPromptMode,
+    ) -> Result<octet_agent::Run<'_>, octet_agent::AgentError> {
+        match self {
+            Self::Host(prepared) => agent.prompt_prepared(prepared, mode).await,
+            Self::Ordinary(input) => match mode {
+                octet_agent::PreparedPromptMode::Normal => agent.prompt(input).await,
+                octet_agent::PreparedPromptMode::ResponsesPrewarm => {
+                    agent.prompt_with_responses_prewarm(input).await
+                }
+                octet_agent::PreparedPromptMode::WithoutTools => {
+                    agent.prompt_without_tools(input).await
+                }
+            },
+        }
+    }
+}
+
 impl App {
+    pub(crate) fn prepare_submission(
+        &mut self,
+        input: octet_agent::UserInput,
+    ) -> anyhow::Result<(PreparedAppSubmission, Vec<String>)> {
+        let notices = self.synchronize_extension_provider_catalog_for_request()?;
+        self.agent.set_tool_inference_resolver(Some(
+            self.executable_extensions.tool_inference_model_resolver(&self.catalog),
+        ));
+        if !catalog_route_matches_active_model(&self.catalog, self.agent.model())
+            || !same_model_facts(&self.model, self.agent.model())
+            || self.model.endpoint.id != self.agent.model().endpoint.id
+        {
+            anyhow::bail!("App and Agent selected models differ at prompt preparation");
+        }
+        let transport = self
+            .executable_extensions
+            .prepare_selected_provider_transport(self.agent.model())?;
+        let prepared = match transport {
+            Some(fetch) => {
+                PreparedAppSubmission::Host(self.agent.prepare_host_prompt(input, fetch))
+            }
+            None => PreparedAppSubmission::Ordinary(input),
+        };
+        Ok((prepared, notices))
+    }
+
     /// Attaches every extension process whose handshake has settled.
     ///
     /// The first interactive frame is drawn before the extension host is ready
@@ -865,13 +921,29 @@ impl App {
                 self.model.spec.id.0
             )
         })?;
-        if !catalog_route_matches_active_model(&self.catalog, &self.model) {
+        if !catalog_route_matches_active_model(&self.catalog, &self.model)
+            && !self.rebind_reloaded_extension_provider_model()?
+        {
             anyhow::bail!(
                 "the active model {} route changed after an extension provider update; select it again before prompting",
                 self.model.spec.id.0
             );
         }
         Ok(diagnostics)
+    }
+
+    fn rebind_reloaded_extension_provider_model(&mut self) -> anyhow::Result<bool> {
+        let Some(model) = self
+            .executable_extensions
+            .reloaded_provider_model(&self.catalog, &self.model)
+        else {
+            return Ok(false);
+        };
+        if !same_model_facts(&model, &self.model) {
+            return Ok(false);
+        }
+        Ok(bootstrap::try_select_model_at_idle(self, model, None)?
+            && catalog_route_matches_active_model(&self.catalog, &self.model))
     }
 }
 

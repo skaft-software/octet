@@ -12,14 +12,17 @@ import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCom
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
-import { checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
+import { customProviderHttp, customProviderHttpChunk, nativeProviderEvent, nativeProviderPayload, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
 import { transformInput } from './context-api.mjs';
+import { retainPiProjectTrust } from './project-trust.mjs';
 import { HookBudget, LoadBudget } from './handler-budget.mjs';
 import { forgetMcpRegistrations, hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
 import { sessionOperation, sessionOperationHooks, sessionReplacement, sessionReplacementHooks } from './session-operations.mjs';
 import { modelTurn, modelTurnHooks } from './model-turns.mjs';
-import { runMessageMethods, handleRunMessage, rememberPrompt } from './run-messages.mjs';
+import { runMessageMethods, handleRunMessage, rememberPrompt, settleToolResult } from './run-messages.mjs';
+import { toolLifecyclePayload } from './tool-events.mjs';
+import { registryInferenceEvent } from './model-registry-stream.mjs';
 import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
 import { beforeAgentStart } from './before-agent-start.mjs';
 import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
@@ -28,6 +31,7 @@ import { RemoteUI } from './remote-ui.mjs';
 import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
+import { configureLocalPi } from '../shims/local-pi.mjs';
 import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
 import { discoverPiSetup, resolveThemeFile, SOURCE_EXTENSIONS } from './pi-setup.mjs';
 import { readPiTheme } from './theme-palette.mjs';
@@ -38,9 +42,11 @@ import { TerminalInputListeners } from './terminal-input.mjs';
 import { bindHostTheme, configureBridgeTheme, nativeTheme } from './theme.mjs';
 import { tracePhase } from './startup-trace.mjs';
 import { jitiCacheOptions } from './startup-cache.mjs';
+import { withToolHost } from './tool-host.mjs';
+import { createHostedRunner, hostedToolCatalog } from './extension-runner.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials']);
-const supportedFeatures = new Set([...SESSION_FEATURES, ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'provider_proxy_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1']);
+const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_inheritance_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -54,13 +60,6 @@ export const REVIEWED_SOURCE_LIMITS = Object.freeze({
 });
 
 function missingPath(error) { return error?.code === 'ENOENT' || error?.code === 'ENOTDIR'; }
-// Pi's names for the host's tool lifecycle fields, next to the wire names.
-// durationMs (Pi 1.1) is the host's measured execution time.
-function piToolLifecycle(method, p) {
-  if (method !== 'tool/started' && method !== 'tool/settled') return {};
-  return { toolCallId: p.tool_call_id, toolName: p.tool_name,
-    ...(method === 'tool/settled' && Number.isSafeInteger(p.duration_ms) ? { durationMs: p.duration_ms } : {}) };
-}
 function sourceFilePath(pathname, baseDirectory) {
   const absolute = resolve(pathname), relativePath = relative(baseDirectory, absolute);
   const parts = relativePath ? relativePath.split(sep) : [];
@@ -201,6 +200,7 @@ export class Runtime {
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null; this.autocompleteStarted = false; this.autocompleteSettle = null;
     this.entrypoints = [];
+    this.runner = createHostedRunner(this);
     this.uninstallChildren = installChildRuntime(this);
     bindHostTheme(this);
   }
@@ -244,7 +244,7 @@ export class Runtime {
     const s = this.scope.getStore();
     this.assertOwner(s); return { ...s, factory };
   }
-  hostCall(method, params, store = this.scope.getStore()) {
+  hostCall(method, params, store = this.scope.getStore(), requestOptions = {}) {
     store = compactionCallbackStore(this, store);
     if (this.stopping) throw rpcError(-32002, 'host is draining');
     if (!Number.isSafeInteger(store?.id) || store.id < 0) throw rpcError(-32002, 'active numeric parent_request_id required');
@@ -262,8 +262,10 @@ export class Runtime {
     // Other calls keep their live parent. Wire origin/owner and abort signal stay.
     return this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
-    }, { parent: live && !independentCheckpoint ? store.id : undefined, signal: store.controller.signal,
-      timeout: method === 'process/exec' ? 2147483647 : undefined });
+    }, { parent: live && !independentCheckpoint ? store.id : undefined,
+      signal: requestOptions.signal ?? store.controller.signal,
+      ...(requestOptions.onUpdate === undefined ? {} : { onUpdate: requestOptions.onUpdate }),
+      timeout: method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
   }
   appendEntry(type, data, store = this.scope.getStore()) {
     this.require('session_entries');
@@ -281,15 +283,16 @@ export class Runtime {
       parent_request_id: store.id, resource_owner: store.state.owner, entry_type: type, data: clean,
       ...(grant ? { session_leaf: { grant_id: grant.grant_id, activation_epoch: grant.activation_epoch, operation_id: grant.operation_id } } : {}),
     }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) });
+    const routed = Boolean(this.sessionTransport && (grant || this.features.has('session_append_receipts_v1')));
     let committed;
-    try { committed = appendReply(result, grant, store.state.owner, Boolean(this.sessionTransport));
-      if (this.sessionTransport && grant) this.sessionTransport.append(store, result, grant, committed.successor); }
+    try { committed = appendReply(result, grant, store.state.owner, routed);
+      if (routed) this.sessionTransport.append(store, result, grant, committed.successor); }
     catch (error) {
       const ambiguous = rpcError(-32002, `session append outcome unknown: invalid commit reply (${error.message})`);
       this.transport.fail(ambiguous); throw ambiguous;
     }
     if (store.leaf) store.leaf.grant = committed.successor;
-    if (this.sessionTransport && grant) return undefined;
+    if (routed) return undefined;
     const host = store.state.host;
     const entry = { id: committed.entryId, type: 'custom', customType: type, data: clean, ...(grant ? { parentId: grant.expected_head } : {}) };
     // A durable ACK is the only source of local read-after-write success.
@@ -370,6 +373,7 @@ export class Runtime {
     if (Object.values(routes).some(mode => mode !== 'shims' && mode !== 'installed')) invalid('extension runtime must be "shims" or "installed"');
     const piAgentDir = this.config.pi_agent_dir;
     if (piAgentDir !== undefined && (typeof piAgentDir !== 'string' || !isAbsolute(piAgentDir))) invalid('pi_agent_dir must be an absolute path');
+    configureLocalPi(piAgentDir);
     let installedJiti;
     const jitiFor = async mode => {
       if (mode !== 'installed') return this.jiti;
@@ -403,9 +407,6 @@ export class Runtime {
         if (this.config.entrypoint_sha256?.[resolved]) {
           const actual = createHash('sha256').update(readFileSync(resolved)).digest('hex');
           if (actual !== this.config.entrypoint_sha256[resolved]) invalid(`reviewed factory changed: ${resolved}; configure again`);
-        }
-        if (mode !== 'installed' && (await scanPiImportGaps(resolved, this.jiti)).direct_tools.length) {
-          unsupported('direct Pi tool execution', 'requires the reviewed installed-Pi route, not native child-tool descriptors');
         }
       } catch (error) {
         preparationError = error;
@@ -500,7 +501,13 @@ export class Runtime {
     this.timers.clearWhere(store => store?.factory === factory);
     forgetMcpRegistrations(this, entry);
   }
+  toolExecution(name) {
+    const entry = hostedToolCatalog(this.runner).get(name);
+    if (!entry) invalid(`unknown hosted tool ${name}`);
+    return entry.definition;
+  }
   metadata() {
+    const tools = hostedToolCatalog(this.runner);
     const hooks = [...new Set(this.config.subscribed_hooks ?? [...this.events.keys()].filter(e => hookEvents[e]).map(e => hookEvents[e]))];
     // Message history needs the real prompt and durable assistant/tool commits,
     // even when the factory subscribes only to Pi notification events. These
@@ -514,8 +521,8 @@ export class Runtime {
     return {
       ...(completions.length ? { argument_completions: completions } : {}),
       ...(this.transcript.factories.size ? { transcript_renderers: this.transcript.metadata() } : {}),
-      tools: [...this.tools].map(([name, tool]) => toolWire(name, tool)),
-      commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description || name, ...(d.usage ? { usage: d.usage } : {}) })),
+      tools: [...tools].map(([name, tool]) => toolWire(name, tool)),
+      commands: [...this.commands].map(([name, { definition: d }]) => ({ name, description: d.description?.trim() ? d.description : name })),
       hooks: hooks.sort(), flags: [...this.flags].map(([name, { definition }]) => ({ name, ...definition })),
       shortcuts: [...this.shortcuts].map(([key, { definition: d }], i) => ({ name: this.config.registrations?.shortcuts?.find(shortcut => shortcut.key === key)?.name ?? `pi-shortcut-${i}`, key, description: d.description || key })),
       events: [...this.events.keys()].sort(),
@@ -530,6 +537,7 @@ export class Runtime {
     this.features = new Set([...required, ...(params.protocol.optional_features || [])].filter(f => supportedFeatures.has(f)));
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
     if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
+    if (this.features.has('runtime_command_registration_v1')) this.require('runtime_commands');
     if (this.features.has('transcript_render_v1') || this.features.has('terminal_input_intercept_v1')) this.require('remote_ui');
     const builtinOverrides = params.capabilities?.builtin_tool_overrides === undefined ? [] : params.capabilities.builtin_tool_overrides;
     if (!Array.isArray(builtinOverrides) || builtinOverrides.length > BUILTIN_TOOL_NAMES.length
@@ -544,6 +552,7 @@ export class Runtime {
     this.maxConcurrent = Math.min(8, params.protocol.limits?.max_concurrent_requests || 1);
     const routed = SESSION_FEATURES.filter(f => this.features.has(f));
     if (routed.length && (routed.length !== 2 || this.maxConcurrent < 2 || !this.features.has('session_entries'))) invalid('paired session transport requirements');
+    if (this.features.has('session_append_receipts_v1') && routed.length !== 2) invalid('session append receipts require paired session transport');
     if (routed.length) {
       const frame = params.protocol.limits?.max_message_bytes;
       this.sessionTransport = new SessionTransport(this, params.protocol.session_snapshot_transport_v1, frame);
@@ -664,6 +673,8 @@ export class Runtime {
       state.workspace = context.workspace || state.workspace;
       state.host = { ...state.host, ...(context.host || {}) }; state.parent = store.id;
     }
+    retainPiProjectTrust(state);
+    this.actionsInitialized = true;
     store.state = state;
     if (grant) store.leaf = store.activation?.leaf ?? { grant };
     if (foreground) {
@@ -748,6 +759,7 @@ export class Runtime {
     const next = plainJSON(params.host, 'host snapshot', 524288);
     if (Object.hasOwn(next, 'theme')) nativeTheme(next.theme);
     const previous = state.host.git_branch; state.host = { ...state.host, ...next };
+    retainPiProjectTrust(state);
     if (previous !== state.host.git_branch) for (const listener of state.branchListeners) listener();
     for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
@@ -866,6 +878,10 @@ export class Runtime {
     }
     await this.sessionTransport?.hydrate(p, store);
     if (message.method === 'provider/stream') return prepareProviderStream(this, p, store);
+    if (message.method === 'provider/delegate_http') return customProviderHttp(this, p);
+    if (message.method === 'provider/delegate_http_chunk') return customProviderHttpChunk(this, p);
+    if (message.method === 'provider/delegate_payload') return nativeProviderPayload(this, p);
+    if (message.method === 'provider/delegate_event') return nativeProviderEvent(this, p);
     if (message.method === 'ui/autocomplete/complete') return commandCompletions(this, p, store);
     if (message.method === 'hook/run' && p.hook === 'resources_discover') return discoverResources(this, p, store);
     if (message.method === 'hook/run' && p.hook === 'provider_context') return projectContext(this, p, store);
@@ -909,7 +925,8 @@ export class Runtime {
       return { text: '', notifications: [], context: [] };
     }
     if (message.method === 'tool/prepare_arguments') return prepareRegisteredArguments(this, p, store);
-    if (message.method === 'tool/call') return executeRegisteredTool(this, p, store, await createToolContext(this, p, store, createContext(this, store)));
+    if (message.method === 'tool/call') return withToolHost(this, store, async () => executeRegisteredTool(this, p, store,
+      await createToolContext(this, p, store, createContext(this, store)), this.toolExecution(p.name)));
     if (message.method === 'hook/run') return this.queued(store, async () => {
       const events = Object.keys(hookEvents).filter(e => e !== 'input' && hookEvents[e] === p.hook);
       if (!this.metadata().hooks.includes(p.hook)) invalid(`unknown hook ${p.hook}`);
@@ -938,14 +955,18 @@ export class Runtime {
         // Pi hands handlers one mutable input; later handlers see earlier mutations.
         const value = p.hook === 'before_tool_call' ? { type: event, toolName: payload.name, toolCallId: payload.tool_call_id, ...(payload.parent_tool_call_id == null ? {} : { parentToolCallId: payload.parent_tool_call_id }), input: toolInput ??= structuredClone(payload.arguments ?? {}) }
           : p.hook === 'after_tool_call' ? { type: event, toolName: payload.name, input: payload.arguments, content: [{ type: 'text', text: payload.output }], isError: payload.is_error }
-          // Pi's session_start always has a reason; a host that gives none is
-          // starting this process's session, which Pi calls "startup".
-          : facade({ type: event, ...(event === 'session_start' && payload.reason === undefined ? { reason: 'startup' } : {}), ...payload }, `${event} event`);
+          : event === 'session_start' ? facade({ type: event, reason: payload.reason ?? 'startup',
+            ...(payload.previousSessionFile === undefined ? {} : { previousSessionFile: payload.previousSessionFile }) }, `${event} event`)
+          : event === 'session_shutdown' ? facade({ type: event,
+            reason: ['reload', 'new', 'resume', 'fork'].includes(payload.reason) ? payload.reason : 'quit',
+            ...(payload.targetSessionFile === undefined ? {} : { targetSessionFile: payload.targetSessionFile }) }, `${event} event`)
+          : facade({ type: event, ...payload }, `${event} event`);
         disposition = await this.runEvent(event, value, store, { veto: p.hook === 'before_tool_call' });
         if (disposition.action === 'deny') break;
       }
       await this.flush(store);
-      if (p.hook === 'before_prompt') rememberPrompt(store, payload);
+      if (p.hook === 'before_prompt') rememberPrompt(store, { ...payload,
+        system_prompt: this.features.has('committed_message_events_v1') ? systemPrompt ?? payload.system_prompt : undefined });
       if (p.hook === 'session_end' && store.state) await this.retire(store.state);
       const replaced = toolInput !== undefined && disposition.action === 'continue' && !isDeepStrictEqual(toolInput, payload.arguments ?? {});
       return { disposition, context: [], notifications: [], ...(customMessages.length ? { custom_messages: customMessages } : {}), ...(systemPrompt === undefined || systemPrompt === payload.system_prompt ? {} : { system_prompt: systemPrompt }),
@@ -966,6 +987,7 @@ export class Runtime {
   }
   async notify(message) {
     const p = message.params;
+    if (message.method === 'provider/infer_event') return registryInferenceEvent(this, p);
     if (message.method === 'provider/cancel') { cancelProviderStream(this, p.stream_id); return; }
     // Pi's isIdle: no agent run is active and nothing is compacting. Track it
     // from the host's own lifecycle notifications as they arrive, before any
@@ -1004,7 +1026,7 @@ export class Runtime {
       this.require('shortcuts'); const meta = this.metadata().shortcuts.find(s => s.name === p.id);
       if (!meta) invalid('unknown shortcut trigger'); handler = this.shortcuts.get(meta.key);
     } else if (!event) throw rpcError(-32601, `unsupported_feature notification ${message.method}`);
-    if (event) this.require(['turn/started', 'turn/settled', 'tool/started', 'tool/settled'].includes(message.method) ? 'lifecycle_events' : 'lifecycle_events_v2');
+    if (event) this.require(['turn/started', 'turn/settled', 'tool/started', 'tool/settled', 'tool/updated'].includes(message.method) ? 'lifecycle_events' : 'lifecycle_events_v2');
     const state = p.resource_owner ? this.states.get(ownerKey(p.resource_owner)) : this.foreground;
     // A lifecycle notification has no reply. An owner the adapter never bound (an
     // empty bridge subscribes to no hook, so the host never sends it session_start)
@@ -1022,7 +1044,11 @@ export class Runtime {
         await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
       } else {
         if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
-        else await this.runEvent(event, facade({ type: event, ...p, ...piToolLifecycle(message.method, p) }, `${event} event`), store);
+        else {
+          const fields = message.method.startsWith('tool/') ? toolLifecyclePayload(p, store, message.method) : p;
+          await this.runEvent(event, facade({ type: event, ...fields }, `${event} event`), store);
+          if (message.method === 'tool/settled' && p.result) await settleToolResult(this, store, p);
+        }
         const following = followingEvents[message.method];
         // Pi 1.1 agent_settled says whether the run was cancelled.
         if (following) await this.runEvent(following, { type: following, aborted: p.outcome === 'cancelled' || p.outcome === 'interrupted' }, store);

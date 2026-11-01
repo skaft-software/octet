@@ -1,10 +1,12 @@
-// Pi 1.0.2 context facts and raw-input transforms. Rust supplies every fact;
-// extension request cancellation is not a substitute for aborting the agent.
+// Pi 1.0.2 context facts and raw-input transforms. Rust supplies native facts;
+// Pi's no-project-resources trust signal does not change native resource admission.
+// Extension request cancellation is not a substitute for aborting the agent.
 import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
 import { readPiSettings } from './pi-setup.mjs';
+import { retainPiProjectTrust } from './project-trust.mjs';
 
 function fact(runtime, store, key, api) {
   runtime.assertSessionOwner(store);
@@ -21,7 +23,8 @@ export function contextFacts(runtime, store) {
     isProjectTrusted() {
       const trusted = fact(runtime, store, 'project_trusted', 'ctx.isProjectTrusted');
       if (typeof trusted !== 'boolean') invalid('host project trust');
-      return trusted;
+      retainPiProjectTrust(store.state);
+      return trusted || store.state.piPlainWorkspaceTrusted;
     },
     getSystemPrompt() {
       runtime.require('system_prompt_read');

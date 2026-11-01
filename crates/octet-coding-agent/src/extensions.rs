@@ -114,6 +114,7 @@ mod notice_dedup;
 mod notifications;
 mod post_mutation;
 mod provider_runtime;
+mod tool_inference;
 mod runtime_state;
 mod status;
 mod summaries;
@@ -139,6 +140,8 @@ pub(crate) use self::runtime_state::ExtensionAutocompleteUpdate;
 pub use self::runtime_state::ExtensionBackgroundUpdates;
 pub use self::runtime_state::ExtensionToolRenderUpdate;
 pub use self::runtime_state::ExtensionTurnLifecycle;
+#[cfg(test)]
+pub(crate) use self::runtime_state::LifecycleDeliveryTestControl;
 use self::runtime_state::*;
 pub use self::summaries::ExtensionLifecycleSnapshot;
 pub use self::summaries::ExtensionOptions;
@@ -351,8 +354,17 @@ pub(crate) struct DeferredExtensionStartup {
     /// Whether a pending `octet-subagents` was admitted with `subagent_spawn`.
     /// Keeps delegation readiness honest while its handshake is in flight.
     agent_sessions_pending: bool,
+    pi_preparation: Option<lifecycle::DeferredPiPreparation>,
     /// Activation tasks; aborting cancels the still-starting processes.
     tasks: Vec<JoinHandle<()>>,
+}
+
+impl Drop for DeferredExtensionStartup {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 /// One settled extension handshake reported by a deferred startup.
@@ -382,6 +394,7 @@ pub(crate) struct DeferredStartupProgress {
 }
 
 pub struct ExecutableExtensions {
+    modeless: bool,
     telemetry: Option<octet_agent::TelemetryObserver>,
     telemetry_rejected: u64,
     /// Recently shown extension notices, so a repeating one is shown once.
@@ -416,6 +429,8 @@ pub struct ExecutableExtensions {
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
+    /// Queue observation only, fenced to the session whose run supplied it.
+    pending_message_control: Option<(String, octet_agent::RunControl)>,
     pending_session_setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     // The actual host registry handle, not an adapter-owned tool mirror. Its
     // interior dynamic registry remains usable while the Agent is borrowed.
@@ -485,7 +500,8 @@ pub struct ExecutableExtensions {
     /// `None` for every synchronous boot and once a deferred fleet settles.
     deferred_startup: Option<DeferredExtensionStartup>,
     #[cfg(test)]
-    lifecycle_delivery_test_control: Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
+    pub(crate) lifecycle_delivery_test_control:
+        Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
 }
 
 impl Default for ExecutableExtensions {
@@ -523,8 +539,10 @@ impl Default for ExecutableExtensions {
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
+            pending_message_control: None,
             pending_session_setup: None,
             tool_host: None,
+            modeless: false,
             command_resources: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),
