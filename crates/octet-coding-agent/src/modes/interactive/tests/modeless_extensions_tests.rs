@@ -33,7 +33,7 @@ export default pi => {
   pi.on('session_start', async (event, ctx) => {
     const entries = ctx.sessionManager.getEntries();
     record({start: true, reason: event.reason, entryCount: entries.length, entryIds: entries.map(entry => entry.id),
-      noModel: ctx.model === undefined, noUsage: ctx.getContextUsage() === undefined,
+      noModel: ctx.model === undefined, noUsage: ctx.getContextUsage() === undefined, thinkingLevel: pi.getThinkingLevel(),
       sessionId: ctx.sessionId, available: ctx.modelRegistry.getAvailable().length, idle: ctx.isIdle(), hasUI: ctx.hasUI});
     await ctx.ui.setFooter(() => ({render: () => [`NO-PROVIDER-FOOTER ${event.reason}`], invalidate() {}}));
   });
@@ -222,6 +222,7 @@ async fn modeless_pi_startup_footer_command_append_and_prompt_refusal() {
     assert_eq!(starts.len(), 1, "{starts:?}");
     assert_eq!(starts[0]["noModel"], true);
     assert_eq!(starts[0]["noUsage"], true);
+    assert_eq!(starts[0]["thinkingLevel"], "off");
     assert_eq!(starts[0]["hasUI"], true);
     assert_eq!(starts[0]["idle"], true);
     assert_eq!(starts[0]["available"], 0);
@@ -411,6 +412,11 @@ async fn modeless_pi_resource_reload_withdraws_native_catalog() {
     assert_eq!(starts.len(), 2, "{starts:?}");
     assert_eq!(starts[0]["reason"], "startup");
     assert_eq!(starts[1]["reason"], "reload");
+    for start in &starts {
+        assert_eq!(start["thinkingLevel"], "off", "{start}");
+        assert_eq!(start["noModel"], true, "{start}");
+        assert_eq!(start["noUsage"], true, "{start}");
+    }
     assert_eq!(starts[1]["entryCount"], 1);
     assert_eq!(starts[1]["entryIds"], serde_json::json!([entry_id.0]));
     let reopened = Session::open_read_only(session.path()).unwrap();
@@ -459,6 +465,7 @@ async fn modeless_pi_resource_reload_withdraws_native_catalog() {
     );
     assert!(state.extensions.is_modeless());
     assert!(state.config.model.is_none());
+    assert!(state.config.reasoning.is_none());
     state.extensions.shutdown().await;
 }
 

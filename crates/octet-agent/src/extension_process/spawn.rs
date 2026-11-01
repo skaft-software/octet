@@ -353,6 +353,7 @@ pub(super) async fn spawn_connection(
         active_admissions: AtomicU64::new(0),
         slots: StdRwLock::new(Arc::new(Semaphore::new(config.max_pending_requests))),
         publications: StdMutex::new(session_leaf::transport::PublicationPump::default()),
+        registered_shortcuts: StdMutex::new(HashSet::new()),
         frame_limit,
         shutdown_timeout: config.shutdown_timeout,
         cancellation_grace: config.cancellation_grace,

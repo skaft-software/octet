@@ -80,6 +80,7 @@ pub(super) struct ProcessConnection {
     pub(super) active_admissions: AtomicU64,
     pub(super) slots: StdRwLock<Arc<Semaphore>>,
     pub(super) publications: StdMutex<session_leaf::transport::PublicationPump>,
+    pub(super) registered_shortcuts: StdMutex<HashSet<String>>,
     pub(super) frame_limit: Arc<ProtocolFrameLimit>,
     pub(super) shutdown_timeout: Duration,
     pub(super) cancellation_grace: Duration,
@@ -177,6 +178,7 @@ pub(super) struct ChildRequest {
     pub(super) response_state: Arc<ChildResponseState>,
     pub(super) policy_intent: Option<ExtensionActionIntent>,
     pub(super) remote_ui: Option<RemoteUiChildRequest>,
+    pub(super) shortcut_registration: Option<(String, ExtensionResourceOwner)>,
 }
 
 pub(super) struct RegisteredChildRequest {
@@ -1750,7 +1752,7 @@ impl ProcessConnection {
         }
         let line = ZeroizingBytes(line);
         loop {
-            let (response_state, remote_ui_response) = {
+            let (response_state, remote_ui_response, shortcut_registration) = {
                 let children = lock_std_mutex(&self.child_requests);
                 let Some(child) = children.get(&id) else {
                     return Ok(ChildResponseAdmission::AlreadySettled);
@@ -1762,7 +1764,17 @@ impl ProcessConnection {
                     .transpose()
                     .map_err(ExtensionRuntimeError::Protocol)?
                     .flatten();
-                (Arc::clone(&child.response_state), remote_ui_response)
+                let shortcut_registration = child.shortcut_registration.clone().filter(|_| {
+                    response
+                        .get("result")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|result| result.is_empty())
+                });
+                (
+                    Arc::clone(&child.response_state),
+                    remote_ui_response,
+                    shortcut_registration,
+                )
             };
             match response_state.state.compare_exchange(
                 CHILD_ACTIVE,
@@ -1804,13 +1816,52 @@ impl ProcessConnection {
                     // Writer admission is the sole terminal outcome boundary:
                     // after this non-awaiting step cancellation cannot enqueue
                     // a competing $/cancelRequest for the same child request.
-                    claim.mark_admitted();
-                    permit.send(WriterFrame {
+                    let frame = WriterFrame {
                         line: line.0.clone(),
                         state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                         completion: Some(completed),
                         bus_delivery: None,
-                    });
+                    };
+                    if let Some((shortcut_id, owner)) = shortcut_registration {
+                        let pending = lock_std_mutex(&self.pending);
+                        let issued = lock_std_mutex(&self.issued_resource_owners);
+                        let mut children = lock_std_mutex(&self.child_requests);
+                        let child = children.get(&id).ok_or_else(|| {
+                            resource_error("shortcut registration child is unavailable")
+                        })?;
+                        if self.closed.load(Ordering::Acquire)
+                            || self.draining.load(Ordering::Acquire)
+                            || owner.process_generation != self.generation
+                            || !issued.contains(&owner)
+                            || child.exec_cancelled
+                            || !Arc::ptr_eq(&child.response_state, &claim.response_state)
+                            || child.response_state.state.load(Ordering::Acquire)
+                                != CHILD_RESPONDING
+                            || (child.parent_request_id != 0
+                                && pending.get(&child.parent_request_id).is_none_or(|parent| {
+                                    parent.terminal.load(Ordering::Acquire) != REQUEST_ACTIVE
+                                        || parent.resource_owner.as_ref() != Some(&owner)
+                                }))
+                        {
+                            return Err(resource_error(
+                                "shortcut registration is no longer active",
+                            ));
+                        }
+                        let mut registered = lock_std_mutex(&self.registered_shortcuts);
+                        if !registered.contains(&shortcut_id)
+                            && registered.len() >= MAX_EXTENSION_SHORTCUTS
+                        {
+                            return Err(resource_error(
+                                "runtime shortcut registration limit reached",
+                            ));
+                        }
+                        registered.insert(shortcut_id);
+                        claim.mark_admitted_with_children(&mut children);
+                        permit.send(frame);
+                    } else {
+                        claim.mark_admitted();
+                        permit.send(frame);
+                    }
                     let completed = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(

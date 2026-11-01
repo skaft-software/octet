@@ -23,7 +23,6 @@ initialize = json.loads(sys.stdin.readline())
 workspace = initialize["params"]["workspace"]
 send({"jsonrpc":"2.0","id":initialize["id"],"result":{
     "api_version":"0.4","tools":[],"commands":[{"name":"probe","description":"Probe retained settings"}],
-    "hooks":["session_start"],
     "protocol":{"version":"0.4","features":["request_cancellation","content_parts","runtime_commands","lifecycle_events","pi_settings_v1"],"limits":{"max_concurrent_requests":2}}
 }})
 origin = None

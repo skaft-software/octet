@@ -519,6 +519,7 @@ pub(super) fn insert_child_request(
                 response_state: Arc::clone(&response_state),
                 policy_intent: None,
                 remote_ui: None,
+                shortcut_registration: None,
             });
         }
         std::collections::hash_map::Entry::Occupied(_) => {

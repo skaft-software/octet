@@ -226,6 +226,7 @@ export class RemoteTUI {
     };
   }
   topOverlay() { return this.overlays.findLast(e => !e.hidden && !e.options.nonCapturing && (!e.options.visible || e.options.visible(this.surface.columns, this.surface.rows))); }
+  getTopmostVisibleOverlay() { return this.topOverlay(); }
   hideOverlay() { const entry = this.overlays.pop(); if (entry) { this.setFocus(entry.before); this.requestRender(); } }
   hasOverlay() { return this.overlays.some(e => !e.hidden); }
   input(data, release) {

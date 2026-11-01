@@ -342,7 +342,11 @@ impl PublicationPump {
         match self.queued.remove(owner) {
             Some(next) => Some(next),
             None => {
-                self.lanes.remove(owner);
+                let lanes = self.lanes.get_mut(owner).expect("active publication lane");
+                *lanes -= 1;
+                if *lanes == 0 {
+                    self.lanes.remove(owner);
+                }
                 None
             }
         }
@@ -352,5 +356,225 @@ impl PublicationPump {
     /// requests settle their own lanes so no owner is left permanently pinned.
     pub(in crate::extension_process) fn clear_queued(&mut self) {
         self.queued.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owner(session: &str) -> ExtensionResourceOwner {
+        ExtensionResourceOwner {
+            session_id: session.to_owned(),
+            extension_instance_id: "instance".to_owned(),
+            process_generation: 1,
+        }
+    }
+
+    fn staged(owner: &ExtensionResourceOwner, revision: u64) -> Staged {
+        Staged {
+            mailbox: Arc::new(SessionLeafMailbox::default()),
+            descriptor: Descriptor {
+                transfer_id: format!("transfer-{revision}"),
+                kind: "history".to_owned(),
+                owner: owner.clone(),
+                view_revision: revision,
+                head: Some(format!("head-{revision}")),
+                bytes: 1,
+                sha256: "0".repeat(64),
+                entry_count: 0,
+                branch_count: 0,
+                preparation: None,
+            },
+        }
+    }
+
+    fn host_state() -> ExtensionHostState {
+        ExtensionHostState::default()
+    }
+
+    #[test]
+    fn finish_releases_one_lane_and_handoff_keeps_other_lane_charged() {
+        let owner = owner("session-a");
+        let mut pump = PublicationPump::default();
+
+        let (first, _, first_id) = pump
+            .start(&owner, staged(&owner, 1), host_state(), 10)
+            .expect("first lane");
+        assert_eq!(first.descriptor.view_revision, 1);
+        assert_eq!(first_id, 10);
+        let (second, _, second_id) = pump
+            .start(&owner, staged(&owner, 2), host_state(), 11)
+            .expect("second lane");
+        assert_eq!(second.descriptor.view_revision, 2);
+        assert_eq!(second_id, 11);
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump
+            .start(&owner, staged(&owner, 3), host_state(), 12)
+            .is_none());
+        assert_eq!(pump.queued.len(), 1);
+
+        let (handed, _, handed_id) = pump.finish(&owner).expect("queued handoff");
+        assert_eq!(handed.descriptor.transfer_id, "transfer-3");
+        assert_eq!(handed.descriptor.view_revision, 3);
+        assert_eq!(handed_id, 12);
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump.finish(&owner).is_none());
+        assert_eq!(pump.lanes.get(&owner), Some(&1));
+
+        let (replacement, _, replacement_id) = pump
+            .start(&owner, staged(&owner, 4), host_state(), 13)
+            .expect("second lane refill");
+        assert_eq!(replacement.descriptor.view_revision, 4);
+        assert_eq!(replacement_id, 13);
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump
+            .start(&owner, staged(&owner, 5), host_state(), 14)
+            .is_none());
+        assert_eq!(pump.queued.len(), 1);
+
+        let (final_handoff, _, final_id) = pump.finish(&owner).expect("newest queued handoff");
+        assert_eq!(final_handoff.descriptor.transfer_id, "transfer-5");
+        assert_eq!(final_handoff.descriptor.view_revision, 5);
+        assert_eq!(final_id, 14);
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump.finish(&owner).is_none());
+        assert_eq!(pump.lanes.get(&owner), Some(&1));
+        assert!(pump.finish(&owner).is_none());
+        assert!(pump.lanes.get(&owner).is_none());
+    }
+
+    #[test]
+    fn newest_queued_publication_replaces_older() {
+        let owner = owner("session-a");
+        let mut pump = PublicationPump::default();
+
+        assert!(pump
+            .start(&owner, staged(&owner, 1), host_state(), 20)
+            .is_some());
+        assert!(pump
+            .start(&owner, staged(&owner, 2), host_state(), 21)
+            .is_some());
+        assert!(pump
+            .start(&owner, staged(&owner, 3), host_state(), 22)
+            .is_none());
+        assert!(pump
+            .start(&owner, staged(&owner, 4), host_state(), 23)
+            .is_none());
+        assert_eq!(pump.queued.len(), 1);
+
+        let (next, _, next_id) = pump.finish(&owner).expect("newest queued handoff");
+        assert_eq!(next.descriptor.transfer_id, "transfer-4");
+        assert_eq!(next.descriptor.view_revision, 4);
+        assert_eq!(next_id, 23);
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump.finish(&owner).is_none());
+        assert_eq!(pump.lanes.get(&owner), Some(&1));
+        assert!(pump.queued.is_empty());
+        assert!(pump.finish(&owner).is_none());
+        assert!(pump.lanes.get(&owner).is_none());
+    }
+
+    #[test]
+    fn clear_queued_retains_active_lanes_until_settled() {
+        let owner = owner("session-a");
+        let mut pump = PublicationPump::default();
+
+        assert!(pump
+            .start(&owner, staged(&owner, 1), host_state(), 30)
+            .is_some());
+        assert!(pump
+            .start(&owner, staged(&owner, 2), host_state(), 31)
+            .is_some());
+        assert!(pump
+            .start(&owner, staged(&owner, 3), host_state(), 32)
+            .is_none());
+        assert_eq!(pump.queued.len(), 1);
+
+        pump.clear_queued();
+        assert!(pump.queued.is_empty());
+        assert_eq!(pump.lanes.get(&owner), Some(&2));
+
+        assert!(pump.finish(&owner).is_none());
+        assert_eq!(pump.lanes.get(&owner), Some(&1));
+        assert!(pump.finish(&owner).is_none());
+        assert!(pump.lanes.get(&owner).is_none());
+    }
+
+    #[test]
+    fn separate_owners_are_bounded_independently() {
+        let first = owner("session-a");
+        let second = owner("session-b");
+        let mut pump = PublicationPump::default();
+
+        assert!(pump
+            .start(&first, staged(&first, 1), host_state(), 40)
+            .is_some());
+        assert!(pump
+            .start(&first, staged(&first, 2), host_state(), 41)
+            .is_some());
+        assert!(pump
+            .start(&first, staged(&first, 3), host_state(), 42)
+            .is_none());
+        assert!(pump
+            .start(&second, staged(&second, 1), host_state(), 50)
+            .is_some());
+        assert!(pump
+            .start(&second, staged(&second, 2), host_state(), 51)
+            .is_some());
+        assert!(pump
+            .start(&second, staged(&second, 3), host_state(), 52)
+            .is_none());
+        assert_eq!(pump.lanes.get(&first), Some(&2));
+        assert_eq!(pump.lanes.get(&second), Some(&2));
+        assert_eq!(pump.queued.len(), 2);
+
+        let (second_next, _, second_next_id) =
+            pump.finish(&second).expect("second owner queued handoff");
+        assert_eq!(second_next.descriptor.transfer_id, "transfer-3");
+        assert_eq!(second_next.descriptor.view_revision, 3);
+        assert_eq!(second_next_id, 52);
+        assert_eq!(pump.lanes.get(&second), Some(&2));
+        assert_eq!(pump.lanes.get(&first), Some(&2));
+
+        let (first_next, _, first_next_id) =
+            pump.finish(&first).expect("first owner queued handoff");
+        assert_eq!(first_next.descriptor.transfer_id, "transfer-3");
+        assert_eq!(first_next.descriptor.view_revision, 3);
+        assert_eq!(first_next_id, 42);
+        assert_eq!(pump.lanes.get(&first), Some(&2));
+
+        assert!(pump.finish(&second).is_none());
+        assert_eq!(pump.lanes.get(&second), Some(&1));
+        assert_eq!(pump.lanes.get(&first), Some(&2));
+
+        assert!(pump
+            .start(&second, staged(&second, 4), host_state(), 53)
+            .is_some());
+        assert_eq!(pump.lanes.get(&second), Some(&2));
+
+        assert!(pump.finish(&first).is_none());
+        assert_eq!(pump.lanes.get(&first), Some(&1));
+        assert_eq!(pump.lanes.get(&second), Some(&2));
+
+        assert!(pump
+            .start(&second, staged(&second, 5), host_state(), 54)
+            .is_none());
+        assert_eq!(pump.queued.len(), 1);
+        let (second_queued, _, second_queued_id) =
+            pump.finish(&second).expect("second owner newest handoff");
+        assert_eq!(second_queued.descriptor.transfer_id, "transfer-5");
+        assert_eq!(second_queued.descriptor.view_revision, 5);
+        assert_eq!(second_queued_id, 54);
+        assert_eq!(pump.lanes.get(&second), Some(&2));
+
+        assert!(pump.finish(&first).is_none());
+        assert!(pump.lanes.get(&first).is_none());
+        assert_eq!(pump.lanes.get(&second), Some(&2));
     }
 }

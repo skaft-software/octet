@@ -49,7 +49,7 @@ fn waited_note(process: &ExtensionProcess, elapsed: Duration) -> Option<String> 
 
 /// Isolated processes receive the host facts with the native session view;
 /// shared workspace services never hold one session's history.
-fn publish_host_state<'a>(
+pub(super) fn publish_host_state<'a>(
     processes: impl IntoIterator<Item = &'a ExtensionProcess>,
     state: &ExtensionHostState,
     session: &Session,

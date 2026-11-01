@@ -248,6 +248,17 @@ impl ExecutableExtensions {
                 return outcome;
             }
         };
+        if process
+            .contributions()
+            .shortcuts
+            .iter()
+            .any(|shortcut| shortcut.name == shortcut_id)
+        {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut id {shortcut_id:?} is declared by the static manifest"),
+            );
+        }
         if self.shortcuts.iter().any(|existing| existing.key == parsed) {
             return ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
@@ -922,6 +933,19 @@ impl ExecutableExtensions {
                             data,
                         )
                     };
+                    if matches!(&outcome, ExtensionRequestOutcome::Ok(_)) {
+                        let state = self
+                            .host_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone();
+                        super::turns::publish_host_state(
+                            &self.processes,
+                            &state,
+                            session,
+                            &mut self.diagnostics,
+                        );
+                    }
                     if pending.process.supports_feature(
                         octet_agent::extension_process::EXTENSION_FEATURE_TRANSCRIPT_RENDER,
                     ) {

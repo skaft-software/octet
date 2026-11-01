@@ -1226,6 +1226,21 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         (ExtensionRequestFailure::InvalidRequest, error.to_string()),
                     );
                 }
+                if state
+                    .declared
+                    .shortcuts
+                    .iter()
+                    .any(|shortcut| shortcut.name == request.id)
+                {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "runtime shortcut id is declared by the static manifest".into(),
+                        ),
+                    );
+                }
                 if let Err(failure) = bounded_plain_text_failure(
                     "shortcut key",
                     &request.key,
@@ -1239,6 +1254,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES,
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
+                }
+                {
+                    let mut children = lock_std_mutex(&state.child_requests);
+                    let Some(child) = children.get_mut(&admitted.request_id) else {
+                        return Ok(());
+                    };
+                    child.shortcut_registration =
+                        Some((request.id.clone(), admitted.owner.clone()));
                 }
                 dispatch_host_request_event(state, &admitted, move |admitted| {
                     ExtensionEvent::ShortcutRequested {

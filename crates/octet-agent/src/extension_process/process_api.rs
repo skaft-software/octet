@@ -6,6 +6,10 @@ use super::*;
 #[path = "startup_catalog_tests.rs"]
 mod startup_catalog_tests;
 
+#[cfg(all(test, unix))]
+#[path = "registered_shortcut_tests.rs"]
+mod registered_shortcut_tests;
+
 impl ExtensionProcess {
     /// Launches, initializes, and validates an explicitly enabled and trusted
     /// executable extension.
@@ -1126,22 +1130,33 @@ impl ExtensionProcess {
         mut context: ExtensionExecutionContext,
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
-        if !self
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let declared = self
             .inner
             .contributions
             .shortcuts
             .iter()
-            .any(|shortcut| shortcut.name == name)
-        {
-            return Err(self.undeclared("shortcut", name));
+            .any(|shortcut| shortcut.name == name);
+        if !declared {
+            if !lock_std_mutex(&connection.registered_shortcuts).contains(&name) {
+                return Err(self.undeclared("shortcut", name));
+            }
+            if context.resource_owner.as_ref().is_none_or(|owner| {
+                owner.extension_instance_id != self.inner.instance_id
+                    || owner.process_generation != connection.generation
+            }) {
+                return Err(resource_error(
+                    "runtime shortcut registration generation is stale",
+                ));
+            }
+        } else {
+            context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
+                session_id: owner.session_id,
+                extension_instance_id: self.inner.instance_id.clone(),
+                process_generation: connection.generation,
+            });
         }
-        let connection = read_std_lock(&self.inner.connection).clone();
         connection.require_api_v03_host_method(methods::SHORTCUT_EXECUTE)?;
-        context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
-            session_id: owner.session_id,
-            extension_instance_id: self.inner.instance_id.clone(),
-            process_generation: connection.generation,
-        });
         let resource_owner = context.resource_owner.clone();
         let params = serde_json::to_value(ShortcutRequest { name, context })
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;

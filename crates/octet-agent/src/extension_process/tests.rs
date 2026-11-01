@@ -2642,6 +2642,7 @@ fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
     ChildRequest {
         exec_cancelled: false,
         remote_ui: None,
+        shortcut_registration: None,
         parent_request_id,
         response_state: Arc::new(ChildResponseState {
             state: AtomicU8::new(state),

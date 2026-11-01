@@ -837,10 +837,14 @@ fn sigterm_delivers_graceful_shutdown_to_executable_extension() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = tempfile::tempdir().expect("tempdir");
     let (args, started_marker, marker) = install_shutdown_probe(directory.path());
-    let mut octet = PtyOctet::spawn_with_args(directory.path(), &args);
-    // The first terminal setup bytes precede `build_app`; wait for an
-    // extension-owned marker so SIGTERM cannot race its initialize handshake.
-    octet.wait_until(READY_DEADLINE, |_| started_marker.exists());
+    let mut octet = PtyOctet::spawn_with_args_and_startup_trace(directory.path(), &args);
+    octet.wait_until(READY_DEADLINE, |output| {
+        contains_bytes(output, b"octet-startup: extensions.attached")
+    });
+    octet.submit_command(b"/shutdown-probe-ready");
+    octet.wait_until(READY_DEADLINE, |output| {
+        started_marker.exists() && contains_bytes(output, b"shutdown-ready-ack")
+    });
 
     let (status, elapsed, output) = octet.terminate();
     assert_eq!(status.code(), Some(128 + libc::SIGTERM));
@@ -857,7 +861,10 @@ fn idle_plain_tty_sigterm_gracefully_stops_extensions_without_the_watchdog() {
     let (mut args, started_marker, marker) = install_shutdown_probe(directory.path());
     args.push("--plain".to_owned());
     let mut octet = PtyOctet::spawn_plain_with_args(directory.path(), &args);
-    octet.wait_until(READY_DEADLINE, |_| started_marker.exists());
+    octet.write_input(b"/shutdown-probe-ready\r");
+    octet.wait_until(READY_DEADLINE, |output| {
+        started_marker.exists() && contains_bytes(output, b"shutdown-ready-ack")
+    });
 
     let (status, elapsed, output) = octet.terminate();
     assert_eq!(status.code(), Some(128 + libc::SIGTERM));
@@ -934,6 +941,8 @@ version = "0.1.0"
 api_version = "0.1"
 [entrypoint]
 command = "probe.sh"
+[contributes]
+commands = ["shutdown-probe-ready"]
 "#,
     )
     .expect("extension manifest");
@@ -941,12 +950,23 @@ command = "probe.sh"
     std::fs::write(
         &script,
         r#"#!/bin/sh
-printf '%s\n' started > "$OCTET_WORKSPACE/extension-started.marker"
 IFS= read -r initialize
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
-IFS= read -r shutdown
-printf '%s\n' graceful > "$OCTET_WORKSPACE/extension-shutdown.marker"
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+id=$(printf '%s\n' "$initialize" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[{"name":"shutdown-probe-ready","description":"Check shutdown probe readiness"}]}}\n' "$id"
+while IFS= read -r request; do
+  id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$request" in
+    *'"method":"command/execute"'*)
+      printf '%s\n' started > "$OCTET_WORKSPACE/extension-started.marker"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"shutdown-ready-ack"}}\n' "$id"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '%s\n' graceful > "$OCTET_WORKSPACE/extension-shutdown.marker"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
 "#,
     )
     .expect("extension script");

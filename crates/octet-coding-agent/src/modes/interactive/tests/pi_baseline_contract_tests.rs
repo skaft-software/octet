@@ -121,6 +121,66 @@ export default pi => {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_append_publication_preserves_live_pin_and_refreshes_each_shortcut() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.registerCommand('publication-prime', {handler: () => {
+    pi.appendEntry('publication-seed', {index:1});
+    pi.appendEntry('publication-seed', {index:2});
+  }});
+  pi.registerShortcut('ctrl+shift+p', {handler: ctx => {
+    const entries = ctx.sessionManager.getEntries();
+    pi.appendEntry('publication-shortcut', {
+      seeds: entries.filter(entry => entry.type === 'custom' && entry.customType === 'publication-seed').length,
+      previous: entries.filter(entry => entry.type === 'custom' && entry.customType === 'publication-shortcut').length
+    });
+  }});
+};
+"#,
+    );
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "publication-prime")
+        .await
+        .unwrap();
+    assert_eq!(
+        private_entries(app.agent.session(), "publication-seed").len(),
+        2
+    );
+    for count in 1..=2 {
+        app.executable_extensions
+            .dispatch_shortcut_for_event(&Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('P'),
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+            )))
+            .expect("native shortcut remains registered after append publication");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                apply_extension_background(&mut shell, &mut app.executable_extensions);
+                app.executable_extensions
+                    .apply_session_host_requests(&mut app.agent, &app.sessions);
+                let entries = private_entries(app.agent.session(), "publication-shortcut");
+                if entries.len() == count {
+                    assert_eq!(
+                        entries[count - 1].1,
+                        json!({"seeds":2,"previous":count - 1})
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("each invocation appends against the actual latest durable head");
+    }
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    assert_eq!(private_entries(&reopened, "publication-seed").len(), 2);
+    assert_eq!(private_entries(&reopened, "publication-shortcut").len(), 2);
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_late_shortcut_hook_registers_native_binding_and_dispatches() {
     let (_directory, mut app) = pi_app(
         r#"

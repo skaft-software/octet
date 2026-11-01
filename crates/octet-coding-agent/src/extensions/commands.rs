@@ -50,9 +50,10 @@ impl ExecutableExtensions {
         event: &Event,
     ) -> Option<ExtensionShortcutInvocation> {
         let invocation = self.shortcut_for_event(event)?;
-        if let Some(index) = self.dynamic_shortcuts.iter().position(|dynamic| {
-            dynamic.extension == invocation.extension && dynamic.shortcut_id == invocation.name
-        }) {
+        let (process, binding_generation) = if let Some(index) =
+            self.dynamic_shortcuts.iter().position(|dynamic| {
+                dynamic.extension == invocation.extension && dynamic.shortcut_id == invocation.name
+            }) {
             let dynamic = self.dynamic_shortcuts[index].clone();
             if !dynamic.process.is_running()
                 || dynamic.process.health_snapshot().generation != dynamic.generation
@@ -64,36 +65,41 @@ impl ExecutableExtensions {
                 ));
                 return None;
             }
-            if let Err(error) = dynamic
-                .process
-                .notify_shortcut_trigger(&dynamic.shortcut_id)
-            {
+            if !dynamic.process.supports_feature("session_owner_routes_v1") {
+                if let Err(error) = dynamic
+                    .process
+                    .notify_shortcut_trigger(&dynamic.shortcut_id)
+                {
+                    self.diagnostics.push(format!(
+                        "warning: extension shortcut {:?}/{} could not be delivered: {error}",
+                        dynamic.extension, dynamic.shortcut_id
+                    ));
+                    return None;
+                }
+                return Some(invocation);
+            }
+            (dynamic.process, Some(dynamic.generation))
+        } else {
+            let Some(process) = self
+                .processes
+                .iter()
+                .find(|process| {
+                    process.descriptor().manifest.name == invocation.extension
+                        && process
+                            .contributions()
+                            .shortcuts
+                            .iter()
+                            .any(|shortcut| shortcut.name == invocation.name)
+                })
+                .cloned()
+            else {
                 self.diagnostics.push(format!(
-                    "warning: extension shortcut {:?}/{} could not be delivered: {error}",
-                    dynamic.extension, dynamic.shortcut_id
+                    "warning: extension shortcut {:?}/{} is no longer available",
+                    invocation.extension, invocation.name
                 ));
                 return None;
-            }
-            return Some(invocation);
-        }
-        let Some(process) = self
-            .processes
-            .iter()
-            .find(|process| {
-                process.descriptor().manifest.name == invocation.extension
-                    && process
-                        .contributions()
-                        .shortcuts
-                        .iter()
-                        .any(|shortcut| shortcut.name == invocation.name)
-            })
-            .cloned()
-        else {
-            self.diagnostics.push(format!(
-                "warning: extension shortcut {:?}/{} is no longer available",
-                invocation.extension, invocation.name
-            ));
-            return None;
+            };
+            (process, None)
         };
         if Handle::try_current().is_err() {
             self.diagnostics.push(format!(
@@ -111,7 +117,12 @@ impl ExecutableExtensions {
             return None;
         }
         let sender = self.background_tx.clone();
-        let context = extension_execution_context(&process, self.resource_owner.as_deref());
+        let mut context = extension_execution_context(&process, self.resource_owner.as_deref());
+        if let (Some(generation), Some(owner)) =
+            (binding_generation, context.resource_owner.as_mut())
+        {
+            owner.process_generation = generation;
+        }
         let started = invocation.clone();
         self.shortcut_tasks.push(tokio::spawn(async move {
             let (extension, context, messages) =

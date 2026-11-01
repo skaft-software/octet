@@ -131,7 +131,9 @@ pub(super) fn shell_chrome(
     let available = budget.saturating_sub(fixed.saturating_add(1));
     // The footer stays last and has priority when widgets exceed the viewport.
     footer_rows.truncate(available);
-    let widget_rows = available.saturating_sub(footer_rows.len());
+    let widget_rows = available
+        .saturating_sub(footer_rows.len())
+        .saturating_sub(usize::from(!state.transcript.is_empty()));
     chrome.extension_below.truncate(widget_rows);
     chrome
         .extension_above
@@ -248,3 +250,6 @@ pub(super) fn working_frame(reasoning: &super::assistant_block::AssistantBlock) 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod overflow_tests;

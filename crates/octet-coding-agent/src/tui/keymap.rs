@@ -193,6 +193,8 @@ pub(crate) fn parse_extension_shortcut(value: &str) -> Result<ExtensionShortcutK
     if matches!(code, KeyCode::Char(_))
         && modifiers.contains(KeyModifiers::ALT)
         && !modifiers.contains(KeyModifiers::SUPER)
+        && !(modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(code, KeyCode::Char(character) if character.is_ascii_alphabetic()))
     {
         return Err(
             "shortcut character may be text produced by Option or AltGr; use ctrl or super instead"
@@ -207,7 +209,11 @@ pub(crate) fn extension_shortcut_key(event: &Event) -> Option<ExtensionShortcutK
     let Event::Key(key) = event else {
         return None;
     };
-    if key.kind != KeyEventKind::Press || key_text(key).is_some() {
+    if key.kind != KeyEventKind::Press
+        || (key_text(key).is_some()
+            && !(key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && matches!(key.code, KeyCode::Char(character) if character.is_ascii_alphabetic())))
+    {
         return None;
     }
     let code = match key.code {
@@ -227,6 +233,11 @@ pub(crate) fn is_reserved_extension_shortcut(key: &ExtensionShortcutKey) -> bool
         | (KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab, _) => true,
         (KeyCode::Char('a' | 'c'), modifiers)
             if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+        {
+            true
+        }
+        (KeyCode::Char('d'), modifiers)
+            if modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             true
         }
@@ -721,6 +732,53 @@ mod tests {
         assert!(parse_extension_shortcut("shift+p").is_err());
         assert!(parse_extension_shortcut("alt+p").is_err());
         assert!(parse_extension_shortcut("ctrl+ctrl+p").is_err());
+    }
+
+    #[test]
+    fn explicit_control_alt_ascii_shortcuts_preserve_other_text_and_repeat_events() {
+        let modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let parsed = parse_extension_shortcut("ctrl+alt+f").unwrap();
+        assert!(!is_reserved_extension_shortcut(&parsed));
+        assert!(is_reserved_extension_shortcut(
+            &parse_extension_shortcut("ctrl+alt+d").unwrap()
+        ));
+        for character in ['c', 'e', 'z'] {
+            assert!(!is_reserved_extension_shortcut(
+                &parse_extension_shortcut(&format!("ctrl+alt+{character}")).unwrap()
+            ));
+        }
+        assert_eq!(
+            extension_shortcut_key(&key(KeyCode::Char('f'), modifiers)),
+            Some(parsed.clone())
+        );
+        assert_eq!(
+            extension_shortcut_key(&key(KeyCode::Char('F'), modifiers)),
+            Some(parsed)
+        );
+        for character in ['€', 'é', '@', '1'] {
+            assert!(parse_extension_shortcut(&format!("ctrl+alt+{character}")).is_err());
+            let event = KeyEvent::new(KeyCode::Char(character), modifiers);
+            assert_eq!(key_text(&event), Some(character));
+            assert_eq!(extension_shortcut_key(&Event::Key(event)), None);
+        }
+        assert!(parse_extension_shortcut("alt+f").is_err());
+        assert!(parse_extension_shortcut("ctrl+alt+shift+f").is_err());
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            assert_eq!(
+                extension_shortcut_key(&Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('f'),
+                    modifiers,
+                    kind,
+                ))),
+                None
+            );
+        }
+        let event = KeyEvent::new(KeyCode::Char('f'), modifiers);
+        assert_eq!(key_text(&event), Some('f'));
+        assert_eq!(
+            translate(Some(Event::Key(event)), false, ""),
+            InputAction::Edit(EditAction::Char('f'))
+        );
     }
 
     #[test]

@@ -75,6 +75,40 @@ test('late shortcut registration fences retired owners, cancellation and drainin
   assert.deepEqual(h.calls, []);
 });
 
+test('native admitted dynamic shortcut executes with its fresh live parent, not the notification origin', async t => {
+  const h = harness(t);
+  h.runtime.initialized = true;
+  h.runtime.features.add('session_entries');
+  h.run(() => h.api.registerShortcut('ctrl+alt+f', {
+    handler() { h.api.appendEntry('shortcut-native-parent', { invoked: true }); },
+  }));
+  h.runtime.active.clear();
+  h.store.live = false;
+  await assert.rejects(h.runtime.notify({ method: 'shortcut/trigger', params: {
+    id: 'pi-runtime-shortcut-1', resource_owner: owner,
+  } }), /active numeric parent_request_id required/);
+  const invocation = { id: 41, live: true, method: 'shortcut/execute', controller: new AbortController(), pending: new Set(), errors: [] };
+  h.runtime.active.set(invocation.id, invocation);
+  h.runtime.transport.requestSync = (method, params, options) => {
+    assert.equal(method, 'session/append_entry');
+    assert.deepEqual(params, { parent_request_id: 41, resource_owner: owner,
+      entry_type: 'shortcut-native-parent', data: Object.assign(Object.create(null), { invoked: true }) });
+    assert.equal(options.parent, 41);
+    assert.equal(options.signal, invocation.controller.signal);
+    h.calls.push({ method, params, options });
+    return { entry_id: 'native-committed-shortcut' };
+  };
+  assert.deepEqual(await h.runtime.dispatch({ method: 'shortcut/execute', params: {
+    name: 'pi-runtime-shortcut-1', context: { resource_owner: owner, workspace: '/work',
+      host: { session_entries: [], session_branch: [] } },
+  } }, invocation), { text: '', notifications: [], context: [] });
+  assert.equal(h.calls.filter(call => call.method === 'session/append_entry').length, 1);
+  assert.equal(invocation.state.host.session_entries[0].id, 'native-committed-shortcut');
+  assert.equal(h.store.live, false);
+  invocation.controller.abort(Error('cancelled native shortcut'));
+  assert.throws(() => h.runtime.scope.run(invocation, () => h.api.appendEntry('after-cancel', {})), /cancelled native shortcut/);
+});
+
 test('retained shortcut registration carries exact owner without a stale active parent', t => {
   const h = harness(t);
   h.store.live = false; h.runtime.active.clear();

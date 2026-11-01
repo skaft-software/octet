@@ -502,9 +502,11 @@ pub(super) fn host_state_for_selection(
         session_name,
         model: selection.map(|(model, _)| model.spec.id.0.clone()),
         model_view: selection.and_then(|(model, _)| extension_model_view(model)),
-        reasoning: selection
-            .and_then(|(model, reasoning)| pi_thinking_level(model, reasoning))
-            .map(serde_json::Value::String),
+        reasoning: match selection {
+            Some((model, reasoning)) => pi_thinking_level(model, reasoning),
+            None => Some("off".into()),
+        }
+        .map(serde_json::Value::String),
         pi_models: None,
         active_skills,
     }

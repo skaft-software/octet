@@ -19,6 +19,19 @@ mod wire;
 pub use wire::SessionSnapshotProfile;
 pub(in crate::extension_process) use wire::{Descriptor, Preparation};
 
+pub(in crate::extension_process) fn publication_changed(
+    mailbox: &SessionLeafMailbox,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let mut receiver = lock_std_mutex(&mailbox.snapshot_publication)
+        .as_ref()
+        .map(|(_, sender)| sender.subscribe());
+    async move {
+        if let Some(receiver) = &mut receiver {
+            let _ = receiver.changed().await;
+        }
+    }
+}
+
 pub(crate) const OWNER_ROUTES: &str = "session_owner_routes_v1";
 pub(crate) const SNAPSHOT_TRANSPORT: &str = "session_snapshot_transport_v1";
 pub(crate) const APPEND_RECEIPTS: &str = "session_append_receipts_v1";
@@ -199,6 +212,54 @@ impl Store {
             preparation,
             revision,
         )
+    }
+
+    pub(in crate::extension_process) fn rebind_parent(
+        &mut self,
+        parent_id: u64,
+        previous: &ExtensionResourceOwner,
+        mirror: &SessionMirror,
+        mailbox: &SessionLeafMailbox,
+    ) -> Result<bool, ExtensionRuntimeError> {
+        let parent = self.parents.get(&parent_id).ok_or_else(unavailable)?;
+        if parent.owner != *previous || parent.preparation.is_some() {
+            return Err(unavailable());
+        }
+        let publication = lock_std_mutex(&mailbox.snapshot_publication);
+        let revision = match publication.as_ref() {
+            Some((owner, sender)) if owner == &mirror.owner => match sender.borrow().clone() {
+                SnapshotPublicationState::Pending { .. } => return Ok(false),
+                SnapshotPublicationState::Prepared { revision } => revision,
+                SnapshotPublicationState::Failed { .. } => return Err(unavailable()),
+            },
+            _ => return Err(unavailable()),
+        };
+        let view = self
+            .current
+            .get(&mirror.owner)
+            .and_then(Option::as_ref)
+            .ok_or_else(unavailable)?;
+        let descriptor = &view.descriptor;
+        let facts = mirror.value.as_ref().ok_or_else(unavailable)?;
+        if descriptor.owner != mirror.owner
+            || descriptor.preparation.is_some()
+            || facts.get("session_view_revision").and_then(Value::as_u64)
+                != Some(descriptor.view_revision)
+            || facts.get("session_leaf_id") != Some(&json!(descriptor.head))
+            || revision != descriptor.view_revision
+        {
+            return Err(unavailable());
+        }
+        self.parents.insert(
+            parent_id,
+            ParentView {
+                owner: mirror.owner.clone(),
+                preparation: None,
+                revision: descriptor.view_revision,
+                head: descriptor.head.clone(),
+            },
+        );
+        Ok(true)
     }
 
     pub(in crate::extension_process) fn rebind_current(
