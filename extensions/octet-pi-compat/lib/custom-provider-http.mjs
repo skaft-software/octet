@@ -18,13 +18,24 @@ function appendHeaders(target, source) {
 export function prepareCustomProviderHttp(job, model, options) {
   const fetch = options.fetch ?? globalThis.fetch;
   if (typeof fetch !== 'function') invalid('custom provider fetch');
-  const headers = {};
+  const headers = { Accept: 'application/json' };
   if (options.apiKey !== undefined) {
     bounded(options.apiKey, 'custom provider key', 65536, { controls: true });
     if (/[\r\n\0]/.test(options.apiKey)) invalid('custom provider key');
     headers.Authorization = `Bearer ${options.apiKey}`;
   }
   appendHeaders(headers, headerObject(model.headers, 'custom model headers'));
+  const openRouter = model.provider === 'openrouter' || model.baseUrl.includes('openrouter.ai');
+  const format = model.compat?.sessionAffinityFormat ?? (openRouter ? 'openrouter' : 'openai');
+  const completions = model.api === 'openai-completions';
+  if (options.sessionId && (!completions || (model.compat?.sendSessionAffinityHeaders ?? openRouter))) {
+    const affinity = format === 'openrouter' ? { 'x-session-id': options.sessionId } : {
+      ...(format === 'openai' ? { session_id: options.sessionId } : {}),
+      'x-client-request-id': options.sessionId,
+      ...(completions ? { 'x-session-affinity': options.sessionId } : {}),
+    };
+    appendHeaders(headers, affinity);
+  }
   appendHeaders(headers, headerObject(options.headers, 'custom request headers'));
   headerObject(headers, 'custom combined headers');
   const controller = new AbortController();
