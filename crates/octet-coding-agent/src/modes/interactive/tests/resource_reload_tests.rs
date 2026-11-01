@@ -7,6 +7,117 @@ use super::*;
 
 use super::support::*;
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resource_reload_activates_replacement_model_driver_before_startup_preflight() {
+    use super::pi_contract_support::pi_ui_app;
+    use octet_ai::{auth::Auth, EndpointId, ModelId};
+
+    let factory = r#"
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+export default pi => {
+  const record = row => appendFileSync(TRACE, JSON.stringify(row) + '\n');
+  let settled = false;
+  pi.on('session_start', async (event, ctx) => {
+    const target = ctx.modelRegistry.getAvailable().find(model => model.provider === 'reload-local');
+    if (!target) throw Error('real local catalog route missing');
+    const selected = await pi.setModel(target);
+    if (!selected) throw Error('real local model selection refused');
+    settled = true;
+    record({phase: 'start', reason: event.reason, selected, model: ctx.model});
+  });
+  pi.on('resources_discover', (_, ctx) => {
+    record({phase: 'discover', settled});
+    if (!settled) throw Error('startup model selection did not settle');
+    return {promptPaths: [join(ctx.cwd, 'reload-prompts')]};
+  });
+};
+"#;
+    let (directory, mut app, mut shell) = pi_ui_app(factory);
+    let mut endpoint = (*app.model.endpoint).clone();
+    endpoint.id = EndpointId("reload-local".into());
+    endpoint.auth = Auth::None;
+    endpoint.base_url = "http://127.0.0.1:9/v1/".parse().unwrap();
+    app.catalog.register_endpoint(endpoint.clone()).unwrap();
+    let mut spec = (*app.model.spec).clone();
+    spec.id = ModelId("reload-local-model".into());
+    spec.endpoint = endpoint.id;
+    app.catalog.register_model(spec.clone()).unwrap();
+    assert_ne!(app.model.spec.id, spec.id);
+    let prompts = app.config.workspace.join("reload-prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    let prompt = prompts.join("reload-driver.md");
+    std::fs::write(&prompt, "Native reload driver resource $1\n").unwrap();
+    let session = app.agent.session().path().to_owned();
+    let owner = app.agent.session().resource_owner_key();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(app.model.spec.id, spec.id);
+    assert_eq!(app.agent.model().spec.id, spec.id);
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
+
+    let (mut app, applied) = tokio::time::timeout(
+        Duration::from_secs(20),
+        reload_resources_announcing(app, &mut shell, &mut input, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(applied);
+    assert_eq!(app.model.spec.id, spec.id);
+    assert_eq!(app.agent.model().spec.id, spec.id);
+    assert_eq!(app.agent.session().path(), session);
+    assert_eq!(app.agent.session().resource_owner_key(), owner);
+    assert!(app.agent.session().usage_records().is_empty());
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
+    let visible = shell.debug_snapshot();
+    assert!(!visible.contains("reload failed"), "{visible}");
+    assert!(visible.contains("reload succeeded"), "{visible}");
+    app.executable_extensions.shutdown().await;
+
+    let rows = std::fs::read_to_string(directory.path().join("trace.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let starts = rows
+        .iter()
+        .filter(|row| row["phase"] == "start")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2, "{rows:#?}");
+    assert_eq!(starts[0]["reason"], "startup");
+    assert_eq!(starts[1]["reason"], "reload");
+    for row in starts {
+        assert_eq!(row["selected"], true, "{row}");
+        assert_eq!(row["model"]["provider"], "reload-local", "{row}");
+        assert_eq!(row["model"]["id"], spec.api_name, "{row}");
+    }
+    let discoveries = rows
+        .iter()
+        .filter(|row| row["phase"] == "discover")
+        .collect::<Vec<_>>();
+    assert_eq!(discoveries.len(), 2, "{rows:#?}");
+    assert!(
+        discoveries.iter().all(|row| row["settled"] == true),
+        "{rows:#?}"
+    );
+}
+
 #[test]
 fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
     use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};

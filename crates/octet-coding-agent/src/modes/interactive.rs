@@ -5631,6 +5631,8 @@ where
         Ok(app)
     })
     .await?;
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
     let mut problems =
         resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
     let (theme, problem) = crate::tui::theme::retain_invalid_file_theme(
@@ -5651,8 +5653,6 @@ where
     shell.hydrate(app.agent.session())?;
     // After hydration: it rebuilds the transcript, which would drop the note.
     shell.report_reload_outcome(&problems, announce_success);
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
     update_status(shell, &app);
     Ok((app, true))
 }
