@@ -4,33 +4,113 @@
     "package": "@earendil-works/pi-coding-agent",
     "version": "1.4.0"
   },
-  "note": "Exact pins, chosen as the newest version (preferring one published before 2026-11-02) whose pi peer ranges admit Pi 1.4.0. pi-background-tasks has no such version: every release peers on pi ^0.81-0.84, so it is kept at its newest release as the informational 'peer range excludes Pi 1.4.0' case, mirroring a real user setup. Pi installs these with --legacy-peer-deps, so the peer mismatch does not block install.",
+  "note": "Exact pins, chosen as the newest version (preferring one published before 2026-11-02) whose pi peer ranges admit Pi 1.4.0. pi-background-tasks has no such version: every release peers on pi ^0.81-0.84, so it is kept at its newest release as the informational 'peer range excludes Pi 1.4.0' case, mirroring a real user setup. Pi installs these with --legacy-peer-deps, so the peer mismatch does not block install. Pi 1.4.0 refuses to start when two extensions register the same tool (Failed to load extension ... conflicts with ...), so packages that collide with another locked package are dropped (see dropped_for_pi_conflicts); a fixture Pi cannot start would measure nothing.",
   "packages": [
-    {"name": "pi-powerline-footer", "version": "0.22.0"},
-    {"name": "pi-ding", "version": "0.2.2"},
-    {"name": "pi-hermes-memory", "version": "0.9.11"},
-    {"name": "pi-background-tasks", "version": "2.6.10"},
-    {"name": "pi-subagents", "version": "0.84.0"},
-    {"name": "pi-mcp-adapter", "version": "7.0.0"},
-    {"name": "pi-lens", "version": "4.4.7"},
-    {"name": "pi-web-access", "version": "0.46.0"},
-    {"name": "@juicesharp/rpiv-todo", "version": "2.15.0"},
-    {"name": "@juicesharp/rpiv-ask-user-question", "version": "2.15.0"},
-    {"name": "pi-advisor-flow", "version": "0.14.3"},
-    {"name": "pi-btw", "version": "0.8.0"},
-    {"name": "pi-simplify", "version": "0.2.3"},
-    {"name": "pi-hashline-edit-pro", "version": "7.1.1"},
-    {"name": "pi-cache-optimizer", "version": "2.10.4"},
-    {"name": "@heyhuynhgiabuu/pi-pretty", "version": "0.8.0"},
-    {"name": "pi-intercom", "version": "0.18.1"},
-    {"name": "pi-prompt-template-model", "version": "0.12.3"},
-    {"name": "pi-interview", "version": "0.14.1"},
-    {"name": "pi-ask-user", "version": "0.17.2"},
-    {"name": "@narumitw/pi-plan-mode", "version": "0.59.4"},
-    {"name": "@narumitw/pi-goal", "version": "0.54.13"},
-    {"name": "@narumitw/pi-usage", "version": "0.69.0"},
-    {"name": "pi-memory", "version": "0.4.2"},
-    {"name": "pi-web-search", "version": "1.7.0"},
-    {"name": "@gotgenes/pi-permission-system", "version": "42.0.0"}
+    {
+      "name": "pi-powerline-footer",
+      "version": "0.22.0"
+    },
+    {
+      "name": "pi-ding",
+      "version": "0.2.2"
+    },
+    {
+      "name": "pi-hermes-memory",
+      "version": "0.9.11"
+    },
+    {
+      "name": "pi-background-tasks",
+      "version": "2.6.10"
+    },
+    {
+      "name": "pi-subagents",
+      "version": "0.84.0"
+    },
+    {
+      "name": "pi-mcp-adapter",
+      "version": "7.0.0"
+    },
+    {
+      "name": "pi-lens",
+      "version": "4.4.7"
+    },
+    {
+      "name": "pi-web-access",
+      "version": "0.46.0"
+    },
+    {
+      "name": "@juicesharp/rpiv-todo",
+      "version": "2.15.0"
+    },
+    {
+      "name": "@juicesharp/rpiv-ask-user-question",
+      "version": "2.15.0"
+    },
+    {
+      "name": "pi-advisor-flow",
+      "version": "0.14.3"
+    },
+    {
+      "name": "pi-btw",
+      "version": "0.8.0"
+    },
+    {
+      "name": "pi-simplify",
+      "version": "0.2.3"
+    },
+    {
+      "name": "pi-hashline-edit-pro",
+      "version": "7.1.1"
+    },
+    {
+      "name": "pi-cache-optimizer",
+      "version": "2.10.4"
+    },
+    {
+      "name": "pi-intercom",
+      "version": "0.18.1"
+    },
+    {
+      "name": "pi-prompt-template-model",
+      "version": "0.12.3"
+    },
+    {
+      "name": "pi-interview",
+      "version": "0.14.1"
+    },
+    {
+      "name": "pi-ask-user",
+      "version": "0.17.2"
+    },
+    {
+      "name": "@narumitw/pi-plan-mode",
+      "version": "0.59.4"
+    },
+    {
+      "name": "@narumitw/pi-goal",
+      "version": "0.54.13"
+    },
+    {
+      "name": "@narumitw/pi-usage",
+      "version": "0.69.0"
+    },
+    {
+      "name": "@gotgenes/pi-permission-system",
+      "version": "42.0.0"
+    }
+  ],
+  "dropped_for_pi_conflicts": [
+    {
+      "name": "@heyhuynhgiabuu/pi-pretty",
+      "reason": "re-registers built-in tools read/grep, which pi-hashline-edit-pro also overrides"
+    },
+    {
+      "name": "pi-memory",
+      "reason": "tool memory_search conflicts with pi-hermes-memory"
+    },
+    {
+      "name": "pi-web-search",
+      "reason": "tool web_search conflicts with pi-web-access"
+    }
   ]
 }

@@ -223,8 +223,13 @@ def extract_issue_lines(text: str, *, limit: int = 60) -> list[str]:
         if _ISSUE_HEADERS.search(line):
             block = [line.strip()]
             index += 1
-            while index < len(lines) and lines[index].strip() and len(block) < 12:
-                block.append(lines[index].strip())
+            blank_run = 0
+            while index < len(lines) and len(block) < 12 and blank_run < 2:
+                if lines[index].strip():
+                    blank_run = 0
+                    block.append(lines[index].strip())
+                else:
+                    blank_run += 1
                 index += 1
             add("\n".join(block))
             continue

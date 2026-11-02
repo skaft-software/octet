@@ -345,7 +345,10 @@ def write_provider_config(home: Path, port: int) -> None:
                 "api_key": "",
                 "api_name": MODEL,
                 "headers": [],
-                "auto_discover": True,
+                "auto_discover": False,
+                # The legacy single-model shape (api_name only) no longer yields a model in
+                # current builds; an explicit models list does.
+                "models": [{"api_name": MODEL, "display_name": MODEL, "context_window": 128000, "max_output_tokens": 4096}],
             }
         )
     )
