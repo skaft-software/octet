@@ -13,7 +13,7 @@ enableModuleCompileCache();
 const { hookEvents } = await import('./lib/api.mjs');
 const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
 const { locateInstalledPi, scanPiImportGaps } = await import('./lib/installed-pi.mjs');
-const { createJiti } = await import('jiti');
+const { createJiti } = await import('./lib/jiti-resolve-cache.mjs');
 const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs');
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');

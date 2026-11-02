@@ -19,7 +19,8 @@ export function fingerprint(stat) {
 }
 
 export class SourceFingerprints {
-  constructor() {
+  constructor({ racyNs = RACY_NS } = {}) {
+    this.racyNs = racyNs;
     this.files = new Map();
     this.dirty = false;
     const stored = readPersisted(FILE, SCHEMA);
@@ -36,7 +37,7 @@ export class SourceFingerprints {
   }
   record(file, stat, hash, imports) {
     const now = BigInt(Date.now()) * 1_000_000n;
-    if (now - stat.ctimeNs < RACY_NS || now - stat.mtimeNs < RACY_NS) return;
+    if (now - stat.ctimeNs < this.racyNs || now - stat.mtimeNs < this.racyNs) return;
     const f = fingerprint(stat), previous = this.files.get(file);
     if (previous?.f === f && previous.h === hash) return;
     this.files.set(file, { f, h: hash, i: imports });

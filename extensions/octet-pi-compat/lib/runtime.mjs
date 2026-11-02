@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { SessionTransport, SESSION_FEATURES } from './session-transport.mjs';
 import { withContextLimits } from './context-limits.mjs';
-import { createJiti } from 'jiti';
+import { createJiti, flushResolveCache } from './jiti-resolve-cache.mjs';
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -505,6 +505,7 @@ export class Runtime {
       }
     }
     this.loaded = true;
+    flushResolveCache(); // persist newly learned module resolutions once per launch
     tracePhase('adapter.load.ready', `factories=${extensions.length} failures=${this.loadFailures.length}`);
     if (this.tools.size > 256 || this.commands.size > 256 || this.flags.size > 64 || this.shortcuts.size > 64) throw rpcError(-32012, 'bounds_exceeded registrations');
   }
