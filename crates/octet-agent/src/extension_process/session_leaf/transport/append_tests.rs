@@ -144,12 +144,14 @@ commands = ["append"]
             ));
             drop(permits);
             assert_eq!(std::fs::read(session.path()).unwrap(), before);
+            // A host write other than a config selection is a real divergence
+            // from the parent's pinned view: refuse without writing.
             session
-                .append(EntryValue::Config {
-                    model: None,
-                    reasoning: None,
-                    reasoning_mode: None,
-                })
+                .append(EntryValue::Message(octet_ai::Message::User(
+                    octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text("host write".into())],
+                    },
+                )))
                 .unwrap();
             let changed = std::fs::read(session.path()).unwrap();
             assert!(process
@@ -164,9 +166,29 @@ commands = ["append"]
             assert_eq!(std::fs::read(session.path()).unwrap(), changed);
             session.checkout_root().unwrap();
         }
+        // The parent's own model/thinking selection commits a host config
+        // entry after its pinned head; the receipt chains it exactly.
+        let host_config = (index == 1).then(|| {
+            session
+                .append(EntryValue::Config {
+                    model: None,
+                    reasoning: None,
+                    reasoning_mode: None,
+                })
+                .unwrap()
+        });
         let receipt = process
             .append_session_entry_request(&id, generation, &mut session, &entry_type, data)
             .unwrap();
+        match &host_config {
+            Some(config) => {
+                assert_eq!(receipt["gap"].as_array().unwrap().len(), 1);
+                assert_eq!(receipt["gap"][0]["id"], json!(config.0));
+                assert_eq!(receipt["gap"][0]["value"]["type"], "config");
+                assert_eq!(receipt["entry"]["parent"], json!(config.0));
+            }
+            None => assert!(receipt.get("gap").is_none()),
+        }
         let entry = session
             .entry(&crate::session::EntryId(
                 receipt["entry_id"].as_str().unwrap().into(),

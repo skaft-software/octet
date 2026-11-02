@@ -513,6 +513,36 @@ impl ExtensionProcess {
 }
 
 impl EventObserver for ExtensionProcess {
+    fn bind_run_system_prompt(
+        &self,
+        resource_owner: &str,
+        system_prompt: &str,
+        cancellation: CancellationToken,
+    ) -> Option<Box<dyn Send>> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if connection.closed.load(Ordering::Acquire)
+            || connection.draining.load(Ordering::Acquire)
+            || !read_std_lock(&connection.protocol).supports(prompt_read::FEATURE)
+        {
+            return None;
+        }
+        let owner = ExtensionResourceOwner {
+            session_id: resource_owner.to_owned(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: connection.generation,
+        };
+        let guard = connection
+            .prompt_reads
+            .bind(owner.clone(), system_prompt, cancellation);
+        connection.queue_notification(
+            "context/system_prompt_scope",
+            serde_json::json!({
+                "resource_owner": owner, "scope": guard.scope()
+            }),
+        );
+        Some(Box::new(guard))
+    }
+
     fn on_tool_call_stream(&self, event: &octet_ai::StreamEvent, owner: &str) {
         let fields = match event {
             octet_ai::StreamEvent::ToolCallStart {

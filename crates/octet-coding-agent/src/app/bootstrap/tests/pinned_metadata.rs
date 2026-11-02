@@ -2026,6 +2026,8 @@ fn opencode_go_id_only_inventory_takes_thinking_and_modalities_from_pinned_recor
         (E::Low, E::Max)
     );
 
+    assert_eq!(values(&glm).unwrap(), ["low", "high", "max"]);
+
     let deepseek = resolve("deepseek-v4.1-flash");
     let reasoning = deepseek.capabilities.reasoning.as_ref().unwrap();
     assert_eq!(
@@ -2034,8 +2036,13 @@ fn opencode_go_id_only_inventory_takes_thinking_and_modalities_from_pinned_recor
     );
     assert_eq!(
         (reasoning.min_effort, reasoning.max_effort),
-        (E::High, E::High)
+        (E::Low, E::Max)
     );
+    assert_eq!(values(&deepseek).unwrap(), ["low", "high", "max"]);
+    assert!(!reasoning.supports(&ReasoningConfig::Off));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(E::Medium)));
+    assert!(!reasoning.supports(&ReasoningConfig::Effort(E::Xhigh)));
+    assert!(reasoning.supports(&ReasoningConfig::Effort(E::Max)));
     assert!(deepseek
         .capabilities
         .input_modalities
@@ -2063,8 +2070,20 @@ fn opencode_go_id_only_inventory_takes_thinking_and_modalities_from_pinned_recor
         ReasoningControl::TokenBudget
     );
 
+    for spec in [&glm, &deepseek, &gpt, &claude, &qwen] {
+        let record =
+            octet_ai::model_metadata::model_capability_metadata(declaration.id, &spec.api_name)
+                .unwrap();
+        assert_pinned_exact_reasoning_options(spec, &record);
+    }
+
     let mimo = resolve("mimo-v2.6-pro");
-    assert!(mimo.capabilities.reasoning.is_some());
+    let record =
+        octet_ai::model_metadata::model_capability_metadata(declaration.id, &mimo.api_name)
+            .unwrap();
+    assert_eq!(record["reasoning"], true);
+    assert_eq!(record["reasoning_options"], serde_json::json!([]));
+    assert!(mimo.capabilities.reasoning.is_none());
     for modality in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
         assert!(
             mimo.capabilities.input_modalities.contains(modality),
@@ -2085,16 +2104,66 @@ fn opencode_go_id_only_inventory_takes_thinking_and_modalities_from_pinned_recor
         .contains(octet_ai::Modality::Audio));
 }
 
-/// Guard for the snapshot refresh: every pinned OpenCode and OpenCode Go model
-/// that reasons registers with thinking controls, whether from a hand-written
-/// preset or derived from its record, and never with an invalid configuration.
+fn assert_pinned_exact_reasoning_options(spec: &ModelSpec, record: &serde_json::Value) {
+    use octet_ai::{types::ReasoningOptions, ReasoningEffort as E};
+    let source = record["reasoning_options"].as_array().unwrap();
+    let effort = source
+        .iter()
+        .find(|option| option["type"] == "effort")
+        .unwrap();
+    let mut expected: ReasoningOptions = serde_json::from_value(effort.clone()).unwrap();
+    assert!(expected.is_valid(), "{}", spec.id.0);
+    if source.iter().any(|option| option["type"] == "toggle")
+        && !expected.choices().contains(&ReasoningConfig::Off)
+    {
+        expected.values.insert(0, "none".into());
+    }
+    let reasoning = spec
+        .capabilities
+        .reasoning
+        .as_ref()
+        .unwrap_or_else(|| panic!("{}: missing advertised reasoning choices", spec.id.0));
+    assert_eq!(reasoning.options.as_ref(), Some(&expected), "{}", spec.id.0);
+    let choices = expected.choices();
+    for choice in [
+        ReasoningConfig::Off,
+        ReasoningConfig::On,
+        ReasoningConfig::Effort(E::Minimal),
+        ReasoningConfig::Effort(E::Low),
+        ReasoningConfig::Effort(E::Medium),
+        ReasoningConfig::Effort(E::High),
+        ReasoningConfig::Effort(E::Xhigh),
+        ReasoningConfig::Effort(E::Max),
+        ReasoningConfig::Effort(E::Ultra),
+    ] {
+        assert_eq!(
+            reasoning.supports(&choice),
+            choices.contains(&choice),
+            "{}: {choice:?}",
+            spec.id.0
+        );
+    }
+    if let Some(default) = expected.default.as_deref() {
+        assert_eq!(
+            reasoning.default_selection(),
+            ReasoningConfig::from_provider_value(default),
+            "{}",
+            spec.id.0
+        );
+    }
+}
+
 #[test]
-fn every_pinned_opencode_reasoning_model_registers_thinking_controls() {
+fn pinned_opencode_reasoning_refresh_preserves_exact_controls_or_fails_closed() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../octet-ai/models/models-dev-capabilities.json");
     let records: std::collections::BTreeMap<String, serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let mut checked = 0;
+    let mut exact_checked = 0;
+    let mut failed_closed = 0;
+    let mut budgets_checked = 0;
+    let mut static_checked = 0;
     for provider in ["opencode", "opencode-go"] {
         let declaration = BUILTIN_PROVIDER_DECLARATIONS
             .iter()
@@ -2121,15 +2190,123 @@ fn every_pinned_opencode_reasoning_model_registers_thinking_controls() {
             let model = catalog
                 .resolve(&ModelId(format!("{provider}/{id}")))
                 .unwrap_or_else(|error| panic!("{provider}/{id}: {error}"));
-            assert!(
-                model.spec.capabilities.reasoning.is_some(),
-                "{provider}/{id} reasons but offers only off"
-            );
+            let record = &records[&format!("{provider}/{id}")];
+            let route = declaration.route_for_model(id).unwrap();
+            let actual = model.spec.capabilities.reasoning.as_ref();
+            if let Some(declared) = declaration.static_reasoning_for(id, route.protocol) {
+                assert_eq!(actual, Some(&declared), "{provider}/{id}");
+                static_checked += 1;
+            } else {
+                let options = record
+                    .get("reasoning_options")
+                    .and_then(serde_json::Value::as_array);
+                let valid_schema = options.is_some_and(|options| {
+                    !options.is_empty()
+                        && options.len() <= 3
+                        && options.iter().enumerate().all(|(index, option)| {
+                            matches!(
+                                option["type"].as_str(),
+                                Some("effort" | "toggle" | "budget_tokens")
+                            ) && !options[..index]
+                                .iter()
+                                .any(|previous| previous["type"] == option["type"])
+                        })
+                });
+                let effort = options
+                    .and_then(|options| options.iter().find(|option| option["type"] == "effort"));
+                let exact = effort.and_then(|option| {
+                    serde_json::from_value::<octet_ai::types::ReasoningOptions>(option.clone()).ok()
+                });
+                let has = |kind: &str| {
+                    options
+                        .is_some_and(|options| options.iter().any(|option| option["type"] == kind))
+                };
+                let native_budget =
+                    route.protocol == Protocol::AnthropicMessages && has("budget_tokens");
+                let usable_effort = exact.as_ref().is_some_and(|options| {
+                    options.is_valid()
+                        && options
+                            .choices()
+                            .iter()
+                            .any(|choice| matches!(choice, ReasoningConfig::Effort(_)))
+                        && options.choices().iter().all(|choice| {
+                            !matches!(
+                                choice,
+                                ReasoningConfig::On
+                                    | ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra)
+                            )
+                        })
+                        && match route.protocol {
+                            Protocol::OpenAiChat | Protocol::OpenAiResponses => true,
+                            Protocol::GoogleGenerativeAi => {
+                                !has("toggle")
+                                    && options.values.iter().all(|value| {
+                                        ["minimal", "low", "medium", "high"]
+                                            .contains(&value.to_ascii_lowercase().as_str())
+                                    })
+                            }
+                            Protocol::AnthropicMessages => {
+                                native_budget
+                                    || (id.starts_with("claude-")
+                                        && options.values.iter().all(|value| {
+                                            ["none", "low", "medium", "high", "xhigh", "max"]
+                                                .contains(&value.as_str())
+                                        }))
+                            }
+                            _ => false,
+                        }
+                });
+                if valid_schema && usable_effort {
+                    assert_pinned_exact_reasoning_options(&model.spec, record);
+                    let expected_control = if native_budget && !id.starts_with("claude-") {
+                        ReasoningControl::TokenBudget
+                    } else {
+                        ReasoningControl::Effort
+                    };
+                    assert_eq!(actual.unwrap().control, expected_control, "{provider}/{id}");
+                    exact_checked += 1;
+                } else if valid_schema && effort.is_none() && native_budget {
+                    let reasoning = actual.unwrap_or_else(|| {
+                        panic!("{provider}/{id}: missing declared budget control")
+                    });
+                    assert_eq!(
+                        reasoning.control,
+                        ReasoningControl::TokenBudget,
+                        "{provider}/{id}"
+                    );
+                    assert!(reasoning.effort_budgets.is_some(), "{provider}/{id}");
+                    assert_eq!(
+                        reasoning.supports(&ReasoningConfig::Off),
+                        has("toggle"),
+                        "{provider}/{id}"
+                    );
+                    budgets_checked += 1;
+                } else {
+                    assert!(actual.is_none(), "{provider}/{id}: unusable source metadata must not invent controls: {record}");
+                    failed_closed += 1;
+                }
+            }
             checked += 1;
         }
     }
     assert!(
         checked >= 30,
         "checked only {checked} pinned OpenCode models"
+    );
+    assert!(
+        exact_checked >= 30,
+        "checked only {exact_checked} exact contracts"
+    );
+    assert!(
+        failed_closed > 0,
+        "missing metadata must exercise fail-closed registration"
+    );
+    assert!(
+        budgets_checked > 0,
+        "native source budgets must remain represented"
+    );
+    assert!(
+        static_checked > 0,
+        "declaration-owned contracts must remain represented"
     );
 }

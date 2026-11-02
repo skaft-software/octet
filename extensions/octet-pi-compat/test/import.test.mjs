@@ -130,6 +130,35 @@ test('from-Pi setup requires review, excludes disabled entries, records routes a
   assert.deepEqual(JSON.parse(loaded.stdout).result.commands.map(c => c.name), ['good', 'fallback']);
 });
 
+test('recorded Pi agent directory reaches imports and factories under a minimal relocated environment', t => {
+  const dir = temporary(t), agent = join(dir, 'recorded-agent'), home = join(dir, 'relocated-home');
+  mkdirSync(home);
+  const expected = JSON.stringify(agent);
+  const factory = entry(dir, 'directory', `import { getAgentDir } from '@earendil-works/pi-coding-agent';
+    if (process.env.PI_CODING_AGENT_DIR !== ${expected} || getAgentDir() !== ${expected}) throw new Error('import directory mismatch');
+    export default pi => {
+      if (process.env.PI_CODING_AGENT_DIR !== ${expected} || getAgentDir() !== ${expected}) throw new Error('factory directory mismatch');
+      pi.registerCommand('directory', {handler(){}});
+    };`);
+  const output = join(dir, 'octet-pi-compat'), env = { HOME: home, PATH: process.env.PATH };
+  const { registrations } = configure({ output, extensions: [factory], reviewed: true, piAgentDir: agent, env });
+  assert.deepEqual(registrations.commands.map(command => command.name), ['directory']);
+  const configPath = join(output, 'bridge.json');
+  for (const ambient of [{}, { PI_CODING_AGENT_DIR: join(dir, 'ambient-agent'), OCTET_PI_AGENT_DIR: join(dir, 'other-agent') }]) {
+    const loaded = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', configPath, '--inspect'],
+      { encoding: 'utf8', env: { ...env, ...ambient } });
+    assert.equal(loaded.status, 0, loaded.stderr);
+    assert.deepEqual(JSON.parse(loaded.stdout).result.commands.map(command => command.name), ['directory']);
+  }
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, pi_agent_dir: 'relative-agent' }));
+  const invalid = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', configPath, '--inspect'],
+    { encoding: 'utf8', env });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /pi_agent_dir must be an absolute path/);
+  assert.equal(existsSync(agent), false);
+});
+
 test('failing factories roll back tools, hooks, commands, bus listeners, MCP, and timers; missing files are isolated', async t => {
   const dir = temporary(t);
   const good = entry(dir, 'good', `export default pi => { pi.registerTool({name:'kept',label:'kept',description:'original',parameters:{type:'object'},async execute(){return {content:[]};}}); pi.registerCommand('good',{handler(){pi.events.emit('topic',{});}}); };`);

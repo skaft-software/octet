@@ -46,6 +46,7 @@ export class Editor {
   #debounceTimer;
   #references;
   #binding;
+  #final;
   focused = false;
   disableSubmit = false;
   onSubmit;
@@ -60,12 +61,26 @@ export class Editor {
     if (typeof result.editor_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(result.editor_id)) invalid('native editor handle');
     this.#id = result.editor_id;
     this.#binding = registerNativeEditor(this, this.#call, this.#id);
+    this.#call.track?.(this);
+  }
+  // Final native observations, taken once while the owning surface is still
+  // live. Afterwards only these reads are answered locally; every write and
+  // every other observation still refuses as retired.
+  static #finalFields = ['text', 'expanded', 'lines', 'cursor', 'padding', 'autocomplete_max_visible'];
+  retainFinalState() {
+    if (this.#disposed || this.#final || !this.#call.isAlive()) return;
+    const final = new Map();
+    for (const field of Editor.#finalFields) final.set(field, this.#request({op: 'read', field}).value);
+    this.#final = final;
   }
   #request(operation) {
     if (this.#disposed) invalid('native editor disposed');
     return this.#call(operation, this.#id);
   }
-  #read(field) { return this.#request({op: 'read', field}).value; }
+  #read(field) {
+    if (this.#final && !this.#call.isAlive() && this.#final.has(field)) return structuredClone(this.#final.get(field));
+    return this.#request({op: 'read', field}).value;
+  }
   #mutate(operation) {
     let reply = this.#request(operation);
     if (reply.apply_completion) return this.#applySelected(reply.submit_after);

@@ -30,6 +30,8 @@ mod launch_and_resume;
 #[cfg(test)]
 mod mistral_large_4;
 #[cfg(test)]
+mod model_metadata_refresh;
+#[cfg(test)]
 mod openrouter_discovery;
 #[cfg(test)]
 mod openrouter_offline_catalog;

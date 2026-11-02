@@ -19,7 +19,7 @@
 
 mod batch;
 mod diagnostics;
-mod hooks;
+pub(crate) mod hooks;
 mod stream;
 mod transport;
 mod websocket;
@@ -640,10 +640,20 @@ impl AiClient {
             )
             .into());
         }
+        let request_hooks = transport
+            .as_ref()
+            .is_some_and(|transport| transport.supports_request_hooks());
         if host_transport
             && native.is_none()
             && custom_http.is_none()
-            && (host_options.has_wire_hooks() || self.has_provider_request_hooks())
+            && (host_options.api_key.is_some()
+                || !host_options.metadata.is_empty()
+                || host_options.on_payload.is_some()
+                || host_options.transform_headers.is_some()
+                || host_options.on_response.is_some()
+                || !request_hooks
+                    && (!host_options.provider_hooks.is_empty()
+                        || self.has_provider_request_hooks()))
         {
             return Err(crate::ConfigError::Parse(
                 "per-request api key, metadata, and payload/header/response hooks are unsupported by a host stream transport".into(),
@@ -1088,6 +1098,13 @@ impl AiClient {
             {
                 request.responses = None;
             }
+            let request_hooks = crate::HostProviderRequestHooks {
+                attempt: hooks::ProviderRequestAttempt::new(
+                    model,
+                    &self.provider_request_hooks,
+                    &host_options.provider_hooks,
+                ),
+            };
             self.mark_request_dispatch();
             let stream = if let Some(native) = native_model.or(custom_http_model) {
                 if native.spec.id != model.spec.id
@@ -1143,16 +1160,23 @@ impl AiClient {
                     }),
                 };
                 transport
-                    .stream_native(
+                    .stream_with_request_hooks(
                         HostStreamModel::from(model),
                         request,
                         diagnostics,
-                        continuation,
+                        Some(continuation),
+                        request_hooks,
                     )
                     .await?
             } else {
                 transport
-                    .stream(HostStreamModel::from(model), request, diagnostics)
+                    .stream_with_request_hooks(
+                        HostStreamModel::from(model),
+                        request,
+                        diagnostics,
+                        None,
+                        request_hooks,
+                    )
                     .await?
             };
             return Ok(trace_usage(crate::stream::guard(stream), trace));
@@ -1192,6 +1216,9 @@ impl AiClient {
                 crate::protocol::mistral_conversations::build_request(model, &req)?
             }
             Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
+            Protocol::ExtensionStream => {
+                return Err(crate::error::UnsupportedError::ExtensionStream.into())
+            }
         };
 
         if let Some(trace) = &trace {

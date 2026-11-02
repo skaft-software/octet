@@ -149,6 +149,7 @@ function size(value, reference, fallback) {
 
 const editorSurfaces = new WeakMap();
 const nativeEditors = new WeakMap();
+const nativeRetirements = new WeakMap(), retiredNativeSurfaces = new WeakMap();
 
 // Internal component binding only; native handles still pass the admitted
 // surface's owner/mount checks on every synchronous call.
@@ -165,19 +166,35 @@ export function nativeEditorCall(tui) {
   const surface = editorSurfaces.get(tui);
   if (!surface) unsupported('native Editor', 'requires the host-supplied TUI');
   const call = (operation, editorId) => {
-    if (operation.op === 'dispose' && surface.closed) return {};
+    if (operation.op === 'dispose' && (surface.closed || retiredNativeSurfaces.has(surface))) return {};
+    if (retiredNativeSurfaces.has(surface)) throw retiredNativeSurfaces.get(surface);
     if (surface.closed || !surface.opened || surface.runtime.stopping) throw rpcError(-32002, 'native editor surface retired');
     const runtime = surface.runtime, store = surface.store;
     runtime.require('remote_ui'); runtime.assertOwner(store);
     store.controller.signal.throwIfAborted();
-    return runtime.transport.requestSync('ui/chrome', {
-      parent_request_id: store.id, resource_owner: store.state.owner,
-      chrome: { kind: 'editor', surface_id: surface.id,
-        ...(surface.placement === 'editor' ? {mount_id: surface.mountId} : {}),
-        ...(editorId === undefined ? {} : {editor_id: editorId}), operation },
-    }, {parent: store.live ? store.id : undefined, signal: store.controller.signal});
+    try {
+      return runtime.transport.requestSync('ui/chrome', {
+        parent_request_id: store.id, resource_owner: store.state.owner,
+        chrome: { kind: 'editor', surface_id: surface.id,
+          ...(surface.placement === 'editor' ? {mount_id: surface.mountId} : {}),
+          ...(editorId === undefined ? {} : {editor_id: editorId}), operation },
+      }, {parent: store.live ? store.id : undefined, signal: store.controller.signal,
+        onUiClosed(id) {
+          if (id !== surface.id || retiredNativeSurfaces.has(surface)) return;
+          const error = rpcError(-32002, surface.placement === 'editor' ? 'editor mount retired' : 'native editor surface retired');
+          retiredNativeSurfaces.set(surface, error);
+          nativeRetirements.set(error, surface);
+        },
+      });
+    } catch (error) {
+      if (retiredNativeSurfaces.has(surface) && error.code === -32002) nativeRetirements.set(error, surface);
+      throw error;
+    }
   };
-  call.isAlive = () => !surface.closed && surface.opened && !surface.runtime.stopping;
+  call.isAlive = () => !surface.closed && !retiredNativeSurfaces.has(surface) && surface.opened && !surface.runtime.stopping;
+  // Editors created on this surface, so an adapter-initiated close can retain
+  // their final observable state before the native mount is released.
+  call.track = editor => (surface.nativeEditorObjects ??= new Set()).add(editor);
   return call;
 }
 
@@ -350,7 +367,11 @@ export class RemoteUI {
       await this.push(surface);
       if (placement === 'fullscreen' && store.method === 'command/execute' && store.detach) store.detach();
       return surface;
-    } catch (error) { await this.close(surface, undefined, !surface.opened).catch(e => this.runtime.backgroundError(e)); throw error; }
+    } catch (error) {
+      if (nativeRetirements.get(error) === surface) return surface;
+      await this.close(surface, undefined, !surface.opened).catch(e => this.runtime.backgroundError(e));
+      throw error;
+    }
   }
   async admit(surface, title, capture) {
     surface.requestedMouseCapture = capture;
@@ -510,6 +531,7 @@ export class RemoteUI {
     let lines;
     try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
     catch (error) {
+      if (nativeRetirements.get(error) === surface) return;
       // History-reading components cannot render a missing publication as an
       // empty session. Retain their last frame without blocking native paint or
       // retiring the mount; successful preparation requests another render.
@@ -518,6 +540,7 @@ export class RemoteUI {
     }
     // Capture lines and this exact barrier in the same synchronous turn. Never
     // render newer text after waiting on an older checkpoint acknowledgement.
+    if (retiredNativeSurfaces.has(surface)) return;
     const checkpoint = surface.editor?.tail;
     await checkpoint;
     if (surface.closed || !surface.store.state.alive || columns !== surface.columns || rows !== surface.rows) return;
@@ -528,6 +551,21 @@ export class RemoteUI {
   }
   async close(surface, value, observed = false) {
     if (surface.closed) return;
+    observed ||= retiredNativeSurfaces.has(surface);
+    // Pi's Editor stays a readable object after its custom UI resolves (e.g.
+    // a questionnaire mirrors its drafts right after done()). While this close
+    // is ours and the native mount is still live, retain each editor's final
+    // read-only state; host-observed retirement has nothing left to read.
+    if (!observed && surface.opened && surface.store.state.alive && !this.runtime.stopping) {
+      for (const editor of surface.nativeEditorObjects ?? []) {
+        try { this.runtime.scope.run(surface.store, () => editor.retainFinalState()); }
+        catch (error) {
+          if (nativeRetirements.get(error) === surface) { observed = true; break; }
+          this.runtime.backgroundError(error);
+        }
+        if (retiredNativeSurfaces.has(surface)) { observed = true; break; }
+      }
+    }
     surface.closed = true; surface.observedClose = observed; surface.phase = 'closed';
     if (observed) { surface.opened = false; surface.admittedMouseCapture = false; }
     surface.initialInputs.length = 0;

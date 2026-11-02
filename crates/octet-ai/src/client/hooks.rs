@@ -103,14 +103,14 @@ fn encode_hook_body(payload: &serde_json::Value) -> Result<bytes::Bytes, AiError
 
 /// Exists only when an async subscriber is installed. One identity and ordered
 /// chain survive all three phases; no wire hooks run on opaque host transports.
-pub(super) struct ProviderRequestAttempt {
+pub(crate) struct ProviderRequestAttempt {
     context: ProviderRequestContext,
     hooks: Vec<Arc<dyn ProviderRequestHook>>,
     timeout: std::time::Duration,
 }
 
 impl ProviderRequestAttempt {
-    pub(super) fn new(
+    pub(crate) fn new(
         model: &Model,
         client_hooks: &[Arc<dyn ProviderRequestHook>],
         request_hooks: &[Arc<dyn ProviderRequestHook>],
@@ -133,7 +133,7 @@ impl ProviderRequestAttempt {
         })
     }
 
-    pub(super) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
+    pub(crate) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
         tokio::time::timeout(self.timeout, async {
             for hook in &self.hooks {
                 if let Some(payload) = hook
@@ -149,7 +149,7 @@ impl ProviderRequestAttempt {
         .map_err(|_| hook_deadline())?
     }
 
-    pub(super) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
+    pub(crate) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
         tokio::time::timeout(self.timeout, async {
             for hook in &self.hooks {
                 let before = headers.clone();
@@ -162,7 +162,7 @@ impl ProviderRequestAttempt {
         .map_err(|_| hook_deadline())?
     }
 
-    pub(super) async fn response(
+    pub(crate) async fn response(
         &self,
         status: http::StatusCode,
         headers: &http::HeaderMap,

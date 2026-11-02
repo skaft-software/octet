@@ -323,10 +323,23 @@ async fn counted_replacement_rebinds_only_admitted_parent_to_exact_prepared_nati
     let next = publish_counted(&state, &new, &replacement);
     let retained = lock_std_mutex(&state.session_leaf.transport).retained();
     request.respond_replacement(Ok("replacement-display-id".into()));
+    let mut response = reply(&mut frames).await;
+    // The rebound parent is leased exactly its pinned replacement view.
+    let lease = response["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_snapshot")
+        .expect("replacement parent lease");
     assert_eq!(
-        reply(&mut frames).await,
+        response,
         json!({"jsonrpc":"2.0", "id":10, "result":{"session_id":"replacement-display-id"}})
     );
+    let transfer_id = lease["transfer_id"].as_str().unwrap().to_owned();
+    assert_ne!(transfer_id, next.transfer_id);
+    let mut expected = serde_json::to_value(&next).unwrap();
+    expected["transfer_id"] = json!(transfer_id);
+    assert_eq!(lease, expected);
+    assert!(lease["preparation"].is_null());
     {
         let store = lock_std_mutex(&state.session_leaf.transport);
         let pin = &store.parents[&1];
@@ -340,7 +353,8 @@ async fn counted_replacement_rebinds_only_admitted_parent_to_exact_prepared_nati
         assert_eq!(store.parents[&2].owner, original);
         assert_eq!(store.parents[&2].revision, previous.view_revision);
         assert_eq!(store.parents[&2].head, previous.head);
-        assert_eq!(store.in_flight(1), 1);
+        // The original parent-bound transfer plus its counted replacement lease.
+        assert_eq!(store.in_flight(1), 2);
         assert_eq!(store.in_flight(2), 1);
         assert_eq!(store.retained(), retained);
     }

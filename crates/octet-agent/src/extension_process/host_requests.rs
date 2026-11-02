@@ -69,6 +69,11 @@ pub struct ToolCatalogUpdateResponse {
     pub revision: u64,
     /// Complete active tool-name set for this extension.
     pub tools: Vec<String>,
+    /// Names from this registration that the authoritative product tool
+    /// policy (for example `--no-tools`) keeps out of the model-visible set.
+    /// Pi registers such tools disabled; they are never published here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<String>,
 }
 
 /// Host-enforced policy for one bounded extension-owned child session.

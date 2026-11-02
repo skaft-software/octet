@@ -1,7 +1,7 @@
 // Command-context replacements keep the command RPC live, not its old Session.
 import { dirname } from 'node:path';
 import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
-import { entryPayload } from './session-leaf.mjs';
+import { entryPayload, replacementStore } from './session-leaf.mjs';
 import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
 import { cancellable, piToCanonical } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
@@ -39,7 +39,8 @@ function setupManager(runtime, store) {
     return path;
   };
   const apply = receipt => {
-    fields(receipt, ['entry_id', 'context'], 'session setup receipt');
+    fields(receipt, ['entry_id', 'context', 'session_snapshot'], 'session setup receipt');
+    if (receipt.session_snapshot !== undefined && receipt.entry_id !== undefined) invalid('session setup write lease');
     if (ownerKey(receipt.context?.resource_owner) !== ownerKey(store.state.owner)) invalid('session setup receipt owner');
     runtime.bind({ context: receipt.context }, store);
     return receipt.entry_id;
@@ -111,7 +112,16 @@ function setupManager(runtime, store) {
     // wait here would deadlock the main thread that runs those callbacks.
     const result = await runtime.hostCall('session/setup', { resource_owner: store.state.owner, mutation: { kind: 'complete' } }, store);
     apply(result);
+    await lease(runtime, store, result.session_snapshot);
   } };
+}
+
+// The host leases a rebound command parent exactly the view its native append
+// pin names, so the replacement's receipts chain from that same document.
+async function lease(runtime, store, snapshot) {
+  if (snapshot === undefined) return;
+  if (!runtime.sessionTransport || store.sessionView) invalid('replacement session lease');
+  await runtime.sessionTransport.hydrate({ context: { resource_owner: store.state.owner }, session_snapshot: snapshot }, store);
 }
 
 export function sessionMethods(runtime, store, createContext) {
@@ -127,32 +137,35 @@ export function sessionMethods(runtime, store, createContext) {
     const result = await runtime.track(runtime.hostCall(method, {
       resource_owner: store.state.owner, ...params,
     }, store), store);
-    fields(result, ['session_id', 'cancelled', ...(setup ? ['context'] : [])], `${name} receipt`);
+    fields(result, ['session_id', 'cancelled', ...(setup ? ['context'] : ['session_snapshot'])], `${name} receipt`);
     if (result.cancelled !== undefined && typeof result.cancelled !== 'boolean') invalid(`${name} cancelled`);
     if (result.cancelled) return { cancelled: true };
     bounded(result.session_id, 'replacement session id', 256);
     // Setup binds from an authenticated native creation receipt, before start
     // hooks; ordinary replacements await the real lifecycle binding as before.
     const fresh = setup ? bindSetup(result.context, result.session_id)
-      : { ...store, state: await runtime.foregroundFor(result.session_id, store.controller.signal) };
-    if (setup) {
-      const writable = setupManager(runtime, fresh);
-      let failed = false, error;
-      try { await runtime.scope.run(fresh, () => setup(writable.manager)); }
-      catch (cause) { failed = true; error = cause; }
-      // A throwing setup retains its already committed native writes, starts
-      // the new session, and still reports failure instead of false success.
-      try { await writable.complete(); } catch (cause) { if (!failed) throw cause; }
-      if (failed) throw error;
-    }
-    if (withSession) {
-      // Foreground binding proves ownership, not completion of a newer history
-      // publication. Do not expose synchronous getters until that view is ready.
-      if (runtime.sessionTransport) await cancellable(runtime.sessionTransport.ready(fresh), fresh.controller.signal);
-      runtime.assertOwner(fresh);
-      await runtime.scope.run(fresh, () => withSession(createContext(runtime, fresh, true)));
-    }
-    return { cancelled: false };
+      : replacementStore(store, { state: await runtime.foregroundFor(result.session_id, store.controller.signal) });
+    try {
+      if (!setup) await lease(runtime, fresh, result.session_snapshot);
+      if (setup) {
+        const writable = setupManager(runtime, fresh);
+        let failed = false, error;
+        try { await runtime.scope.run(fresh, () => setup(writable.manager)); }
+        catch (cause) { failed = true; error = cause; }
+        // A throwing setup retains its already committed native writes, starts
+        // the new session, and still reports failure instead of false success.
+        try { await writable.complete(); } catch (cause) { if (!failed) throw cause; }
+        if (failed) throw error;
+      }
+      if (withSession) {
+        // Foreground binding proves ownership, not completion of a newer history
+        // publication. Do not expose synchronous getters until that view is ready.
+        if (runtime.sessionTransport) await cancellable(runtime.sessionTransport.ready(fresh), fresh.controller.signal);
+        runtime.assertOwner(fresh);
+        await runtime.scope.run(fresh, () => withSession(createContext(runtime, fresh, true)));
+      }
+      return { cancelled: false };
+    } finally { runtime.sessionTransport?.settle(fresh); }
   };
   return {
     newSession(options = {}) {

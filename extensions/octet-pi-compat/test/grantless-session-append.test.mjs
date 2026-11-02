@@ -142,3 +142,40 @@ test('grant-less routed appends retain cancellation, owner and live-parent fence
     assert.equal(rig.view.document.entries.length, 0);
   }
 });
+
+// A command's own model/thinking selection commits host config entries after
+// its pinned head; the next append receipt chains them exactly (Pi appendEntry
+// after setModel/setThinkingLevel, e.g. @plannotator/pi-extension exitToIdle).
+const hostConfig = (id, parent) => ({ id, parent, timestamp_unix_ms: 1700000000000,
+  value: { type: 'config', model: { provider: 'p', id: 'm' }, reasoning: null, reasoning_mode: null } });
+const withGap = value => ({ ...value, gap: [hostConfig('cfg-1', null), hostConfig('cfg-2', 'cfg-1')],
+  entry: { ...value.entry, parent: 'cfg-2' } });
+
+test('grant-less routed append chains host config writes made after the pinned head', () => {
+  const { runtime, store, view, context, failures } = fixture(withGap);
+  assert.equal(runtime.appendEntry('after-model', { saved: 1 }, store), undefined);
+  assert.deepEqual(view.document.entries.map(entry => entry.id), ['cfg-1', 'cfg-2', 'native-1']);
+  assert.deepEqual(view.document.branch_ids, ['cfg-1', 'cfg-2', 'native-1']);
+  assert.equal(view.descriptor.entry_count, 3);
+  assert.equal(context.sessionManager.getLeafId(), 'native-1');
+  assert.equal(context.sessionManager.getEntry('native-1').parentId, 'cfg-2');
+  assert.deepEqual(failures, []);
+});
+
+test('config gap chains are exact: broken links, foreign entries and empty or oversized gaps refuse', () => {
+  for (const mutate of [
+    value => ({ ...withGap(value), entry: { ...value.entry, parent: 'cfg-1' } }),
+    value => ({ ...withGap(value), gap: [hostConfig('cfg-1', 'foreign')] }),
+    value => ({ ...withGap(value), gap: [hostConfig('cfg-1', null), hostConfig('cfg-2', null)] }),
+    value => ({ ...withGap(value), gap: [{ ...hostConfig('cfg-1', null), value: { type: 'message' } }, hostConfig('cfg-2', 'cfg-1')] }),
+    value => ({ ...withGap(value), gap: [{ ...hostConfig('cfg-1', null), metadata: { extension_metadata: { other: { public: true } } } }, hostConfig('cfg-2', 'cfg-1')] }),
+    value => ({ ...value, gap: [] }),
+    value => ({ ...value, gap: Array.from({ length: 17 }, (_, i) => hostConfig(`c${i}`, i ? `c${i - 1}` : null)), entry: { ...value.entry, parent: 'c16' } }),
+    value => ({ ...withGap(value), entry_id: 'cfg-2', head: 'cfg-2', entry: { ...value.entry, id: 'cfg-2', parent: 'cfg-2' } }),
+  ]) {
+    const { runtime, store, view, failures } = fixture(mutate);
+    assert.throws(() => runtime.appendEntry('private', {}, store), /outcome unknown/);
+    assert.equal(view.document.entries.length, 0);
+    assert.equal(failures.length, 1);
+  }
+});

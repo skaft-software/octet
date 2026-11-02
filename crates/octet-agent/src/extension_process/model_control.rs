@@ -21,10 +21,20 @@ pub struct PiProviderModelMetadata {
     pub input: Vec<String>,
     /// Host-accounted immutable per-million-token rates, in microdollars.
     pub pricing: Option<octet_ai::Pricing>,
+    #[allow(missing_docs)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_options: Option<octet_ai::types::ReasoningOptions>,
 }
 impl PiProviderModelMetadata {
     /// Validate this system boundary before recording or projecting a route.
     pub fn validate(&self) -> Result<(), String> {
+        if self
+            .reasoning_options
+            .as_ref()
+            .is_some_and(|options| !options.is_valid())
+        {
+            return Err("invalid provider reasoning options".into());
+        }
         if self.inherit_provider.is_some() && self.custom_openai_chat.is_some() {
             return Err("inherited providers cannot accept a custom Chat profile".into());
         }
@@ -113,7 +123,12 @@ fn parse_proxy_declaration(
         .iter()
         .zip(value["models"].as_array().unwrap())
     {
-        if model.protocol != "google_generative_ai" {
+        // Google and extension-owned stream labels are outside the generated
+        // API 0.3 protocol enum; their remaining fields are bounded explicitly.
+        if !matches!(
+            model.protocol.as_str(),
+            "google_generative_ai" | "extension_stream"
+        ) {
             api_v03::parse_provider_model_definition(wire.clone())
                 .map_err(|_| ProviderHostResponseError::Invalid)?;
         } else if model.id.len() > api_v03::MAX_PROVIDER_ID_BYTES
@@ -162,9 +177,18 @@ pub(super) fn parse_provider_proxy_registration(
     }
     let request = parse_proxy_declaration(value)?;
     if request.models.iter().zip(&facts).any(|(model, fact)| {
+        // A Google model may be inherited from the native provider or streamed
+        // by the extension itself (its protocol is then only a label); an
+        // inheritance naming another provider is never admitted.
         (model.protocol == "google_generative_ai"
-            && fact.inherit_provider.as_deref() != Some(request.provider.id.as_str()))
+            && fact
+                .inherit_provider
+                .as_deref()
+                .is_some_and(|provider| provider != request.provider.id.as_str()))
             || (fact.custom_openai_chat.is_some() && model.protocol != "openai_chat")
+            || (fact.reasoning_options.is_some() && !model.capabilities.reasoning)
+            // An extension-owned stream is never inherited from a native route.
+            || (model.protocol == "extension_stream" && fact.inherit_provider.is_some())
     }) {
         return Err(ProviderHostResponseError::Invalid);
     }

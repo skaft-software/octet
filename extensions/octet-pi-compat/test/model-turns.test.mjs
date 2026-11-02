@@ -51,6 +51,31 @@ test('per-model hooks carry real iteration and entry timestamps; whole-run notif
   await peer.close();
 });
 
+test('agent_start and actual model iterations synchronously read only their live native prompt scope', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/run-prompt-reads.ts')]);
+  await peer.init(['session_entries', 'lifecycle_events', 'system_prompt_read', 'run_system_prompt_read_v1']);
+  await peer.start({ system_prompt: 'stale preparation must not be returned' });
+  const scope = 'native-run-scope';
+  peer.notify('context/system_prompt_scope', { resource_owner: owner, scope });
+  peer.notify('turn/started', { resource_owner: owner });
+  const observation = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(observation.params, { parent_request_id: 0, resource_owner: owner, scope });
+  peer.send({ jsonrpc: '2.0', id: observation.id, result: { text: 'admitted run prompt' } });
+  await notification(peer, 'agent_start-prompt:admitted run prompt');
+  for (const [event, payload] of [['turn_start', start()], ['turn_end', end()]]) {
+    const body = params(peer, payload);
+    body.context.system_prompt_scope = scope;
+    const hook = peer.request('hook/run', body);
+    const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+    assert.deepEqual(read.params, { parent_request_id: hook.id, resource_owner: owner, scope });
+    peer.send({ jsonrpc: '2.0', id: read.id, result: { text: 'admitted run prompt' } });
+    assert.deepEqual((await hook.response).result, expected);
+    await notification(peer, `${event}-prompt:admitted run prompt`);
+  }
+  assert.equal(peer.seen.some(issueNotice), false);
+  await peer.close();
+});
+
 test('one durable native tool-result batch supplies every Pi tool result without fabricated entry IDs', async t => {
   const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
   const entry = structuredClone(assistant);

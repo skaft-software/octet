@@ -76,15 +76,22 @@ impl ExtensionProcess {
         }
         let mut store = lock_std_mutex(&connection.session_leaf.transport);
         let pin = store.parents.get(&parent_id).ok_or_else(refused)?;
-        let previous_head = session.head_ref().map(|id| id.0.clone());
-        if pin.owner != *owner || pin.preparation.is_some() || pin.head != previous_head {
+        let session_head = session.head_ref().map(|id| id.0.clone());
+        if pin.owner != *owner || pin.preparation.is_some() {
             return Err(refused());
         }
+        // The parent's own view ends at its pinned head. Host config writes
+        // made since (its model/thinking selections) are chained into this
+        // receipt; any other divergence (branching, foreign writes) refuses.
+        let gap = config_gap(session, pin.head.as_deref(), session_head.as_deref())
+            .ok_or_else(refused)?;
+        let previous_head = pin.head.clone();
+        let entry_parent = session_head.clone();
         let previous_revision = pin.revision;
         let namespace = &self.descriptor().manifest.name;
         let candidate = Entry {
             id: EntryId("9".repeat(20)),
-            parent: previous_head.clone().map(EntryId),
+            parent: entry_parent.clone().map(EntryId),
             timestamp_unix_ms: Some(u64::MAX),
             value: EntryValue::Config {
                 model: None,
@@ -120,6 +127,7 @@ impl ExtensionProcess {
             previous_revision,
             view_revision: MAX_SAFE,
             previous_head: previous_head.clone(),
+            gap: visible_gap(&gap, namespace),
         };
         let max_bytes = connection.max_message_bytes();
         if validate_session_snapshot_size(
@@ -131,6 +139,7 @@ impl ExtensionProcess {
             return Err(bounds());
         }
         let view_revision = store.next_revision().map_err(|_| bounds())?;
+        let gap_entries: Vec<Entry> = gap.into_iter().cloned().collect();
         let entry_id = session
             .append_extension_entry(namespace, Some(generation), entry_type, data)
             .map_err(|error| {
@@ -151,6 +160,7 @@ impl ExtensionProcess {
             previous_revision,
             view_revision,
             previous_head,
+            gap: visible_gap(&gap_entries, namespace),
         })
         .expect("session entry receipt is JSON");
         let mut line =
@@ -176,4 +186,49 @@ impl ExtensionProcess {
         });
         Ok(result)
     }
+}
+
+/// Maximum host config entries a parent receipt may chain past its pin.
+const MAX_CONFIG_GAP: usize = 16;
+
+/// Entries strictly after `pinned` up to `head`, oldest first, when that span
+/// is a short linear run of host `Config` entries on the same branch.
+fn config_gap<'s>(
+    session: &'s Session,
+    pinned: Option<&str>,
+    head: Option<&str>,
+) -> Option<Vec<&'s Entry>> {
+    let mut gap = Vec::new();
+    let mut cursor = head;
+    while cursor != pinned {
+        if gap.len() >= MAX_CONFIG_GAP {
+            return None;
+        }
+        let entry = session.entry(&EntryId(cursor?.to_owned()))?;
+        let host_config = matches!(entry.value, EntryValue::Config { .. })
+            && entry
+                .metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.extension_metadata.is_empty());
+        if !host_config {
+            return None;
+        }
+        gap.push(entry);
+        cursor = entry.parent.as_ref().map(|id| id.0.as_str());
+    }
+    gap.reverse();
+    Some(gap)
+}
+
+fn visible_gap<'a>(
+    gap: &'a [impl std::borrow::Borrow<Entry>],
+    namespace: &'a str,
+) -> Vec<visible::VisibleEntry<'a>> {
+    gap.iter()
+        .map(|entry| visible::VisibleEntry {
+            entry: entry.borrow(),
+            namespace,
+            usage: None,
+        })
+        .collect()
 }

@@ -38,9 +38,11 @@ pub(super) async fn run_catalog_updates(
                         )
                     } else {
                         let mut next = read_std_lock(&update.catalog).clone();
+                        let mut requested = Vec::new();
                         match update.mutation {
                             CatalogMutation::Register(definitions) => {
                                 for definition in definitions {
+                                    requested.push(definition.name.clone());
                                     if inner.config.withheld_tools.contains(&definition.name) {
                                         continue;
                                     }
@@ -88,9 +90,14 @@ pub(super) async fn run_catalog_updates(
                             next.retain(|definition| published.contains(&definition.name));
                             *write_std_lock(&update.catalog) = next.clone();
                             committed_catalog = Some((registration.clone(), Arc::clone(&active)));
+                            let withheld = requested
+                                .into_iter()
+                                .filter(|name| !published.contains(name))
+                                .collect();
                             Ok(ToolCatalogUpdateResponse {
                                 revision,
                                 tools: next.into_iter().map(|definition| definition.name).collect(),
+                                withheld,
                             })
                         })
                     }

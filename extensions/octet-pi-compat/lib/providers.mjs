@@ -8,6 +8,10 @@ import { nativeProviderDelegate, withNativeProvider, ingestNativeProviderEvent, 
 import { providerState, snapshotCustomProvider, abortProviderEntry, startCustomProviderRefresh, resolveCustomProviderAuth, hasCustomProvider, customProviderModels, getCustomProviderApiKey, getCustomProviderAuth } from './custom-provider.mjs';
 import { openCustomProviderHttp, pullCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 import { isDeepStrictEqual } from 'node:util';
+import { localFunction, localModule } from '../shims/local-pi.mjs';
+import { readPiSettings } from './pi-setup.mjs';
+import { getSupportedThinkingLevels } from '../shims/pi-1.0.2/ai/models.mjs';
+const piNormalizeContext = localFunction('ai', 'utils/transcript.js', 'normalizeContext');
 import { createHash } from 'node:crypto';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -34,34 +38,41 @@ export function thinkingLevel(host, optional = false) {
   if (optional) return undefined;
   unsupported('pi.getThinkingLevel', 'the current native reasoning selection has no portable Pi thinking level');
 }
-export function modelView(view) {
+// An extension-streamed model's own Pi `api` name (e.g. 'claude-bridge'); the
+// host labels such routes 'extension-stream' and the adapter restores the name.
+const extensionStreamApis = new Map();
+const extensionStreamKey = (provider, id) => JSON.stringify([provider, id]);
+export function modelView(view, runtime) {
   if (!view) return undefined;
+  const declared = runtime && providers(runtime).committed.get(view.provider)?.models?.find(model => model.pi.id === view.id)?.pi;
+  const api = view.api === 'extension-stream' ? extensionStreamApis.get(extensionStreamKey(view.provider, view.id)) ?? view.api : view.api;
   return {
-    id: view.id, ...(view.name ? { name: view.name } : {}), api: view.api,
+    id: view.id, ...(view.name ? { name: view.name } : {}), api,
     provider: view.provider, reasoning: view.reasoning, input: [...view.input],
+    ...(declared?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: structuredClone(declared.thinkingLevelMap) }),
     ...(view.base_url === undefined ? {} : { baseUrl: view.base_url }),
     contextWindow: view.context_window, maxTokens: view.max_tokens,
     ...(view.cost ? { cost: { input: view.cost.input / 1e6, output: view.cost.output / 1e6,
       cacheRead: view.cost.cache_read / 1e6, cacheWrite: view.cost.cache_write / 1e6 } } : {}),
   };
 }
-export function currentModel(host) {
+export function currentModel(host, runtime) {
   if (host.model_view) {
     const current = host.model_view;
     const view = host.pi_models?.available_models?.find(model => model.provider === current.provider && model.id === current.id);
-    return modelView(view ?? current);
+    return modelView(view ?? current, runtime);
   }
   if (host.model_info) return structuredClone(host.model_info);
   return typeof host.model === 'object' && host.model !== null ? structuredClone(host.model) : undefined;
 }
-export function scopedModels(host) {
+export function scopedModels(host, runtime) {
   return snapshot(host, 'scoped_models', 'ctx.scopedModels').map(entry => ({
-    model: modelView(entry.model), ...(entry.thinkingLevel === undefined ? {} : { thinkingLevel: entry.thinkingLevel }),
+    model: modelView(entry.model, runtime), ...(entry.thinkingLevel === undefined ? {} : { thinkingLevel: entry.thinkingLevel }),
   }));
 }
 export function modelRegistry(getHost, runtime = {}) {
   const all = () => [...snapshot(getHost(), 'all_models', 'ctx.modelRegistry.getAll')
-    .filter(model => !hasCustomProvider(runtime, model.provider)).map(modelView), ...customProviderModels(runtime)];
+    .filter(model => !hasCustomProvider(runtime, model.provider)).map(model => modelView(model, runtime)), ...customProviderModels(runtime)];
   const explicitProvider = provider => {
     const entry = providers(runtime).desired.get(provider);
     if (entry?.apiKey === undefined) return undefined;
@@ -75,7 +86,7 @@ export function modelRegistry(getHost, runtime = {}) {
     getRegisteredProviderConfig: name => providers(runtime).registered.get(name),
     getRegisteredNativeProvider: name => providers(runtime).nativeRegistered.get(name),
     getAvailable: () => snapshot(getHost(), 'available_models', 'ctx.modelRegistry.getAvailable').flatMap(model => {
-      if (!hasCustomProvider(runtime, model.provider)) return [modelView(model)];
+      if (!hasCustomProvider(runtime, model.provider)) return [modelView(model, runtime)];
       return customProviderModels(runtime, model.provider).filter(local => local.id === model.id);
     }),
     getAll: () => all(),
@@ -110,7 +121,7 @@ export function modelRegistry(getHost, runtime = {}) {
         const model = candidates.find(model => model.provider === provider && model.id === host.model_view?.id)
           ?? candidates.find(model => model.provider === provider);
         if (!model) return undefined;
-        const result = await registry.getApiKeyAndHeaders(modelView(model));
+        const result = await registry.getApiKeyAndHeaders(modelView(model, runtime));
         return result.ok ? result.apiKey : undefined;
       } catch {
         return undefined;
@@ -172,7 +183,12 @@ function declaration(name, config, factory, inherited = false) {
   fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
   if (config.streamSimple !== undefined && typeof config.streamSimple !== 'function') invalid('provider streamSimple');
   if (!inherited && config.streamSimple && !config.api) invalid('provider api is required with streamSimple');
-  if (config.api !== undefined && !protocols[config.api]) unsupported(`provider API ${config.api}`);
+  // A provider API Pi itself does not ship is legal in Pi when the extension
+  // brings its own streamSimple: the stream is the extension's, and the host
+  // carries it only as an extension-owned route.
+  const ownStream = typeof config.streamSimple === 'function' && !inherited;
+  const protocolFor = api => protocols[api] ?? (ownStream && typeof api === 'string' && /^[a-z][a-z0-9._-]{0,63}$/.test(api) ? 'extension_stream' : undefined);
+  if (config.api !== undefined && !protocolFor(config.api)) unsupported(`provider API ${config.api}`);
   const baseUrl = providerBaseUrl(config.baseUrl);
   if (config.apiKey !== undefined) bounded(config.apiKey, 'explicit provider key', 16384, { controls: true });
   if (config.models === undefined) return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, inherited: true };
@@ -180,19 +196,30 @@ function declaration(name, config, factory, inherited = false) {
   if (!Array.isArray(config.models) || !config.models.length || config.models.length > 256) invalid('provider models must contain 1..256 explicit definitions');
   const ids = new Set();
   const models = config.models.map(model => {
-    fields(model, ['id', 'name', 'api', 'provider', 'baseUrl', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'], 'provider model');
+    fields(model, ['id', 'name', 'api', 'provider', 'baseUrl', 'reasoning', 'thinkingLevelMap', 'input', 'cost', 'contextWindow', 'maxTokens'], 'provider model');
+    const { thinkingLevelMap, ...definition } = model;
+    model = definition;
+    if (thinkingLevelMap !== undefined) {
+      const map = plainJSON(thinkingLevelMap, 'model thinkingLevelMap', 4096, { omitUndefined: true });
+      fields(map, [...levels], 'model thinkingLevelMap');
+      for (const value of Object.values(map)) if (value !== null) bounded(value, 'model thinkingLevelMap value', 256);
+      model.thinkingLevelMap = map;
+    }
     const modelBaseUrl = providerBaseUrl(model.baseUrl ?? baseUrl);
     bounded(model.id, 'model id', inherited ? 256 : 64); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
     bounded(model.name, 'model name', 128);
     const api = model.api ?? config.api;
-    if (!protocols[api]) unsupported(`provider API ${api}`, 'only negotiated native provider identities are representable');
-    if (api === 'google-generative-ai' && !inherited) unsupported('Google provider', 'only inherited native Google models are supported');
+    if (!protocolFor(api)) unsupported(`provider API ${api}`, 'only negotiated native provider identities or extension-owned streams are representable');
+    if (!protocols[api]) extensionStreamApis.set(extensionStreamKey(name, model.id), api);
     if (typeof model.reasoning !== 'boolean') invalid('model reasoning must be boolean');
     if (!Array.isArray(model.input) || !model.input.includes('text') || model.input.length > 2 || new Set(model.input).size !== model.input.length || model.input.some(x => !['text', 'image'].includes(x))) invalid('model input must be text and optionally image');
     if (![model.contextWindow, model.maxTokens].every(x => Number.isSafeInteger(x) && x > 0) || model.maxTokens > model.contextWindow) invalid('model token limits');
     const pricing = inherited && model.cost == null ? null : providerPricing(model.cost);
-    return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocols[api], context_window: model.contextWindow, max_output_tokens: model.maxTokens,
-      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl, input: [...model.input], pricing } } };
+    const reasoningOptions = model.reasoning && model.thinkingLevelMap !== undefined ? { values: getSupportedThinkingLevels(model), default: null } : undefined;
+    if (reasoningOptions?.values.length === 0) unsupported('model thinkingLevelMap', 'no selectable reasoning level');
+    return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocolFor(api), context_window: model.contextWindow, max_output_tokens: model.maxTokens,
+      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl, input: [...model.input], pricing,
+        ...(reasoningOptions === undefined ? {} : { reasoning_options: reasoningOptions }) } } };
   });
   return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, models,
     wire: { provider: { id: name, label: name, auth: { kind: 'none' } }, models: models.map(model => model.wire) } };
@@ -329,26 +356,91 @@ export function startProviderRegistration(runtime) {
     await runtime.transport.notify('providers/complete', {});
   }).catch(error => runtime.backgroundError(error));
 }
-function requestContext(request) {
+function requestContext(request, runtime) {
   if ((request.tool_choice !== 'auto' && !(request.tool_choice === 'none' && !request.tools?.length)) || request.stop?.length || request.responses != null || request.output_format?.type !== 'text' || (request.reasoning_mode !== undefined && request.reasoning_mode !== 'standard')) unsupported('provider request', 'tool constraints, stop sequences, Responses replay and structured output are not supported by streamSimple');
   const tools = (request.tools || []).map(tool => {
     if (tool.async || tool.constrained_sampling != null) unsupported('provider tool', 'async/constrained sampling cannot be dropped');
+    // A Pi extension's own tool reaches the package's stream as Pi passes it:
+    // the definition the extension registered (JSON round-trip, as Pi's
+    // toToolDeclaration), not the host's normalized copy of its schema.
+    const own = runtime?.tools?.get(tool.name)?.definition;
+    if (own) return { name: tool.name, description: own.description, parameters: JSON.parse(JSON.stringify(own.parameters)) };
     return { name: tool.name, description: tool.description, parameters: tool.parameters };
   });
-  return { systemPrompt: request.system ?? undefined, messages: canonicalToPi(request.messages), ...(tools.length ? { tools } : {}) };
+  // Pi's agent hands providers a transcript context (the system prompt and tools
+  // ride in a leading system message). Build it with the installed Pi's own
+  // normalizeContext so a package's stream sees exactly what Pi would pass it.
+  return piNormalizeContext({ systemPrompt: request.system ?? undefined, messages: canonicalToPi(request.messages), ...(tools.length ? { tools } : {}) });
+}
+// The transport options Pi's own buildRequestOptions adds from the user's Pi
+// settings (timeout, retries, websocket connect timeout), read the way Pi does.
+function piRequestOptions(runtime, store) {
+  let settings = {};
+  try {
+    settings = Object.hasOwn(store?.state?.host ?? {}, 'settings') ? store.state.host.settings
+      : readPiSettings({ agentDir: runtime.config.pi_agent_dir, cwd: store?.state?.workspace, projectTrusted: store?.state?.host?.project_trusted === true }).settings;
+  } catch {}
+  const dispatcher = localModule('coding-agent', 'core/http-dispatcher.js');
+  let idle;
+  try { idle = dispatcher.parseHttpIdleTimeoutMs(settings?.httpIdleTimeoutMs); } catch {}
+  idle ??= dispatcher.DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+  const provider = settings?.retry?.provider ?? {};
+  let websocket;
+  try { websocket = dispatcher.parseHttpIdleTimeoutMs(settings?.websocketConnectTimeoutMs); } catch {}
+  return { timeoutMs: provider.timeoutMs ?? (idle === 0 ? 2147483647 : idle), websocketConnectTimeoutMs: websocket,
+    maxRetries: provider.maxRetries, maxRetryDelayMs: provider.maxRetryDelayMs ?? 60000 };
+}
+// Pi gives providers its session id (a UUID). Octet's owner key is not one, so
+// derive a stable, per-session RFC 9562 version-8 UUID from it.
+export function piSessionId(id) {
+  if (id == null) return undefined;
+  const h = createHash('sha256').update(`octet-pi-session:${id}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${(8 | (parseInt(h[16], 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+function providerRequestCallbacks(runtime, id, controller) {
+  const call = async (phase, body) => {
+    controller.signal.throwIfAborted();
+    const result = await runtime.transport.request(`provider/hooks/${phase}`, { stream_id: id, ...body });
+    controller.signal.throwIfAborted();
+    return result;
+  };
+  return {
+    async onPayload(payload) {
+      const result = await call('payload', { payload: plainJSON(payload, 'provider payload', 786432, { omitUndefined: true }) });
+      fields(result, ['payload'], 'provider payload reply');
+      return plainJSON(result.payload, 'provider payload', 786432);
+    },
+    async transformHeaders(headers) {
+      const result = await call('headers', { headers: plainJSON(headers, 'provider headers', 65536) });
+      fields(result, ['headers'], 'provider headers reply');
+      return plainJSON(result.headers, 'provider headers', 65536);
+    },
+    async onResponse(response) {
+      fields(response, ['status', 'headers'], 'provider response');
+      const result = await call('response', { status: response.status, headers: plainJSON(response.headers, 'provider response headers', 65536) });
+      if (result?.accepted !== true || Object.keys(result).length !== 1) invalid('provider response reply');
+    },
+  };
 }
 export async function prepareProviderStream(runtime, params, store) {
   runtime.require('provider_proxy_v1');
-  fields(params, ['stream_id', 'provider_id', 'model_id', 'request', 'authorization_lease'], 'provider stream');
+  fields(params, ['stream_id', 'provider_id', 'model_id', 'request', 'authorization_lease', 'request_hooks'], 'provider stream');
   bounded(params.stream_id, 'provider stream id', 256);
   if (params.authorization_lease != null) unsupported('provider authorization lease');
   const state = providers(runtime); await state.tail;
   const entry = state.committed.get(params.provider_id), model = entry?.models.find(model => model.wire.id === params.model_id);
   if (!model || state.jobs.has(params.stream_id) || state.jobs.size >= 8) throw rpcError(-32002, 'provider route unavailable or stream limit reached');
-  const context = requestContext(params.request), controller = new AbortController();
-  const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: params.request.max_output_tokens ?? undefined,
-    temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: params.request.session_id ?? undefined,
-    reasoning: undefined, onPayload: undefined };
+  if (params.request_hooks !== undefined) {
+    if (params.request_hooks !== true) invalid('provider request hooks');
+    runtime.require('provider_request_hooks_v1');
+  }
+  const context = requestContext(params.request, runtime), controller = new AbortController();
+  // Pi's agent passes no maxTokens to provider streams; the model's own limit
+  // applies inside the package's code exactly as under Pi.
+  const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: undefined,
+    temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: piSessionId(params.request.session_id),
+    reasoning: undefined, onPayload: undefined, onResponse: undefined, transformHeaders: undefined, ...piRequestOptions(runtime, store),
+    ...(params.request_hooks ? providerRequestCallbacks(runtime, params.stream_id, controller) : {}) };
   const reasoning = params.request.reasoning;
   if (reasoning?.type === 'effort' && levels.has(reasoning.value)) options.reasoning = reasoning.value;
   else if (reasoning?.type !== 'off') unsupported('provider reasoning', 'only portable effort controls are supported');
@@ -378,6 +470,12 @@ export function startProviderStream(runtime, id) {
       if (!resolution) unsupported('custom provider auth', 'provider is not configured');
       if (resolution?.auth.baseUrl) model.baseUrl = resolution.auth.baseUrl;
       job.options = { ...job.options, apiKey: resolution?.auth.apiKey, headers: { ...resolution?.auth.headers, ...model.headers }, env: resolution?.env };
+    }
+    if (job.options.transformHeaders) {
+      const { transformHeaders, ...options } = job.options;
+      const headers = await transformHeaders(options.headers ?? {});
+      job.controller.signal.throwIfAborted();
+      job.options = { ...options, headers };
     }
     const callback = job.entry.inherited && !job.entry.native && job.entry.config.api !== job.model.pi.api ? nativeProviderDelegate : job.entry.stream;
     const stream = callback(model, job.context, strict(job.options, 'provider stream options'));

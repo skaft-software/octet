@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch } from './helper.mjs';
-import { modelRegistry, registerProvider, unregisterProvider, startProviderRegistration, validateProviderInitialization, prepareProviderStream, startProviderStream, cancelProviderStream } from '../lib/providers.mjs';
+import { currentModel, modelView, scopedModels, modelRegistry, registerProvider, unregisterProvider, startProviderRegistration, validateProviderInitialization, prepareProviderStream, startProviderStream, cancelProviderStream } from '../lib/providers.mjs';
 
 const definition = streamSimple => ({ baseUrl: 'http://127.0.0.1:9/local/', apiKey: 'explicit-local-dummy', api: 'openai-completions',
   models: [{ id: 'virtual/model', name: 'Virtual Local', reasoning: false, input: ['text', 'image'], cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 }, contextWindow: 8192, maxTokens: 1024 }], streamSimple });
@@ -50,6 +50,63 @@ test('startup batch uses native registration, preserves exact metadata and keeps
   assert.ok(!JSON.stringify(registration).includes('explicit-local-dummy'));
 });
 
+for (const [label, map, expected] of [
+  ['undefined', undefined, undefined],
+  ['empty', {}, ['off', 'minimal', 'low', 'medium', 'high']],
+  ['holes', { off: null, minimal: null, low: 'provider-low', medium: null }, ['low', 'high']],
+  ['xhigh only', { xhigh: 'max' }, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']],
+  ['max only', { max: 'provider-maximum' }, ['off', 'minimal', 'low', 'medium', 'high', 'max']],
+  ['both', { xhigh: 'provider-xhigh', max: 'provider-max' }, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
+  ['undefined member', { off: undefined, max: null }, ['off', 'minimal', 'low', 'medium', 'high']],
+]) test(`registered thinking map preserves Pi choices: ${label}`, async () => {
+  const value = fixture(), config = definition(() => []);
+  Object.assign(config.models[0], { reasoning: true, thinkingLevelMap: map });
+  registerProvider(value.runtime, 0, 'pi-local-provider', config);
+  value.runtime.initialized = true; startProviderRegistration(value.runtime);
+  await until(() => value.frames.some(frame => frame.method === 'providers/complete'));
+  assert.deepEqual(value.frames[0].params.models[0].pi_metadata.reasoning_options,
+    expected === undefined ? undefined : { values: expected, default: null });
+  assert.ok(!JSON.stringify(value.frames[0]).includes('thinkingLevelMap'));
+});
+
+test('thinking map survives defensive model views and reaches the custom stream without remapping reasoning', async () => {
+  let observed;
+  const value = fixture(), map = { off: null, minimal: null, low: 'provider-low', medium: null, high: 'provider-high', xhigh: 'max', max: 'provider-maximum' };
+  const config = definition((model, _, options) => {
+    observed = { model, reasoning: options.reasoning };
+    return (async function* () {
+      yield { type: 'start', partial: { content: [] } };
+      yield { type: 'done', reason: 'stop', message: { content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } };
+    })();
+  });
+  Object.assign(config.models[0], { reasoning: true, thinkingLevelMap: map });
+  registerProvider(value.runtime, 0, 'pi-local-provider', config);
+  value.runtime.initialized = true; startProviderRegistration(value.runtime);
+  await until(() => value.frames.some(frame => frame.method === 'providers/complete'));
+  const view = { provider: 'pi-local-provider', id: 'virtual/model', api: 'openai-completions', reasoning: true, input: ['text', 'image'], context_window: 8192, max_tokens: 1024 };
+  const facts = { model_view: view, pi_models: { available_models: [view], all_models: [view], scoped_models: [{ model: view }] } };
+  const registry = modelRegistry(() => facts, value.runtime);
+  for (const model of [modelView(view, value.runtime), currentModel(facts, value.runtime), scopedModels(facts, value.runtime)[0].model,
+    registry.find(view.provider, view.id), registry.getAll()[0], registry.getAvailable()[0]]) {
+    assert.deepEqual(model.thinkingLevelMap, map);
+    model.thinkingLevelMap.xhigh = 'mutated';
+  }
+  const input = params(value); input.request.reasoning = { type: 'effort', value: 'xhigh' };
+  await prepareProviderStream(value.runtime, input, value.store); startProviderStream(value.runtime, 'stream-1');
+  await until(() => value.frames.some(frame => frame.params.kind === 'finished'));
+  assert.deepEqual(observed.model.thinkingLevelMap, map);
+  assert.equal(observed.reasoning, 'xhigh');
+});
+
+test('invalid or unselectable thinking maps refuse before registration', () => {
+  for (const map of [null, [], { unknown: 'high' }, { high: 42 }, { high: () => 'high' },
+    { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null }]) {
+    const { runtime } = fixture(), config = definition(() => []);
+    Object.assign(config.models[0], { reasoning: true, thinkingLevelMap: map });
+    assert.throws(() => registerProvider(runtime, 0, 'pi-local-provider', config), /thinkingLevelMap/);
+  }
+});
+
 test('replacement uses native update, unregister uses native owner-fenced removal', async () => {
   const value = await registered(() => {});
   registerProvider(value.runtime, 0, 'pi-local-provider', definition(() => {})); await Promise.all(value.pending);
@@ -76,8 +133,13 @@ for (const choice of ['auto', 'none']) test(`custom stream receives logical sele
   startProviderStream(value.runtime, 'stream-1');
   await until(() => value.frames.some(frame => frame.params.kind === 'finished'));
   assert.equal(observed.model.id, 'virtual/model'); assert.equal(observed.key, 'explicit-local-dummy');
-  assert.equal(observed.context.messages[0].content[0].text, 'native input');
-  assert.equal(observed.context.tools, undefined);
+  // Pi 1.0.2 hands providers a transcript context: an optional leading system
+  // message carries prompt/tools, never separate systemPrompt/tools fields.
+  assert.deepEqual(Object.keys(observed.context), ['messages']);
+  const users = observed.context.messages.filter(message => message.role === 'user');
+  assert.equal(users[0].content[0].text, 'native input');
+  assert.ok(observed.context.messages.every((message, index) => message.role !== 'system' || index === 0));
+  assert.equal(observed.context.messages[0].role === 'system' ? observed.context.messages[0].toolsAdded : undefined, undefined);
   const events = value.frames.filter(frame => frame.method === 'provider/event');
   assert.deepEqual(events.map(frame => frame.params.kind), ['started', 'text_start', 'text_delta', 'text_end', 'usage', 'finished']);
   assert.deepEqual(events.map(frame => frame.params.sequence), [0, 1, 2, 3, 4, 5]);
@@ -136,7 +198,7 @@ test('real adapter transport registers after initialize and emits the native acc
     streamSimple: (_, context, options) => (async function* () {
       if (options.apiKey !== 'explicit-local-dummy') throw new Error('local key missing');
       const partial = { content: [{type:'text',text:''}] };
-      if (context.systemPrompt === 'cancel-native') {
+      if ((context.messages[0]?.role === 'system' ? context.messages[0].content : undefined) === 'cancel-native') {
         // The host may cancel while this generator is still suspended at
         // 'start' (the adapter then closes it with return()), or after it
         // resumes; record the observed abort either way.

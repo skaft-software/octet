@@ -16,22 +16,28 @@ const schemaKeywords = new Set(['$schema', '$id', '$ref', '$defs', 'definitions'
   'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'minItems', 'maxItems', 'uniqueItems', 'minProperties',
   'maxProperties', 'pattern', 'format', 'deprecated', 'readOnly', 'writeOnly', 'contentEncoding', 'contentMediaType', 'contentSchema']);
 
-function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0, budget = { remaining: 4096 }) {
-  if (depth > 32 || --budget.remaining < 0) invalid(`tool ${tool} schema depth or work limit`);
+// Same bounds as the host's schema check (depth 32, 4096 schema nodes); the
+// separate work bound only stops pathological keyword/list sizes.
+function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0, budget = { nodes: 4096, work: 65536 }) {
+  if (depth > 32 || --budget.nodes < 0) invalid(`tool ${tool} schema depth or work limit`);
   if (typeof schema === 'boolean') return;
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) invalid(`tool ${tool} ${path} must be a schema object or boolean`);
   const visit = (child, suffix) => validateSchemaProfile(child, tool, `${path}.${suffix}`, depth + 1, budget);
   const strings = value => {
-    if (!Array.isArray(value) || value.length > budget.remaining || new Set(value).size !== value.length) invalid(`tool ${tool} ${path} requires distinct strings`);
-    for (const name of value) if (--budget.remaining < 0 || typeof name !== 'string') invalid(`tool ${tool} ${path} dependency or schema work limit`);
+    if (!Array.isArray(value) || value.length > budget.work || new Set(value).size !== value.length) invalid(`tool ${tool} ${path} requires distinct strings`);
+    for (const name of value) if (--budget.work < 0 || typeof name !== 'string') invalid(`tool ${tool} ${path} dependency or schema work limit`);
   };
   const constant = value => plainJSON(value, `tool ${tool} schema constant`, 65536);
   const pattern = value => {
     if (typeof value !== 'string' || Buffer.byteLength(value) > 1024) invalid(`tool ${tool} ${path}.pattern`);
     try { new RegExp(value, 'u'); } catch { invalid(`tool ${tool} ${path}.pattern syntax`); }
   };
+  // Validate the same document toolWire sends: JSON omits undefined object
+  // members (e.g. TypeBox-style `required: undefined`), so they are absent.
+  // Undefined array entries are still rejected by the checks below.
   for (const [key, value] of Object.entries(schema)) {
-    if (--budget.remaining < 0) invalid(`tool ${tool} schema work limit`);
+    if (value === undefined) continue;
+    if (--budget.work < 0) invalid(`tool ${tool} schema work limit`);
     if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported');
     if (key === 'pattern') pattern(value);
     if (['deprecated', 'readOnly', 'writeOnly', '$recursiveAnchor', 'uniqueItems'].includes(key) && typeof value !== 'boolean') invalid(`tool ${tool} ${path}.${key} must be boolean`);
@@ -48,11 +54,12 @@ function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0, bud
     if (['const', 'default', 'examples'].includes(key)) constant(value);
     if (key === 'enum') {
       if (!Array.isArray(value) || !value.length) invalid(`tool ${tool} ${path}.enum`);
-      for (const child of value) { if (--budget.remaining < 0) invalid(`tool ${tool} schema work limit`); constant(child); }
+      for (const child of value) { if (--budget.work < 0) invalid(`tool ${tool} schema work limit`); constant(child); }
     }
     if (['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas', 'dependencies'].includes(key)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`tool ${tool} ${path}.${key}`);
       for (const [name, child] of Object.entries(value)) {
+        if (child === undefined) continue;
         if (key === 'patternProperties') pattern(name);
         if (key === 'dependencies' && Array.isArray(child)) { strings(child); continue; }
         visit(child, `${key}.${name}`);
@@ -149,8 +156,14 @@ export function registerTool(runtime, factory, definition) {
   // Pi registration is synchronous void. Reuse the transport worker so a
   // following getter sees the host ACK, not an optimistic local catalog.
   const result = runtime.transport.requestSync('tools/register', { tools: [toolWire(definition.name, entry)] }, { signal: store.controller.signal });
-  fields(result, ['revision', 'tools'], 'tool registration acknowledgement');
-  if (!Number.isSafeInteger(result.revision) || result.revision < 0 || !Array.isArray(result.tools) || !result.tools.includes(definition.name)) invalid('host did not publish registered tool');
+  fields(result, ['revision', 'tools', 'withheld'], 'tool registration acknowledgement');
+  if (!Number.isSafeInteger(result.revision) || result.revision < 0 || !Array.isArray(result.tools)) invalid('host did not publish registered tool');
+  const withheld = result.withheld ?? [];
+  if (!Array.isArray(withheld) || result.withheld !== undefined && !withheld.length || withheld.some(name => typeof name !== 'string' || result.tools.includes(name))) invalid('tool registration withheld names');
+  // Pi registers a tool even when the product tool policy disables it by
+  // default (`--no-tools`): registration succeeds, the tool is never active
+  // or model-visible. Only the host's explicit policy withholding counts.
+  if (!result.tools.includes(definition.name) && !withheld.includes(definition.name)) invalid('host did not publish registered tool');
   runtime.tools.set(definition.name, entry);
 }
 

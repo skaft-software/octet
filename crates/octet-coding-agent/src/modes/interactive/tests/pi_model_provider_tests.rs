@@ -13,15 +13,21 @@ export default pi => {
     streamSimple: (model, context, options) => (async function* () {
       // The logical native selection reaches exactly this process-owned
       // streamer; its physical dispatch choice stays local to the extension.
+      const system = context.messages[0]?.role === 'system' ? context.messages[0].content : undefined;
       appendFileSync(TRACE,JSON.stringify({kind:'dispatch',id:model.id,provider:model.provider,baseUrl:model.baseUrl,
-        explicitKey:options.apiKey==='explicit-local-dummy',system:context.systemPrompt,messages:context.messages})+'\n');
+        explicitKey:options.apiKey==='explicit-local-dummy',system,messages:context.messages})+'\n');
       const partial={role:'assistant',model:'local-physical',api:'openai-completions',provider:'physical-local',content:[]};
-      yield {type:'start',partial};
-      if(context.systemPrompt==='cancel-native') {
-        await new Promise(resolve=>options.signal.addEventListener('abort',resolve,{once:true}));
-        appendFileSync(TRACE,JSON.stringify({kind:'cancelled',aborted:options.signal.aborted})+'\n');
+      if(system==='cancel-native') {
+        const aborted = new Promise(resolve=>options.signal.addEventListener('abort',resolve,{once:true}));
+        try {
+          yield {type:'start',partial};
+          await aborted;
+        } finally {
+          appendFileSync(TRACE,JSON.stringify({kind:'cancelled',aborted:options.signal.aborted})+'\n');
+        }
         return;
       }
+      yield {type:'start',partial};
       partial.content.push({type:'text',text:''});
       yield {type:'text_start',contentIndex:0,partial};
       partial.content[0].text=text; yield {type:'text_delta',contentIndex:0,delta:text,partial};
@@ -168,9 +174,72 @@ async fn pi_custom_provider_registration_selection_replacement_and_stream_are_na
     assert!(values.iter().any(|value| value["kind"] == "cancelled" && value["aborted"] == true),
         "native removal must abort the existing custom callback, not just withdraw its catalog entry");
     assert_eq!(
-        dispatch["messages"][0]["content"][0]["text"],
+        dispatch["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"][0]["text"],
         "local fixture input"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_custom_provider_thinking_map_keeps_exact_choices_and_portable_dispatch() {
+    use octet_ai::ReasoningEffort;
+    let map = serde_json::json!({"off":null,"minimal":null,"low":"provider-low","medium":null,"high":"provider-high","xhigh":"max","max":"provider-maximum"});
+    let factory = CUSTOM_PROVIDER
+        .replacen("reasoning:false", &format!("reasoning:true,thinkingLevelMap:{map}"), 1)
+        .replace("explicitKey:options.apiKey", "thinkingLevelMap:model.thinkingLevelMap,reasoning:options.reasoning,explicitKey:options.apiKey")
+        .replace("appendFileSync(TRACE,JSON.stringify({kind:'selected'", "pi.setThinkingLevel('max'); appendFileSync(TRACE,JSON.stringify({kind:'selected'");
+    let (directory, mut app) = pi_app(&factory);
+    let mut shell = InteractiveShell::test_shell();
+    app.synchronize_extension_provider_catalog();
+    request_extension_ui(&mut shell, &mut app);
+    command(&mut app, &mut shell, "select").await.unwrap();
+    let expected = ReasoningConfig::Effort(ReasoningEffort::Max);
+    assert_eq!(app.reasoning, expected);
+    let capability = app.model.spec.capabilities.reasoning.as_ref().unwrap();
+    assert_eq!(
+        capability.choices(),
+        vec![
+            ReasoningConfig::Effort(ReasoningEffort::Low),
+            ReasoningConfig::Effort(ReasoningEffort::High),
+            ReasoningConfig::Effort(ReasoningEffort::Xhigh),
+            expected.clone(),
+        ]
+    );
+    assert!(app
+        .executable_extensions
+        .prepare_selected_provider_transport(&app.model)
+        .unwrap()
+        .is_some());
+    let mut request = pi_custom_provider_request();
+    request.reasoning = expected;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        app.client.complete(&app.model, request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.executable_extensions.shutdown().await;
+    let values = std::fs::read_to_string(directory.path().join("trace.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let selected = values
+        .iter()
+        .find(|value| value["kind"] == "selected")
+        .unwrap();
+    assert_eq!(selected["model"]["thinkingLevelMap"], map);
+    let dispatch = values
+        .iter()
+        .find(|value| value["kind"] == "dispatch")
+        .unwrap();
+    assert_eq!(dispatch["thinkingLevelMap"], map);
+    assert_eq!(dispatch["reasoning"], "max");
 }
 
 const FACTS: &str = r#"
@@ -825,7 +894,7 @@ export default pi => {
     .unwrap();
     assert_eq!(
         *observations.lock().unwrap(),
-        ["payload", "headers", "response"]
+        ["headers", "payload", "response"]
     );
     assert_eq!(response.usage.input_tokens, 2);
     assert_eq!(response.usage.output_tokens, 3);

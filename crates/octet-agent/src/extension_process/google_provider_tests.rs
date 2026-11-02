@@ -60,11 +60,18 @@ fn google_proxy_declaration_preserves_closed_api_03_and_bounded_api_04() {
             "{field}"
         );
     }
-    for value in [serde_json::Value::Null, serde_json::json!("other")] {
-        let mut bad = original.clone();
-        bad["models"][0]["pi_metadata"]["inherit_provider"] = value;
-        assert!(model_control::parse_provider_proxy_registration(bad).is_err());
-    }
+    let mut bad = original.clone();
+    bad["models"][0]["pi_metadata"]["inherit_provider"] = serde_json::json!("other");
+    assert!(model_control::parse_provider_proxy_registration(bad).is_err());
+    // An extension-streamed Google model (no inheritance) is a label only; its
+    // own process performs the request, so registration admits it with pricing.
+    let mut own = original.clone();
+    own["models"][0]["pi_metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("inherit_provider");
+    own["models"][0]["pi_metadata"]["pricing"] = serde_json::json!({"input":0,"output":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":null,"reasoning":null,"tiers":[]});
+    assert!(model_control::parse_provider_proxy_registration(own).is_ok());
     for protocol in ["anthropic_messages", "openai_chat", "openai_responses"] {
         let mut old = original.clone();
         old["models"][0]["protocol"] = serde_json::json!(protocol);

@@ -74,6 +74,7 @@ fn protocol_api_id(protocol: crate::types::Protocol) -> &'static str {
         crate::types::Protocol::GoogleGenerativeAi => "google-generative-ai",
         crate::types::Protocol::MistralConversations => "mistral-conversations",
         crate::types::Protocol::PiMessages => "pi-messages",
+        crate::types::Protocol::ExtensionStream => "extension-stream",
     }
 }
 

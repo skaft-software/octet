@@ -185,6 +185,7 @@ pub(super) async fn spawn_connection(
     let pending = Arc::new(StdMutex::new(HashMap::new()));
     let issued_resource_owners = Arc::new(StdMutex::new(HashSet::new()));
     let session_leaf = Arc::new(session_leaf::SessionLeafMailbox::default());
+    let prompt_reads = Arc::new(prompt_read::Mailbox::default());
     let remote_ui = Arc::new(RemoteUiMailbox::new(
         (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
             .then(|| config.remote_ui.clone())
@@ -279,6 +280,7 @@ pub(super) async fn spawn_connection(
         Arc::clone(&resource_cleanup_changed),
         Arc::clone(&issued_resource_owners),
         Arc::clone(&session_leaf),
+        Arc::clone(&prompt_reads),
         Arc::clone(&remote_ui),
         Arc::clone(&pending_changed),
         Arc::clone(&closed),
@@ -343,6 +345,7 @@ pub(super) async fn spawn_connection(
         resource_cleanup_changed: Arc::clone(&resource_cleanup_changed),
         issued_resource_owners,
         session_leaf,
+        prompt_reads,
         remote_ui,
         pi_settings,
         pending_changed,
@@ -451,6 +454,7 @@ pub(super) async fn spawn_connection(
     }
     if offered_host_services.provider_proxy {
         optional_features.push("provider_proxy_v1".to_owned());
+        optional_features.push(provider_hooks::FEATURE.to_owned());
         if offered_host_services.provider_inheritance {
             optional_features.push("provider_inheritance_v1".to_owned());
             optional_features.push("provider_google_generative_ai_v1".to_owned());
@@ -589,6 +593,9 @@ pub(super) async fn spawn_connection(
     }
     if descriptor.manifest.capabilities.system_prompt {
         optional_features.push(EXTENSION_FEATURE_SYSTEM_PROMPT_READ.to_owned());
+        if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+            optional_features.push(prompt_read::FEATURE.to_owned());
+        }
     }
     if let Some(profile) = &session_offer {
         optional_features.push(transport::OWNER_ROUTES.to_owned());

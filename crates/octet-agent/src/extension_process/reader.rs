@@ -8,6 +8,7 @@ pub(super) struct ProtocolReadState {
     pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
+    pub(super) prompt_reads: Arc<prompt_read::Mailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) closed: Arc<AtomicBool>,
@@ -303,7 +304,7 @@ pub(super) fn queue_session_compaction_operation(
                 request_id,
                 ExtensionRequestFailure::BoundsExceeded,
                 "session compaction worker limit exceeded",
-            )
+            );
         }
     };
     let authority = SessionCompactionAuthority {
@@ -344,7 +345,7 @@ pub(super) fn queue_session_compaction_operation(
                         "session compaction idle consumer is unavailable"
                     }
                 },
-            )
+            );
         }
     };
     let owner_changed = Arc::clone(&state.pending_changed);
@@ -397,9 +398,16 @@ pub(super) fn queue_session_compaction_operation(
             Err("session compaction consumer was lost; do not replay ambiguous work".into())
         });
         let result = match result {
-            Ok(committed) if !authority.is_current()
-                || !driver.active.load(Ordering::Acquire)
-                || driver.epoch.load(Ordering::Acquire) != epoch => Err(format!("session compaction committed entry {} but its owner retired; retained, do not retry", committed.entry_id)),
+            Ok(committed)
+                if !authority.is_current()
+                    || !driver.active.load(Ordering::Acquire)
+                    || driver.epoch.load(Ordering::Acquire) != epoch =>
+            {
+                Err(format!(
+                    "session compaction committed entry {} but its owner retired; retained, do not retry",
+                    committed.entry_id
+                ))
+            }
             other => other,
         };
         let committed_id = result.as_ref().ok().map(|result| result.entry_id.clone());
@@ -910,6 +918,7 @@ pub(super) async fn read_protocol_stdout<R>(
     resource_cleanup_changed: Arc<Notify>,
     issued_resource_owners: IssuedResourceOwners,
     session_leaf: Arc<session_leaf::SessionLeafMailbox>,
+    prompt_reads: Arc<prompt_read::Mailbox>,
     remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
     closed: Arc<AtomicBool>,
@@ -955,6 +964,7 @@ pub(super) async fn read_protocol_stdout<R>(
         resource_cleanup_changed,
         issued_resource_owners,
         session_leaf,
+        prompt_reads,
         remote_ui,
         pending_changed,
         closed,

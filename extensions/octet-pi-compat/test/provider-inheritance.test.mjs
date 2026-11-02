@@ -78,7 +78,9 @@ test('admitted native delegation preserves tools, usage and route while composin
     delegateCalls++;
     assert.equal(params.stream_id, 'stream-1');
     assert.equal(params.on_payload, true);
-    assert.equal(params.request.system, 'wrapped system');
+    // Pi normalizes a wrapper's systemPrompt into a leading system message and
+    // replays it before the original prompt (installed Pi 1.0.2 behaviour).
+    assert.equal(params.request.system, 'wrapped system\n\nnative system');
     assert.deepEqual(params.request.tools, []);
     assert.equal(params.request.max_output_tokens, 32);
     assert.deepEqual(await nativeProviderPayload(fixture.runtime, { stream_id: params.stream_id, payload: { system: 'native payload', model: native.id } }), { payload: { system: 'wrapped payload', model: native.id } });
@@ -92,6 +94,16 @@ test('admitted native delegation preserves tools, usage and route while composin
   assert.equal(events[2].params.payload.delta, 'native response');
   assert.equal(events[4].params.payload.total_tokens, 5);
 });
+
+for (const callback of ['onResponse', 'transformHeaders']) {
+  test(`native delegation refuses unforwarded package ${callback} callbacks`, { timeout: 5000 }, async () => {
+    let calls = 0;
+    const value = await admitted((model, context, options) => ai.anthropicMessagesApi().streamSimple(model, context, { ...options, [callback]() { assert.fail('callback must not be accepted without wire forwarding'); } }), async () => { calls++; return nativeResponse(); });
+    assert.equal((await value.terminal).kind, 'error');
+    await Promise.all(value.pending);
+    assert.equal(calls, 0);
+  });
+}
 
 for (const mutation of ['tools', 'signal', 'tokens', 'reasoning', 'model', 'duplicate']) {
   test(`native delegation refuses ${mutation} authority changes before a new host attempt`, { timeout: 5000 }, async () => {

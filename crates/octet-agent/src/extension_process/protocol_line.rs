@@ -646,6 +646,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     native_provider::inherited_models(state, params),
                 )?;
             }
+            "provider/hooks/payload" | "provider/hooks/headers" | "provider/hooks/response" => {
+                provider_hooks::dispatch(state, object, method, params)?;
+            }
             "provider/delegate" => {
                 require_declared(state.declared.providers, "provider streams")?;
                 if !read_std_lock(&state.protocol).supports("provider_inheritance_v1") {
@@ -1690,7 +1693,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 // echoing it in the initialize response fails negotiation as an
                 // unknown feature. An unnegotiated request is refused with
                 // `unsupported_feature` before the owner check.
-                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                let Some((request, admitted)) = admit_host_request::<prompt_read::Request>(
                     state,
                     object,
                     methods::CONTEXT_SYSTEM_PROMPT,
@@ -1700,6 +1703,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 else {
                     return Ok(());
                 };
+                if let Some(scope) = request.scope.as_deref() {
+                    return prompt_read::respond(state, &request, &admitted, scope);
+                }
                 // The child request stays registered until the frontend answers
                 // with bounded prompt text.
                 dispatch_host_request_event(state, &admitted, |admitted| {

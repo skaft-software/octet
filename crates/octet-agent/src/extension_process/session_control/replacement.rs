@@ -107,6 +107,7 @@ pub(super) fn dispatch_setup(
     if let Err(failure) = validate_explicit_request_owner(state, &admitted.owner) {
         return refuse_admitted_request(state, &admitted, failure);
     }
+    let completes = matches!(request.mutation, SetupMutation::Complete);
     let mutation = serde_json::to_value(request.mutation).map_err(|e| e.to_string())?;
     if serde_json::to_vec(&mutation)
         .map_err(|e| e.to_string())?
@@ -147,16 +148,70 @@ pub(super) fn dispatch_setup(
     let children = Arc::clone(&state.child_requests);
     let health = Arc::clone(&state.health);
     let events = state.events.clone();
+    let pending = Arc::clone(&state.pending);
+    let issued = Arc::clone(&state.issued_resource_owners);
+    let mailbox = Arc::clone(&state.session_leaf);
+    let routed = session_leaf::owner_routes_enabled(&read_std_lock(&state.protocol));
+    let closed = Arc::clone(&state.closed);
+    let draining = Arc::clone(&state.draining);
     tokio::spawn(async move {
-        let id = admitted.request_id;
+        let id = admitted.request_id.clone();
         let response = match submission {
             Ok(receiver) => {
                 let result = tokio::select! {
                     biased;
-                    _ = child_response_settled(response_state) => return,
+                    _ = child_response_settled(Arc::clone(&response_state)) => return,
                     result = receiver => result.unwrap_or(Err("session setup driver unavailable".into())),
                 };
                 match result {
+                    Ok(mut result) if completes && routed => {
+                        // Setup writes advanced the real replacement history.
+                        // Re-pin the live parent to the publication that holds
+                        // them (its receipt head) and lease that exact view.
+                        let head = result["context"]["host"]["session_leaf_id"].clone();
+                        let lease = Some(frame_limit.max_message_bytes());
+                        let repin = async {
+                            loop {
+                                let changed =
+                                    session_leaf::transport::publication_changed(&mailbox);
+                                let current = lock_std_mutex(&mailbox.mirror)
+                                    .as_ref()
+                                    .and_then(|mirror| mirror.leaf_id());
+                                if current.as_ref() == Some(&head) {
+                                    if let Some(leased) = rebind_parent(
+                                        &pending,
+                                        &issued,
+                                        &mailbox,
+                                        &children,
+                                        &admitted,
+                                        routed,
+                                        (&closed, &draining),
+                                        lease,
+                                    )? {
+                                        break Ok::<_, String>(leased);
+                                    }
+                                }
+                                changed.await;
+                            }
+                        };
+                        let leased = tokio::select! {
+                            biased;
+                            _ = child_response_settled(response_state) => return,
+                            leased = repin => leased,
+                        };
+                        match leased {
+                            Ok(leased) => {
+                                if let Some(descriptor) = leased {
+                                    result["session_snapshot"] = descriptor;
+                                }
+                                Ok(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}))
+                            }
+                            Err(detail) => Ok(serde_json::json!({
+                                "jsonrpc":"2.0", "id":id,
+                                "error":ExtensionRequestFailure::NotForegroundOwner.error_object(&detail),
+                            })),
+                        }
+                    }
                     Ok(result) => Ok(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})),
                     Err(detail) => api_v03_session_lifecycle_error(&id, "internal_error", &detail),
                 }
@@ -190,7 +245,8 @@ fn rebind_parent(
     admitted: &AdmittedExtensionRequest,
     routed: bool,
     process: (&AtomicBool, &AtomicBool),
-) -> Result<bool, String> {
+    lease: Option<usize>,
+) -> Result<Option<Option<serde_json::Value>>, String> {
     let mut pending = lock_std_mutex(pending);
     let mut issued = lock_std_mutex(issued);
     let children = lock_std_mutex(children);
@@ -225,13 +281,25 @@ fn rebind_parent(
             .rebind_parent(parent_id, &admitted.owner, mirror, mailbox)
             .map_err(|error| error.to_string())?
     {
-        return Ok(false);
+        return Ok(None);
     }
+    // The rebound parent receives a counted lease of exactly its pinned view,
+    // so its first append receipt is validated against the same revision.
+    let leased = match lease.filter(|_| routed) {
+        Some(frame) => {
+            let profile = mailbox.profile(frame).map_err(|error| error.to_string())?;
+            let descriptor = store
+                .lease_parent(parent_id, &profile)
+                .map_err(|error| error.to_string())?;
+            Some(serde_json::to_value(descriptor).map_err(|error| error.to_string())?)
+        }
+        None => None,
+    };
     // Admission of subsequent requests still derives authority from the live
     // parent. Do not weaken it to accept any explicit owner supplied by Node.
     parent.resource_owner = Some(owner.clone());
     issued.insert(owner.clone());
-    Ok(true)
+    Ok(Some(leased))
 }
 
 pub(super) fn queue_replacement(
@@ -282,11 +350,14 @@ pub(super) fn queue_replacement(
                     Ok(result) if result["cancelled"] == true => {
                         Ok(serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result}))
                     }
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        // Setup parents are leased again at setup completion,
+                        // after their writes; ordinary replacements lease now.
+                        let lease = (!setup).then(|| frame_limit.max_message_bytes());
                         let rebind = async {
                             loop {
                                 let changed = session_leaf::transport::publication_changed(&mirror);
-                                if rebind_parent(
+                                if let Some(leased) = rebind_parent(
                                     &pending,
                                     &issued,
                                     &mirror,
@@ -294,19 +365,23 @@ pub(super) fn queue_replacement(
                                     &admitted,
                                     routed,
                                     (&closed, &draining),
+                                    lease,
                                 )? {
-                                    break Ok(());
+                                    break Ok(leased);
                                 }
                                 changed.await;
                             }
                         };
-                        let rebound: Result<(), String> = tokio::select! {
+                        let rebound: Result<Option<serde_json::Value>, String> = tokio::select! {
                             biased;
                             _ = child_response_settled(response_state) => return,
                             result = rebind => result,
                         };
                         match rebound {
-                            Ok(()) => {
+                            Ok(leased) => {
+                                if let Some(descriptor) = leased {
+                                    result["session_snapshot"] = descriptor;
+                                }
                                 Ok(serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result}))
                             }
                             // This is the owner-scoped API 0.4 contract, not an

@@ -42,7 +42,7 @@ test('schema keyword shapes and dependency work stay bounded before publication'
   for (const parameters of [
     { required: [1] }, { dependentRequired: { a: [false] } }, { dependencies: { a: [null] } },
     { format: 1 }, { multipleOf: 0 }, { maxContains: -1 }, { $vocabulary: { urn: 'yes' } },
-    { required: Array.from({ length: 4096 }, (_, index) => `key${index}`) },
+    { required: Array.from({ length: 65537 }, (_, index) => `key${index}`) },
   ]) assert.throws(() => validateTool(definition(parameters)));
   assert.throws(() => validateTool({ ...definition({}), outputSchema: { patternProperties: { '[': {} } } }));
 });
@@ -54,4 +54,24 @@ test('native default-format golden cases retain the pinned TypeBox decisions', a
     const validator = Compile({ type: 'string', format });
     for (const [value, expected] of values) assert.equal(validator.Check(value), expected, `${format}: ${value}`);
   }
+});
+
+test('undefined schema object members are absent, matching the JSON wire document', () => {
+  // Original @onkernel/browser-loop removeDiscriminator spreads `{ required: void 0 }`.
+  const parameters = { type: 'object', required: undefined, properties: { filter: { type: 'string', description: undefined }, gone: undefined } };
+  validateTool(definition(parameters));
+  assert.deepEqual(toolWire('schema_probe', { definition: definition(parameters) }).parameters, { type: 'object', properties: { filter: { type: 'string' } } });
+  validateTool({ ...definition({}), outputSchema: { type: 'object', required: undefined } });
+  for (const bad of [
+    { required: [undefined] }, { required: 'a' }, { required: null }, { required: ['a', 'a'] }, { enum: [undefined] },
+    { properties: { a: null } }, { madeUp: 1 }, { type: 'object', required: undefined, multipleOf: 0 },
+  ]) assert.throws(() => validateTool(definition(bad)), JSON.stringify(bad));
+});
+
+test('schema node bound matches the host (4096 nodes), independent of keyword count', () => {
+  // ~2k nodes with many keywords each (e.g. @onkernel/browser-loop browser_act) is accepted.
+  const wide = { type: 'object', properties: Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`p${i}`, { type: 'string', description: 'd', minLength: 0, maxLength: 9, pattern: '^a' }])), required: ['p0'] };
+  validateTool(definition(wide));
+  const deep = { type: 'object', properties: Object.fromEntries(Array.from({ length: 4096 }, (_, i) => [`p${i}`, { type: 'string' }])) };
+  assert.throws(() => validateTool(definition(deep)), /work limit/);
 });

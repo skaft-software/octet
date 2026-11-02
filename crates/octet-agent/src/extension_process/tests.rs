@@ -60,6 +60,7 @@ pub(super) fn protocol_read_state_for_test(
             pending: Arc::new(StdMutex::new(HashMap::new())),
             issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
             session_leaf: Arc::new(session_leaf::SessionLeafMailbox::default()),
+            prompt_reads: Arc::new(prompt_read::Mailbox::default()),
             remote_ui: Arc::new(RemoteUiMailbox::new(None)),
             pending_changed: Arc::new(Notify::new()),
             closed: Arc::new(AtomicBool::new(false)),
@@ -2103,14 +2104,18 @@ fn pending_remote_cancellation_remains_a_remote_error() {
 fn api_v03_theme_selection_is_omitted_without_a_host_handler() {
     for session_lifecycle in [false, true] {
         let offer = api_v03_host_offer_for_services(1024, 4, session_lifecycle, false).unwrap();
-        assert!(!offer
-            .optional_capabilities
-            .iter()
-            .any(|capability| capability == "theme_selection"));
-        assert!(!offer
-            .optional_methods
-            .iter()
-            .any(|method| method == "theme/select"));
+        assert!(
+            !offer
+                .optional_capabilities
+                .iter()
+                .any(|capability| capability == "theme_selection")
+        );
+        assert!(
+            !offer
+                .optional_methods
+                .iter()
+                .any(|method| method == "theme/select")
+        );
         api_v03::validate_offer(&offer).unwrap();
     }
 }
@@ -2118,10 +2123,12 @@ fn api_v03_theme_selection_is_omitted_without_a_host_handler() {
 #[test]
 fn api_v03_session_lifecycle_offer_is_conditional_on_a_bound_driver() {
     let unavailable = api_v03_host_offer_for_services(1024, 4, false, false).unwrap();
-    assert!(unavailable
-        .optional_capabilities
-        .iter()
-        .all(|capability| capability != "session_lifecycle"));
+    assert!(
+        unavailable
+            .optional_capabilities
+            .iter()
+            .all(|capability| capability != "session_lifecycle")
+    );
     assert!(unavailable.optional_methods.iter().all(|method| {
         api_v03::method_spec(method)
             .is_none_or(|specification| specification.capability != "session_lifecycle")
@@ -2129,10 +2136,12 @@ fn api_v03_session_lifecycle_offer_is_conditional_on_a_bound_driver() {
     api_v03::validate_offer(&unavailable).unwrap();
 
     let available = api_v03_host_offer_for_services(1024, 4, true, false).unwrap();
-    assert!(available
-        .optional_capabilities
-        .iter()
-        .any(|capability| capability == "session_lifecycle"));
+    assert!(
+        available
+            .optional_capabilities
+            .iter()
+            .any(|capability| capability == "session_lifecycle")
+    );
     assert_eq!(
         available
             .optional_methods
@@ -3016,10 +3025,12 @@ async fn artifact_publication_requires_and_preserves_the_host_owner() {
     let response: serde_json::Value = serde_json::from_slice(&frame.line).expect("JSON");
     let artifact_id: ArtifactId =
         serde_json::from_value(response["result"]["artifact_id"].clone()).expect("artifact id");
-    assert!(state
-        .artifact_store
-        .resolve_artifact_for_owner(1, "owner-a", &artifact_id)
-        .is_ok());
+    assert!(
+        state
+            .artifact_store
+            .resolve_artifact_for_owner(1, "owner-a", &artifact_id)
+            .is_ok()
+    );
     assert!(matches!(
         state
             .artifact_store
@@ -3088,8 +3099,10 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
     assert_eq!(response["id"], "late-input");
     assert_eq!(response["error"]["code"], JSON_RPC_REQUEST_CANCELLED);
     assert!(lock_std_mutex(&state.child_requests).is_empty());
-    assert!(lock_std_mutex(&state.seen_child_request_ids)
-        .contains(&ExtensionRequestId::String("late-input".into())));
+    assert!(
+        lock_std_mutex(&state.seen_child_request_ids)
+            .contains(&ExtensionRequestId::String("late-input".into()))
+    );
 
     let reuse = handle_protocol_line(line, &state)
         .expect_err("terminal child IDs remain consumed for the generation");
@@ -3222,8 +3235,10 @@ fn non_tool_input_is_delivered_to_an_event_consumer() {
             request: ExtensionInputRequest { prompt, secret: true, .. },
         }) if id == "py:1" && prompt == "Token?"
     ));
-    assert!(lock_std_mutex(&state.child_requests)
-        .contains_key(&ExtensionRequestId::String("py:1".into())));
+    assert!(
+        lock_std_mutex(&state.child_requests)
+            .contains_key(&ExtensionRequestId::String("py:1".into()))
+    );
 }
 
 #[test]
@@ -4454,9 +4469,11 @@ shortcuts = [{ key = "ctrl+shift+p", name = "open_panel", description = "Open th
             description: "bounded shortcut".into(),
         })
         .collect::<Vec<_>>();
-    assert!(validate_shortcut_definitions(&oversized)
-        .unwrap_err()
-        .contains("limit is"));
+    assert!(
+        validate_shortcut_definitions(&oversized)
+            .unwrap_err()
+            .contains("limit is")
+    );
 }
 
 #[cfg(unix)]
@@ -5914,16 +5931,18 @@ fn api_v03_queue_writer_value_canonicalizes_and_validates_child_frames() {
             br#"{"error":{"code":-32601,"message":"unknown or unnegotiated method"},"id":"child","jsonrpc":"2.0"}
 "#
         );
-    assert!(queue_writer_value(
-        &state.writer,
-        &state.frame_limit,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": "child",
-            "error": {"code": -32601, "message": "method not found"},
-        }),
-    )
-    .is_err());
+    assert!(
+        queue_writer_value(
+            &state.writer,
+            &state.frame_limit,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "child",
+                "error": {"code": -32601, "message": "method not found"},
+            }),
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -6168,17 +6187,21 @@ fn agent_spawn_requires_host_policy_and_defaults_tokens_to_parent_inheritance() 
     assert_eq!(policy.max_tokens, None);
     let mut invalid_tokens = policy.clone();
     invalid_tokens.max_tokens = Some(999);
-    assert!(invalid_tokens
-        .validate()
-        .unwrap_err()
-        .contains("max_tokens"));
+    assert!(
+        invalid_tokens
+            .validate()
+            .unwrap_err()
+            .contains("max_tokens")
+    );
 
     let mut invalid = policy.clone();
     invalid.tools.push("browser".into());
-    assert!(invalid
-        .validate()
-        .unwrap_err()
-        .contains("duplicate-free subset of read, edit, write, and bash"));
+    assert!(
+        invalid
+            .validate()
+            .unwrap_err()
+            .contains("duplicate-free subset of read, edit, write, and bash")
+    );
 
     let mut elevated = policy.clone();
     elevated.tools = vec!["read".into(), "bash".into()];
@@ -6810,8 +6833,10 @@ notifications = true
     .unwrap();
     assert_eq!(diagnostic, "ignored response for unknown request 999");
     // Fixture-only release over the existing writer, not a product RPC/profile.
-    assert!(read_std_lock(&process.inner.connection)
-        .queue_notification("test/release", serde_json::json!({})));
+    assert!(
+        read_std_lock(&process.inner.connection)
+            .queue_notification("test/release", serde_json::json!({}))
+    );
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), &mut call)
             .await
@@ -6955,10 +6980,12 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
         "drain returned while an admitted request had not inserted pending state"
     );
     drop(admission);
-    assert!(tokio::time::timeout(Duration::from_secs(1), drain)
-        .await
-        .expect("drain did not observe admission release")
-        .expect("drain task failed"));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("drain did not observe admission release")
+            .expect("drain task failed")
+    );
     assert!(process.shutdown().await);
 }
 
@@ -8277,77 +8304,91 @@ command = "dynamic.py"
 
 #[test]
 fn semantic_ui_transport_rejects_terminal_controls_and_oversized_widgets() {
-    assert!(ExtensionUiContribution::Status {
-        key: "pi.status".into(),
-        text: Some("ready".into()),
-        style_role: Some("extension.pi.status".into()),
-        priority: 0,
-    }
-    .validate()
-    .is_ok());
-    assert!(ExtensionUiContribution::Status {
-        key: "pi.status".into(),
-        text: Some("\u{1b}[31munsafe".into()),
-        style_role: Some("extension.pi.status".into()),
-        priority: 0,
-    }
-    .validate()
-    .is_err());
-    assert!(ExtensionUiContribution::Widget {
-        key: "pi.widget".into(),
-        lines: Some(vec!["row".into(); MAX_EXTENSION_UI_LINES + 1]),
-        placement: ExtensionWidgetPlacement::AboveEditor,
-        style_role: None,
-        priority: 0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        ExtensionUiContribution::Status {
+            key: "pi.status".into(),
+            text: Some("ready".into()),
+            style_role: Some("extension.pi.status".into()),
+            priority: 0,
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        ExtensionUiContribution::Status {
+            key: "pi.status".into(),
+            text: Some("\u{1b}[31munsafe".into()),
+            style_role: Some("extension.pi.status".into()),
+            priority: 0,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ExtensionUiContribution::Widget {
+            key: "pi.widget".into(),
+            lines: Some(vec!["row".into(); MAX_EXTENSION_UI_LINES + 1]),
+            placement: ExtensionWidgetPlacement::AboveEditor,
+            style_role: None,
+            priority: 0,
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 #[test]
 fn autocomplete_transport_requires_a_character_boundary_and_plain_choices() {
-    assert!(ExtensionAutocompleteRequest {
-        text: "é".into(),
-        cursor: 1,
-        revision: 1,
-    }
-    .validate()
-    .is_err());
-    assert!(ExtensionAutocompleteResponse {
-        prefix: "@".into(),
-        items: vec![ExtensionAutocompleteItem {
-            value: "file".into(),
-            label: "file".into(),
-            description: Some("\u{1b}[31munsafe".into()),
-            replace_after_bytes: None,
-            cursor_offset_bytes: None,
-        }],
-    }
-    .validate()
-    .is_err());
+    assert!(
+        ExtensionAutocompleteRequest {
+            text: "é".into(),
+            cursor: 1,
+            revision: 1,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ExtensionAutocompleteResponse {
+            prefix: "@".into(),
+            items: vec![ExtensionAutocompleteItem {
+                value: "file".into(),
+                label: "file".into(),
+                description: Some("\u{1b}[31munsafe".into()),
+                replace_after_bytes: None,
+                cursor_offset_bytes: None,
+            }],
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 #[test]
 fn rendered_tool_transport_is_bounded_and_plain_text() {
-    assert!(RenderedToolCall {
-        segments: vec![ToolRenderSegment {
-            text: "\u{1b}[31munsafe".into(),
-            style_role: None,
-        }],
-    }
-    .validate()
-    .is_err());
-    assert!(RenderedToolCall {
-        segments: vec![
-            ToolRenderSegment {
-                text: "row".into(),
+    assert!(
+        RenderedToolCall {
+            segments: vec![ToolRenderSegment {
+                text: "\u{1b}[31munsafe".into(),
                 style_role: None,
-            };
-            MAX_EXTENSION_UI_LINES.saturating_mul(4) + 1
-        ],
-    }
-    .validate()
-    .is_err());
+            }],
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        RenderedToolCall {
+            segments: vec![
+                ToolRenderSegment {
+                    text: "row".into(),
+                    style_role: None,
+                };
+                MAX_EXTENSION_UI_LINES.saturating_mul(4) + 1
+            ],
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 fn write_manifest(directory: &Path, name: &str, description: &str) {

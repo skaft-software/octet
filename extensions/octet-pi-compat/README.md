@@ -47,6 +47,9 @@ octet's emulated path, then automatically tries installed Pi when loading fails
 or a bounded source scan finds an installed-only helper. Tool factories on both
 routes use the same native broker; direct execution is not an installed-route grant.
 Setup prints each route or skip reason and records the Pi installation path.
+The recorded agent directory also supplies `PI_CODING_AGENT_DIR` before imports
+and factory execution, overriding ambient directory selectors when HOME changes.
+This maps reviewed configuration inside the adapter, not native environment passthrough.
 Broken factories and unsupported schemas are diagnosed; constraints are never
 stripped to make a tool load. Static registration collisions require explicit
 ownership and fresh review, refusing a partial setup rather than silently dropping
@@ -56,6 +59,11 @@ exact manifest grants and negotiated native `builtin_tool_overrides_v1` admissio
 For a manual list, replace `--from-pi` with absolute entrypoint paths. Configure
 records the executable; selecting Bun does not qualify that runtime. A load pass
 does not qualify commands, hooks or UI behavior.
+
+Runner and configure enable the best-effort private Node compile cache before
+loading the adapter graph. Existing `NODE_COMPILE_CACHE` overrides remain authoritative;
+unavailable caches do not block startup. Review capture and live factory execution
+remain separate and unchanged.
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
 with safe `pi-*` native selectors. Enabling this reviewed bridge contributes these
@@ -495,6 +503,18 @@ candidate and security policy; historical passes do not qualify changed source.
 
 ## Native context, persistence and provider phases
 
+Outside `before_agent_start`'s lazy prompt composer, `ctx.getSystemPrompt()`
+reads the native disclosure service synchronously. With negotiated
+`run_system_prompt_read_v1`, `agent_start` and actual model-turn callbacks use
+an exact native run scope: the current Agent prompt is immutable for that run,
+so the read does not wait on the frontend borrowing the Agent. The lifecycle
+observer remains read-only and never acquires a fabricated live parent. Model
+callbacks retain their actual live parent/controller checks. Cancelled,
+completed, retired or replaced scopes refuse; neither cached host prompt text
+nor an older/newer run is a fallback. Idle live requests keep the existing
+frontend service. This implementation and its regression tests are not package
+or full-Pi qualification.
+
 `ctx.hasPendingMessages()` requires an actual native boolean; absent facts still
 refuse. With paired session transport, queue-only `runtime.updated` publications
 update an existing live exact owner's retained fact without `remote_ui` or a UI
@@ -546,6 +566,18 @@ JSON, header mutation/deletion patches, and real status/header arrival respectiv
 not canonical context or inferred stream completion. Private callback exceptions
 are redacted. Native code polices reserved headers and effects before send.
 
+For extension-owned provider streams, negotiated API 0.4
+`provider_request_hooks_v1` (requiring `provider_proxy_v1`) relays installed Pi's
+actual payload and HTTP-response callbacks through the live stream job. Header
+transforms run before the provider callback, matching Pi's model runtime. The
+host retains one hook-chain identity, reserved-header validation and deadlines;
+withdrawal, cancellation and terminal settlement invalidate pending callbacks.
+Native delegation and the callback bridge cannot both consume the same attempt.
+A callback that omits real wire phases cannot report a successful hooked stream.
+No canonical request or synthetic completion substitutes for an HTTP boundary.
+Native delegates still refuse package-supplied response/header callbacks that
+lack wire forwarding; undefined optional callback fields remain accepted.
+
 `modelRegistry.getAll()` and `find()` use the host's full native and extension
 model inventory, including models without configured authentication.
 `getAvailable()` is the separately filtered configured-auth inventory, not a
@@ -555,6 +587,15 @@ are refreshed defensively; unrepresentable or oversized snapshots refuse rather
 than silently dropping models. Extension-owned custom models retain their full
 process-local metadata in defensive registry snapshots; private metadata is not
 added to the native host projection.
+
+Explicit string-form provider models preserve sparse `thinkingLevelMap` data in
+custom-stream and defensive model snapshots. Missing ordinary levels retain Pi's
+defaults, null excludes a level, and `xhigh`/`max` require their own non-null
+entries. Optional undefined map members are omitted, not converted to null.
+Only the resulting portable choices cross into native `ReasoningOptions`;
+provider-specific mapped strings stay in the adapter and the custom stream maps
+its unchanged portable `options.reasoning` itself. Malformed maps and maps with
+no selectable level refuse registration. Inherited native controls remain native.
 
 Provider credentials are withheld by default. Add `--provider-credentials` only
 when the reviewed factories need Pi 1.0.2 `modelRegistry.getApiKeyAndHeaders`;
@@ -881,6 +922,14 @@ preempt CPU-bound code. Shutdown acknowledgement/drain is bounded to 1.5 seconds
 EOF/crash exits and the host owns final process-tree cleanup. Trusted code can
 still access OS facilities directly: this isolation is protocol discipline,
 not security confinement.
+
+Synchronous replies also carry bounded observations of already-received `ui/closed`
+notifications in a separate 32 KiB worker buffer. Only the matching native surface
+is marked retired; the ordinary notification retains FIFO ownership of disposal
+after the component callback unwinds. Cleanup skips stale final-state reads and
+duplicate close requests. This does not reorder notification callbacks, accept stale
+native operations or classify arbitrary `-32002` errors as retirement. Incomplete
+input still reports failure; normal errors and authoritative reply outcomes remain intact.
 
 ### Transcript presentation
 

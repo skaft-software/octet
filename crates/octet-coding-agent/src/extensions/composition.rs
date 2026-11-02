@@ -525,6 +525,8 @@ pub(super) fn pi_api_name(protocol: &Protocol) -> &'static str {
         Protocol::GoogleGenerativeAi => "google-generative-ai",
         Protocol::MistralConversations => "mistral-conversations",
         Protocol::PiMessages => "pi-messages",
+        // The adapter restores the extension's own `api` name from its record.
+        Protocol::ExtensionStream => "extension-stream",
     }
 }
 

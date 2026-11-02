@@ -41,7 +41,15 @@ impl ExecutableExtensions {
             .provider_runtime
             .native_model(route)
             .map(|model| model.spec.capabilities.clone())
-            .unwrap_or_else(|| extension_provider_capabilities(&route.model.capabilities));
+            .unwrap_or_else(|| {
+                extension_provider_capabilities(
+                    &route.model.capabilities,
+                    route
+                        .model_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.reasoning_options.as_ref()),
+                )
+            });
         if route
             .model_metadata
             .as_ref()
@@ -839,8 +847,13 @@ impl ExtensionProviderRuntime {
                 }
                 let _ =
                     catalog.set_endpoint_label(endpoint_id.clone(), entry.provider.label.clone());
-                let mut capabilities =
-                    extension_provider_capabilities(&provider_model.capabilities);
+                let mut capabilities = extension_provider_capabilities(
+                    &provider_model.capabilities,
+                    route
+                        .model_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.reasoning_options.as_ref()),
+                );
                 if route
                     .model_metadata
                     .as_ref()
@@ -1049,13 +1062,26 @@ pub(super) fn extension_provider_protocol(protocol: &str) -> Option<Protocol> {
         "openai_responses" => Some(Protocol::OpenAiResponses),
         "anthropic_messages" => Some(Protocol::AnthropicMessages),
         "google_generative_ai" => Some(Protocol::GoogleGenerativeAi),
+        "extension_stream" => Some(Protocol::ExtensionStream),
         _ => None,
     }
 }
 
 pub(super) fn extension_provider_capabilities(
     capabilities: &octet_agent::extension_api_v03::ProviderModelCapabilities,
+    options: Option<&octet_ai::types::ReasoningOptions>,
 ) -> Capabilities {
+    let efforts: Vec<_> = options
+        .into_iter()
+        .flat_map(|options| options.choices())
+        .filter_map(|choice| {
+            if let ReasoningConfig::Effort(effort) = choice {
+                Some(effort)
+            } else {
+                None
+            }
+        })
+        .collect();
     Capabilities {
         responses_features: Default::default(),
         input_modalities: Default::default(),
@@ -1063,14 +1089,22 @@ pub(super) fn extension_provider_capabilities(
         tools: capabilities.tools,
         parallel_tool_calls: capabilities.parallel_tool_calls,
         reasoning: capabilities.reasoning.then_some(ReasoningCapability {
-            options: None,
+            options: options.cloned(),
             control: ReasoningControl::Effort,
             exposes_text: true,
             preserves_state: false,
             effort_budgets: None,
             openai_chat_mode: OpenAiChatReasoningMode::Standard,
-            min_effort: ReasoningEffort::Minimal,
-            max_effort: ReasoningEffort::High,
+            min_effort: efforts
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(ReasoningEffort::Minimal),
+            max_effort: efforts
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(ReasoningEffort::High),
         }),
         responses_lite: false,
         agent_delegation: None,

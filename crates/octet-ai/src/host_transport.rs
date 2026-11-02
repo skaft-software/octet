@@ -34,6 +34,47 @@ impl From<&Model> for HostStreamModel {
 }
 
 #[allow(missing_docs)]
+pub struct HostProviderRequestHooks {
+    pub(crate) attempt: Option<crate::client::hooks::ProviderRequestAttempt>,
+}
+
+#[allow(missing_docs)]
+impl HostProviderRequestHooks {
+    pub fn is_empty(&self) -> bool {
+        self.attempt.is_none()
+    }
+
+    pub async fn payload(&self, payload: serde_json::Value) -> Result<serde_json::Value, AiError> {
+        let Some(attempt) = &self.attempt else {
+            return Ok(payload);
+        };
+        let body = serde_json::to_vec(&payload)
+            .map_err(|_| crate::ConfigError::Parse("invalid provider hook payload".into()))?;
+        let body = attempt.payload(body.into()).await?;
+        serde_json::from_slice(&body)
+            .map_err(|_| crate::ConfigError::Parse("invalid provider hook payload".into()).into())
+    }
+
+    pub async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
+        if let Some(attempt) = &self.attempt {
+            attempt.headers(headers).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn response(
+        &self,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+    ) -> Result<(), AiError> {
+        if let Some(attempt) = &self.attempt {
+            attempt.response(status, headers).await?;
+        }
+        Ok(())
+    }
+}
+
+#[allow(missing_docs)]
 pub struct NativeRequestContinuation {
     pub(crate) open: Box<
         dyn FnOnce(
@@ -90,6 +131,30 @@ pub trait HostStreamTransport: Send + Sync {
         request: Request,
         diagnostics: Vec<Diagnostic>,
     ) -> Result<ResponseStream, AiError>;
+
+    #[allow(missing_docs)]
+    fn supports_request_hooks(&self) -> bool {
+        false
+    }
+
+    #[allow(missing_docs)]
+    async fn stream_with_request_hooks(
+        &self,
+        model: HostStreamModel,
+        request: Request,
+        diagnostics: Vec<Diagnostic>,
+        continuation: Option<NativeRequestContinuation>,
+        hooks: HostProviderRequestHooks,
+    ) -> Result<ResponseStream, AiError> {
+        if let Some(continuation) = continuation {
+            self.stream_native(model, request, diagnostics, continuation)
+                .await
+        } else if hooks.is_empty() {
+            self.stream(model, request, diagnostics).await
+        } else {
+            Err(crate::ConfigError::Parse("provider request hooks unavailable".into()).into())
+        }
+    }
 
     #[allow(missing_docs)]
     fn native_model(&self) -> Option<Model> {

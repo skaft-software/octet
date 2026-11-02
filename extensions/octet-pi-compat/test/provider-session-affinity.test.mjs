@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Runtime } from '../lib/runtime.mjs';
-import { registerProvider, startProviderRegistration } from '../lib/providers.mjs';
+import { registerProvider, startProviderRegistration, piSessionId } from '../lib/providers.mjs';
 import { providerState } from '../lib/custom-provider.mjs';
 import { openaiCompletionsDelegate, openaiResponsesDelegate } from '../lib/native-provider.mjs';
 import { owner, host } from './helper.mjs';
@@ -77,16 +77,20 @@ test('real Runtime keeps admitted cache identity stable and projects the explici
   for (const session of ['native-cache-scope', 'native-cache-scope', 'next-cache-scope']) {
     const stream = await value.run(session);
     assert.equal(await stream.terminal, 'finished', JSON.stringify(value.frames));
-    assert.equal(value.optionsSeen.at(-1).sessionId, stream.input.session_id);
+    assert.equal(value.optionsSeen.at(-1).sessionId, piSessionId(stream.input.session_id));
+    assert.match(value.optionsSeen.at(-1).sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.equal(value.delegated.at(-1).request.session_id, stream.input.session_id);
     assert.equal(value.delegated.at(-1).request.cache_retention, stream.input.cache_retention);
     assert.notEqual(stream.input.session_id, host.session_id);
     assert.notEqual(stream.input.session_id, owner.session_id);
     const headers = value.fetches.at(-1).headers;
     assert.equal(headers.get('accept'), 'application/json');
-    assert.equal(headers.get('x-coral-session'), stream.input.session_id);
-    for (const name of affinityNames) assert.equal(headers.get(name), stream.input.session_id, name);
+    assert.equal(headers.get('x-coral-session'), piSessionId(stream.input.session_id));
+    for (const name of affinityNames) assert.equal(headers.get(name), piSessionId(stream.input.session_id), name);
   }
+  // Pi's provider session id is stable per session and distinct across sessions.
+  assert.equal(value.optionsSeen[0].sessionId, value.optionsSeen[1].sessionId);
+  assert.notEqual(value.optionsSeen[1].sessionId, value.optionsSeen[2].sessionId);
 });
 
 test('absent admitted identity never falls back to retained owner or host session facts', { timeout: 2000 }, async t => {
@@ -117,7 +121,7 @@ test('OpenRouter affinity uses its pinned Pi convention rather than OpenAI heade
   const value = await fixture(t, { format: 'openrouter' });
   const stream = await value.run('native-cache-scope');
   assert.equal(await stream.terminal, 'finished');
-  assert.equal(value.fetches[0].headers.get('x-session-id'), stream.input.session_id);
+  assert.equal(value.fetches[0].headers.get('x-session-id'), piSessionId(stream.input.session_id));
   for (const name of affinityNames) assert.equal(value.fetches[0].headers.get(name), null);
 });
 
@@ -126,7 +130,7 @@ test('request headers retain precedence over affinity defaults and model headers
   const stream = await value.run('native-cache-scope');
   assert.equal(await stream.terminal, 'finished');
   assert.equal(value.fetches[0].headers.get('x-session-affinity'), 'request-value');
-  assert.equal(value.fetches[0].headers.get('session_id'), stream.input.session_id);
+  assert.equal(value.fetches[0].headers.get('session_id'), piSessionId(stream.input.session_id));
 });
 
 test('native stream cancellation before HTTP dispatch cannot disclose affinity identity', { timeout: 2000 }, async t => {
@@ -154,13 +158,13 @@ test('Pi openai-nosession affinity omits session_id but keeps the two routing he
   const stream = await value.run('native-cache-scope');
   assert.equal(await stream.terminal, 'finished');
   assert.equal(value.fetches[0].headers.get('session_id'), null);
-  for (const name of affinityNames.slice(1)) assert.equal(value.fetches[0].headers.get(name), stream.input.session_id);
+  for (const name of affinityNames.slice(1)) assert.equal(value.fetches[0].headers.get(name), piSessionId(stream.input.session_id));
 });
 
 test('Responses follows its own Pi session-header default without Chat affinity opt-in', { timeout: 2000 }, async t => {
   const value = await fixture(t, { api: 'openai-responses', affinity: false });
   const stream = await value.run('native-cache-scope');
   assert.equal(await stream.terminal, 'finished');
-  for (const name of affinityNames.slice(0, 2)) assert.equal(value.fetches[0].headers.get(name), stream.input.session_id);
+  for (const name of affinityNames.slice(0, 2)) assert.equal(value.fetches[0].headers.get(name), piSessionId(stream.input.session_id));
   assert.equal(value.fetches[0].headers.get('x-session-affinity'), null);
 });

@@ -42,6 +42,7 @@ pub(super) struct NativeDelegate {
     pub(super) connection: Weak<ProcessConnection>,
     pub(super) route: crate::ExtensionProviderRoute,
     pub(super) used: AtomicBool,
+    pub(super) claim: Arc<AtomicUsize>,
     pub(super) response: StdMutex<Option<octet_ai::Response>>,
     pub(super) cancelled: Arc<Notify>,
 }
@@ -276,7 +277,13 @@ pub(super) fn dispatch_delegate(
             temperature.is_finite() && (0.0..=2.0).contains(&temperature)
         })
         && native_reasoning_preserved(&delegate.original.messages, &request.request.messages);
-    if !valid || delegate.used.swap(true, Ordering::AcqRel) {
+    if !valid
+        || delegate
+            .claim
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        || delegate.used.swap(true, Ordering::AcqRel)
+    {
         return queue_provider_host_response(state, &id, Err(ProviderHostResponseError::Invalid));
     }
     let Ok(worker) = state.child_work_slots.clone().try_acquire_owned() else {
@@ -600,6 +607,41 @@ mod tests {
                 "{endpoint}"
             );
         }
+    }
+
+    #[test]
+    fn provider_reasoning_options_require_valid_exact_choices_and_capability() {
+        let mut value = serde_json::json!({
+            "provider": {"id":"custom","label":"Custom","auth":{"kind":"none"}},
+            "models": [{"id":"selected","api_name":"custom-model","protocol":"extension_stream","context_window":8192,"max_output_tokens":1024,
+                "capabilities":{"tools":false,"parallel_tool_calls":false,"structured_output":false,"reasoning":true},
+                "pi_metadata":{"base_url":"custom","input":["text"],"pricing":{"input":0,"output":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":null,"reasoning":null,"tiers":[]},
+                    "reasoning_options":{"values":["low","xhigh","max"],"default":null}}}]
+        });
+        let Ok((_, metadata)) = model_control::parse_provider_proxy_registration(value.clone())
+        else {
+            panic!("valid exact provider choices must be admitted");
+        };
+        assert_eq!(
+            metadata["selected"]
+                .reasoning_options
+                .as_ref()
+                .unwrap()
+                .values,
+            ["low", "xhigh", "max"]
+        );
+        for options in [
+            serde_json::json!({"values":[],"default":null}),
+            serde_json::json!({"values":["off","none"],"default":null}),
+            serde_json::json!({"values":["unknown"],"default":null}),
+            serde_json::json!({"values":["low"],"default":"high"}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["models"][0]["pi_metadata"]["reasoning_options"] = options;
+            assert!(model_control::parse_provider_proxy_registration(invalid).is_err());
+        }
+        value["models"][0]["capabilities"]["reasoning"] = serde_json::json!(false);
+        assert!(model_control::parse_provider_proxy_registration(value).is_err());
     }
 
     #[test]

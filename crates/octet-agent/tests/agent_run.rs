@@ -1016,6 +1016,9 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::PiMessages => {
             panic!("{protocol:?} is the native host codec and has no scripted fixture")
         }
+        Protocol::ExtensionStream => {
+            panic!("{protocol:?} requires an extension-owned stream fixture")
+        }
     }
 }
 

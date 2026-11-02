@@ -236,6 +236,16 @@ advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`, `codex/gpt-6-sol`
 or `codex/gpt-6-luna`. These stay namespaced separately from direct OpenAI
 presets. When discovery is unreachable, 6.1 Sol leads the fallback suggestions.
 
+Account-advertised input/output modalities and exact thinking choices/defaults
+survive discovery and its normalized cache, including newly named models such as
+Terra when an account actually advertises them. Explicit text-only, false or
+malformed input assertions do not inherit the historical vision-family fallback.
+Cache schema 11 refreshes older records that discarded modality metadata. Only
+media implemented by the selected codec become usable: Codex Responses accepts
+advertised images/PDFs, not audio input or generated media. Unknown reasoning
+assertions do not receive guessed thinking levels. None of this borrows direct
+OpenAI API capabilities, availability or pricing for a subscription route.
+
 <details>
 <summary>Discovery version, GPT-6 account contracts and pricing</summary>
 

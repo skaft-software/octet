@@ -26,7 +26,7 @@ import { registryInferenceEvent } from './model-registry-stream.mjs';
 import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
 import { beforeAgentStart } from './before-agent-start.mjs';
 import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
-import { appendReply, entryPayload, leafGrant } from './session-leaf.mjs';
+import { appendReply, entryPayload, leafGrant, replacementStore } from './session-leaf.mjs';
 import { RemoteUI } from './remote-ui.mjs';
 import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
@@ -46,7 +46,7 @@ import { withToolHost } from './tool-host.mjs';
 import { createHostedRunner, hostedToolCatalog } from './extension-runner.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials', 'pi/settings/update']);
-const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_inheritance_v1', 'provider_google_generative_ai_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'command_catalog_v1', 'pi_settings_v1']);
+const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_request_hooks_v1', 'provider_inheritance_v1', 'provider_google_generative_ai_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'run_system_prompt_read_v1', 'command_catalog_v1', 'pi_settings_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -70,8 +70,9 @@ function sourceFilePath(pathname, baseDirectory) {
     if (part === '..') { current = dirname(current); continue; }
     current = join(current, part);
     let stat;
-    try { stat = lstatSync(current); }
+    try { stat = lstatSync(current, { throwIfNoEntry: false }); }
     catch (error) { if (missingPath(error)) return undefined; throw error; }
+    if (!stat) return undefined;
     if (stat.isSymbolicLink()) invalid('reviewed factory source traverses a symlink; configure entrypoints explicitly');
     if (index < parts.length - 1 && !stat.isDirectory()) return undefined;
     if (index === parts.length - 1 && !stat.isFile()) return undefined;
@@ -373,6 +374,7 @@ export class Runtime {
     if (Object.values(routes).some(mode => mode !== 'shims' && mode !== 'installed')) invalid('extension runtime must be "shims" or "installed"');
     const piAgentDir = this.config.pi_agent_dir;
     if (piAgentDir !== undefined && (typeof piAgentDir !== 'string' || !isAbsolute(piAgentDir))) invalid('pi_agent_dir must be an absolute path');
+    if (piAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = piAgentDir;
     configureLocalPi(piAgentDir);
     let installedJiti;
     const jitiFor = async mode => {
@@ -537,6 +539,7 @@ export class Runtime {
     this.features = new Set([...required, ...(params.protocol.optional_features || [])].filter(f => supportedFeatures.has(f)));
     for (const f of ['request_cancellation', 'content_parts']) this.require(f);
     if (this.features.has('session_compaction_v1')) this.require('session_control_v1');
+    if (this.features.has('run_system_prompt_read_v1')) this.require('system_prompt_read');
     if (this.features.has('runtime_command_registration_v1')) this.require('runtime_commands');
     if (this.features.has('transcript_render_v1') || this.features.has('terminal_input_intercept_v1')) this.require('remote_ui');
     const builtinOverrides = params.capabilities?.builtin_tool_overrides === undefined ? [] : params.capabilities.builtin_tool_overrides;
@@ -636,6 +639,11 @@ export class Runtime {
   }
   bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
     const context = params.context || {};
+    let promptReadScope;
+    if (context.system_prompt_scope !== undefined) {
+      this.require('run_system_prompt_read_v1');
+      promptReadScope = bounded(context.system_prompt_scope, 'run system prompt scope', 256);
+    }
     if (Object.hasOwn(context.host || {}, 'theme')) nativeTheme(context.host.theme);
     const owner = context.resource_owner || params.payload?.binding;
     if (!owner) {
@@ -676,6 +684,7 @@ export class Runtime {
     retainPiProjectTrust(state);
     this.actionsInitialized = true;
     store.state = state;
+    if (promptReadScope !== undefined) store.promptReadScope = promptReadScope;
     if (grant) store.leaf = store.activation?.leaf ?? { grant };
     if (foreground) {
       if (this.foreground && this.foreground !== state) this.retire(this.foreground).catch(e => this.backgroundError(e));
@@ -703,7 +712,7 @@ export class Runtime {
       ownerKey(next);
       if (next.extension_instance_id !== previous.owner.extension_instance_id || next.process_generation !== previous.owner.process_generation || next.session_id === previous.owner.session_id) invalid('replacement receipt owner');
       if (context.host?.session_id !== sessionId) invalid('setup replacement session id');
-      const fresh = { ...store };
+      const fresh = replacementStore(store);
       this.bind({ context }, fresh, { foreground: true });
       return fresh;
     };
@@ -992,6 +1001,14 @@ export class Runtime {
   }
   async notify(message) {
     const p = message.params;
+    if (message.method === 'context/system_prompt_scope') {
+      this.require('run_system_prompt_read_v1');
+      fields(p, ['resource_owner', 'scope'], 'run system prompt scope');
+      const state = this.states.get(ownerKey(p.resource_owner));
+      const scope = bounded(p.scope, 'run system prompt scope', 256);
+      if (state?.alive) state.promptReadScope = scope;
+      return;
+    }
     if (message.method === 'provider/infer_event') return registryInferenceEvent(this, p);
     if (message.method === 'provider/cancel') { cancelProviderStream(this, p.stream_id); return; }
     // Pi's isIdle: no agent run is active and nothing is compacting. Track it
@@ -1039,7 +1056,9 @@ export class Runtime {
     // editor-state snapshot above does, rather than raising one user-visible
     // error per lifecycle event.
     if (!state?.alive) return;
-    const store = { id: state.parent, state, controller: new AbortController(), pending: new Set(), errors: [], live: false, method: message.method };
+    const store = { id: state.parent, state, controller: new AbortController(), pending: new Set(), errors: [], live: false, method: message.method,
+      ...(message.method === 'turn/started' && state.promptReadScope ? { promptReadScope: state.promptReadScope } : {}) };
+    if (message.method === 'turn/settled') delete state.promptReadScope;
     if (p.host) state.host = { ...state.host, ...p.host };
     if (message.method === 'model/selected' && p.model) state.host.model = p.model;
     if (message.method === 'reasoning/selected' && p.reasoning) state.host.reasoning = p.reasoning;

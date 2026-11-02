@@ -25,6 +25,25 @@ export const complete = () => unsupported('pi-ai.complete', 'Rust owns inference
 export const stream = () => unsupported('pi-ai.stream', 'Rust owns inference');
 export const completeSimple = complete;
 export const streamSimple = stream;
+// Explicit provider streams an extension calls for its own provider run the
+// user's installed Pi implementation unchanged (Wine-style): the request a
+// Pi package builds is the request Pi builds, with the extension's own key.
+export const streamAnthropic = localFunction('ai', 'legacy-api-aliases.js', 'streamAnthropic');
+export const streamSimpleAnthropic = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleAnthropic');
+export const streamAzureOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamAzureOpenAIResponses');
+export const streamSimpleAzureOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleAzureOpenAIResponses');
+export const streamGoogle = localFunction('ai', 'legacy-api-aliases.js', 'streamGoogle');
+export const streamSimpleGoogle = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleGoogle');
+export const streamGoogleVertex = localFunction('ai', 'legacy-api-aliases.js', 'streamGoogleVertex');
+export const streamSimpleGoogleVertex = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleGoogleVertex');
+export const streamMistral = localFunction('ai', 'legacy-api-aliases.js', 'streamMistral');
+export const streamSimpleMistral = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleMistral');
+export const streamOpenAICodexResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAICodexResponses');
+export const streamSimpleOpenAICodexResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAICodexResponses');
+export const streamOpenAICompletions = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAICompletions');
+export const streamSimpleOpenAICompletions = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAICompletions');
+export const streamOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAIResponses');
+export const streamSimpleOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAIResponses');
 
 export { anthropicMessagesApi } from '../lib/native-provider.mjs';
 export const parseJsonWithRepair = localFunction('ai', 'utils/json-parse.js', 'parseJsonWithRepair');
@@ -80,21 +99,6 @@ export const registerFauxProvider = refused('pi-ai.registerFauxProvider');
 export const registerImagesApiProvider = refused('pi-ai.registerImagesApiProvider');
 export const resetApiProviders = refused('pi-ai.resetApiProviders');
 export const setBedrockProviderModule = refused('pi-ai.setBedrockProviderModule');
-export const streamAnthropic = refused('pi-ai.streamAnthropic');
-export const streamAzureOpenAIResponses = refused('pi-ai.streamAzureOpenAIResponses');
-export const streamGoogle = refused('pi-ai.streamGoogle');
-export const streamGoogleVertex = refused('pi-ai.streamGoogleVertex');
-export const streamMistral = refused('pi-ai.streamMistral');
-export const streamOpenAICodexResponses = refused('pi-ai.streamOpenAICodexResponses');
-export { openaiCompletionsDelegate as streamOpenAICompletions, openaiResponsesDelegate as streamOpenAIResponses } from '../lib/native-provider.mjs';
-export const streamSimpleAnthropic = refused('pi-ai.streamSimpleAnthropic');
-export const streamSimpleAzureOpenAIResponses = refused('pi-ai.streamSimpleAzureOpenAIResponses');
-export const streamSimpleGoogle = refused('pi-ai.streamSimpleGoogle');
-export const streamSimpleGoogleVertex = refused('pi-ai.streamSimpleGoogleVertex');
-export const streamSimpleMistral = refused('pi-ai.streamSimpleMistral');
-export const streamSimpleOpenAICodexResponses = refused('pi-ai.streamSimpleOpenAICodexResponses');
-export const streamSimpleOpenAICompletions = refused('pi-ai.streamSimpleOpenAICompletions');
-export const streamSimpleOpenAIResponses = refused('pi-ai.streamSimpleOpenAIResponses');
 export const unregisterApiProviders = refused('pi-ai.unregisterApiProviders');
 
 export * from './pi-1.0.2/ai/lazy.mjs';

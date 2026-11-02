@@ -108,7 +108,9 @@ pub use faux::{
     FauxToolCall,
 };
 pub use host_http::{HostHttpRequest, HostHttpResponse, HostHttpSender};
-pub use host_transport::{HostStreamModel, HostStreamTransport, NativeRequestContinuation};
+pub use host_transport::{
+    HostProviderRequestHooks, HostStreamModel, HostStreamTransport, NativeRequestContinuation,
+};
 pub use inference::{
     ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
     InferenceMetrics, OutputRateSample, ReportedTimingUnit, ServerGenerationMetrics,

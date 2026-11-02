@@ -12,8 +12,8 @@ use std::time::Duration;
 use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
 use crate::extension_operations::{
-    cursor_binding, cursor_offset, matching_slots, ApplicableOperationsPage,
-    ApplicableOperationsRequest, OperationDiscovery, OperationSelection, DISCOVERY_TOOL_NAME,
+    ApplicableOperationsPage, ApplicableOperationsRequest, DISCOVERY_TOOL_NAME, OperationDiscovery,
+    OperationSelection, cursor_binding, cursor_offset, matching_slots,
 };
 use crate::extension_process::{ExtensionProcess, ExtensionResourceOwner};
 use crate::input::UserInput;
@@ -52,6 +52,16 @@ pub trait EventObserver: Send + Sync {
         _model: &Model,
         _resource_owner: &str,
     ) {
+    }
+
+    #[doc(hidden)]
+    fn bind_run_system_prompt(
+        &self,
+        _resource_owner: &str,
+        _system_prompt: &str,
+        _cancellation: crate::CancellationToken,
+    ) -> Option<Box<dyn Send>> {
+        None
     }
 
     /// Called for every [`AgentEvent`] the run emits.
@@ -365,7 +375,7 @@ pub trait CompactionStrategy: Send + Sync {
     /// Render the complete supplied transcript slice as PNG frames. A failed
     /// slice aborts compaction; partial frames must never become a checkpoint.
     async fn render(&self, model_id: &str, text: &str, owner: &str)
-        -> Result<Vec<Vec<u8>>, String>;
+    -> Result<Vec<Vec<u8>>, String>;
 }
 
 /// Stable semantic summary of a completed assistant turn before it becomes a
@@ -1193,7 +1203,9 @@ fn validate_dynamic_catalog(
         if registry.static_names.contains(&name)
             && !(registry.builtin_names.contains(&name) && builtin_overrides.contains(&name))
         {
-            return Err(format!("dynamic tool `{name}` conflicts with a host tool (no reviewed builtin override grant)"));
+            return Err(format!(
+                "dynamic tool `{name}` conflicts with a host tool (no reviewed builtin override grant)"
+            ));
         }
         if registered_names.contains(&name) {
             return Err(format!(

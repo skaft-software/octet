@@ -272,6 +272,7 @@ pub(super) fn provider_protocol_name(protocol: Protocol) -> Option<&'static str>
         Protocol::OpenAiResponses => Some("openai_responses"),
         Protocol::AnthropicMessages => Some("anthropic_messages"),
         Protocol::GoogleGenerativeAi => Some("google_generative_ai"),
+        Protocol::ExtensionStream => Some("extension_stream"),
         Protocol::BedrockConverse | Protocol::MistralConversations | Protocol::PiMessages => None,
     }
 }
@@ -369,6 +370,9 @@ pub(super) fn extension_provider_response_stream(
                         native.diagnostics.extend(response.diagnostics);
                         response = native;
                     }
+                    if lock_std_mutex(&connection.provider_streams).get(&stream_id).is_some_and(|stream| stream.request_hooks.as_ref().is_some_and(|job| !job.completed())) {
+                        Err(provider_unavailable_error())?;
+                    }
                     connection.settle_provider_stream(&stream_id);
                     cancellation.disarm();
                     yield StreamEvent::Finished(response);
@@ -390,6 +394,27 @@ pub(super) fn extension_provider_response_stream(
 
 #[async_trait::async_trait]
 impl HostStreamTransport for ExtensionProviderStreamTransport {
+    fn supports_request_hooks(&self) -> bool {
+        self.process.upgrade().is_some_and(|process| {
+            let connection = read_std_lock(&process.connection);
+            let protocol = read_std_lock(&connection.protocol);
+            protocol.version == EXTENSION_API_VERSION_0_4
+                && protocol.supports(provider_hooks::FEATURE)
+        })
+    }
+
+    async fn stream_with_request_hooks(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        continuation: Option<octet_ai::NativeRequestContinuation>,
+        hooks: octet_ai::HostProviderRequestHooks,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, continuation, Some(hooks))
+            .await
+    }
+
     fn custom_http_model(&self, selected: &octet_ai::Model) -> Option<octet_ai::Model> {
         let captured = match &self.binding {
             ProviderRouteBinding::Projected(route) => route,
@@ -466,7 +491,8 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         request: octet_ai::Request,
         diagnostics: Vec<Diagnostic>,
     ) -> Result<ResponseStream, AiError> {
-        self.stream_inner(model, request, diagnostics, None).await
+        self.stream_inner(model, request, diagnostics, None, None)
+            .await
     }
 
     async fn stream_native(
@@ -476,7 +502,7 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         diagnostics: Vec<Diagnostic>,
         continuation: octet_ai::NativeRequestContinuation,
     ) -> Result<ResponseStream, AiError> {
-        self.stream_inner(model, request, diagnostics, Some(continuation))
+        self.stream_inner(model, request, diagnostics, Some(continuation), None)
             .await
     }
 }
@@ -488,6 +514,7 @@ impl ExtensionProviderStreamTransport {
         request: octet_ai::Request,
         diagnostics: Vec<Diagnostic>,
         mut continuation: Option<octet_ai::NativeRequestContinuation>,
+        hooks: Option<octet_ai::HostProviderRequestHooks>,
     ) -> Result<ResponseStream, AiError> {
         let process = self
             .process
@@ -575,7 +602,7 @@ impl ExtensionProviderStreamTransport {
             request: request_value,
             authorization_lease: None,
         };
-        let params = serde_json::to_value(params).map_err(|_| {
+        let mut params = serde_json::to_value(params).map_err(|_| {
             provider_transport_error(
                 TransportPhase::ResponseHeaders,
                 false,
@@ -589,6 +616,34 @@ impl ExtensionProviderStreamTransport {
                 "extension provider request was rejected by the API contract",
             ));
         }
+        let hooks = hooks.filter(|hooks| !hooks.is_empty());
+        let bridge_allowed = hooks.is_some()
+            && self.supports_request_hooks()
+            && !route
+                .model_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.inherit_provider.is_some());
+        if hooks.is_some() {
+            if bridge_allowed {
+                params
+                    .as_object_mut()
+                    .expect("stream request is an object")
+                    .insert("request_hooks".into(), true.into());
+            } else if continuation.is_none() {
+                return Err(provider_unavailable_error());
+            }
+        }
+        let claim = Arc::new(AtomicUsize::new(0));
+        let request_hooks = hooks.map(|hooks| {
+            provider_hooks::ProviderHooksJob::new(
+                hooks,
+                &connection,
+                route.clone(),
+                stream_id.clone(),
+                claim.clone(),
+                bridge_allowed,
+            )
+        });
         let (sender, receiver) = mpsc::channel(connection.provider_stream_buffer);
         {
             let mut streams = lock_std_mutex(&connection.provider_streams);
@@ -616,12 +671,14 @@ impl ExtensionProviderStreamTransport {
                             connection: Arc::downgrade(&connection),
                             route: route.clone(),
                             used: AtomicBool::new(false),
+                            claim: claim.clone(),
                             response: StdMutex::new(None),
                             cancelled: Arc::new(Notify::new()),
                         }))
                     } else {
                         None
                     },
+                    request_hooks,
                     sender,
                     next_sequence: 0,
                     terminal: false,
@@ -862,6 +919,11 @@ pub(super) fn dispatch_provider_stream_event(
                     .checked_add(1)
                     .ok_or_else(|| "provider stream event sequence overflowed".to_owned())?;
                 ingress.terminal = terminal;
+                if terminal {
+                    if let Some(job) = &ingress.request_hooks {
+                        job.cancelled.cancel();
+                    }
+                }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
             | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -960,6 +1022,7 @@ mod terminal_ingress_tests {
             "terminal".into(),
             ProviderStreamIngress {
                 delegate: None,
+                request_hooks: None,
                 sender,
                 next_sequence: 0,
                 terminal: false,
@@ -1004,6 +1067,7 @@ mod terminal_ingress_tests {
             "full".into(),
             ProviderStreamIngress {
                 delegate: None,
+                request_hooks: None,
                 sender,
                 next_sequence: 0,
                 terminal: false,

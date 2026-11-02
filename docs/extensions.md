@@ -303,6 +303,30 @@ Implementation is not a full conformance or Pi compatibility claim; actual
 SPICE execution additionally requires `ngspice`. These services do not sandbox
 a trusted subprocess's operating-system access.
 
+### Run-scoped system prompt reads (API `0.4`)
+
+`run_system_prompt_read_v1` requires `system_prompt_read` and is offered only
+with `capabilities.system_prompt = true`. At run admission the host binds the
+Agent's current composed system prompt to its exact session owner, process
+instance and generation. This immutable run value remains readable while the
+run mutably borrows the Agent; no frontend event pump or prior host snapshot
+supplies the text.
+
+The host sends `context/system_prompt_scope` with `{resource_owner, scope}` and
+adds `context.system_prompt_scope` to subsequent owner-bound requests during
+that run. Read with `context/system_prompt` using
+`{parent_request_id, resource_owner, scope}`; the result is `{text}`. A request
+callback keeps its actual live parent. A read-only lifecycle observer uses
+`parent_request_id: 0`, its genuine issued owner and the native run scope;
+this does not create request, mutation or session-leaf authority.
+
+Cancellation, stream drop, completion, owner retirement and process replacement
+invalidate the scope. A stale, foreign or unnegotiated scope is refused, never
+rerouted to a newer run or the idle frontend. Text is limited to 262,144 UTF-8
+bytes and may not contain NUL; empty text is valid and over-bound text is never
+truncated. Without a scope, the existing live frontend disclosure service is
+unchanged.
+
 ### Tool prompt metadata (API `0.4`)
 
 The optional `tool_prompt_metadata_v1` feature carries presentation metadata in

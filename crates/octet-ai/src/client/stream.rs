@@ -674,6 +674,7 @@ pub(super) async fn stream_http(
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::ExtensionStream => unreachable!("extension-owned streams never reach host HTTP: build_request refuses them"),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(
@@ -771,6 +772,7 @@ pub(super) async fn stream_http(
                                 Protocol::GoogleGenerativeAi => crate::protocol::google::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::MistralConversations => crate::protocol::mistral_conversations::decode_stream_event(&model_clone, &sse, &mut builder),
                                 Protocol::PiMessages => crate::protocol::pi_messages::decode_stream_event(&model_clone, &sse, &mut builder),
+                                Protocol::ExtensionStream => unreachable!("extension-owned streams never reach host HTTP: build_request refuses them"),
                             }
                             .map_err(|error| {
                                 annotate_stream_failure(

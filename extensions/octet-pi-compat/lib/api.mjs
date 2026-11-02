@@ -458,9 +458,9 @@ export function createContext(runtime, store, replaced = false) {
     isProjectTrusted() { return contextFacts(runtime, store).isProjectTrusted(); },
     getSystemPromptOptions() { return contextFacts(runtime, store).getSystemPromptOptions(); },
     get hasUI() { const state = current(); return runtime.features.has('remote_ui') && state === runtime.foreground && state.alive && state.host.has_ui !== false; },
-    get model() { return currentModel(current().host); },
+    get model() { return currentModel(current().host, runtime); },
     get thinkingLevel() { return thinkingLevel(current().host, true); },
-    get scopedModels() { return scopedModels(current().host); },
+    get scopedModels() { return scopedModels(current().host, runtime); },
     ui, sessionManager,
     modelRegistry: modelRegistry(() => current().host, runtime),
     getContextUsage() {

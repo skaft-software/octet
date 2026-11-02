@@ -5,12 +5,28 @@ import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 import { canonicalToPi, piToCanonical } from './provider-context.mjs';
 import { createAssistantMessageEventStream, calculateCost } from './ai-public-helpers.mjs';
 import { clampThinkingLevel } from '../shims/pi-1.0.2/ai/models.mjs';
+import { localFunction } from '../shims/local-pi.mjs';
 import { customOpenAiChatProfile, prepareCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 
 const scopeKey = Symbol.for('octet.pi.nativeProvider.scope');
 const scope = globalThis[scopeKey] ??= new AsyncLocalStorage();
 export const withNativeProvider = (runtime, job, work) => scope.run({ runtime, job }, work);
+// Unfold a provider context exactly as the installed Pi would: normalize any
+// Context fields into its transcript, then replay every system message into the
+// one prompt and tool set the request carries. The host request has fields for
+// those, so this is the same request Pi's own provider builds.
+const piTranscript = name => localFunction('ai', 'utils/transcript.js', name);
+const piNormalizeContext = piTranscript('normalizeContext'), piCurrentSystem = piTranscript('getCurrentSystemMessage');
+const piSystemText = localFunction('ai', 'utils/text.js', 'getSystemMessageText');
+function fromTranscript(context) {
+  if (!context || typeof context !== 'object' || !Array.isArray(context.messages)) return context;
+  const { messages } = piNormalizeContext(context);
+  const head = piCurrentSystem(messages);
+  const text = head ? piSystemText(head) : '';
+  return { ...(text ? { systemPrompt: text } : {}), messages: messages.filter(message => message.role !== 'system'), ...(head?.toolsAdded?.length ? { tools: head.toolsAdded } : {}) };
+}
 export function nativeProviderDelegate(model, context, options = {}) {
+  context = fromTranscript(context);
   const bound = scope.getStore();
   if (!bound) unsupported('native provider stream', 'an admitted provider request is required');
   const { runtime, job } = bound;
@@ -18,15 +34,17 @@ export function nativeProviderDelegate(model, context, options = {}) {
   if (model.api === 'google-generative-ai') runtime.require('provider_google_generative_ai_v1');
   if (!job.entry.inherited || !isDeepStrictEqual(model, job.model.pi)) unsupported('native provider stream', 'the delegate is bound to the selected inherited model');
   if (job.entry.config.baseUrl || job.entry.apiKey !== undefined) unsupported('native provider stream', 'native endpoint and authentication remain host-owned');
-  fields(options, ['signal', 'apiKey', 'maxTokens', 'temperature', 'cacheRetention', 'sessionId', 'reasoning', 'onPayload'], 'native provider options');
+  fields(options, ['signal', 'apiKey', 'maxTokens', 'temperature', 'cacheRetention', 'sessionId', 'reasoning', 'onPayload', 'onResponse', 'transformHeaders', 'timeoutMs', 'websocketConnectTimeoutMs', 'maxRetries', 'maxRetryDelayMs'], 'native provider options');
+  if (options.onResponse !== undefined || options.transformHeaders !== undefined) unsupported('native provider callbacks', 'package response and header callbacks require real wire forwarding');
   if (options.signal !== job.controller.signal || options.apiKey !== job.options.apiKey || options.reasoning !== job.options.reasoning
       || options.cacheRetention !== job.options.cacheRetention || options.sessionId !== job.options.sessionId) unsupported('native provider stream', 'authentication, reasoning, cache and session authority cannot change');
   fields(context, ['systemPrompt', 'messages', 'tools'], 'native provider context');
-  if (!isDeepStrictEqual(context.tools, job.context.tools)) unsupported('native provider stream', 'the authoritative tool catalog cannot change');
+  if (!isDeepStrictEqual(context.tools, fromTranscript(job.context).tools)) unsupported('native provider stream', 'the authoritative tool catalog cannot change');
   if (options.onPayload !== undefined && typeof options.onPayload !== 'function') invalid('native onPayload');
   return delegatedStream(runtime, job, model, context, options, false);
 }
 export function customProviderDelegate(model, context, options = {}) {
+  context = fromTranscript(context);
   const bound = scope.getStore();
   if (!bound) unsupported('custom provider stream', 'an admitted provider request is required');
   const { runtime, job } = bound;
@@ -35,14 +53,15 @@ export function customProviderDelegate(model, context, options = {}) {
   if (!job.entry.custom || job.entry.inherited || !['openai-completions', 'openai-responses'].includes(model.api)) unsupported('custom provider stream', 'the selected custom OpenAI provider is required');
   for (const key of ['id', 'provider', 'api', 'baseUrl']) if (model[key] !== job.model.pi[key]) unsupported('custom provider model', 'the selected model identity and endpoint cannot change');
   if (typeof model.baseUrl !== 'string' || !model.baseUrl) invalid('custom provider endpoint');
-  fields(options, ['signal', 'apiKey', 'headers', 'env', 'fetch', 'maxTokens', 'temperature', 'cacheRetention', 'sessionId', 'reasoning', 'reasoningEffort', 'onPayload'], 'custom provider options');
+  fields(options, ['signal', 'apiKey', 'headers', 'env', 'fetch', 'maxTokens', 'temperature', 'cacheRetention', 'sessionId', 'reasoning', 'reasoningEffort', 'onPayload', 'onResponse', 'transformHeaders', 'timeoutMs', 'websocketConnectTimeoutMs', 'maxRetries', 'maxRetryDelayMs'], 'custom provider options');
+  if (options.onResponse !== undefined || options.transformHeaders !== undefined) unsupported('custom provider callbacks', 'package response and header callbacks require real wire forwarding');
   if (options.signal !== job.controller.signal || options.cacheRetention !== job.options.cacheRetention || options.sessionId !== job.options.sessionId
       || options.temperature !== job.options.temperature || (options.reasoning !== undefined && options.reasoning !== job.options.reasoning)) unsupported('custom provider stream', 'admitted request authority cannot change');
   const clamped = job.options.reasoning ? clampThinkingLevel(job.model.pi, job.options.reasoning) : undefined;
   const effort = clamped === 'off' ? undefined : clamped;
   if (options.reasoningEffort !== undefined && options.reasoningEffort !== effort) unsupported('custom provider reasoning', 'the admitted thinking selection cannot change');
   fields(context, ['systemPrompt', 'messages', 'tools'], 'custom provider context');
-  if (!isDeepStrictEqual(context.tools, job.context.tools)) unsupported('custom provider tools', 'the authoritative tool catalog cannot change');
+  if (!isDeepStrictEqual(context.tools, fromTranscript(job.context).tools)) unsupported('custom provider tools', 'the authoritative tool catalog cannot change');
   if (options.onPayload !== undefined && typeof options.onPayload !== 'function') invalid('custom onPayload');
   if (job.delegated) unsupported('custom provider stream', 'a provider attempt can delegate only once');
   const profile = customOpenAiChatProfile(model);

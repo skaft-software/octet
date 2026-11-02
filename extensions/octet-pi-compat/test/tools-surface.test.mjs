@@ -56,6 +56,19 @@ test('module: runtime registration waits for an actual host ACK, replaces names,
   assert.equal(rt.tools.get('probe').definition, replacement);
 });
 
+test('module: a tool the product policy withholds (Pi --no-tools) registers disabled; only explicit withholding counts', () => {
+  const rt = runtime(); rt.loaded = true;
+  rt.transport = { requestSync() { return { revision: 1, tools: [], withheld: ['probe'] }; } };
+  assert.equal(registerTool(rt, '/actual/probe.ts', definition()), undefined);
+  assert.ok(rt.tools.has('probe'));
+  for (const reply of [{ revision: 2, tools: [] }, { revision: 2, tools: [], withheld: ['other'] }, { revision: 2, tools: [], withheld: [] },
+    { revision: 2, tools: ['probe'], withheld: ['probe'] }, { revision: 2, tools: [], withheld: [7] }, { revision: 2, tools: [], withheld: 'probe' }]) {
+    const fresh = runtime(); fresh.loaded = true; fresh.transport = { requestSync: () => reply };
+    assert.throws(() => registerTool(fresh, '/actual/probe.ts', definition()), /host did not publish registered tool|withheld names/, JSON.stringify(reply));
+    assert.equal(fresh.tools.has('probe'), false);
+  }
+});
+
 test('module: selection and catalog queries use authoritative host state and consume author hints', () => {
   const rt = runtime(); registerTool(rt, '/actual/probe.ts', definition({ annotations: { readOnlyHint: true }, namespace: { name: 'docs' } }));
   const calls = [];

@@ -500,7 +500,7 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 #[test]
 fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.159.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 10);
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 11);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -1495,6 +1495,8 @@ fn codex_astra_cache_caps_output_and_honors_lower_metadata() {
         plan: codex_plan_cache_key(&claims).map(str::to_owned),
         models: vec![DiscoveredCodexModel {
             display_name: None,
+            input_modalities: codex_input_modalities(&serde_json::Value::Null, "gpt-6-astra"),
+            output_modalities: ModalitySet::none(),
             reasoning_options: codex_fallback_reasoning_options("gpt-6-astra"),
             id: "gpt-6-astra".into(),
             context_window: 272_000,

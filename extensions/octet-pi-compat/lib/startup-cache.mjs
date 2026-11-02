@@ -47,8 +47,7 @@ function ensure(directory) {
 
 /// Enables Node's module compile cache for every module compiled from now on.
 ///
-/// The adapter's own static imports are already loaded, but every factory and
-/// dependency jiti compiles afterwards benefits. Best effort by contract: an
+/// Best effort by contract: an
 /// unavailable or unwritable cache only means the process starts a little
 /// slower, never that startup fails.
 export function enableModuleCompileCache() {

@@ -211,7 +211,7 @@ struct ProviderPipelineReply {
 
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
-enum PipelineHeaderValue {
+pub(super) enum PipelineHeaderValue {
     One(String),
     Many(Vec<String>),
 }
@@ -222,7 +222,7 @@ fn pipeline_refused(reason: &'static str) -> AiError {
     octet_ai::ConfigError::Parse(reason.to_owned()).into()
 }
 
-fn pipeline_header_projection(
+pub(super) fn pipeline_header_projection(
     headers: &reqwest::header::HeaderMap,
 ) -> Result<BTreeMap<String, PipelineHeaderValue>, AiError> {
     let mut projected = BTreeMap::new();
@@ -258,7 +258,7 @@ fn pipeline_header_projection(
     Ok(projected)
 }
 
-fn apply_pipeline_headers(
+pub(super) fn apply_pipeline_headers(
     headers: &mut reqwest::header::HeaderMap,
     patch: BTreeMap<String, Option<PipelineHeaderValue>>,
 ) -> Result<(), AiError> {

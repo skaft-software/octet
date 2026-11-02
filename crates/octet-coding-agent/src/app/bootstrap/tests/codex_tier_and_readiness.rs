@@ -34,6 +34,8 @@ pub(in crate::app::bootstrap) fn codex_discovered_model(
     DiscoveredCodexModel {
         id: model_id.to_owned(),
         display_name: None,
+        input_modalities: codex_input_modalities(&serde_json::Value::Null, model_id),
+        output_modalities: ModalitySet::none(),
         reasoning_options: codex_fallback_reasoning_options(model_id),
         context_window: default_context_window,
         default_context_window,

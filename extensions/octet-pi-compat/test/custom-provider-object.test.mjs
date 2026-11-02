@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { localModule } from '../shims/local-pi.mjs';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -139,7 +140,10 @@ test('custom objects cannot use guarded native delegation or host OpenAI HTTP he
   startProviderStream(value.runtime, 'stream-1'); await value.flush();
   assert.ok(value.frames.some(frame => frame.params.kind === 'error'));
   assert.equal(value.frames.some(frame => frame.method === 'provider/delegate'), false);
-  assert.throws(() => ai.streamOpenAICompletions(row(), { messages: [] }), /unsupported/);
+  // The explicit pi-ai provider streams are the installed Pi implementation:
+  // they run with the extension's own key and carry no host HTTP authority.
+  assert.equal(typeof ai.streamOpenAICompletions, 'function');
+  assert.equal(typeof localModule('ai', 'legacy-api-aliases.js').streamOpenAICompletions, 'function');
 });
 
 test('registry auth helper is invocation-only and supplies explicit/process-local inputs, never host stores', async t => {

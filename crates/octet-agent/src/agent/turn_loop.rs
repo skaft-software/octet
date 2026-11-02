@@ -311,6 +311,18 @@ impl Agent {
         let stream_lifecycle = lifecycle.clone();
         let telemetry = self.telemetry.clone();
         let cache_warmer = &mut self.cache_warmer;
+        let prompt_read_guards = self
+            .extensions
+            .observers
+            .iter()
+            .filter_map(|observer| {
+                observer.bind_run_system_prompt(
+                    &self.resource_owner,
+                    &self.system,
+                    abort.cancellation.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -3640,6 +3652,7 @@ impl Agent {
             // Row 3.5: the run span settles at the durable run boundary, after
             // every recovery and checkpoint path has finalized `reason`.
             run_guard.finish(matches!(reason, FinishReason::Failed(_)));
+            drop(prompt_read_guards);
             stream_lifecycle.finished.store(true, Ordering::Release);
             let ev = AgentEvent::RunFinished { head, reason };
             notify_observers(&observers, &ev);

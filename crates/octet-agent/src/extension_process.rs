@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::ExitStatus;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -37,14 +37,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
@@ -74,11 +74,11 @@ use crate::extension_provider::{
     ExtensionProviderOwner, ExtensionProviderRegistry, ExtensionProviderRegistryError,
 };
 use crate::extension_remote_ui::{
-    ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest, ExtensionRemoteUiClosed,
-    ExtensionRemoteUiEditorText, ExtensionRemoteUiFrame, ExtensionRemoteUiFrameNotification,
-    ExtensionRemoteUiKey, ExtensionRemoteUiMouse, ExtensionRemoteUiOpenRequest,
-    ExtensionRemoteUiOperation, ExtensionRemoteUiResize, RemoteUiChildRequest, RemoteUiMailbox,
-    EXTENSION_FEATURE_REMOTE_UI,
+    EXTENSION_FEATURE_REMOTE_UI, ExtensionRemoteUiChromeRequest, ExtensionRemoteUiCloseRequest,
+    ExtensionRemoteUiClosed, ExtensionRemoteUiEditorText, ExtensionRemoteUiFrame,
+    ExtensionRemoteUiFrameNotification, ExtensionRemoteUiKey, ExtensionRemoteUiMouse,
+    ExtensionRemoteUiOpenRequest, ExtensionRemoteUiOperation, ExtensionRemoteUiResize,
+    RemoteUiChildRequest, RemoteUiMailbox,
 };
 use crate::extension_secret::{ExtensionSecretBroker, ExtensionSecretRequest};
 use crate::tool::{
@@ -115,41 +115,43 @@ mod terminal_input;
 pub use terminal_input::EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT;
 mod transcript_render;
 pub use transcript_render::{
-    transcript_private_entry, TranscriptInvalidation, TranscriptRenderContent,
-    TranscriptRenderRequest, TranscriptRenderResponse, EXTENSION_FEATURE_TRANSCRIPT_RENDER,
+    EXTENSION_FEATURE_TRANSCRIPT_RENDER, TranscriptInvalidation, TranscriptRenderContent,
+    TranscriptRenderRequest, TranscriptRenderResponse, transcript_private_entry,
 };
 mod process_group;
 mod process_hooks;
 mod process_state;
+mod prompt_read;
 mod protocol;
 mod protocol_line;
 mod provider_context;
+mod provider_hooks;
 mod provider_stream;
 mod python_runtime;
-pub use python_runtime::{provision_python_runtime, PythonRuntimeConfig, PythonRuntimeSetup};
+pub use python_runtime::{PythonRuntimeConfig, PythonRuntimeSetup, provision_python_runtime};
 mod reader;
 mod resource_paths;
 mod session_control;
 use self::model_control::dispatch_model_control;
 pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 pub use resource_paths::{
-    ExtensionDefaultModel, ExtensionResourceDiscoveryReason, ExtensionResourcePaths,
-    ExtensionSourceInfo, EXTENSION_FEATURE_COMMAND_CATALOG, EXTENSION_FEATURE_RESOURCE_PATHS,
+    EXTENSION_FEATURE_COMMAND_CATALOG, EXTENSION_FEATURE_RESOURCE_PATHS, ExtensionDefaultModel,
+    ExtensionResourceDiscoveryReason, ExtensionResourcePaths, ExtensionSourceInfo,
 };
-use session_control::{dispatch_session_compaction, dispatch_session_control};
 pub use session_control::{
     EXTENSION_FEATURE_SESSION_COMPACTION_V1, EXTENSION_FEATURE_SESSION_CONTROL_V1,
 };
+use session_control::{dispatch_session_compaction, dispatch_session_control};
 mod resource_validation;
 use bulk::*;
 mod resources;
 use resource_validation::*;
 use resources::*;
 pub use resources::{
-    OperationDescriptor, ResourceAccess, ResourceCleanupStatus, ResourceInput, ResourceOutput,
-    ResourceRef, ResourceReleaseStatus, EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1,
-    EXTENSION_FEATURE_RESOURCE_REFS_V1, MAX_RESOURCE_RECORDS,
-    MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
+    EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1, EXTENSION_FEATURE_RESOURCE_REFS_V1,
+    MAX_RESOURCE_RECORDS, MAX_RESOURCE_REGISTRATIONS_PER_PARENT, OperationDescriptor,
+    ResourceAccess, ResourceCleanupStatus, ResourceInput, ResourceOutput, ResourceRef,
+    ResourceReleaseStatus,
 };
 mod pi_settings;
 pub use pi_settings::PiSettingsConfig;
@@ -239,6 +241,10 @@ pub use self::host_requests::ExtensionHostState;
 pub use self::host_requests::ExtensionModelCost;
 pub use self::host_requests::ExtensionModelView;
 pub use self::host_requests::ExtensionResourceOwner;
+pub use self::host_requests::MAX_EXTENSION_MODEL_API_BYTES;
+pub use self::host_requests::MAX_EXTENSION_MODEL_CATALOG_ROWS;
+pub use self::host_requests::MAX_EXTENSION_MODEL_FIELD_BYTES;
+pub use self::host_requests::MAX_EXTENSION_MODEL_INPUTS;
 pub use self::host_requests::SessionAppendEntryRequest;
 pub use self::host_requests::SessionAppendEntryResult;
 pub use self::host_requests::SessionSendMessageRequest;
@@ -257,10 +263,6 @@ pub use self::host_requests::ToolDefinition;
 pub use self::host_requests::ToolRegistrationRequest;
 pub use self::host_requests::ToolUnregistrationRequest;
 pub use self::host_requests::ToolsSetActiveRequest;
-pub use self::host_requests::MAX_EXTENSION_MODEL_API_BYTES;
-pub use self::host_requests::MAX_EXTENSION_MODEL_CATALOG_ROWS;
-pub use self::host_requests::MAX_EXTENSION_MODEL_FIELD_BYTES;
-pub use self::host_requests::MAX_EXTENSION_MODEL_INPUTS;
 use self::host_requests::*;
 pub use self::lifecycle_events::ExtensionEvent;
 pub use self::lifecycle_events::ExtensionOperationToken;
@@ -271,9 +273,6 @@ pub use self::lifecycle_events::ExtensionSessionLifecycleReceiver;
 pub use self::lifecycle_events::ExtensionSessionLifecycleRequest;
 pub use self::lifecycle_events::ExtensionSessionLifecycleService;
 use self::lifecycle_events::*;
-pub use self::manifest::default_extension_roots;
-pub use self::manifest::discover_extension_manifests;
-pub use self::manifest::load_extension_manifest_paths;
 pub use self::manifest::DiscoveredExtension;
 pub use self::manifest::ExtensionActivation;
 pub use self::manifest::ExtensionCapabilities;
@@ -297,25 +296,15 @@ pub use self::manifest::ExtensionStartDecision;
 pub use self::manifest::ExtensionTrust;
 pub use self::manifest::ExtensionUiSurface;
 pub use self::manifest::ManifestContributions;
+pub use self::manifest::default_extension_roots;
+pub use self::manifest::discover_extension_manifests;
+pub use self::manifest::load_extension_manifest_paths;
 use self::negotiation::*;
 use self::presentation::*;
-pub use self::process_group::begin_host_shutdown;
-pub use self::process_group::force_kill_registered_process_groups;
-#[cfg(all(test, unix))]
-pub(crate) use self::process_group::process_group_registered_for_test;
-#[cfg(all(test, unix))]
-pub(crate) use self::process_group::process_is_live_for_test;
-pub use self::process_group::sanitized_subprocess_environment;
-pub use self::process_group::terminate_bash_process_groups;
-#[cfg(unix)]
-pub use self::process_group::wait_for_bash_process;
 #[cfg(unix)]
 pub use self::process_group::BashProcessHandoff;
 #[cfg(unix)]
 pub use self::process_group::BashProcessLaunch;
-pub use self::process_group::ProcessGroupGuard;
-#[cfg(windows)]
-pub use self::process_group::WindowsProcessLaunch;
 pub use self::process_group::DEFAULT_EXTENSION_MANIFEST_BYTES;
 pub use self::process_group::DEFAULT_EXTENSION_MESSAGE_BYTES;
 pub use self::process_group::DELEGATION_TELEMETRY_SCHEMA;
@@ -326,9 +315,9 @@ pub use self::process_group::EXTENSION_API_VERSION_0_3;
 pub use self::process_group::EXTENSION_API_VERSION_0_4;
 pub use self::process_group::EXTENSION_FEATURE_ACTIVE_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_MODEL_SELECTION_V1;
-pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_EVENTS_V1;
 pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSION_LIFETIME_V1;
+pub use self::process_group::EXTENSION_FEATURE_AGENT_SESSIONS;
 pub use self::process_group::EXTENSION_FEATURE_APPROVALS;
 pub use self::process_group::EXTENSION_FEATURE_ARTIFACTS;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
@@ -340,8 +329,8 @@ pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
 pub use self::process_group::EXTENSION_FEATURE_CONTENT_PARTS;
 pub use self::process_group::EXTENSION_FEATURE_DELEGATION_TELEMETRY;
-pub use self::process_group::EXTENSION_FEATURE_DYNAMIC_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_DYNAMIC_TOOL_RENDERERS;
+pub use self::process_group::EXTENSION_FEATURE_DYNAMIC_TOOLS;
 pub use self::process_group::EXTENSION_FEATURE_EDITOR_HANDOFF;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS;
 pub use self::process_group::EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2;
@@ -387,10 +376,10 @@ pub use self::process_group::MAX_EXTENSION_SESSION_ENTRY_TYPE_BYTES;
 pub use self::process_group::MAX_EXTENSION_SESSION_LABEL_BYTES;
 pub use self::process_group::MAX_EXTENSION_SESSION_LIFECYCLE_QUEUE;
 pub use self::process_group::MAX_EXTENSION_SESSION_NAME_BYTES;
-pub use self::process_group::MAX_EXTENSION_SHORTCUTS;
 pub use self::process_group::MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES;
 pub use self::process_group::MAX_EXTENSION_SHORTCUT_ID_BYTES;
 pub use self::process_group::MAX_EXTENSION_SHORTCUT_KEY_BYTES;
+pub use self::process_group::MAX_EXTENSION_SHORTCUTS;
 pub use self::process_group::MAX_EXTENSION_SYSTEM_PROMPT_BYTES;
 pub use self::process_group::MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES;
 pub use self::process_group::MAX_EXTENSION_TERMINAL_INPUT_BYTES;
@@ -399,6 +388,19 @@ pub use self::process_group::MAX_EXTENSION_UI_INDICATOR_FRAMES;
 pub use self::process_group::MAX_EXTENSION_UI_KEY_BYTES;
 pub use self::process_group::MAX_EXTENSION_UI_LINES;
 pub use self::process_group::MAX_EXTENSION_UI_TEXT_BYTES;
+pub use self::process_group::ProcessGroupGuard;
+#[cfg(windows)]
+pub use self::process_group::WindowsProcessLaunch;
+pub use self::process_group::begin_host_shutdown;
+pub use self::process_group::force_kill_registered_process_groups;
+#[cfg(all(test, unix))]
+pub(crate) use self::process_group::process_group_registered_for_test;
+#[cfg(all(test, unix))]
+pub(crate) use self::process_group::process_is_live_for_test;
+pub use self::process_group::sanitized_subprocess_environment;
+pub use self::process_group::terminate_bash_process_groups;
+#[cfg(unix)]
+pub use self::process_group::wait_for_bash_process;
 use self::process_group::*;
 use self::process_hooks::*;
 pub use self::process_state::CommandRequest;
@@ -417,6 +419,8 @@ pub use self::process_state::ToolRenderRequest;
 use self::process_state::*;
 pub use self::protocol::ConfirmationRequest;
 pub use self::protocol::ConfirmationResponse;
+pub use self::protocol::EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES;
+pub use self::protocol::EXTENSION_FEATURE_TOOL_PROMPT_METADATA;
 pub use self::protocol::ExtensionHealthSnapshot;
 pub use self::protocol::ExtensionHealthState;
 pub use self::protocol::ExtensionInputRequest;
@@ -438,8 +442,6 @@ pub use self::protocol::ExtensionRequestId;
 pub use self::protocol::RenderedToolCall;
 pub use self::protocol::ResourceProtocolLimits;
 pub use self::protocol::ToolRenderSegment;
-pub use self::protocol::EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES;
-pub use self::protocol::EXTENSION_FEATURE_TOOL_PROMPT_METADATA;
 use self::protocol::*;
 use self::protocol_line::*;
 use self::provider_stream::*;

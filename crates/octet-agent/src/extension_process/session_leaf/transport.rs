@@ -351,6 +351,32 @@ impl Store {
         Ok(descriptor)
     }
 
+    /// Lease a live parent exactly the view it is pinned to (owner, revision
+    /// and head), as a counted parent-bound transfer. The adapter validates
+    /// that parent's append receipts against this same document, so a later
+    /// owner republication can never race the receipt chain.
+    pub(in crate::extension_process) fn lease_parent(
+        &mut self,
+        parent: u64,
+        profile: &SessionSnapshotProfile,
+    ) -> Result<Descriptor, ExtensionRuntimeError> {
+        let pin = self.parents.get(&parent).ok_or_else(unavailable)?;
+        let view = self
+            .current
+            .get(&pin.owner)
+            .and_then(Option::as_ref)
+            .filter(|view| {
+                view.descriptor.owner == pin.owner
+                    && view.descriptor.preparation.is_none()
+                    && pin.preparation.is_none()
+                    && view.descriptor.view_revision == pin.revision
+                    && view.descriptor.head == pin.head
+            })
+            .cloned()
+            .ok_or_else(unavailable)?;
+        self.transfer(parent, view, profile)
+    }
+
     pub(in crate::extension_process) fn settle(&mut self, parent: u64) {
         self.parents.remove(&parent);
         self.transfers.retain(|_, t| t.parent != parent);

@@ -35,6 +35,13 @@ pub(super) struct SessionMirror {
 }
 
 impl SessionMirror {
+    /// The published leaf of this owner's counted facts, if available.
+    pub(super) fn leaf_id(&self) -> Option<serde_json::Value> {
+        self.value
+            .as_ref()
+            .map(|facts| facts.get("session_leaf_id").cloned().unwrap_or_default())
+    }
+
     pub(super) fn rebind_generation(&mut self, generation: u64) {
         self.owner.process_generation = generation;
     }
@@ -1338,7 +1345,7 @@ pub(super) fn dispatch_append_request(
                     let entry = commit.entry.clone();
                     let previous_head = entry.parent.as_ref().map(|id| id.0.clone());
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":transport::receipt::Receipt {
-                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head,
+                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head, gap: Vec::new(),
                     }})
                 } else {
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})

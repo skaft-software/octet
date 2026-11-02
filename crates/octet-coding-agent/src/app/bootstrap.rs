@@ -1636,9 +1636,9 @@ fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
 }
 
 const MODALITY_FIELDS: &[&str] = &[
-    "architecture",
+    "architecture/input_modalities",
     "input_modalities",
-    "modalities",
+    "modalities/input",
     "vision",
     "audio",
 ];
@@ -2111,10 +2111,27 @@ struct DiscoveredApiModel {
     display_name: Option<String>,
     vision: bool,
     audio: bool,
+    output_modalities: ModalitySet,
     /// The inventory or pinned record lists PDF (or OpenRouter `file`) input.
     pdf: bool,
     modalities_asserted: bool,
     structured_output: Option<bool>,
+}
+
+impl DiscoveredApiModel {
+    fn input_modalities(&self, protocol: Protocol) -> ModalitySet {
+        let mut modalities = ModalitySet::none();
+        if self.vision {
+            modalities = modalities.with(octet_ai::Modality::Image);
+        }
+        if self.audio && !protocol.audio_input_formats().is_empty() {
+            modalities = modalities.with(octet_ai::Modality::Audio);
+        }
+        if self.pdf && protocol.supports_document_input() {
+            modalities = modalities.with(octet_ai::Modality::Pdf);
+        }
+        modalities
+    }
 }
 
 fn is_deepseek_v4_model(id: &str) -> bool {
@@ -2262,30 +2279,70 @@ fn custom_model_metadata_supports_tools(entry: &serde_json::Value) -> bool {
 /// from being incorrectly treated as text-only just because its inventory
 /// shape differs.
 fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
-    let values = entry
-        .get("architecture")
-        .and_then(|value| value.get("input_modalities"))
-        .or_else(|| entry.get("input_modalities"))
-        .or_else(|| entry.get("modalities").map(|m| m.get("input").unwrap_or(m)))
-        .and_then(serde_json::Value::as_array);
+    modalities_from_entry(entry, "input")
+}
+
+fn output_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
+    modalities_from_entry(entry, "output")
+}
+
+fn modalities_from_entry(entry: &serde_json::Value, direction: &str) -> ModalitySet {
+    let field = format!("{direction}_modalities");
+    let values = [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|metadata| [Some(metadata), metadata.get("capabilities")])
+    .flatten()
+    .find_map(|metadata| {
+        metadata
+            .get("architecture")
+            .and_then(|architecture| {
+                if architecture.is_object() {
+                    architecture.get(&field)
+                } else {
+                    Some(architecture)
+                }
+            })
+            .or_else(|| metadata.get(&field))
+            .or_else(|| {
+                metadata.get("modalities").and_then(|modalities| {
+                    if modalities.is_object() {
+                        modalities.get(direction)
+                    } else if direction == "input" {
+                        Some(modalities)
+                    } else {
+                        None
+                    }
+                })
+            })
+    })
+    .and_then(serde_json::Value::as_array)
+    .filter(|values| values.iter().all(serde_json::Value::is_string));
     let mut result = ModalitySet::none();
     for value in values.into_iter().flatten() {
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-        let value = value.to_ascii_lowercase();
-        if value == "image" || value == "vision" || value.contains("image") {
-            result = result.with(octet_ai::Modality::Image);
-        }
-        if value == "audio" || value.contains("audio") {
-            result = result.with(octet_ai::Modality::Audio);
-        }
-        // models.dev says `pdf`; OpenRouter's architecture says `file`.
-        if value == "pdf" || value == "file" {
-            result = result.with(octet_ai::Modality::Pdf);
+        match value.as_str().unwrap().to_ascii_lowercase().as_str() {
+            "image" | "vision" => result = result.with(octet_ai::Modality::Image),
+            "audio" => result = result.with(octet_ai::Modality::Audio),
+            // models.dev says `pdf`; OpenRouter's architecture says `file`.
+            "pdf" | "file" if direction == "input" => {
+                result = result.with(octet_ai::Modality::Pdf);
+            }
+            _ => {}
         }
     }
     result
+}
+
+fn conversation_output_modalities(protocol: Protocol, advertised: ModalitySet) -> ModalitySet {
+    if protocol == Protocol::OpenAiChat && advertised.contains(octet_ai::Modality::Audio) {
+        ModalitySet::none().with(octet_ai::Modality::Audio)
+    } else {
+        ModalitySet::none()
+    }
 }
 
 /// Parse the two inventory envelopes used by supported providers: OpenAI-style
@@ -2422,6 +2479,7 @@ fn api_models_from_response_for(
             display_name: discovered_display_name(entry, id),
             vision,
             audio,
+            output_modalities: output_modalities_from_entry(entry),
             pdf: input_modalities.contains(octet_ai::Modality::Pdf),
             modalities_asserted,
             structured_output: discovered_structured_output(entry),
@@ -2776,6 +2834,9 @@ fn discovered_reasoning_capability(
         // This codec does not support Conversations reasoning controls yet.
         // Discovery must not manufacture a Chat control for the native route.
         Protocol::MistralConversations => return None,
+        // The extension's own stream owns its reasoning mapping; the host
+        // declares no native control for it.
+        Protocol::ExtensionStream => return None,
         // Native codecs need a declaration-owned control/budget contract, but
         // that must not broaden an endpoint's narrower exact choices/default.
         // Pi-messages is native in the same sense: its reasoning state is
@@ -3017,19 +3078,9 @@ pub(crate) fn register_openai_compatible_models_from_response(
             .discovery_capabilities
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
-        let mut input_modalities = if model.vision
-            || (!model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7))
-        {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        };
-        // Inventory audio requires an implemented input mapping on this route.
-        if model.audio && !protocol.audio_input_formats().is_empty() {
-            input_modalities = input_modalities.with(octet_ai::Modality::Audio);
-        }
-        if model.pdf && protocol.supports_document_input() {
-            input_modalities = input_modalities.with(octet_ai::Modality::Pdf);
+        let mut input_modalities = model.input_modalities(protocol);
+        if !model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7) {
+            input_modalities = input_modalities.with(octet_ai::Modality::Image);
         }
         crate::providers::register_discovered_model(
             catalog,
@@ -3044,7 +3095,10 @@ pub(crate) fn register_openai_compatible_models_from_response(
                 .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
-                output_modalities: ModalitySet::none(),
+                output_modalities: conversation_output_modalities(
+                    protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools
                     && model
@@ -3127,6 +3181,10 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
             .max_output_tokens
             .unwrap_or(if direct_opus_5_5 { 128_000 } else { 64_000 })
             .min(context_window);
+        let mut input_modalities = model.input_modalities(route.protocol);
+        if !model.modalities_asserted && declaration.discovery_capabilities.assumes_image_input() {
+            input_modalities = input_modalities.with(octet_ai::Modality::Image);
+        }
         crate::providers::register_discovered_model(
             catalog,
             declaration,
@@ -3136,15 +3194,11 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
                 .clone()
                 .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
             Capabilities {
-                input_modalities: if model.vision
-                    || (!model.modalities_asserted
-                        && declaration.discovery_capabilities.assumes_image_input())
-                {
-                    ModalitySet::none().with(octet_ai::Modality::Image)
-                } else {
-                    ModalitySet::none()
-                },
-                output_modalities: ModalitySet::none(),
+                input_modalities,
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
                 // Only a separately declared native contract is a fallback;
@@ -3380,12 +3434,11 @@ fn register_deepseek_models_from_response(
             api_name,
             model.display_name.clone(),
             Capabilities {
-                input_modalities: if model.vision {
-                    ModalitySet::none().with(octet_ai::Modality::Image)
-                } else {
-                    ModalitySet::none()
-                },
-                output_modalities: ModalitySet::none(),
+                input_modalities: model.input_modalities(route.protocol),
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
                 reasoning,
@@ -3654,7 +3707,10 @@ fn openrouter_models_from_response(
             protocol: route.protocol,
             capabilities: Capabilities {
                 input_modalities,
-                output_modalities: ModalitySet::none(),
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    output_modalities_from_entry(entry),
+                ),
                 tools: supports_tools,
                 parallel_tool_calls: supports_tools
                     && asserted_capability(entry, &["parallel_tool_calls"]).unwrap_or(false),
@@ -6273,9 +6329,7 @@ pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 10 invalidates inventories fetched as client 0.156.1, which the
-/// live backend served without GPT-6.1 Sol, so upgrading shows it at once.
-const CODEX_MODEL_CACHE_VERSION: u8 = 10;
+const CODEX_MODEL_CACHE_VERSION: u8 = 11;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -6308,6 +6362,8 @@ struct DiscoveredCodexModel {
     id: String,
     #[serde(default)]
     display_name: Option<String>,
+    input_modalities: ModalitySet,
+    output_modalities: ModalitySet,
     reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
     /// Backend default window before octet's deliberate working cap. Kept so the
@@ -6535,6 +6591,10 @@ fn codex_inventory_from_response(
                 continue;
             }
         };
+        if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
+            skipped.push(format!("{id}: unknown reasoning metadata"));
+            continue;
+        }
         let mut reasoning_options = if metadata.supported == Some(false) {
             octet_ai::types::ReasoningOptions {
                 values: vec!["none".into()],
@@ -6561,6 +6621,8 @@ fn codex_inventory_from_response(
             id: id.to_owned(),
             display_name: discovered_display_name(entry, id)
                 .or_else(|| (id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned())),
+            input_modalities: codex_input_modalities(entry, id),
+            output_modalities: output_modalities_from_entry(entry),
             reasoning_options,
             context_window,
             default_context_window,
@@ -6687,6 +6749,24 @@ fn codex_supports_image_input(model_id: &str) -> bool {
         || model_id.starts_with("gpt-5.3-codex")
         || model_id.starts_with("gpt-5.2-codex")
         || model_id.starts_with("gpt-5.1-codex")
+}
+
+fn codex_input_modalities(entry: &serde_json::Value, id: &str) -> ModalitySet {
+    let mut modalities = input_modalities_from_entry(entry);
+    if !has_metadata_assertion(entry, MODALITY_FIELDS) && codex_supports_image_input(id) {
+        modalities = modalities.with(octet_ai::Modality::Image);
+    }
+    for (field, modality) in [
+        ("vision", octet_ai::Modality::Image),
+        ("audio", octet_ai::Modality::Audio),
+    ] {
+        match asserted_capability(entry, &[field]) {
+            Some(true) => modalities = modalities.with(modality),
+            Some(false) => modalities = modalities.without(modality),
+            None => {}
+        }
+    }
+    modalities
 }
 
 fn codex_plan_cache_key(claims: &crate::auth::codex::SubscriptionClaims) -> Option<&str> {
@@ -6918,6 +6998,8 @@ fn fallback_codex_models(
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
                 display_name: (*model_id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned()),
+                input_modalities: codex_input_modalities(&serde_json::Value::Null, model_id),
+                output_modalities: ModalitySet::none(),
                 reasoning_options,
                 context_window: limits.context_window,
                 default_context_window,
@@ -7221,12 +7303,12 @@ fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> any
 /// explicitly selected Lite remains supported by `octet-ai` for SDK callers.
 fn codex_inference_capabilities(model: &DiscoveredCodexModel) -> Capabilities {
     Capabilities {
-        input_modalities: if codex_supports_image_input(&model.id) {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        },
-        output_modalities: ModalitySet::none(),
+        // Preserve known advertised inputs, but Responses has no audio codec.
+        input_modalities: model.input_modalities.without(octet_ai::Modality::Audio),
+        output_modalities: conversation_output_modalities(
+            Protocol::OpenAiResponses,
+            model.output_modalities,
+        ),
         tools: true,
         parallel_tool_calls: true,
         reasoning: Some(ReasoningCapability {

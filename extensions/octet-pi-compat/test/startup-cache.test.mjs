@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +36,41 @@ test('an unwritable cache directory degrades to jiti defaults', () => {
     assert.deepEqual(jitiCacheOptions(), {});
   } finally {
     process.env.OCTET_PI_COMPAT_CACHE = previous;
+  }
+});
+
+for (const entry of ['runner.mjs', 'configure.mjs']) test(`${entry} enables the compile cache before loading the adapter graph`, () => {
+  const source = readFileSync(new URL(`../${entry}`, import.meta.url), 'utf8');
+  const enabled = source.indexOf('enableModuleCompileCache();');
+  assert.ok(enabled > source.indexOf("import './lib/runtime-prerequisites.mjs'"));
+  const imports = [...source.matchAll(/await import\(['"]\.\/lib\/([^'"]+)['"]\)/g)];
+  assert.ok(imports.length > 1);
+  for (const imported of imports) if (imported[1] !== 'startup-cache.mjs') assert.ok(enabled < imported.index, `${imported[1]} loaded before cache activation`);
+});
+
+for (const mode of ['private', 'override', 'unusable']) test(`module compile cache activates before subsequent imports: ${mode}`, () => {
+  const directory = join(process.env.OCTET_PI_COMPAT_CACHE, mode);
+  const probe = join(process.env.OCTET_PI_COMPAT_CACHE, `probe-${mode}.mjs`);
+  writeFileSync(probe, 'import module from "node:module"; export default module.getCompileCacheDir?.();');
+  const cacheModule = new URL('../lib/startup-cache.mjs', import.meta.url).href;
+  const env = { ...process.env, OCTET_PI_COMPAT_CACHE: directory };
+  delete env.NODE_COMPILE_CACHE;
+  delete env.NODE_DISABLE_COMPILE_CACHE;
+  if (mode === 'override') env.NODE_COMPILE_CACHE = join(directory, 'explicit');
+  if (mode === 'unusable') writeFileSync(directory, 'not a directory');
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    import { enableModuleCompileCache } from ${JSON.stringify(cacheModule)};
+    enableModuleCompileCache();
+    const { default: directory } = await import(${JSON.stringify(pathToFileURL(probe).href)});
+    console.log(JSON.stringify({ directory }));
+  `], { env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout).directory;
+  if (mode === 'unusable') assert.equal(observed, undefined);
+  else {
+    const expected = mode === 'override' ? env.NODE_COMPILE_CACHE : join(directory, 'node-compile-cache');
+    assert.equal(observed, fileURLToPath(pathToFileURL(observed)));
+    assert.ok(observed.startsWith(`${expected}/`), observed);
   }
 });
 

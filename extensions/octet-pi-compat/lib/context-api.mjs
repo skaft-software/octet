@@ -31,15 +31,18 @@ export function contextFacts(runtime, store) {
       if (runtime.stopping) throw rpcError(-32002, 'host is draining');
       runtime.assertOwner(store);
       store.controller.signal.throwIfAborted();
-      if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live
-          || runtime.active.get(store.id)?.controller !== store.controller) {
+      const scoped = store.promptReadScope !== undefined && runtime.features.has('run_system_prompt_read_v1');
+      const observation = !store.live && store.method === 'turn/started' && scoped
+        && store.promptReadScope === store.state.promptReadScope && store.state.runActive;
+      if (!observation && (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live
+          || runtime.active.get(store.id)?.controller !== store.controller)) {
         throw rpcError(-32002, 'not_foreground_owner system prompt read requires a live request');
       }
-      // Read the live Agent through its existing disclosure service. Never use
-      // ambient host state (which may retain an older provider preparation).
+      const parent = observation ? 0 : store.id;
       const result = runtime.transport.requestSync('context/system_prompt', {
-        parent_request_id: store.id, resource_owner: store.state.owner,
-      }, { parent: store.id, signal: store.controller.signal });
+        parent_request_id: parent, resource_owner: store.state.owner,
+        ...(scoped ? { scope: store.promptReadScope } : {}),
+      }, { parent, signal: store.controller.signal });
       fields(result, ['text'], 'system prompt reply');
       const text = bounded(result.text, 'system prompt text', 262144, { controls: true });
       if (text.includes('\0')) invalid('system prompt text must not contain NUL');

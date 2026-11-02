@@ -1023,6 +1023,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::GoogleGenerativeAi => "google_generative_ai",
         Protocol::MistralConversations => "mistral_conversations",
         Protocol::PiMessages => "pi_messages",
+        Protocol::ExtensionStream => "extension_stream",
     }
 }
 

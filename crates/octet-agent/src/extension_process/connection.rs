@@ -47,6 +47,7 @@ impl ProtocolFrameLimit {
 
 pub(super) struct ProviderStreamIngress {
     pub(super) delegate: Option<Arc<native_provider::NativeDelegate>>,
+    pub(super) request_hooks: Option<Arc<provider_hooks::ProviderHooksJob>>,
     pub(super) sender: mpsc::Sender<api_v03::ProviderStreamEvent>,
     pub(super) next_sequence: usize,
     pub(super) terminal: bool,
@@ -54,6 +55,9 @@ pub(super) struct ProviderStreamIngress {
 
 impl Drop for ProviderStreamIngress {
     fn drop(&mut self) {
+        if let Some(job) = &self.request_hooks {
+            job.cancelled.cancel();
+        }
         if let Some(delegate) = &self.delegate {
             delegate.cancelled.notify_one();
         }
@@ -70,6 +74,7 @@ pub(super) struct ProcessConnection {
     pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
+    pub(super) prompt_reads: Arc<prompt_read::Mailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
     pub(super) pi_settings: Option<Arc<pi_settings::Service>>,
     pub(super) pending_changed: Arc<Notify>,
@@ -1084,6 +1089,16 @@ impl ProcessConnection {
                 ));
             }
             let mut params = params;
+            if let Some(owner) = resource_owner.as_ref() {
+                if let Some(scope) = connection.prompt_reads.scope(owner) {
+                    if let Some(context) = params
+                        .get_mut("context")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        context.insert("system_prompt_scope".into(), scope.into());
+                    }
+                }
+            }
             session_leaf::attach_request_session_mirror(
                 &connection,
                 resource_owner.as_ref(),

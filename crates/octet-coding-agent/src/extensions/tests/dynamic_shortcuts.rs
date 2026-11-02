@@ -168,7 +168,7 @@ init=json.loads(sys.stdin.readline()); offer=init['params']['protocol']
 features=offer['required_features']+['shortcuts','session_entries','session_owner_routes_v1','session_snapshot_transport_v1','session_append_receipts_v1']
 reply(init,{'api_version':'0.4','tools':[],'commands':[{'name':'prime','description':'Register shortcut'}],
  'shortcuts':[{'key':'ctrl+shift+p','name':'static','description':'Static action'}],
- 'protocol':{'version':'0.4','features':features,'limits':{'max_concurrent_requests':4,'max_message_bytes':offer['limits']['max_message_bytes']},'session_snapshot_transport_v1':offer['session_snapshot_transport_v1']}})
+ 'protocol':{'version':'0.4','features':features,'limits':{'max_concurrent_requests':8,'max_message_bytes':offer['limits']['max_message_bytes']},'session_snapshot_transport_v1':offer['session_snapshot_transport_v1']}})
 while True:
  m=pending.pop(0) if pending else json.loads(sys.stdin.readline())
  method=m.get('method'); p=m.get('params',{})

@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 // Delay linking adapter dependencies until the runtime prerequisite has passed.
+const { startupCacheDirectory, enableModuleCompileCache } = await import('./lib/startup-cache.mjs');
+enableModuleCompileCache();
 const { hookEvents } = await import('./lib/api.mjs');
 const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
 const { locateInstalledPi, scanPiImportGaps } = await import('./lib/installed-pi.mjs');
@@ -15,8 +17,8 @@ const { createJiti } = await import('jiti');
 const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs');
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
+const { warmTransformCache } = await import('./lib/transform-warmup.mjs');
 const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
-const { startupCacheDirectory } = await import('./lib/startup-cache.mjs');
 const { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } = await import('./lib/theme-import.mjs');
 
 // Importing a factory executes arbitrary user code. Never perform implicit
@@ -61,14 +63,12 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
-  if (mirrorPiSetup && expectedSourceHashes && extensions.some(entry => !isDeepStrictEqual(expectedSourceHashes[entry], reviewedSourceHashes(entry)))) {
-    throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
-  }
   const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
   }
   let registrations = capturedRegistrations && structuredClone(capturedRegistrations);
+  const capturedHere = !registrations;
   if (!registrations) {
     const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: captureCacheDir ?? join(output, '.cache') });
     if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
@@ -92,7 +92,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
     .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover').sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
-  if (entrypoint_sources && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
+  if (entrypoint_sources && capturedHere && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed during capture; prepare and review again');
   }
@@ -224,6 +224,7 @@ async function captureCombined(extensions, options) {
   let entries, routes;
   try {
     entries = extensions.map(entry => realpathSync(entry));
+    if (options.cacheDir && options.warmFiles?.length) await warmTransformCache(options.warmFiles, join(options.cacheDir, 'jiti'));
     const jiti = createJiti(import.meta.url, { alias: { ...typeboxAliases(), ...emulatedPiAliases() },
       moduleCache: true, tryNative: false, ...(options.cacheDir ? { fsCache: join(options.cacheDir, 'jiti') } : {}) });
     routes = Object.fromEntries(await Promise.all(entries.map(async entry => {
@@ -319,7 +320,8 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   // .cache would transform every factory cold at each capture. Its captures use
   // the adapter's persistent startup cache instead.
   const captureCacheDir = resolve(cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache'));
-  const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir });
+  const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir,
+    warmFiles: Object.values(prepared.sourceHashes).flatMap(hashes => Object.keys(hashes)) });
   let routed = reused?.routed;
   if (!routed && combined) {
     // Only what the combined capture skipped is probed on its own, for the
@@ -343,7 +345,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   if (refused.length && refused.length === routed.length) throw new Error('none of your Pi extensions loaded');
   const mirrorExcluded = refused.map(result => ({ entry: realpathSync(result.entry), reason: String(result.error).slice(0, 512) }));
   const accepted = routed.filter(result => result.route);
-  const current = mirrorPreparation({ output, cwd, env, projectTrusted });
+  const current = reused ? prepared : mirrorPreparation({ output, cwd, env, projectTrusted });
   if (current.review.fingerprint !== prepared.review.fingerprint) throw new Error('Pi setup changed during mirror review; prepare and review again before capture');
   const expectedSourceHashes = Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes]));
   const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,

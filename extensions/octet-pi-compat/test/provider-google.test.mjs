@@ -75,11 +75,14 @@ for (const form of ['string', 'native-object']) test(`Google ${form} registratio
   assert.deepEqual(value.frames, []);
 });
 
-test('unknown dialect and non-inherited Google models remain refused', () => {
+test('extension-owned streams register any Pi API name; a dialect without its own stream is refused', () => {
   const value = fixture();
-  assert.throws(() => registerProvider(value.runtime, 0, 'google', { api: 'google-interactions', streamSimple() {} }), /provider API/);
+  // Pi accepts a custom api with the extension's own streamSimple, including a
+  // non-inherited Google model: the stream is the extension's, not the host's.
   const { provider, ...definition } = model;
-  assert.throws(() => registerProvider(value.runtime, 0, 'google', { api: model.api, models: [definition], streamSimple() {} }), /native|inherited/);
+  registerProvider(value.runtime, 0, 'google-own', { api: 'google-interactions', models: [{ ...definition, api: 'google-interactions' }], streamSimple() {} });
+  registerProvider(value.runtime, 0, 'google-plain', { api: model.api, models: [definition], streamSimple() {} });
+  assert.throws(() => registerProvider(value.runtime, 0, 'google-bare', { api: 'google-interactions', models: [{ ...definition, api: 'google-interactions' }] }), /streamSimple|provider API/);
   assert.deepEqual(value.frames, []);
 });
 

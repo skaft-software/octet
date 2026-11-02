@@ -37,6 +37,7 @@ fn build(protocol: Protocol, request: &crate::Request) -> Value {
             super::mistral_conversations::build_request(&model, request)
         }
         Protocol::PiMessages => super::pi_messages::build_request(&model, request),
+        Protocol::ExtensionStream => unreachable!("extension-owned streams have no host codec"),
     }
     .unwrap();
     serde_json::from_slice(&parts.body).unwrap()

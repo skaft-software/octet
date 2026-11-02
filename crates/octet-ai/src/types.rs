@@ -149,6 +149,10 @@ pub enum Protocol {
     /// `{ model, context, options }` document and the response is a stream of
     /// serialized assistant-message events.
     PiMessages,
+    /// A model whose stream is produced by its own extension process (for
+    /// example a Pi package's custom `streamSimple`). The host never encodes
+    /// or decodes a wire request for it; this is only the route's label.
+    ExtensionStream,
 }
 
 /// Preferred transport for streaming provider responses.

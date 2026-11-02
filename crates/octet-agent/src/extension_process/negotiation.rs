@@ -308,6 +308,7 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if offered_host_services.provider_proxy {
                 allowed.insert("provider_proxy_v1");
+                allowed.insert(provider_hooks::FEATURE);
                 if offered_host_services.provider_inheritance {
                     allowed.insert("provider_inheritance_v1");
                     allowed.insert("provider_google_generative_ai_v1");
@@ -412,6 +413,12 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "provider_google_generative_ai_v1 requires provider_inheritance_v1".into(),
                 ));
             }
+            if features.contains(provider_hooks::FEATURE) && !features.contains("provider_proxy_v1")
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_request_hooks_v1 requires provider_proxy_v1".into(),
+                ));
+            }
             if features.contains("provider_inheritance_v1")
                 && !features.contains("provider_proxy_v1")
             {
@@ -455,6 +462,16 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if manifest.capabilities.system_prompt {
                 allowed.insert(EXTENSION_FEATURE_SYSTEM_PROMPT_READ);
+                if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                    allowed.insert(prompt_read::FEATURE);
+                }
+            }
+            if features.contains(prompt_read::FEATURE)
+                && !features.contains(EXTENSION_FEATURE_SYSTEM_PROMPT_READ)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "run_system_prompt_read_v1 requires system_prompt_read".into(),
+                ));
             }
             let session_offer = (offered_host_services.max_message_bytes > 0)
                 .then(|| {

@@ -129,6 +129,41 @@ test('getSystemPrompt refuses absent negotiation, retired/settled/reused parents
   assert.equal(calls.length, 0);
 });
 
+test('run observation reads require the exact current native scope and never gain a fabricated live parent', async () => {
+  const { runtime, store, calls } = systemPromptHarness();
+  runtime.features.add('run_system_prompt_read_v1'); runtime.features.add('lifecycle_events');
+  let retained;
+  runtime.events.set('agent_start', [{ factory: 0, handler(_event, ctx) {
+    retained = ctx;
+    assert.equal(ctx.getSystemPrompt(), 'actual native service text\n文');
+  } }]);
+  runtime.active.delete(store.id);
+  await runtime.notify({ method: 'context/system_prompt_scope', params: { resource_owner: owner, scope: 'scope-one' } });
+  await runtime.notify({ method: 'turn/started', params: { resource_owner: owner } });
+  assert.deepEqual(calls[0].params, { parent_request_id: 0, resource_owner: owner, scope: 'scope-one' });
+  assert.equal(calls[0].options.parent, 0); assert.equal(runtime.active.size, 0);
+  await runtime.notify({ method: 'turn/settled', params: { resource_owner: owner } });
+  assert.throws(() => retained.getSystemPrompt(), /live request/);
+  await runtime.notify({ method: 'context/system_prompt_scope', params: { resource_owner: owner, scope: 'scope-two' } });
+  store.state.runActive = true;
+  assert.throws(() => retained.getSystemPrompt(), /live request/);
+  assert.equal(calls.length, 1);
+});
+
+test('run scope does not authorize settled, reused or cancelled model-turn parents or hide native refusal', () => {
+  const { runtime, store, ctx, calls } = systemPromptHarness();
+  runtime.features.add('run_system_prompt_read_v1'); store.promptReadScope = 'native-scope';
+  runtime.active.set(store.id, { ...store, controller: new AbortController() });
+  assert.throws(() => ctx.getSystemPrompt(), /live request/);
+  runtime.active.set(store.id, store); store.live = false;
+  assert.throws(() => ctx.getSystemPrompt(), /live request/);
+  store.live = true; runtime.transport.requestSync = () => { throw Object.assign(new Error('not_foreground_owner expired run scope'), { code: -32002 }); };
+  assert.throws(() => ctx.getSystemPrompt(), /expired run scope/);
+  store.controller.abort(new Error('cancelled scoped read'));
+  assert.throws(() => ctx.getSystemPrompt(), /cancelled scoped read/);
+  assert.equal(calls.length, 0);
+});
+
 test('getSystemPrompt refuses malformed, oversized, NUL and non-UTF-8 native replies without disclosure in errors', () => {
   const { ctx, reply } = systemPromptHarness();
   for (const result of [undefined, null, [], {}, { text: null }, { text: 4 }, { text: 'private', extra: true },
