@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import module from 'node:module';
@@ -69,4 +69,33 @@ export function enableModuleCompileCache() {
 export function jitiCacheOptions() {
   const directory = startupCacheDirectory();
   return directory ? { fsCache: join(directory, 'jiti') } : {};
+}
+
+/// Reads one persisted JSON document from the startup cache directory.
+///
+/// Persisted maps are optimizations: a missing, oversized, unreadable or
+/// wrong-schema file is `undefined` and the caller recomputes.
+export function readPersisted(name, schema, maxBytes = 16 * 1024 * 1024) {
+  try {
+    const directory = startupCacheDirectory();
+    if (!directory) return undefined;
+    const file = join(directory, name);
+    if (statSync(file).size > maxBytes) return undefined;
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    return value?.schema === schema ? value : undefined;
+  } catch { return undefined; }
+}
+
+/// Atomically replaces one persisted document (private mode, rename). Best effort.
+export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
+  try {
+    const directory = startupCacheDirectory();
+    if (!directory) return false;
+    const text = JSON.stringify(value);
+    if (Buffer.byteLength(text) > maxBytes) return false;
+    const file = join(directory, name), temporary = `${file}.${process.pid}.tmp`;
+    writeFileSync(temporary, text, { mode: 0o600 });
+    renameSync(temporary, file);
+    return true;
+  } catch { return false; }
 }

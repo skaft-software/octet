@@ -42,6 +42,7 @@ import { TerminalInputListeners } from './terminal-input.mjs';
 import { bindHostTheme, configureBridgeTheme, nativeTheme } from './theme.mjs';
 import { tracePhase } from './startup-trace.mjs';
 import { jitiCacheOptions } from './startup-cache.mjs';
+import { sharedSourceFingerprints } from './source-fingerprints.mjs';
 import { withToolHost } from './tool-host.mjs';
 import { createHostedRunner, hostedToolCatalog } from './extension-runner.mjs';
 
@@ -87,7 +88,15 @@ function sourceFilePath(pathname, baseDirectory) {
   return realpathSync(current);
 }
 
-function readReviewedSource(file, maxBytes, limitMessage) {
+const IMPORT_SPECIFIERS = /\b(?:from\s*|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"\n]+)['"]/g;
+
+// Reads one reviewed source with the TOCTOU guards (O_NOFOLLOW, regular file,
+// bounded size, size/mtime/ctime unchanged across the read) and returns its
+// digest, byte length and relative-import specifiers. With `fingerprints`, a
+// file whose persisted stat fingerprint is unchanged is not read again; the
+// fingerprint is taken from the already-open descriptor, so the symlink and
+// regular-file checks above still run for every file on every pass.
+function readReviewedSource(file, maxBytes, limitMessage, fingerprints) {
   // O_NOFOLLOW is available on the supported Unix platforms. The lstat checks
   // also protect platforms where Node does not expose that flag.
   let fd;
@@ -97,38 +106,48 @@ function readReviewedSource(file, maxBytes, limitMessage) {
     throw error;
   }
   try {
-    const before = fstatSync(fd);
+    const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) invalid('reviewed factory source is not a regular file; configure entrypoints explicitly');
-    if (before.size > maxBytes) invalid(limitMessage);
+    if (before.size > BigInt(maxBytes)) invalid(limitMessage);
+    const known = fingerprints?.lookup(file, before);
+    if (known) return { hash: known.hash, length: Number(before.size), imports: known.imports };
     // Read at most the size observed plus one byte, so concurrent growth is
     // detected without ever allocating or reading an unbounded source file.
-    const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(maxBytes + 1, before.size + 1)));
+    const size = Number(before.size);
+    const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(maxBytes + 1, size + 1)));
     let length = 0;
     while (length < buffer.length) {
       const count = readSync(fd, buffer, length, buffer.length - length, length);
       if (!count) break;
       length += count;
     }
-    if (length > maxBytes || length !== before.size) invalid('reviewed factory source changed during review; configure entrypoints explicitly');
-    const after = fstatSync(fd);
-    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+    if (length > maxBytes || length !== size) invalid('reviewed factory source changed during review; configure entrypoints explicitly');
+    const after = fstatSync(fd, { bigint: true });
+    if (after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
       invalid('reviewed factory source changed during review; configure entrypoints explicitly');
     }
-    return buffer.subarray(0, length);
+    const bytes = buffer.subarray(0, length), source = bytes.toString('utf8');
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const imports = [...source.matchAll(IMPORT_SPECIFIERS)].map(match => match[1]);
+    // Recorded from the pre-read stat, which the post-read stat just confirmed.
+    fingerprints?.record(file, before, hash, imports);
+    return { hash, length, imports };
   } finally { closeSync(fd); }
 }
 
 // Review the bounded relative-import source closure without executing it. Every
 // accepted file is hashed; symlink candidates and changed/oversized sources fail closed.
-export function reviewedSourceHashes(entry) {
+// `options.fingerprints` (a SourceFingerprints) makes unchanged files cheap; it
+// never skips the open/fstat checks and a changed fingerprint re-hashes.
+export function reviewedSourceHashes(entry, { fingerprints } = {}) {
   const absolute = resolve(entry), initial = sourceFilePath(absolute, dirname(absolute));
   if (!initial) invalid('reviewed factory entrypoint is not a regular file; configure entrypoints explicitly');
   const hashes = {}, queue = [initial];
-  let totalBytes = 0;
+  let totalBytes = 0, count = 0;
   while (queue.length) {
     const file = queue.shift();
     if (Object.hasOwn(hashes, file)) continue;
-    if (Object.keys(hashes).length >= REVIEWED_SOURCE_LIMITS.files) {
+    if (count >= REVIEWED_SOURCE_LIMITS.files) {
       invalid(`reviewed factory source closure exceeds ${REVIEWED_SOURCE_LIMITS.files} files; configure entrypoints explicitly`);
     }
     const remaining = REVIEWED_SOURCE_LIMITS.bytes - totalBytes;
@@ -136,11 +155,10 @@ export function reviewedSourceHashes(entry) {
     const limitMessage = remaining < REVIEWED_SOURCE_LIMITS.fileBytes
       ? `reviewed factory source closure exceeds ${REVIEWED_SOURCE_LIMITS.bytes} bytes; configure entrypoints explicitly`
       : `reviewed factory source file exceeds ${REVIEWED_SOURCE_LIMITS.fileBytes} bytes; configure entrypoints explicitly`;
-    const bytes = readReviewedSource(file, maxBytes, limitMessage), source = bytes.toString('utf8');
-    totalBytes += bytes.length;
-    hashes[file] = createHash('sha256').update(bytes).digest('hex');
-    const imports = source.matchAll(/\b(?:from\s*|import\s*\(?\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"\n]+)['"]/g);
-    for (const [, specifier] of imports) {
+    const { hash, length, imports } = readReviewedSource(file, maxBytes, limitMessage, fingerprints);
+    totalBytes += length; count++;
+    hashes[file] = hash;
+    for (const specifier of imports) {
       const base = resolve(dirname(file), specifier), stem = base.slice(0, base.length - extname(base).length);
       for (const candidate of [base, ...[...SOURCE_EXTENSIONS].map(extension => base + extension), ...[...SOURCE_EXTENSIONS].map(extension => stem + extension), ...[...SOURCE_EXTENSIONS].map(extension => join(base, `index${extension}`))]) {
         const resolved = sourceFilePath(candidate, dirname(file));
@@ -398,6 +416,7 @@ export class Runtime {
     // is still reported against that factory, in order, below. The import and
     // the `fn(pi)` invocation stay strictly sequential: Pi's registration
     // ORDER is the contract, and jiti's transform path is synchronous anyway.
+    const fingerprints = sharedSourceFingerprints();
     const prepared = await Promise.all(extensions.map(async (entry, factory) => {
       let resolved = entry;
       let mode = routes[entry] ?? globalMode;
@@ -405,7 +424,7 @@ export class Runtime {
       try {
         resolved = realpathSync(entry);
         mode = routes[resolved] ?? globalMode;
-        if (this.mirrorPiSetup && !isDeepStrictEqual(this.config.entrypoint_sources[resolved], reviewedSourceHashes(resolved))) invalid(`reviewed factory sources changed: ${resolved}; review and configure again`);
+        if (this.mirrorPiSetup && !isDeepStrictEqual(this.config.entrypoint_sources[resolved], reviewedSourceHashes(resolved, { fingerprints }))) invalid(`reviewed factory sources changed: ${resolved}; review and configure again`);
         if (this.config.entrypoint_sha256?.[resolved]) {
           const actual = createHash('sha256').update(readFileSync(resolved)).digest('hex');
           if (actual !== this.config.entrypoint_sha256[resolved]) invalid(`reviewed factory changed: ${resolved}; configure again`);
@@ -415,6 +434,7 @@ export class Runtime {
       }
       return { factory, entry: resolved, mode, preparationError };
     }));
+    fingerprints.flush();
     for (const { factory, entry, mode, preparationError } of prepared) {
       const previousTools = new Map(this.tools);
       const restoreProviders = checkpointFactoryProviders(this);

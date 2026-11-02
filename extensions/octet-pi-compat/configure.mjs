@@ -18,7 +18,10 @@ const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
 const { warmTransformCache } = await import('./lib/transform-warmup.mjs');
-const { reviewedSourceHashes } = await import('./lib/runtime.mjs');
+const { reviewedSourceHashes: hashReviewedSources } = await import('./lib/runtime.mjs');
+const { sharedSourceFingerprints } = await import('./lib/source-fingerprints.mjs');
+// Unchanged files are not re-read (persisted stat fingerprints); see source-fingerprints.mjs.
+const reviewedSourceHashes = entry => hashReviewedSources(entry, { fingerprints: sharedSourceFingerprints() });
 const { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } = await import('./lib/theme-import.mjs');
 
 // Importing a factory executes arbitrary user code. Never perform implicit
@@ -63,7 +66,14 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
-  const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
+  // Hash once per launch: a mirror prepared by `mirrorPreparation` already
+  // hashed this closure, so its digests are carried forward instead of walking
+  // the closure again. The one integrity check that matters runs in the runner
+  // immediately before each factory import. Without carried digests (a direct
+  // configure call) the closure is hashed here, once, and re-checked after capture.
+  const carried = mirrorPiSetup && expectedSourceHashes && extensions.every(entry => expectedSourceHashes[entry]);
+  const entrypoint_sources = mirrorPiSetup
+    ? Object.fromEntries(extensions.map(entry => [entry, carried ? expectedSourceHashes[entry] : reviewedSourceHashes(entry)])) : undefined;
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
   }
@@ -92,7 +102,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
     .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover').sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
-  if (entrypoint_sources && capturedHere && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
+  if (entrypoint_sources && capturedHere && !carried && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed during capture; prepare and review again');
   }
@@ -153,6 +163,7 @@ function mirrorPreparation({ output, cwd = process.cwd(), env = process.env, pro
     try { sourceHashes[entry] = reviewedSourceHashes(entry); }
     catch (error) { unreviewable.push({ entry, reason: String(error?.message || error).slice(0, 512) }); }
   }
+  sharedSourceFingerprints().flush();
   const extensions = setup.extensions.map(entry => ({
     path: entry,
     sources: sourceHashes[entry] ? Object.entries(sourceHashes[entry]).map(([path, sha256]) => ({ path, sha256 })) : [],
