@@ -161,6 +161,27 @@ In flight: `perf/pi-native-esm` (worktree) skips Babel for already-ESM JS bundle
 identity or the pre-import integrity gate.
 Also open: exit takes about 2 s against Pi's 0.18 s.
 
+## v3 landed (`39d8c0f8`): native ESM for reviewed plain-ESM factories
+
+Design: `docs/design/pi-native-esm.md`. jiti already tries a native import first; it failed
+only because bundles import Pi package names, and jiti then ran Babel over the whole file.
+`lib/native-esm.mjs` adds a `module.registerHooks` resolve and load hook scoped to reviewed
+factory closures:
+- aliases resolve to the same shim file URLs, so module identity is preserved;
+- each served closure file is checked against its reviewed sha256, and a mismatch is refused;
+- a jiti-wrapper-name prelude is joined onto line 1, so line numbers are kept;
+- anything unusual falls back to jiti before evaluation;
+- disable with `OCTET_PI_NATIVE_ESM=0`.
+
+Worker numbers (3 reps, baseline Pi medians): cold full UI 17.43 s (0.68x), warm 2.31 s.
+Adapter suite 1046 pass / 118 fail; the failing names are identical to the baseline.
+
+Residuals:
+- pi-subagents (imports CJS `yaml`) stays on jiti.
+- Inert `module`/`exports` prelude objects could flip UMD-style checks.
+- A native evaluation error re-runs the entry on jiti, as jiti's own native-first behaviour does.
+- Release evidence: a side-by-side 5-rep v3 run (Pi alternated) is in progress.
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).
