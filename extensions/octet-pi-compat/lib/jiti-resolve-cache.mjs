@@ -75,10 +75,23 @@ class ResolveCache {
     return JSON.stringify([this.aliasKey(ctx.alias), ctx.opts?.extensions, String(parent?.href ?? parent), specifier,
       !!options?.async, options?.conditions ?? null, options?.paths ?? null, !!options?.try, ctx.filename, ctx.parentModule?.filename ?? null]);
   }
-  dependencies(parentFile, resolved) {
+  // Fingerprints the result depends on. A relative or absolute specifier only
+  // looks in the parent directory; a bare one also looks in each ancestor
+  // `node_modules` up to the one that supplied the result (a nearer package
+  // appearing there must win). Ancestor directories themselves are not needed.
+  dependencies(parentFile, specifier, resolved) {
     const out = new Set([resolved, dirname(resolved)]);
     if (parentFile) {
-      for (let dir = dirname(parentFile), last; dir !== last; last = dir, dir = dirname(dir)) { out.add(dir); out.add(join(dir, 'node_modules')); }
+      const parent = dirname(parentFile);
+      out.add(parent);
+      if (!/^\.{0,2}\//.test(specifier) && specifier !== '.' && specifier !== '..') {
+        const marker = resolved.lastIndexOf('/node_modules/'), supplied = marker >= 0 ? resolved.slice(0, marker + '/node_modules'.length) : undefined;
+        for (let dir = parent, last; dir !== last; last = dir, dir = dirname(dir)) {
+          const modules = join(dir, 'node_modules');
+          out.add(modules);
+          if (modules === supplied) break;
+        }
+      }
     }
     for (let dir = dirname(resolved), last; dir !== last; last = dir, dir = dirname(dir)) {
       out.add(join(dir, 'package.json'));
@@ -105,7 +118,7 @@ class ResolveCache {
       try {
         const parent = options?.parentURL ?? ctx.url, parentFile = parent ? fileURLToPath(parent.href ?? parent) : undefined;
         const ids = [];
-        for (const path of this.dependencies(parentFile, result)) {
+        for (const path of this.dependencies(parentFile, specifier, result)) {
           ids.push(this.intern(this.ids, this.paths, path), this.intern(this.printIds, this.prints, this.now(path)));
         }
         this.entries.set(key, { r: result, d: ids });
