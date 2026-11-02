@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { SessionTransport, SESSION_FEATURES } from './session-transport.mjs';
 import { withContextLimits } from './context-limits.mjs';
 import { createJiti, flushResolveCache } from './jiti-resolve-cache.mjs';
+import { NativeEsm, nativeEsmAvailable } from './native-esm.mjs';
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -32,7 +33,7 @@ import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
 import { configureLocalPi } from '../shims/local-pi.mjs';
-import { emulatedPiAliases, typeboxAliases } from './pi-modules.mjs';
+import { emulatedPiAliases, typeboxAliases, UNAVAILABLE_MODULE } from './pi-modules.mjs';
 import { discoverPiSetup, resolveThemeFile, SOURCE_EXTENSIONS } from './pi-setup.mjs';
 import { readPiTheme } from './theme-palette.mjs';
 import { configureAgentDir } from './public-helpers.mjs';
@@ -382,6 +383,10 @@ export class Runtime {
     // adapter's private persistent cache directory.
     const cache = jitiCacheOptions();
     this.jiti = createJiti(import.meta.url, { alias: aliases, moduleCache: true, tryNative: false, ...cache });
+    // Reviewed plain-ESM factories load natively with the same alias table
+    // (docs/design/pi-native-esm.md); everything else, and any doubt, stays on jiti.
+    const nativeSources = this.mirrorPiSetup ? this.config.entrypoint_sources : this.config.native_esm_sources; // the review capture passes its digests here
+    const native = nativeSources && typeof nativeSources === 'object' && nativeEsmAvailable() ? new NativeEsm(aliases, UNAVAILABLE_MODULE) : undefined;
     await installHostKeybindings(this);
     // Each extension runs on the route recorded at setup (`extension_runtimes`),
     // or the bridge-wide `pi_runtime`. The installed-Pi route is created only
@@ -450,7 +455,12 @@ export class Runtime {
           // same classification path as a load failure, exactly as they did
           // when the scan ran inline here.
           if (preparationError) throw preparationError;
-          const fn = await setupBudget.settle(() => jiti.import(entry, { default: true }));
+          const fn = await setupBudget.settle(async () => {
+            // A native probe evaluates the module once; jiti then returns that same
+            // instance through its usual default/interop wrapper.
+            if (native && mode !== 'installed') await native.attempt(entry, nativeSources[entry]);
+            return jiti.import(entry, { default: true });
+          });
           tracePhase(`adapter.factory.import.${factory}`);
           if (typeof fn !== 'function') invalid(`default export must be a factory: ${entry}`);
           const s = { id: this.initializingId, controller: new AbortController(), factory, pending: new Set(), errors: [], live: false };

@@ -19,6 +19,7 @@ const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThe
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
 const { tracePhase } = await import('./lib/startup-trace.mjs');
 const { startTransformWarmup } = await import('./lib/transform-warmup.mjs');
+const { nativeEsmAvailable, nativeIneligibleReason, nativeLikelyDeclines } = await import('./lib/native-esm.mjs');
 const { reviewedSourceHashes: hashReviewedSources } = await import('./lib/runtime.mjs');
 const { sharedSourceFingerprints } = await import('./lib/source-fingerprints.mjs');
 // Unchanged files are not re-read (persisted stat fingerprints); see source-fingerprints.mjs.
@@ -32,21 +33,24 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 // Runs the review-only registration capture for explicit entrypoints, each on
 // its recorded route ('shims' = octet's emulated path, 'installed' = the
 // installed Pi). Bounded by time and output; never touches host state.
-function captureConfig(dir, extensions, routes, { piAgentDir, piTheme }) {
+function captureConfig(dir, extensions, routes, { piAgentDir, piTheme, nativeSources }) {
   const config = join(dir, 'bridge.json');
   // Probes/capture see the exact planned colors before publication. A failed
   // capture must not overwrite an existing import's palette files.
   const themePath = piTheme?.json === undefined ? piTheme?.path : join(dir, 'theme.json');
   if (piTheme?.json !== undefined) writeFileSync(themePath, piTheme.json, { mode: 0o600 });
+  // The reviewed closure digests let the capture runner load plain-ESM factories
+  // natively (each served file is checked against its digest; lib/native-esm.mjs).
   writeFileSync(config, JSON.stringify({ extensions, extension_runtimes: routes,
+    ...(nativeSources ? { native_esm_sources: nativeSources } : {}),
     ...(piAgentDir ? { pi_agent_dir: piAgentDir } : {}),
     ...(piTheme ? { pi_theme: { name: piTheme.name, path: themePath } } : {}) }));
   return config;
 }
-function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.env, piAgentDir, piTheme, cacheDir } = {}) {
+function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.env, piAgentDir, piTheme, cacheDir, nativeSources } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'octet-pi-capture-'));
   try {
-    const config = captureConfig(dir, extensions, routes, { piAgentDir, piTheme });
+    const config = captureConfig(dir, extensions, routes, { piAgentDir, piTheme, nativeSources });
     // The review capture runs every reviewed factory once, so it warms the
     // runtime's own transform cache: the first real launch must not pay a cold
     // factory transform. `cacheDir` is pinned in the generated entrypoint's
@@ -345,7 +349,10 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   // the adapter's persistent startup cache instead.
   const captureCacheDir = resolve(cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache'));
   const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir,
-    warmFiles: Object.values(prepared.sourceHashes).flatMap(hashes => Object.keys(hashes)) });
+    nativeSources: Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes])),
+    warmFiles: Object.entries(prepared.sourceHashes).flatMap(([entry, hashes]) =>
+      // Plain-ESM closures load natively (lib/native-esm.mjs); only the rest needs babel.
+      nativeEsmAvailable() && !nativeIneligibleReason(realpathSync(entry), hashes) && !nativeLikelyDeclines(hashes, { ...typeboxAliases(), ...emulatedPiAliases() }) ? [] : Object.keys(hashes)) });
   let routed = reused?.routed;
   if (!routed && combined) {
     // Only what the combined capture skipped is probed on its own, for the
