@@ -424,7 +424,13 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             auth: octet_ai::Auth::None,
             default_headers: reqwest::header::HeaderMap::new(),
             transport: octet_ai::EndpointTransport::Http,
-            runtime: Default::default(),
+            runtime: octet_ai::RequestRuntime {
+                openai_chat_profile: metadata.custom_openai_chat.map_or(
+                    octet_ai::OpenAiChatRuntimeProfile::Default,
+                    octet_ai::OpenAiChatRuntimeProfile::PiCustom,
+                ),
+                ..Default::default()
+            },
             timeout: selected.endpoint.timeout,
         });
         Some(model)

@@ -861,9 +861,8 @@ fn idle_plain_tty_sigterm_gracefully_stops_extensions_without_the_watchdog() {
     let (mut args, started_marker, marker) = install_shutdown_probe(directory.path());
     args.push("--plain".to_owned());
     let mut octet = PtyOctet::spawn_plain_with_args(directory.path(), &args);
-    octet.write_input(b"/shutdown-probe-ready\r");
     octet.wait_until(READY_DEADLINE, |output| {
-        started_marker.exists() && contains_bytes(output, b"shutdown-ready-ack")
+        started_marker.exists() && contains_bytes(output, b"Workspace -")
     });
 
     let (status, elapsed, output) = octet.terminate();
@@ -953,6 +952,7 @@ commands = ["shutdown-probe-ready"]
 IFS= read -r initialize
 id=$(printf '%s\n' "$initialize" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"api_version":"0.1","tools":[],"commands":[{"name":"shutdown-probe-ready","description":"Check shutdown probe readiness"}]}}\n' "$id"
+printf '%s\n' started > "$OCTET_WORKSPACE/extension-started.marker"
 while IFS= read -r request; do
   id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$request" in

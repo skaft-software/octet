@@ -1679,3 +1679,152 @@ fn completed_chat_responses_keep_reasoning_details() {
     assert_eq!(replay["messages"][1]["reasoning_details"][0]["data"], "SIG");
     assert_eq!(replay["messages"][1]["reasoning"], "Plan");
 }
+
+#[test]
+fn custom_chat_profile_preserves_authority_and_projects_role_cap_and_strict_tools() {
+    for supports_developer_role in [false, true] {
+        for use_max_tokens in [false, true] {
+            for supports_strict_mode in [false, true] {
+                let profile = crate::CustomOpenAiChatProfile {
+                    supports_developer_role,
+                    use_max_tokens,
+                    supports_strict_mode,
+                };
+                let mut model = make_test_model(false, false, false, true, true, false);
+                Arc::make_mut(&mut model.endpoint)
+                    .runtime
+                    .openai_chat_profile = crate::OpenAiChatRuntimeProfile::PiCustom(profile);
+                let request = Request {
+                    system: Some("actual native system".into()),
+                    messages: vec![Message::User(UserMessage {
+                        content: vec![UserPart::Text("actual native user".into())],
+                    })],
+                    session_id: Some("actual-native-session".into()),
+                    max_output_tokens: Some(1000),
+                    tools: vec![ToolDef {
+                        name: "native_tool".into(),
+                        description: "native definition".into(),
+                        parameters: serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}),
+                        async_execution: false,
+                        constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                            strict: crate::ConstrainedSamplingStrict::Prefer,
+                        }),
+                    }],
+                    ..base_request()
+                };
+                let before = serde_json::to_value(&request).unwrap();
+                let spec = model.spec.clone();
+                let parts = build_request(&model, &request).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+                assert_eq!(
+                    body["messages"][0]["role"],
+                    if supports_developer_role {
+                        "developer"
+                    } else {
+                        "system"
+                    }
+                );
+                assert_eq!(body["messages"][0]["content"], "actual native system");
+                assert_eq!(body["model"], model.spec.api_name);
+                assert_eq!(body["tool_choice"], "auto");
+                assert_eq!(
+                    body[if use_max_tokens {
+                        "max_tokens"
+                    } else {
+                        "max_completion_tokens"
+                    }],
+                    1000
+                );
+                assert!(body
+                    .get(if use_max_tokens {
+                        "max_completion_tokens"
+                    } else {
+                        "max_tokens"
+                    })
+                    .is_none());
+                let tool = &body["tools"][0]["function"];
+                assert_eq!(tool["name"], "native_tool");
+                if supports_strict_mode {
+                    assert_eq!(tool["strict"], true);
+                    assert_eq!(tool["parameters"]["additionalProperties"], false);
+                } else {
+                    assert!(tool.get("strict").is_none());
+                    assert_eq!(tool["parameters"], request.tools[0].parameters);
+                }
+                assert_eq!(serde_json::to_value(&request).unwrap(), before);
+                assert_eq!(
+                    serde_json::to_value(&*model.spec).unwrap(),
+                    serde_json::to_value(&*spec).unwrap()
+                );
+                let uncapped = Request {
+                    max_output_tokens: None,
+                    ..request
+                };
+                let body: serde_json::Value =
+                    serde_json::from_slice(&build_request(&model, &uncapped).unwrap().body)
+                        .unwrap();
+                assert!(body.get("max_tokens").is_none());
+                assert!(body.get("max_completion_tokens").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn custom_chat_profile_cannot_silently_downgrade_required_strict_sampling() {
+    let mut model = make_test_model(false, false, false, true, false, false);
+    Arc::make_mut(&mut model.endpoint)
+        .runtime
+        .openai_chat_profile =
+        crate::OpenAiChatRuntimeProfile::PiCustom(crate::CustomOpenAiChatProfile {
+            supports_developer_role: false,
+            use_max_tokens: true,
+            supports_strict_mode: false,
+        });
+    let request = Request {
+        tools: vec![ToolDef {
+            name: "required_strict".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}),
+            async_execution: false,
+            constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                strict: crate::ConstrainedSamplingStrict::Require,
+            }),
+        }],
+        ..base_request()
+    };
+    assert!(matches!(
+        build_request(&model, &request),
+        Err(AiError::Unsupported(
+            crate::error::UnsupportedError::ConstrainedSampling(_)
+        ))
+    ));
+}
+
+#[test]
+fn custom_chat_profile_is_a_strict_three_boolean_boundary() {
+    let profile = serde_json::json!({"supports_developer_role":false,"use_max_tokens":true,"supports_strict_mode":false});
+    assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(profile.clone()).is_ok());
+    for field in [
+        "supports_developer_role",
+        "use_max_tokens",
+        "supports_strict_mode",
+    ] {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::json!({}),
+        ] {
+            let mut malformed = profile.clone();
+            malformed[field] = value;
+            assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(malformed).is_err());
+        }
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(missing).is_err());
+    }
+    let mut unknown = profile;
+    unknown["max_output_tokens"] = serde_json::json!(99999);
+    assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(unknown).is_err());
+}

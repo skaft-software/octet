@@ -120,6 +120,15 @@ fn remote_widget_overflow_keeps_real_notice_visible_after_repaints_in_both_polic
                     matches!(&state.transcript[0], TranscriptBlock::Notice(text) if text == NOTICE)
                 );
                 assert!(shell_chrome(&state, size.0, Instant::now()).transcript_rows >= 2);
+                let chrome = shell_chrome(&state, size.0, Instant::now());
+                let capacity =
+                    viewport::transcript_viewport_capacity(chrome.transcript_rows, false);
+                let transcript = state.rendered_transcript(size.0);
+                let tail = &transcript[transcript.len().saturating_sub(capacity)..];
+                assert!(tail.iter().any(|line| line.contains(NOTICE)));
+                assert!(tail
+                    .last()
+                    .is_some_and(|line| { strip_terminal_sequences(line).trim().is_empty() }));
             }
         }
     }
@@ -140,16 +149,52 @@ fn remote_widget_overflow_reserves_extra_semantic_row_only_for_actual_history() 
         shell.notice(NOTICE);
         let state = shell.state.borrow();
         let with_history = shell_chrome(&state, size.0, Instant::now());
-        assert_eq!(with_history.transcript_rows, 2);
+        assert_eq!(with_history.transcript_rows, 3);
         assert_eq!(
             without_history.extension_above.len(),
-            with_history.extension_above.len() + 1
+            with_history.extension_above.len() + 2
         );
         assert_eq!(without_history.composer, with_history.composer);
         assert_eq!(
             without_history.extension_below,
             with_history.extension_below
         );
+    }
+}
+
+#[test]
+fn remote_widget_overflow_keeps_notice_after_empty_frame_and_resize() {
+    for application in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        let mut frame = ShellFrameState::default();
+        let mut retained = Vec::new();
+        shell.set_size(120, 40);
+        shell.set_remote_ui(projection((120, 40), 128, 2));
+        let empty = repaint(&shell, application, &mut frame, &mut retained);
+        assert!(!empty.join("\n").contains(NOTICE));
+        shell.notice(NOTICE);
+        for size in [(120, 40), (80, 24), (120, 40)] {
+            shell.set_size(size.0, size.1);
+            shell.set_remote_ui(projection(size, 128, 2));
+            let visible = repaint(&shell, application, &mut frame, &mut retained);
+            let text = visible.join("\n");
+            assert!(
+                text.contains(NOTICE),
+                "{size:?} application={application}: {text}"
+            );
+            assert!(text.contains("editor draft"));
+            assert!(text.contains("below widget"));
+            assert!(visible.last().unwrap().contains("footer 1"));
+            let warnings = visible
+                .iter()
+                .filter(|line| line.starts_with("warning "))
+                .collect::<Vec<_>>();
+            assert_eq!(warnings.len(), usize::from(size.1) - 9);
+            for (row, line) in warnings.into_iter().enumerate() {
+                assert_eq!(line, &format!("warning {row}"));
+            }
+            assert!(visible.len() <= usize::from(size.1));
+        }
     }
 }
 

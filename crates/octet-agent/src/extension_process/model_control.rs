@@ -12,6 +12,9 @@ pub struct PiProviderModelMetadata {
     #[allow(missing_docs)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model_id: Option<String>,
+    /// Compatibility facts for a non-inherited Chat Completions route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_openai_chat: Option<octet_ai::CustomOpenAiChatProfile>,
     /// Explicit credential-free URL passed only to the process-owned streamer.
     pub base_url: String,
     /// Declared input modalities (text, and optionally image).
@@ -22,6 +25,9 @@ pub struct PiProviderModelMetadata {
 impl PiProviderModelMetadata {
     /// Validate this system boundary before recording or projecting a route.
     pub fn validate(&self) -> Result<(), String> {
+        if self.inherit_provider.is_some() && self.custom_openai_chat.is_some() {
+            return Err("inherited providers cannot accept a custom Chat profile".into());
+        }
         if self.inherit_provider.as_ref().is_some_and(|provider| {
             provider.is_empty()
                 || provider.len() > 64
@@ -156,8 +162,9 @@ pub(super) fn parse_provider_proxy_registration(
     }
     let request = parse_proxy_declaration(value)?;
     if request.models.iter().zip(&facts).any(|(model, fact)| {
-        model.protocol == "google_generative_ai"
-            && fact.inherit_provider.as_deref() != Some(request.provider.id.as_str())
+        (model.protocol == "google_generative_ai"
+            && fact.inherit_provider.as_deref() != Some(request.provider.id.as_str()))
+            || (fact.custom_openai_chat.is_some() && model.protocol != "openai_chat")
     }) {
         return Err(ProviderHostResponseError::Invalid);
     }

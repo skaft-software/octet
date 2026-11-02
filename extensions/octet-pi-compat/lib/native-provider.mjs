@@ -5,7 +5,7 @@ import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 import { canonicalToPi, piToCanonical } from './provider-context.mjs';
 import { createAssistantMessageEventStream, calculateCost } from './ai-public-helpers.mjs';
 import { clampThinkingLevel } from '../shims/pi-1.0.2/ai/models.mjs';
-import { prepareCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
+import { customOpenAiChatProfile, prepareCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 
 const scopeKey = Symbol.for('octet.pi.nativeProvider.scope');
 const scope = globalThis[scopeKey] ??= new AsyncLocalStorage();
@@ -45,8 +45,9 @@ export function customProviderDelegate(model, context, options = {}) {
   if (!isDeepStrictEqual(context.tools, job.context.tools)) unsupported('custom provider tools', 'the authoritative tool catalog cannot change');
   if (options.onPayload !== undefined && typeof options.onPayload !== 'function') invalid('custom onPayload');
   if (job.delegated) unsupported('custom provider stream', 'a provider attempt can delegate only once');
+  const profile = customOpenAiChatProfile(model);
   prepareCustomProviderHttp(job, model, options);
-  return delegatedStream(runtime, job, model, context, options, true);
+  return delegatedStream(runtime, job, model, context, options, true, profile);
 }
 function openaiDelegate(api, model, context, options) {
   if (model.api !== api) unsupported('OpenAI provider model API');
@@ -54,7 +55,7 @@ function openaiDelegate(api, model, context, options) {
 }
 export const openaiCompletionsDelegate = (model, context, options) => openaiDelegate('openai-completions', model, context, options);
 export const openaiResponsesDelegate = (model, context, options) => openaiDelegate('openai-responses', model, context, options);
-function delegatedStream(runtime, job, model, context, options, customHttp) {
+function delegatedStream(runtime, job, model, context, options, customHttp, customOpenaiChat) {
   if (job.delegated) unsupported('native provider stream', 'a provider attempt can delegate only once');
   job.delegated = true;
   job.onPayload = options.onPayload;
@@ -75,7 +76,7 @@ function delegatedStream(runtime, job, model, context, options, customHttp) {
   job.nativeArguments = new Map();
   (async () => {
     try {
-      const result = await runtime.transport.request('provider/delegate', { stream_id: job.id, request: plainJSON(request, 'native provider request', 786432), on_payload: !!job.onPayload, ...(customHttp ? { custom_http: true } : {}) });
+      const result = await runtime.transport.request('provider/delegate', { stream_id: job.id, request: plainJSON(request, 'native provider request', 786432), on_payload: !!job.onPayload, ...(customHttp ? { custom_http: true, ...(customOpenaiChat ? { custom_openai_chat: customOpenaiChat } : {}) } : {}) });
       job.controller.signal.throwIfAborted();
       fields(result, ['message', 'usage', 'stop_reason', 'timestamp'], 'native provider response');
       const message = canonicalToPi([{ Assistant: result.message }], new Map(), { replay: true })[0];

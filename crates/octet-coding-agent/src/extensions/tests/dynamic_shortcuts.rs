@@ -197,6 +197,7 @@ command = "dynamic.py"
 [contributes]
 commands = ["prime"]
 shortcuts = [{key = "ctrl+shift+p", name = "static", description = "Static action"}]
+confirmations = true
 "#,
     )
     .unwrap();

@@ -212,6 +212,7 @@ def _schema_for(driver_tool: str) -> Dict[str, Any]:
         elif name in {"pid", "window_id", "element_index", "max_elements", "max_depth",
                       "max_image_dimension", "x", "y", "count", "amount"}:
             limit = (service.MAX_ELEMENTS if name == "max_elements" else
+                     service.MAX_WINDOW_ID if name == "window_id" else
                      1 << 20 if name in {"max_depth", "max_image_dimension", "x", "y"} else
                      service.MAX_INTEGER)
             minimum = 0 if driver_tool == "move_cursor" and name in {"x", "y"} else -limit

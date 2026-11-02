@@ -1,4 +1,5 @@
 import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
+import { customOpenAiChatProfile } from './custom-provider-http.mjs';
 
 const runtimes = new WeakMap();
 export function providerState(runtime) {
@@ -29,7 +30,10 @@ export function snapshotCustomProvider(provider, factory, declare) {
   const entries = snapshots.map(model => {
     const projected = Object.fromEntries(['id', 'name', 'api', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
     const entry = declare(provider.id, { baseUrl: model.baseUrl ?? provider.baseUrl, api: model.api, models: [projected], streamSimple: provider.streamSimple.bind(provider) }, factory, true);
-    return { pi: { ...model, baseUrl: model.baseUrl ?? provider.baseUrl ?? '' }, wire: entry.models[0].wire };
+    const pi = { ...model, baseUrl: model.baseUrl ?? provider.baseUrl ?? '' };
+    const profile = customOpenAiChatProfile(pi);
+    if (profile) entry.models[0].wire.pi_metadata.custom_openai_chat = profile;
+    return { pi, wire: entry.models[0].wire };
   });
   if (new Set(entries.map(entry => entry.pi.id)).size !== entries.length) invalid('duplicate provider model id');
   return { name: provider.id, factory, config: {}, custom: provider, native: true, stream: provider.streamSimple.bind(provider), models: entries,

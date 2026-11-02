@@ -1117,15 +1117,27 @@ impl AiClient {
                     fetch: None,
                 };
                 let continuation = crate::NativeRequestContinuation {
-                    open: Box::new(move |request, hooks, sender| {
+                    open: Box::new(move |request, hooks, sender, custom_openai_chat| {
                         options.provider_hooks.extend(hooks);
                         if custom_http {
                             hooks::open_custom_http_continuation(
-                                client, native, request, overrides, options, sender,
+                                client,
+                                native,
+                                request,
+                                overrides,
+                                options,
+                                sender,
+                                custom_openai_chat,
                             )
                         } else {
                             hooks::open_native_continuation(
-                                client, native, request, overrides, options, sender,
+                                client,
+                                native,
+                                request,
+                                overrides,
+                                options,
+                                sender,
+                                custom_openai_chat,
                             )
                         }
                     }),

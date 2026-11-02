@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import tempfile
@@ -28,6 +29,55 @@ class SanitizeTests(unittest.TestCase):
         values = {"pid": 42, "window_id": 7, "sneaky": "value", "shell": "; rm -rf /"}
         forwarded = sanitize("get_window_state", values)
         self.assertEqual(forwarded, {"pid": 42, "window_id": 7})
+
+    def test_window_id_keeps_exact_large_handle_without_widening_other_integer_bounds(self):
+        from octet_computer_use.entrypoint import _schema_for
+
+        window_id = 2_459_714_112
+        self.assertEqual(
+            sanitize("get_window_state", {"pid": 42, "window_id": window_id}),
+            {"pid": 42, "window_id": window_id},
+        )
+        self.assertEqual(
+            _schema_for("get_window_state")["properties"]["window_id"]["maximum"],
+            service.MAX_WINDOW_ID,
+        )
+        self.assertEqual(
+            _schema_for("get_window_state")["properties"]["pid"]["maximum"],
+            service.MAX_INTEGER,
+        )
+        with self.assertRaisesRegex(ArgumentError, "window_id is out of range"):
+            sanitize("get_window_state", {"window_id": service.MAX_WINDOW_ID + 1})
+        with self.assertRaisesRegex(ArgumentError, "pid is out of range"):
+            sanitize("get_window_state", {"pid": service.MAX_INTEGER + 1})
+
+    def test_window_id_json_safe_bound_is_consistent_across_all_published_window_tools(self):
+        from octet_computer_use.entrypoint import _WINDOW_SCOPED_TOOLS, _schema_for
+
+        safe_integer = (1 << 53) - 1
+        observed_ids = (2_458_714_112, 2_719_940_608)
+        window_tools = sorted(_WINDOW_SCOPED_TOOLS & set(_DRIVER_TOOLS.values()))
+        self.assertTrue(window_tools)
+        for driver_tool in window_tools:
+            with self.subTest(driver_tool=driver_tool):
+                properties = _schema_for(driver_tool)["properties"]
+                window_schema = properties["window_id"]
+                self.assertEqual(window_schema["type"], "integer")
+                self.assertEqual(window_schema["minimum"], -safe_integer)
+                self.assertEqual(window_schema["maximum"], safe_integer)
+                for value in (*observed_ids, safe_integer, -safe_integer):
+                    self.assertEqual(json.loads(json.dumps(value)), value)
+                    self.assertEqual(sanitize(driver_tool, {"window_id": value}),
+                                     {"window_id": value})
+                for invalid in (True, 1.0, "2458714112", safe_integer + 1,
+                                -safe_integer - 1):
+                    with self.subTest(driver_tool=driver_tool, invalid=invalid):
+                        with self.assertRaises(ArgumentError):
+                            sanitize(driver_tool, {"window_id": invalid})
+                for name in ("pid", "element_index", "count", "amount"):
+                    if name in properties:
+                        self.assertEqual(properties[name]["minimum"], -service.MAX_INTEGER)
+                        self.assertEqual(properties[name]["maximum"], service.MAX_INTEGER)
 
     def test_types_and_bounds_are_enforced(self):
         with self.assertRaises(ArgumentError):

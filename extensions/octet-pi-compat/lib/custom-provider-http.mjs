@@ -15,6 +15,26 @@ function appendHeaders(target, source) {
     target[name] = value;
   }
 }
+export function customOpenAiChatProfile(model) {
+  if (model.api !== 'openai-completions') return undefined;
+  const provider = model.provider, baseUrl = model.baseUrl, compat = model.compat ?? {};
+  const zai = provider === 'zai' || provider === 'zai-coding-cn' || baseUrl.includes('api.z.ai') || baseUrl.includes('open.bigmodel.cn');
+  const together = provider === 'together' || baseUrl.includes('api.together.ai') || baseUrl.includes('api.together.xyz');
+  const moonshot = provider === 'moonshotai' || provider === 'moonshotai-cn' || baseUrl.includes('api.moonshot.');
+  const openRouter = provider === 'openrouter' || baseUrl.includes('openrouter.ai');
+  const workers = provider === 'cloudflare-workers-ai' || baseUrl.includes('api.cloudflare.com');
+  const gateway = provider === 'cloudflare-ai-gateway' || baseUrl.includes('gateway.ai.cloudflare.com');
+  const nvidia = provider === 'nvidia' || baseUrl.includes('integrate.api.nvidia.com');
+  const antLing = provider === 'ant-ling' || baseUrl.includes('api.ant-ling.com');
+  const cerebras = provider === 'cerebras' || baseUrl.includes('cerebras.ai');
+  const deepseek = provider === 'deepseek' || baseUrl.toLowerCase().includes('deepseek.com');
+  const nonStandard = nvidia || cerebras || provider === 'xai' || baseUrl.includes('api.x.ai') || together || baseUrl.includes('chutes.ai') || deepseek || zai || moonshot || provider === 'opencode' || baseUrl.includes('opencode.ai') || workers || gateway || antLing;
+  const developerRole = compat.supportsDeveloperRole ?? ((openRouter && (model.id.startsWith('anthropic/') || model.id.startsWith('openai/'))) || (!nonStandard && !openRouter));
+  const maxTokensField = compat.maxTokensField ?? ((baseUrl.includes('chutes.ai') || deepseek || moonshot || gateway || together || nvidia || antLing || zai) ? 'max_tokens' : 'max_completion_tokens');
+  const strictMode = compat.supportsStrictMode ?? false;
+  if (typeof developerRole !== 'boolean' || typeof strictMode !== 'boolean' || !['max_tokens', 'max_completion_tokens'].includes(maxTokensField)) invalid('custom OpenAI Chat compatibility');
+  return { supports_developer_role: developerRole, use_max_tokens: maxTokensField === 'max_tokens', supports_strict_mode: strictMode };
+}
 export function prepareCustomProviderHttp(job, model, options) {
   const fetch = options.fetch ?? globalThis.fetch;
   if (typeof fetch !== 'function') invalid('custom provider fetch');

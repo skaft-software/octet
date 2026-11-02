@@ -54,6 +54,8 @@ struct DelegateRequest {
     on_payload: bool,
     #[serde(default)]
     custom_http: bool,
+    #[serde(default)]
+    custom_openai_chat: Option<octet_ai::CustomOpenAiChatProfile>,
 }
 
 struct NativePayloadHook {
@@ -255,6 +257,9 @@ pub(super) fn dispatch_delegate(
     comparison.max_output_tokens = delegate.original.max_output_tokens;
     comparison.temperature = delegate.original.temperature;
     let valid = request.custom_http == delegate.custom_http
+        && request
+            .custom_openai_chat
+            .is_none_or(|_| delegate.custom_http && delegate.route.model.protocol == "openai_chat")
         && serde_json::to_value(comparison).ok() == serde_json::to_value(&delegate.original).ok()
         && request.request.max_output_tokens.map_or(
             delegate.original.max_output_tokens.is_none(),
@@ -317,6 +322,7 @@ pub(super) fn dispatch_delegate(
                             connection: delegate.connection.clone(),
                             stream_id: request.stream_id.clone(),
                         }),
+                        request.custom_openai_chat,
                     )
                     .await?
             } else {
@@ -655,6 +661,53 @@ providers = true
                 expected,
                 "offered={offered}, proxy={proxy}: {result:?}"
             );
+        }
+    }
+
+    #[test]
+    fn custom_chat_registration_is_typed_and_refuses_inherited_or_other_protocol_profiles() {
+        let mut value = serde_json::json!({
+            "provider": {"id":"custom","label":"Custom","auth":{"kind":"none"}},
+            "models": [{"id":"selected","api_name":"custom-model","protocol":"openai_chat","context_window":8192,"max_output_tokens":1024,
+                "capabilities":{"tools":true,"parallel_tool_calls":false,"structured_output":false,"reasoning":false},
+                "pi_metadata":{"base_url":"https://custom.invalid/v1","input":["text"],"pricing":{"input":0,"output":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":null,"reasoning":null,"tiers":[]}}}]
+        });
+        assert!(model_control::parse_provider_proxy_registration(value.clone()).is_ok());
+        let profile = serde_json::json!({"supports_developer_role":false,"use_max_tokens":true,"supports_strict_mode":false});
+        value["models"][0]["pi_metadata"]["custom_openai_chat"] = profile.clone();
+        let (_, metadata) = model_control::parse_provider_proxy_registration(value.clone())
+            .unwrap_or_else(|_| panic!("custom profile registration must be admitted"));
+        assert_eq!(
+            metadata["selected"].custom_openai_chat,
+            Some(octet_ai::CustomOpenAiChatProfile {
+                supports_developer_role: false,
+                use_max_tokens: true,
+                supports_strict_mode: false
+            })
+        );
+        for protocol in [
+            "openai_responses",
+            "anthropic_messages",
+            "google_generative_ai",
+        ] {
+            let mut invalid = value.clone();
+            invalid["models"][0]["protocol"] = serde_json::json!(protocol);
+            assert!(
+                model_control::parse_provider_proxy_registration(invalid).is_err(),
+                "{protocol}"
+            );
+        }
+        let mut inherited = value.clone();
+        inherited["models"][0]["pi_metadata"]["inherit_provider"] = serde_json::json!("custom");
+        assert!(model_control::parse_provider_proxy_registration(inherited).is_err());
+        for malformed in [
+            serde_json::json!({"supports_developer_role":"false","use_max_tokens":true,"supports_strict_mode":false}),
+            serde_json::json!({"supports_developer_role":false,"use_max_tokens":true}),
+            serde_json::json!({"supports_developer_role":false,"use_max_tokens":true,"supports_strict_mode":false,"max_output_tokens":99999}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["models"][0]["pi_metadata"]["custom_openai_chat"] = malformed;
+            assert!(model_control::parse_provider_proxy_registration(invalid).is_err());
         }
     }
 }

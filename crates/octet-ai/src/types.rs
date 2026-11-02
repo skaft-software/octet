@@ -206,6 +206,20 @@ pub enum OpenAiChatRuntimeProfile {
     Default,
     /// Mistral Chat Completions compatibility behavior.
     Mistral,
+    /// Custom process-owned Chat Completions compatibility behavior.
+    PiCustom(CustomOpenAiChatProfile),
+}
+
+/// Bounded compatibility facts for a custom Chat Completions route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOpenAiChatProfile {
+    /// Whether the route accepts the developer role.
+    pub supports_developer_role: bool,
+    /// Whether the existing output cap uses `max_tokens` instead of `max_completion_tokens`.
+    pub use_max_tokens: bool,
+    /// Whether the route supports strict function-tool schemas.
+    pub supports_strict_mode: bool,
 }
 
 /// Endpoint behavior for an existing OpenAI Responses codec.

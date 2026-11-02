@@ -213,8 +213,15 @@ pub(super) fn open_native_continuation(
     overrides: crate::RequestOverrides,
     options: crate::HostRequestOptions,
     sender: Option<Arc<dyn crate::HostHttpSender>>,
+    custom_openai_chat: Option<crate::CustomOpenAiChatProfile>,
 ) -> futures_util::future::BoxFuture<'static, Result<crate::ResponseStream, AiError>> {
     Box::pin(async move {
+        if custom_openai_chat.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "native request continuation cannot accept a custom Chat profile".into(),
+            )
+            .into());
+        }
         if sender.is_some() {
             return Err(crate::ConfigError::Parse(
                 "native request continuation cannot accept a custom HTTP sender".into(),
@@ -229,16 +236,28 @@ pub(super) fn open_native_continuation(
 
 pub(super) fn open_custom_http_continuation(
     client: super::AiClient,
-    model: Model,
+    mut model: Model,
     request: Request,
     overrides: crate::RequestOverrides,
     options: crate::HostRequestOptions,
     sender: Option<Arc<dyn crate::HostHttpSender>>,
+    custom_openai_chat: Option<crate::CustomOpenAiChatProfile>,
 ) -> futures_util::future::BoxFuture<'static, Result<crate::ResponseStream, AiError>> {
     Box::pin(async move {
         let sender = sender.ok_or_else(|| {
             crate::ConfigError::Parse("custom HTTP continuation requires its sender".into())
         })?;
+        if let Some(profile) = custom_openai_chat {
+            if model.spec.protocol != crate::Protocol::OpenAiChat {
+                return Err(crate::ConfigError::Parse(
+                    "custom Chat profile requires Chat Completions".into(),
+                )
+                .into());
+            }
+            Arc::make_mut(&mut model.endpoint)
+                .runtime
+                .openai_chat_profile = crate::OpenAiChatRuntimeProfile::PiCustom(profile);
+        }
         client
             .stream_custom_http_with_host_options(&model, request, overrides, options, sender)
             .await

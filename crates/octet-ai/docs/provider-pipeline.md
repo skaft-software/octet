@@ -106,7 +106,7 @@ authorities cannot coexist on one transport.
 
 The existing `stream_native` callback receives the consuming
 `NativeRequestContinuation`. A custom transport opens it with
-`stream_custom_http(request, hooks, Arc<dyn HostHttpSender>)`; ordinary `stream`
+`stream_custom_http(request, hooks, Arc<dyn HostHttpSender>, custom_openai_chat)`; ordinary `stream`
 is refused on this lane, and native continuations refuse custom senders. The
 continuation retains the current client's hooks, request overrides, timeout and
 host options, clearing only the already-selected fetch route. A host API-key
@@ -134,3 +134,13 @@ owned callback/body. Batch, compact and native WebSocket operations are unchange
 Focused tests are in `src/host_http/tests.rs`, `tests/runtime_hooks.rs` and the
 existing agent process provider_context tests. Cargo/build execution belongs to
 the integration owner; source presence is not a runtime qualification claim.
+
+The optional custom Chat profile contains only boolean
+`supports_developer_role`, `use_max_tokens` and `supports_strict_mode` facts.
+Captured model metadata supplies the baseline; an actual custom helper may
+provide a same-identity per-call override on the consuming continuation. It is
+refused on inherited/native continuations and non-Chat protocols. It changes
+only role selection, the name of the existing output-cap field, and strict tool
+capability/serialization. Required strict constrained sampling still refuses an
+unsupported route. Model identity, tool choice/catalog, output cap, pricing,
+credentials, endpoint and canonical request authority remain unchanged.

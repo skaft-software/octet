@@ -131,9 +131,26 @@ pub(super) fn shell_chrome(
     let available = budget.saturating_sub(fixed.saturating_add(1));
     // The footer stays last and has priority when widgets exceed the viewport.
     footer_rows.truncate(available);
+    let transcript_rows = if state.transcript.is_empty()
+        || (chrome.extension_above.is_empty() && chrome.extension_below.is_empty())
+    {
+        0
+    } else {
+        1 + state
+            .rendered_transcript(width)
+            .iter()
+            .rev()
+            .take(budget)
+            .take_while(|line| {
+                sexy_tui_rs::strip_terminal_sequences(line)
+                    .trim()
+                    .is_empty()
+            })
+            .count()
+    };
     let widget_rows = available
         .saturating_sub(footer_rows.len())
-        .saturating_sub(usize::from(!state.transcript.is_empty()));
+        .saturating_sub(transcript_rows);
     chrome.extension_below.truncate(widget_rows);
     chrome
         .extension_above

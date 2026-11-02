@@ -40,6 +40,7 @@ pub struct NativeRequestContinuation {
                 Request,
                 Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
                 Option<std::sync::Arc<dyn crate::HostHttpSender>>,
+                Option<crate::CustomOpenAiChatProfile>,
             )
                 -> futures_util::future::BoxFuture<'static, Result<ResponseStream, AiError>>
             + Send,
@@ -53,7 +54,7 @@ impl NativeRequestContinuation {
         request: Request,
         hooks: Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
     ) -> Result<ResponseStream, AiError> {
-        (self.open)(request, hooks, None).await
+        (self.open)(request, hooks, None, None).await
     }
 
     #[allow(missing_docs)]
@@ -62,8 +63,9 @@ impl NativeRequestContinuation {
         request: Request,
         hooks: Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
         sender: std::sync::Arc<dyn crate::HostHttpSender>,
+        custom_openai_chat: Option<crate::CustomOpenAiChatProfile>,
     ) -> Result<ResponseStream, AiError> {
-        (self.open)(request, hooks, Some(sender)).await
+        (self.open)(request, hooks, Some(sender), custom_openai_chat).await
     }
 }
 

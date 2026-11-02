@@ -226,10 +226,8 @@ struct ChatFunctionDef {
     name: String,
     description: String,
     parameters: serde_json::Value,
-    /// Always emitted: providers that reject unknown fields are excluded from
-    /// strict routes; the flag is `false` unless the tool requested and the
-    /// route could enforce the rewritten schema.
-    strict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 /// OpenAI `custom` tool constrained by a Lark/regex grammar.
@@ -315,6 +313,10 @@ pub(crate) fn build_request(
     )?;
     let mistral_profile = model.endpoint.runtime.openai_chat_profile
         == crate::types::OpenAiChatRuntimeProfile::Mistral;
+    let custom_profile = match model.endpoint.runtime.openai_chat_profile {
+        crate::types::OpenAiChatRuntimeProfile::PiCustom(profile) => Some(profile),
+        _ => None,
+    };
 
     // 2. Map system prompt
     let reasoning_capability = model.spec.capabilities.reasoning.as_ref();
@@ -367,6 +369,7 @@ pub(crate) fn build_request(
             },
         );
         if has_reasoning
+            && custom_profile.is_none_or(|profile| profile.supports_developer_role)
             && !deepseek_thinking
             && !matches!(reasoning_mode, Some(OpenAiChatReasoningMode::SystemMessage))
             && !provider_uses_system_message
@@ -732,7 +735,9 @@ pub(crate) fn build_request(
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters,
-                    strict,
+                    strict: custom_profile
+                        .is_none_or(|profile| profile.supports_strict_mode)
+                        .then_some(strict),
                 },
                 cache_control: (index + 1 == active_tools.len()
                     && model.spec.cache.supports_cache_control_on_tools)
@@ -902,7 +907,10 @@ pub(crate) fn build_request(
     // the compatible `max_tokens` field, while current OpenAI Chat uses
     // `max_completion_tokens`.
     let output_cap = crate::effective_output_token_cap(model, req.max_output_tokens);
-    let (max_tokens, max_completion_tokens) = if deepseek_thinking || mistral_profile {
+    let use_max_tokens = custom_profile.map_or(deepseek_thinking || mistral_profile, |profile| {
+        profile.use_max_tokens
+    });
+    let (max_tokens, max_completion_tokens) = if use_max_tokens {
         (output_cap, None)
     } else {
         (None, output_cap)

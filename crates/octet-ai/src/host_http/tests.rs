@@ -812,6 +812,7 @@ impl HostStreamTransport for ContinuationRoute {
                     request,
                     vec![Arc::new(ContinuationHook)],
                     self.sender.clone(),
+                    None,
                 )
                 .await
         }
@@ -929,6 +930,208 @@ async fn custom_continuation_rejects_wrong_lane_projection_auth_and_private_host
                 .is_err(),
             "refusal case {index}"
         );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+struct ChatProfileRoute {
+    native: bool,
+    baseline: crate::CustomOpenAiChatProfile,
+    override_profile: Option<crate::CustomOpenAiChatProfile>,
+    sender: Arc<dyn HostHttpSender>,
+}
+
+#[async_trait::async_trait]
+impl HostStreamTransport for ChatProfileRoute {
+    async fn stream(
+        &self,
+        _: HostStreamModel,
+        _: Request,
+        _: Vec<Diagnostic>,
+    ) -> Result<ResponseStream, AiError> {
+        panic!("profile routes must use the actual consuming continuation")
+    }
+
+    fn native_model(&self) -> Option<Model> {
+        self.native.then(|| model(Protocol::OpenAiChat))
+    }
+
+    fn custom_http_model(&self, selected: &Model) -> Option<Model> {
+        if self.native {
+            return None;
+        }
+        let mut custom = selected.clone();
+        let endpoint = Arc::make_mut(&mut custom.endpoint);
+        endpoint.id = EndpointId("private-chat-profile".into());
+        endpoint.base_url = "https://custom.invalid/v1/".parse().unwrap();
+        endpoint.runtime.openai_chat_profile =
+            crate::OpenAiChatRuntimeProfile::PiCustom(self.baseline);
+        Arc::make_mut(&mut custom.spec).endpoint = endpoint.id.clone();
+        Some(custom)
+    }
+
+    async fn stream_native(
+        &self,
+        _: HostStreamModel,
+        request: Request,
+        _: Vec<Diagnostic>,
+        continuation: crate::NativeRequestContinuation,
+    ) -> Result<ResponseStream, AiError> {
+        continuation
+            .stream_custom_http(
+                request,
+                Vec::new(),
+                self.sender.clone(),
+                self.override_profile,
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn custom_chat_continuation_uses_captured_baseline_or_actual_helper_override() {
+    let baseline = crate::CustomOpenAiChatProfile {
+        supports_developer_role: false,
+        use_max_tokens: true,
+        supports_strict_mode: false,
+    };
+    let alternate = crate::CustomOpenAiChatProfile {
+        supports_developer_role: true,
+        use_max_tokens: false,
+        supports_strict_mode: true,
+    };
+    for override_profile in [None, Some(alternate)] {
+        let tracked = client().track_request_dispatch();
+        let requests = Arc::default();
+        let mut selected = selected_host_model();
+        Arc::make_mut(&mut selected.spec).capabilities.reasoning =
+            Some(crate::test_fixtures::reasoning_capability());
+        let selected_spec = selected.spec.clone();
+        let profile = override_profile.unwrap_or(baseline);
+        let route = Arc::new(ChatProfileRoute {
+            native: false,
+            baseline,
+            override_profile,
+            sender: sender(
+                &tracked,
+                response(200, streaming_body(CHAT_BODY)),
+                &requests,
+                &Observations::default(),
+            ),
+        });
+        tracked.register_host_stream_transport(selected.endpoint.id.clone(), route);
+        let request = Request {
+            system: Some("actual native profile system".into()),
+            max_output_tokens: Some(77),
+            session_id: Some("native-chat-profile-session".into()),
+            tools: vec![crate::ToolDef {
+                name: "native_tool".into(),
+                description: "actual native definition".into(),
+                parameters: json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}),
+                async_execution: false,
+                constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                    strict: crate::ConstrainedSamplingStrict::Prefer,
+                }),
+            }],
+            ..request()
+        };
+        let before = serde_json::to_value(&request).unwrap();
+        let mut stream = tracked
+            .stream_with_host_options(
+                &selected,
+                request.clone(),
+                RequestOverrides::default(),
+                HostRequestOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut finished = 0;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::Finished(response) = event.unwrap() {
+                assert_eq!(response.usage.total_tokens, 22);
+                assert_eq!(response.stop_reason, StopReason::MaxTokens);
+                finished += 1;
+            }
+        }
+        assert_eq!(finished, 1);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let payload: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(payload["model"], "wire-model");
+        assert_eq!(
+            payload["messages"][0]["role"],
+            if profile.supports_developer_role {
+                "developer"
+            } else {
+                "system"
+            }
+        );
+        assert_eq!(payload["tool_choice"], "auto");
+        let tool = &payload["tools"][0]["function"];
+        assert_eq!(tool["name"], "native_tool");
+        if profile.supports_strict_mode {
+            assert_eq!(tool["strict"], true);
+        } else {
+            assert!(tool.get("strict").is_none());
+        }
+        assert_eq!(
+            payload[if profile.use_max_tokens {
+                "max_tokens"
+            } else {
+                "max_completion_tokens"
+            }],
+            77
+        );
+        assert!(payload
+            .get(if profile.use_max_tokens {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            })
+            .is_none());
+        assert_eq!(serde_json::to_value(&request).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&*selected.spec).unwrap(),
+            serde_json::to_value(&*selected_spec).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn custom_chat_continuation_refuses_profile_on_native_and_responses_routes_before_send() {
+    let profile = crate::CustomOpenAiChatProfile {
+        supports_developer_role: false,
+        use_max_tokens: true,
+        supports_strict_mode: false,
+    };
+    for native in [false, true] {
+        let tracked = client().track_request_dispatch();
+        let requests = Arc::default();
+        let mut selected = selected_host_model();
+        if !native {
+            Arc::make_mut(&mut selected.spec).protocol = Protocol::OpenAiResponses;
+        }
+        let route = Arc::new(ChatProfileRoute {
+            native,
+            baseline: profile,
+            override_profile: Some(profile),
+            sender: sender(
+                &tracked,
+                response(200, "".into()),
+                &requests,
+                &Observations::default(),
+            ),
+        });
+        tracked.register_host_stream_transport(selected.endpoint.id.clone(), route);
+        let result = tracked
+            .stream_with_host_options(
+                &selected,
+                request(),
+                RequestOverrides::default(),
+                HostRequestOptions::default(),
+            )
+            .await;
+        assert!(matches!(result, Err(AiError::Config(_))));
         assert!(requests.lock().unwrap().is_empty());
     }
 }
