@@ -4,27 +4,36 @@ import { spawn } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 
 const TYPESCRIPT = /\.[cm]?tsx?$/;
+// Everything jiti transforms: TypeScript, and ESM JavaScript (large bundled
+// factories cost seconds of babel time each). .cjs is loaded natively.
+const TRANSFORMED = /\.(?:[mc]?tsx?|[mj]sx?)$/;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const CHILD_FLAG = '--octet-transform-warmup';
-const NICE = 15;
 
-// Warm-up must not take the first frame: it runs in a child process at lowered
-// priority (worker threads inherit the creating thread's niceness on Linux) with
-// at most availableParallelism() - 2 workers, so the host and editor keep cores.
+// Warm-up runs in a child process so the host event loop stays free. While it
+// blocks mirror preparation (cold prepare) it runs at normal priority with one
+// core left for the host (measured: more workers do not help, the largest
+// bundle bounds the wall time):
+// the first frame is already up and wall time is what the user waits on. A
+// caller that warms in the background passes `nice` to yield cores instead.
 export function warmupWorkerCount(targets, workers, cpus = availableParallelism()) {
-  return Math.max(0, Math.min(workers ?? Math.min(6, Math.max(1, cpus - 2)), Math.ceil(targets / 16)));
+  return Math.max(0, Math.min(workers ?? Math.min(8, Math.max(1, cpus - 1)), Math.ceil(targets / 16)));
 }
 
-export async function warmTransformCache(files, fsCache, { workers, timeoutMs = 60000, nice = NICE } = {}) {
-  if (!fsCache) return { transformed: 0, workers: 0 };
-  const targets = [...new Set(files)].filter(file => TYPESCRIPT.test(file)).map(file => {
+// Starts the warm-up and returns { done, stop }: `done` settles with the result
+// when the child exits, times out or is stopped; `stop()` kills it early (the
+// capture that overlapped it has filled the cache itself).
+export function startTransformWarmup(files, fsCache, { workers, timeoutMs = 60000, nice = 0 } = {}) {
+  const none = { done: Promise.resolve({ transformed: 0, workers: 0 }), stop() {} };
+  if (!fsCache) return none;
+  const targets = [...new Set(files)].filter(file => TRANSFORMED.test(file) && !/\.d\.[cm]?ts$/.test(file)).map(file => {
     try { return { file, size: statSync(file).size }; } catch { return undefined; }
   }).filter(item => item && item.size <= MAX_FILE_BYTES).sort((a, b) => b.size - a.size).map(item => item.file);
   const count = warmupWorkerCount(targets.length, workers);
-  if (count < 1) return { transformed: 0, workers: 0 };
+  if (count < 1) return none;
   const child = spawn(process.execPath, [new URL(import.meta.url).pathname, CHILD_FLAG, String(count), String(nice)],
     { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, OCTET_TRANSFORM_WARMUP_CACHE: fsCache } });
-  let transformed = 0, output = '';
+  let output = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', chunk => { output += chunk; });
   const exited = new Promise(resolve => { child.once('error', resolve); child.once('close', resolve); });
@@ -32,12 +41,17 @@ export async function warmTransformCache(files, fsCache, { workers, timeoutMs = 
   child.stdin.end(JSON.stringify(targets));
   let timer;
   const expired = new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); });
-  await Promise.race([exited, expired]);
-  clearTimeout(timer);
-  if (child.exitCode === null) child.kill('SIGKILL');
-  const match = /(\d+)\s*$/.exec(output);
-  if (match) transformed = Number(match[1]);
-  return { transformed, workers: count };
+  const stop = () => { clearTimeout(timer); if (child.exitCode === null) child.kill('SIGKILL'); };
+  const done = Promise.race([exited, expired]).then(() => {
+    stop();
+    const match = /(\d+)\s*$/.exec(output);
+    return { transformed: match ? Number(match[1]) : 0, workers: count };
+  });
+  return { done, stop };
+}
+
+export async function warmTransformCache(files, fsCache, options) {
+  return startTransformWarmup(files, fsCache, options).done;
 }
 
 async function runPool(targets, fsCache, count) {
@@ -57,7 +71,7 @@ async function runPool(targets, fsCache, count) {
 }
 
 if (isMainThread && process.argv[2] === CHILD_FLAG) {
-  try { setPriority(0, Number(process.argv[4])); } catch { /* best effort; still bounded */ }
+  try { if (Number(process.argv[4])) setPriority(0, Number(process.argv[4])); } catch { /* best effort; still bounded */ }
   let input = '';
   process.stdin.setEncoding('utf8');
   for await (const chunk of process.stdin) input += chunk;
@@ -72,7 +86,7 @@ if (!isMainThread && workerData?.octetTransformWarmup) {
   parentPort.on('message', file => {
     if (file === null) { parentPort.close(); return; }
     try {
-      jiti.transform({ filename: file, source: readFileSync(file, 'utf8'), ts: true, async: true });
+      jiti.transform({ filename: file, source: readFileSync(file, 'utf8'), ts: TYPESCRIPT.test(file), async: true });
       parentPort.postMessage('done');
     } catch {
       parentPort.postMessage('failed');

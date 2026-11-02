@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { reviewedSourceHashes } from '../lib/runtime.mjs';
 import { SourceFingerprints } from '../lib/source-fingerprints.mjs';
-import { warmupWorkerCount } from '../lib/transform-warmup.mjs';
+import { warmupWorkerCount, warmTransformCache } from '../lib/transform-warmup.mjs';
 
 const past = new Date(Date.now() - 3600_000);
 function tree() {
@@ -49,11 +49,11 @@ test('a corrupt fingerprint cache is ignored', t => {
   assert.equal(new SourceFingerprints().files.size, 0);
 });
 
-test('warm-up workers leave cores for the host', () => {
-  assert.equal(warmupWorkerCount(1000, undefined, 4), 2);
+test('warm-up leaves one core for the host while it blocks preparation', () => {
+  assert.equal(warmupWorkerCount(1000, undefined, 4), 3);
   assert.equal(warmupWorkerCount(1000, undefined, 2), 1);
   assert.equal(warmupWorkerCount(1000, undefined, 1), 1);
-  assert.equal(warmupWorkerCount(1000, undefined, 64), 6);
+  assert.equal(warmupWorkerCount(1000, undefined, 64), 8);
 });
 
 test('persisted jiti resolutions are reused and dropped when a shadowing file appears', () => {
@@ -75,4 +75,14 @@ console.log(await jiti.import(${JSON.stringify(join(dir, 'x.ts'))}, { default: t
   writeFileSync(join(dir, 'y.js'), 'export const y = "-js";');
   assert.equal(run().stdout.trim(), 'js-js');
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('warm-up transforms TypeScript and ESM JavaScript, never .cjs or declaration files', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'octet-warm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const files = { 'a.ts': 'export const a: number = 1;\n', 'b.js': 'export const b = 1;\n', 'c.cjs': 'module.exports = 1;\n', 'd.d.ts': 'export declare const d: number;\n' };
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  const result = await warmTransformCache(Object.keys(files).map(name => join(dir, name)), join(dir, 'cache'));
+  assert.equal(result.transformed, 2);
+  assert.equal(readdirSync(join(dir, 'cache')).length, 2);
 });

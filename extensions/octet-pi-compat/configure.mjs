@@ -17,7 +17,8 @@ const { createJiti } = await import('./lib/jiti-resolve-cache.mjs');
 const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs');
 const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
 const { readPiTheme } = await import('./lib/theme-palette.mjs');
-const { warmTransformCache } = await import('./lib/transform-warmup.mjs');
+const { tracePhase } = await import('./lib/startup-trace.mjs');
+const { startTransformWarmup } = await import('./lib/transform-warmup.mjs');
 const { reviewedSourceHashes: hashReviewedSources } = await import('./lib/runtime.mjs');
 const { sharedSourceFingerprints } = await import('./lib/source-fingerprints.mjs');
 // Unchanged files are not re-read (persisted stat fingerprints); see source-fingerprints.mjs.
@@ -230,20 +231,30 @@ function adapterIdentity() {
 // factories each failure is isolated and named on stderr, so this one run
 // settles the common case that probing each factory separately took seconds
 // for. `undefined` when the capture itself failed: probe as before.
+// Phase attribution on the shared OCTET_STARTUP_TRACE channel (off by default).
+const phase = name => tracePhase(`pi_mirror.${name}`);
 async function captureCombined(extensions, options) {
   if (!extensions.length) return undefined;
-  let entries, routes;
+  let entries, routes, warmup;
   try {
     entries = extensions.map(entry => realpathSync(entry));
-    if (options.cacheDir && options.warmFiles?.length) await warmTransformCache(options.warmFiles, join(options.cacheDir, 'jiti'));
+    phase('capture.begin');
+    warmup = options.cacheDir && options.warmFiles?.length ? startTransformWarmup(options.warmFiles, join(options.cacheDir, 'jiti')) : undefined;
     const jiti = createJiti(import.meta.url, { alias: { ...typeboxAliases(), ...emulatedPiAliases() },
       moduleCache: true, tryNative: false, ...(options.cacheDir ? { fsCache: join(options.cacheDir, 'jiti') } : {}) });
     routes = Object.fromEntries(await Promise.all(entries.map(async entry => {
       const gaps = await scanPiImportGaps(entry, jiti);
       return [entry, gaps.missing.length || gaps.subpaths.length || gaps.direct_tools.length ? 'installed' : 'shims'];
     })));
-  } catch { return undefined; }
+    phase('scan.done');
+    // Capture imports (so transforms) every factory serially; overlapping it with
+    // the warm-up only duplicates the transforms and slows both. Wait for the
+    // warm-up, which runs at full width, so the capture is all cache hits.
+    await warmup?.done;
+    phase('warm.done');
+  } catch { warmup?.stop(); return undefined; }
   const captured = capture(entries, routes, options);
+  phase('runner.done');
   if (captured.error && entries.length === 1) throw new Error(`registration capture failed: ${captured.error.message}`);
   if (captured.error || captured.status !== 0) {
     if (entries.length !== 1) return undefined;
@@ -312,7 +323,9 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed mirror`);
   checkThemeImportOutput(output, overwrite);
+  phase('prepare.begin');
   const prepared = mirrorPreparation({ output, cwd, env, projectTrusted });
+  phase('prepare.done');
   if (expectedFingerprint !== undefined && (typeof expectedFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedFingerprint) || expectedFingerprint !== prepared.review.fingerprint)) {
     throw new Error('Pi setup changed since preparation; prepare and review again before running factories');
   }
@@ -363,6 +376,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
     expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint, mirrorExcluded,
     extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])),
     capturedRegistrations: reused?.registrations ?? (combined && !combined.skipped.size ? combined.registrations : undefined), captureCacheDir });
+  phase('configure.done');
   const { config } = result;
   // Timeouts, missing dependencies and unavailable installed-Pi graphs can
   // recover without changing factory sources or the managed Pi version. Never
