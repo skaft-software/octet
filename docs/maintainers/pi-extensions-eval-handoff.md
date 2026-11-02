@@ -135,6 +135,22 @@ In flight:
   `<scratchpad>/MEASURE_DONE` exists. **The coordinator must create that file when
   measurement finishes.**
 
+## Measured baseline (5 reps, fair harness): supersedes the pilot
+
+The pilot's Pi warm 25.2 s was a harness artifact (per-leg TMPDIR wiped Pi's jiti and
+compile caches). See `docs/benchmarks/pi-extensions-2026-11-02/`.
+
+| | Pi 1.4.0 | octet baseline | octet v1 |
+|---|---|---|---|
+| cold full UI | 25.67 s | 28.18 s (1.10x) | 29.36 s (1.14x) |
+| warm full UI | 2.54 s | 3.76 s (1.48x) | 2.22 s (**0.88x**) |
+
+Warm is now below Pi. Cold is still above, and 25-27 s of it is mirror prepare. Finding:
+the host's `env_clear()` means `OCTET_PI_COMPAT_CACHE` never reaches the adapter, so its
+caches live in `<extension dir>/.cache` inside the installed bundle. Check that this is
+writable in packaged installs; otherwise the fallback is `~/.cache/octet-pi-compat`.
+`MEASURE_DONE` has been created; the cold-prepare worker may time now.
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).
