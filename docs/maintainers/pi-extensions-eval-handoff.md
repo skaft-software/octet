@@ -108,6 +108,33 @@ work starts from. This file is updated at every milestone so work can resume at 
     covers both cache hit and miss. Not merged.
 - Open: the 118 pre-existing adapter failures need triage before release (not caused by this work).
 
+## Eval landed (`b7aa1235`) and pilot (1 rep; not yet a claim)
+
+| leg | Pi 1.4.0 full UI | octet full UI | octet/Pi |
+|---|---|---|---|
+| cold | 26.6 s | 29.3 s | 1.10x |
+| warm | 25.2 s | 4.5 s | 0.18x |
+
+octet is typeable at ~0.03 s. Parity: 23/23 packages and 98/98 commands. Cold octet is
+dominated by `extensions.pi_mirror.prepare` (26.3 s); the runner loads in ~3.2 s.
+Caveats:
+- Pi's warm leg barely beats its cold leg (Pi 1.0.2 was 5.1 s warm), which may be a
+  harness artifact. A fairness check is in progress.
+- The e2e suite's legacy custom credential no longer yields a model on this binary
+  (`scripts/e2e` startup check fails with "Unknown model"). The eval writes an explicit
+  `models` list.
+- Pi 1.4.0 refuses duplicate tool names, so pi-pretty, pi-memory and pi-web-search were
+  dropped from the fixture; octet loads them anyway (behavioural difference).
+- octet skips pi-background-tasks' `anthropic-attribution.js` `session_start` callback,
+  with an issue warning. `packages_parity` does not count skipped handlers yet.
+
+In flight:
+- Measurement worker (main tree): Pi-warm fairness, then a 5-rep `baseline` (adapter at
+  `7a917bd4`, via a worktree) vs `v1` (current), written to `.claude/hillclimb/pi-extensions/`.
+- Cold-prepare worker (worktree, branch `perf/pi-cold-prepare`): holds timing runs until
+  `<scratchpad>/MEASURE_DONE` exists. **The coordinator must create that file when
+  measurement finishes.**
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).
