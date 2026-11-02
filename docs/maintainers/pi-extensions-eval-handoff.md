@@ -80,6 +80,34 @@ work starts from. This file is updated at every milestone so work can resume at 
   preparation digests. It overlaps #2 in `configure.mjs`; merge it after the adapter
   workstream lands. Its tests: cold-start 9/9, mirror/source-review 41/41.
 
+## Adapter workstream result (2026-11-02, items #2-#4, landed on this branch)
+
+- #2: `lib/source-fingerprints.mjs` is a persisted (dev, ino, size, mtimeNs, ctimeNs) → digest
+  cache. The O_NOFOLLOW open, regular-file, size and read-race checks still run on every
+  file; only read+hash is skipped on a fingerprint match. Files touched within 3 s are
+  never recorded. `configure()` carries the preparation digests forward. The runner's
+  single pre-import check is the integrity gate.
+- #3: `lib/jiti-resolve-cache.mjs` is a persisted resolution map hooked into jiti 2.7.0
+  `jitiResolve` by a single exact-anchor rewrite of the locked dist. It falls back to
+  stock jiti on a version or anchor mismatch, or with `OCTET_PI_JITI_RESOLVE_CACHE=0`.
+  Entries are validated by stat fingerprints of the resolved file, its parent dirs,
+  node_modules and package.json; failures are never cached. Synthetic bench
+  (8 extensions, 1208 TS files, warm transforms): import 1.35-1.5 s → 0.25-0.30 s.
+- #4: transform warm-up runs in a nice-15 child, with workers = min(6, max(1, cores-2)).
+- Tests: adapter suite 1039 pass / 118 fail / 30 skip after vs 1035 / 118 / 30 before. The
+  failing test names are identical (pre-existing; the sampled cause is no managed Pi in an
+  isolated HOME). New `test/startup-once.test.mjs`. The release owner re-ran startup-once,
+  pi-mirror-cold-start and source-review: 16/16.
+- Release-owner review decisions:
+  - Accepted dropping configure's post-capture re-hash when digests are carried. The
+    runner's pre-import check against the prepared digests remains the gate, and capture
+    registrations are consent metadata.
+  - Accepted cache trust at the same level as jiti's transform cache, which already holds
+    executable code in the same owner-only directory, so poisoning these adds no new power.
+  - Superseded `3da9f2e3` (worktree branch `perf/pi-single-import-v2`). The adapter version
+    covers both cache hit and miss. Not merged.
+- Open: the 118 pre-existing adapter failures need triage before release (not caused by this work).
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).

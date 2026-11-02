@@ -336,8 +336,14 @@ def pi_package_status(probe: dict | None, locked: list[str]) -> dict:
             status[name] = {"status": "loaded", "detail": ""}
     for error in probe.get("errors") or []:
         name = package_from_path(error.get("path", ""))
-        if name in status:
-            status[name] = {"status": "error", "detail": str(error.get("error", ""))[:300]}
+        if name not in status:
+            continue
+        detail = str(error.get("error", ""))[:300]
+        if status[name]["status"] == "loaded":
+            # Pi lists the extension and reports e.g. a tool-name conflict: loaded, with an issue.
+            status[name]["detail"] = (status[name]["detail"] + " " + detail).strip()
+        else:
+            status[name] = {"status": "error", "detail": detail}
     return status
 
 

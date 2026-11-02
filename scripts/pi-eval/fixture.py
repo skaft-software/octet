@@ -345,7 +345,7 @@ def write_provider_config(home: Path, port: int) -> None:
                 "api_key": "",
                 "api_name": MODEL,
                 "headers": [],
-                "auto_discover": False,
+                "auto_discover": True,
             }
         )
     )
