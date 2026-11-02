@@ -151,6 +151,16 @@ caches live in `<extension dir>/.cache` inside the installed bundle. Check that 
 writable in packaged installs; otherwise the fallback is `~/.cache/octet-pi-compat`.
 `MEASURE_DONE` has been created; the cold-prepare worker may time now.
 
+## v2 measured (5 reps): octet faster than Pi 1.4.0 cold and warm
+
+Full UI: cold 22.06 ± 0.25 s (0.86x Pi), warm 2.26 ± 0.05 s (0.89x Pi). Parity is 1.0
+and every launch exits cleanly. The ratios use the baseline run's Pi medians; re-run
+side by side before release.
+In flight: `perf/pi-native-esm` (worktree) skips Babel for already-ESM JS bundles (about
+12 s of the 19 s cold prepare is pi-lens's 6 MB bundle) without breaking shim module
+identity or the pre-import integrity gate.
+Also open: exit takes about 2 s against Pi's 0.18 s.
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).

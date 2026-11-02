@@ -14,8 +14,13 @@ Full UI, median ± IQR (s):
 | baseline | Pi 1.4.0 | 25.67 ± 0.73 | 2.54 ± 0.39 |
 | baseline | octet | 28.18 ± 1.00 | 3.76 ± 0.20 |
 | v1 | octet | 29.36 ± 1.50 | 2.22 ± 0.15 |
+| v2 | octet | **22.06 ± 0.25** | **2.26 ± 0.05** |
 
-octet/Pi: cold 1.10x → 1.14x (within noise); warm 1.48x → **0.88x**. octet is typeable at
+octet/Pi: cold 1.10x → 1.14x (v1, within noise) → **0.86x** (v2); warm 1.48x → 0.88x (v1) → **0.89x** (v2).
+- `v2`: v1 plus the cold-prepare fix (`ef09590b`). The warm-up now covers ESM JS bundles at full width and overlaps the routing scan. Cold prepare went from 25.3 s to 19.2 s. octet is typeable at
 about 0.03 s in every leg. Package and command parity are 1.0, and every launch exits cleanly.
 Cold octet is about 90% `extensions.pi_mirror.prepare` (25-27 s), which is the next target.
 Traces are not committed; regenerate them with the eval.
+
+Open item: octet's exit takes about 2.06 s against Pi's 0.18 s on the warm leg (11x). This is
+not startup, but the eval tracks it.
