@@ -62,6 +62,24 @@ work starts from. This file is updated at every milestone so work can resume at 
      `docs/design/pi-single-import.md`, then #5 (overlap warm prepare) and #1 (single import
      via contributions-at-handshake), with no fence weakening.
 
+## Single-import workstream result (2026-11-02)
+
+- Design: `docs/design/pi-single-import.md` (on this branch).
+- **#1 is not contained.** The host needs a manifest's contributions before spawn (tool
+  clashes, catalog, flags into `initialize`). Adopting the capture process as the live
+  runner gives factories a different context than the live load, so that option is
+  rejected. The viable path is a generic, manifest-opted "contributions at handshake"
+  primitive, with the envelope check and clash handling re-run before activation and the
+  capture flow kept as fallback. This is a staged protocol change; not implemented yet.
+- **#5 is smaller than the handoff assumed.** On an 8-factory fixture, warm prepare takes
+  about 0.3 s and runner boot about 0.27 s, so most of the ~2 s warm prepare is repeated
+  source walks (#2), not boot. Overlapping boot needs a pre-spawn/held-initialize host
+  primitive; this is phase 2.
+- **Pending merge:** commit `3da9f2e3` in worktree `.claude/worktrees/agent-a172e93c67afbf9d8`
+  (branch `perf/pi-single-import-v2`). On a catalog-cache hit, `configure()` reuses the
+  preparation digests. It overlaps #2 in `configure.mjs`; merge it after the adapter
+  workstream lands. Its tests: cold-start 9/9, mirror/source-review 41/41.
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).
