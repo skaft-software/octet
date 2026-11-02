@@ -182,6 +182,17 @@ Residuals:
 - A native evaluation error re-runs the entry on jiti, as jiti's own native-first behaviour does.
 - Release evidence: a side-by-side 5-rep v3 run (Pi alternated) is in progress.
 
+## v3 side by side (release evidence, `docs/benchmarks/pi-extensions-2026-11-02/v3`)
+
+Cold full UI: 25.62 s (Pi) vs **17.20 s (octet), 0.67x**. Warm: 2.34 s vs 2.26 s, 0.97x, a
+tie within noise. Parity is 1.0 and all 20 launches were clean.
+
+In flight (worktrees; gated so timing runs stay quiet):
+- `perf/pi-warm`: warm target <=1.6 s. Profiles the runner's 1.76 s and the 0.40 s warm
+  prepare. Candidates: V8 code cache for jiti-evaluated code, lazy imports, and prefetching
+  the next factory while preserving order. It creates `<scratchpad>/WARM_DONE` when timing is done.
+- `perf/pi-exit`: exit 2.06 s vs Pi 0.16 s. It waits on `WARM_DONE` before release builds.
+
 ## Next steps
 
 1. Resolve the execution blocker (permission rule, or run legs locally).
