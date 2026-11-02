@@ -24,3 +24,16 @@ Traces are not committed; regenerate them with the eval.
 
 Open item: octet's exit takes about 2.06 s against Pi's 0.18 s on the warm leg (11x). This is
 not startup, but the eval tracks it.
+
+## v3: side by side (release evidence)
+
+`v3` = v2 + native ESM for reviewed plain-ESM factories (`39d8c0f8`). Pi and octet ran in
+alternating legs in the same run, 5 reps, all 20 launches clean, parity 1.0.
+
+| full UI | Pi 1.4.0 | octet | octet/Pi |
+|---|---|---|---|
+| cold | 25.62 ± 0.36 s | 17.20 ± 0.05 s | **0.67x** |
+| warm | 2.34 ± 0.05 s | 2.26 ± 0.12 s | 0.97x (within noise; parity, not a win) |
+
+octet warm phases: prepare 0.40 s; runner adapter ready 1.76 s; extensions attached 2.21 s.
+octet cold prepare: 14.3 s. Exit: octet 2.06 s vs Pi 0.16 s warm.
