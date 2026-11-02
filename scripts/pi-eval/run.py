@@ -94,17 +94,36 @@ class LegError(Exception):
 # One launch
 # --------------------------------------------------------------------------- #
 
-def launch(target: str, env: Environment, fixture: fx.Fixture, octet_bin: Path, work: Path, *, ceiling_s: float) -> dict:
+def leg_tmp(env: Environment) -> Path:
+    """TMPDIR of a (target, rep): shared by the cold launch and the warm launch that follows it.
+
+    Pi's jiti transform cache (`$TMPDIR/jiti`) and Node's compile cache live here, so this
+    directory must survive cold -> warm and be wiped with the home on the next cold leg.
+    (It used to be per-leg, which made Pi's warm leg start with an empty jiti cache.)
+    """
+    return env.root / "tmp"
+
+
+def reset_adapter_cache(extensions_dir: Path) -> None:
+    """octet-pi-compat keeps its startup caches in `<extension dir>/.cache` (startup-cache.mjs; the
+    host strips OCTET_PI_COMPAT_CACHE from the adapter's environment). That directory is outside the
+    leg's HOME, so a cold leg must delete it or it would inherit the previous run's caches."""
+    shutil.rmtree(extensions_dir / "octet-pi-compat" / ".cache", ignore_errors=True)
+
+
+def launch(target: str, env: Environment, fixture: fx.Fixture, octet_bin: Path, work: Path, *, ceiling_s: float, extensions_dir: Path = REPO / "extensions") -> dict:
     """Start one process on a PTY, wait for typeable / full UI, exit it, and collect observations."""
-    workspace, tmp = env.workspace, work / "tmp"
+    workspace, tmp = env.workspace, leg_tmp(env)
     tmp.mkdir(parents=True, exist_ok=True)
+    for stale in glob.glob(str(tmp / "octet-pi-mirror-*")):  # a previous launch's bridge.json must not be read as this one's
+        shutil.rmtree(stale, ignore_errors=True)
     workspace.mkdir(parents=True, exist_ok=True)
     env.sessions.mkdir(parents=True, exist_ok=True)
     if target == "octet":
         binary = octet_bin
         args = octet_args(
             env, name=None, agent=False,
-            extension_dirs=[REPO / "extensions"], enable_extensions=["octet-pi-compat"],
+            extension_dirs=[extensions_dir], enable_extensions=["octet-pi-compat"],
         )
         child_env = env.child_env(REPO, extra={"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp)})
         description = "octet + shipped octet-pi-compat bundle (OCTET_PI_AUTO_MIRROR)"
@@ -295,14 +314,16 @@ def run_case(target: str, leg: str, rep: int, *, args, fixture: fx.Fixture, prob
     try:
         env = make_env(homes, target, rep, provider.port)
         primed = prepare_home(fixture, env, cold=(leg == "cold"))
+        if target == "octet" and (leg == "cold" or not primed):
+            reset_adapter_cache(args.extensions_dir)
         fx.write_provider_config(env.home, provider.port)
         work = out / "work" / f"{cid}_rep{rep}"
         work.mkdir(parents=True, exist_ok=True)
         if leg == "warm" and not primed:
             print(f"  (priming a warm home for {target} rep{rep}; this launch is not measured)")
             (work / "prime").mkdir(parents=True, exist_ok=True)
-            launch(target, env, fixture, args.octet, work / "prime", ceiling_s=args.ceiling)
-        obs = launch(target, env, fixture, args.octet, work, ceiling_s=args.ceiling)
+            launch(target, env, fixture, args.octet, work / "prime", ceiling_s=args.ceiling, extensions_dir=args.extensions_dir)
+        obs = launch(target, env, fixture, args.octet, work, ceiling_s=args.ceiling, extensions_dir=args.extensions_dir)
         if obs["failure"]:
             raise LegError(
                 "ceiling" if "ceiling" in obs["failure"] else "no_full_ui", obs["failure"],
@@ -346,6 +367,7 @@ def run_case(target: str, leg: str, rep: int, *, args, fixture: fx.Fixture, prob
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
+    parser.add_argument("--extensions-dir", type=Path, default=REPO / "extensions", help="extensions root holding octet-pi-compat/ (default: this checkout; use a git worktree to measure another adapter revision)")
     parser.add_argument("--legs", default="cold,warm")
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--targets", default="pi,octet")
@@ -365,6 +387,9 @@ def main(argv: list[str] | None = None) -> int:
     legs, targets = args.legs.split(","), args.targets.split(",")
     if not set(legs) <= {"cold", "warm"} or not set(targets) <= {"pi", "octet"}:
         parser.error("legs are cold,warm; targets are pi,octet")
+    args.extensions_dir = args.extensions_dir.resolve()
+    if not (args.extensions_dir / "octet-pi-compat" / "extension.toml").exists():
+        parser.error(f"--extensions-dir {args.extensions_dir} has no octet-pi-compat/extension.toml")
     out = args.out or REPO / ".claude" / "hillclimb" / "pi-extensions" / args.variant
     out.mkdir(parents=True, exist_ok=True)
     harness = ["scripts/pi-eval/run.py", "scripts/pi-eval/core.py", "scripts/pi-eval/fixture.py", "scripts/pi-eval/pi_probe.mjs", "scripts/pi-eval/sentinel/pi-eval-sentinel.ts", "scripts/pi-eval/packages.lock.json"]
@@ -400,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if not args.keep:
                 shutil.rmtree(homes, ignore_errors=True)
+            if "octet" in targets and not args.report_only:
+                reset_adapter_cache(args.extensions_dir)  # leave no caches in the checkout
 
     rows = core.load_jsonl(out / "results.jsonl")
     errors = core.load_jsonl(out / "errors.jsonl")

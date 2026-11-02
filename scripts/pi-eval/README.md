@@ -23,7 +23,9 @@ Options: `--octet BIN` (default `target/release/octet`), `--legs cold,warm`, `--
 `--targets pi,octet`, `--variant baseline|vN`, `--out DIR` (default
 `.claude/hillclimb/pi-extensions/<variant>/`), `--baseline DIR`, `--ceiling S` (hard per-leg
 limit, default 180), `--cache DIR` (fixture cache; `$PI_EVAL_CACHE` or `~/.cache/octet-pi-eval`),
-`--scratch DIR`, `--keep`, `--force-fixture`.
+`--scratch DIR`, `--keep`, `--force-fixture`, `--extensions-dir DIR` (extensions root holding
+`octet-pi-compat/`, default this checkout's `extensions/`; point it at a `git worktree` of an older commit
+to measure another adapter revision with the same octet binary, the adapter is Node and read live).
 
 This executes downloaded third-party code (Pi 1.4.0 and the locked npm packages run, unsandboxed,
 under a throwaway HOME). The fixture build itself uses `npm install --ignore-scripts`, so no
@@ -103,6 +105,34 @@ next run and counted beside the report. `traces/<case>_rep<k>.json` hold screen,
 lines and the package table as turns. `_state.json` declares the metrics (headline `full_ui_s`,
 lower is better) and `perf_fields`. Rows are appended and fsynced as legs finish; rerunning skips
 finished (case, rep) pairs. `work/` holds raw transcripts and stderr per leg.
+
+## Fairness (fixes applied to the harness)
+
+1. **Warm legs share the cold leg's TMPDIR.** Pi 1.4.0 keeps its jiti transform cache in
+   `$TMPDIR/jiti` (jiti's `fsCache`: nearest `<dir>/node_modules/.cache/jiti`, else `os.tmpdir()/jiti`;
+   `moduleCache` is off) and Node's compile cache under `$TMPDIR/node-compile-cache`. The harness used
+   a per-leg `work/<leg>/tmp`, so Pi's warm leg started with an empty jiti cache and measured a second
+   cold start (pilot: Pi warm 25.2 s vs cold 26.6 s; fixed: cold 24.2 s, warm 2.2 s). TMPDIR is now
+   `<scratch>/<target>_rep<k>/tmp`, created beside the home, reused by the warm launch and wiped with the
+   home on the next cold leg. Stale `octet-pi-mirror-*` dirs in it are removed before every launch so a
+   warm leg cannot read the cold leg's `bridge.json`.
+2. **octet's adapter caches are reset on cold legs.** The host strips the adapter's environment
+   (`OCTET_PI_COMPAT_CACHE` never reaches it), so `startup-cache.mjs` puts jiti, the compile cache and the
+   persisted mirror cache (`pi-mirror-<slot>.json`, keyed by agent dir, which is identical in every fresh
+   HOME) in `<OCTET_EXTENSION_DIR>/.cache`, inside the checkout and outside the leg HOME. A cold leg (and the
+   unmeasured priming launch of a warm-only run) deletes `<extensions-dir>/octet-pi-compat/.cache`, and
+   the run deletes it again at exit, so nothing leaks between legs, runs, or between a baseline worktree
+   and the current tree (each has its own `.cache`).
+3. **Network posture matches.** octet legs pass `--offline`; Pi legs set `PI_OFFLINE=1`,
+   `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`. A `strace -f -e trace=connect` of Pi's cold and warm start
+   shows no socket connect other than AF_UNIX, so Pi's startup does no network I/O here.
+4. **Terminal queries do not stall Pi.** Pi sends DA1 (`CSI c`), kitty `CSI ? u` and OSC 10/11 queries; the
+   VT answers only DSR. Pi proceeds without answers: its warm start reaches the full UI in about 2 s, so any
+   query timeout is below that. octet sends none of them.
+5. Both targets get the same environment otherwise (fresh HOME copy, TERM/COLORTERM/LANG, the same mock
+   provider, PTY 120x40) and `OCTET_*`/`PI_*` variables from the caller are stripped.
+6. A variant run without Pi (`--targets octet`) with `--baseline` computes octet/Pi ratios against the
+   baseline's Pi medians, labelled as such in the report.
 
 ## Noise guidance
 

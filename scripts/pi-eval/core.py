@@ -515,13 +515,19 @@ def aggregate(rows: list[dict]) -> dict[tuple[str, str], dict[str, list[float]]]
     return out
 
 
-def ratios(agg: dict, metric: str = "full_ui_s") -> dict[str, float | None]:
-    """leg -> median(octet metric) / median(pi metric)."""
+def ratios(agg: dict, metric: str = "full_ui_s", pi_fallback: dict | None = None) -> dict[str, float | None]:
+    """leg -> median(octet metric) / median(pi metric).
+
+    `pi_fallback` (an aggregate, normally the baseline's) supplies Pi's medians for a leg
+    this run did not measure, so an octet-only variant still gets ratios.
+    """
     out: dict[str, float | None] = {}
     legs = sorted({leg for (_t, leg) in agg})
     for leg in legs:
         octet = agg.get(("octet", leg), {}).get(metric)
         pi = agg.get(("pi", leg), {}).get(metric)
+        if not pi and pi_fallback:
+            pi = pi_fallback.get(("pi", leg), {}).get(metric)
         if octet and pi and statistics.median(pi) > 0:
             out[leg] = statistics.median(octet) / statistics.median(pi)
         else:
@@ -549,10 +555,19 @@ def format_report(agg: dict, *, error_counts: dict | None = None, baseline: dict
         cells = [f"{_fmt(bucket[m], m):>17}" if m in bucket else f"{'-':>17}" for m in metrics]
         lines.append(f"{target:<7}{leg:<6}{n:>3}  " + "  ".join(cells))
     lines.append("")
-    lines.append("octet / Pi ratio of medians (lower is better; < 1.00 means octet is faster)")
+    pi_from_baseline = baseline is not None and not any(t == "pi" for (t, _l) in agg)
+    lines.append("octet / Pi ratio of medians (lower is better; < 1.00 means octet is faster)"
+                 + ("; Pi medians taken from the baseline run" if pi_from_baseline else ""))
     for metric in ("full_ui_s", "typeable_s", "exit_s"):
-        for leg, value in ratios(agg, metric).items():
+        for leg, value in ratios(agg, metric, baseline if pi_from_baseline else None).items():
             lines.append(f"  {metric:<11}{leg:<6}" + ("n/a" if value is None else f"{value:.2f}x"))
+    phase_metrics = ("prepare_s", "extensions_attached_s", "frame_ready_s", "adapter_load_ready_s")
+    phase_keys = [k for k in sorted(agg, key=lambda k: (k[1] != "cold", k[1], k[0])) if k[0] == "octet" and any(m in agg[k] for m in phase_metrics)]
+    if phase_keys:
+        lines.append("")
+        lines.append("octet per-phase medians±IQR (host trace; prepare = extensions.pi_mirror.prepare.end-begin, attached/frame = host clock, adapter ready = adapter clock)")
+        for key in phase_keys:
+            lines.append(f"  {key[1]:<6}" + "  ".join(f"{m}={_fmt(agg[key][m], m)}" for m in phase_metrics if m in agg[key]))
     if error_counts:
         lines.append("")
         lines.append("not scored (errors.jsonl): " + ", ".join(f"{key}={count}" for key, count in sorted(error_counts.items())))
@@ -570,7 +585,7 @@ def format_report(agg: dict, *, error_counts: dict | None = None, baseline: dict
                     parts.append(f"{metric}={now - before:+.3f}")
             lines.append(f"  {key[0]}.{key[1]}: " + (" ".join(parts) or "no common metrics"))
         base_ratios = ratios(baseline)
-        for leg, value in ratios(agg).items():
+        for leg, value in ratios(agg, pi_fallback=baseline if pi_from_baseline else None).items():
             before = base_ratios.get(leg)
             if value is not None and before is not None:
                 lines.append(f"  full_ui ratio {leg}: {before:.2f}x -> {value:.2f}x ({value - before:+.2f})")
