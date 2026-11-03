@@ -150,3 +150,22 @@ Worker `fix/pi-diagnostics-ux` owns the presentation layer: lib/issues.mjs, the 
 diagnostic paths, and the host rendering of extension diagnostics. Other workers must not add
 new user-facing messages ad hoc. Route them through the existing issue/diagnostic paths with a
 short label and a one-line action, and put detail in the payload.
+
+## DISK DISCIPLINE (mandatory; the disk filled up once already)
+
+The session has a fixed disk allowance (about 7 GB free after cleanup) shared by seven workers.
+
+1. **Before every fixture copy or cargo build, check free space** (`df -h /`). If less than
+   3 GB is free, clean up your own leftovers first; if that isn't enough, wait (re-check
+   every few minutes) rather than fail.
+2. **Fixture homes.** Never full-copy more than one at a time. Copy the read-only trees as
+   hardlinks: `cp -al <fixture>/home/.pi/agent/install` and `.../npm`. Nothing writes into
+   them at runtime; verify with a checksum before and after your first run. Full-copy only
+   the small rest of the home (settings, sessions, caches).
+3. **Delete each leg's home and outputs as soon as you have extracted what you need.** Keep
+   screens, logs and traces (small) and delete the copied homes.
+4. **Cargo.** Build only when your change touches Rust. Set
+   `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` for test builds.
+   Delete your worktree's `target/` when you no longer need it (keep only a release binary
+   you still use, copied out to `scratchpad/bin-<branch>/octet`).
+5. **Never delete another worker's directories.** Ask the coordinator instead.
