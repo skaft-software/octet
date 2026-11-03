@@ -1,0 +1,45 @@
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 5cf035c1..d84389c8 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -176,6 +176,7 @@ def sc_tool(s, p, n):
+     time.sleep(2)
+ 
+ 
++TURN_COMMANDS = {"google-account", "handoff", "review", "run", "search", "end-review"}
+ COMMANDS = [
+     "answer", "bg", "bg-tasks", "btw", "claude-cache", "context-simple", "control-sessions", "curator", "end-review", "files", "fusion",
+     "fusion-models", "google-account", "handoff", "jobs", "learn-memory-tool", "lens-health", "lens-map", "lens-perf", "lens-tools",
+@@ -186,11 +187,10 @@ COMMANDS = [
+ ]
+ 
+ 
+-def sc_commands(s, p, n):
+-    """Each extension command, one at a time; kill/exit/bye/termdraw (which take over the terminal) are left out."""
++def _run_commands(s, n, names) -> None:
+     n["ready"] = s.wait_text(core.READY_MARKER)
+     time.sleep(3)
+-    for name in COMMANDS:
++    for name in names:
+         n[f"cmd_{name}"] = s.now()
+         s.write(f"/{name}")
+         time.sleep(0.4)
+@@ -205,6 +205,18 @@ def sc_commands(s, p, n):
+         time.sleep(0.3)
+ 
+ 
++def sc_commands(s, p, n):
++    """Every extension command in one session. Commands that start a turn or take over the terminal
++    (google-account, handoff, review, run, search, exit, bye, kill, termdraw) are left to sc_commands_ui."""
++    _run_commands(s, n, [name for name in COMMANDS if name not in TURN_COMMANDS])
++
++
++def sc_commands_ui(s, p, n):
++    """The commands whose output is a dialog or an error, one session, no turn-starting command before them."""
++    _run_commands(s, n, ["sessions", "prompt-workflow", "session-breakdown", "fusion", "fusion-models", "bg", "tasks", "todos", "lens-health",
++                         "subagents-doctor", "mcp", "permission-system", "memory-insights", "workflow", "whimsy"])
++
++
+ def sc_back_to_back(s, p, n):
+     n["ready"] = s.wait_text(core.READY_MARKER)
+     _script(p, Reply(text="REPLY-OK one two three four five six seven eight", chunk_delay=0.25))

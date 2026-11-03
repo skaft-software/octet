@@ -1,7 +1,7 @@
 From d3527343e48c651572f84ab39a6c2e4d33a4473a Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 03:45:20 +0000
-Subject: [PATCH 2/3] pi-eval: footer repro driver, flicker --mask,
+Subject: [PATCH 2/4] pi-eval: footer repro driver, flicker --mask,
  parametrised provider model
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

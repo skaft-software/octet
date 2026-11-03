@@ -1,8 +1,8 @@
 From 605e07060f9f40cda4c6fa1861d7d6563264f938 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 07:42:58 +0000
-Subject: [PATCH 4/8] eval: jank recorder (frame-level PTY capture of octet and
- Pi on one scripted timeline)
+Subject: [PATCH 04/10] eval: jank recorder (frame-level PTY capture of octet
+ and Pi on one scripted timeline)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

@@ -1,7 +1,7 @@
 From a62def0ad6eb3853fa389db3052cd8ea1c263da2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 03:21:22 +0000
-Subject: [PATCH 1/8] docs: usability/performance pass brief and workstreams
+Subject: [PATCH 01/10] docs: usability/performance pass brief and workstreams
  [skip ci]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

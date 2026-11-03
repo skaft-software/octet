@@ -1,0 +1,156 @@
+From 85fbe6c944671df8b5ad95137f2cfee54d6abafc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 12:55:54 +0000
+Subject: [PATCH 09/10] eval: jank compare view, reload waits for completion,
+ resize fix, request arrival times
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ scripts/pi-eval/jank.py | 77 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 74 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 386dd3a5..014af51d 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -15,12 +15,16 @@ from __future__ import annotations
+ import argparse
+ import base64
+ import errno
++import fcntl
+ import json
+ import os
+ import select
+ import shutil
++import signal
++import struct
+ import subprocess
+ import sys
++import termios
+ import time
+ from pathlib import Path
+ 
+@@ -79,6 +83,14 @@ class FrameSession(run.EvalSession):
+         self.inputs.append((self.now(), payload))
+         super().write(payload)
+ 
++    def resize(self, columns: int, rows: int) -> None:
++        """OctetSession.resize ioctls the slave end, which the constructor has already closed."""
++        self.columns, self.rows = columns, rows
++        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
++        os.kill(self.process.pid, signal.SIGWINCH)
++        with self._lock:
++            self._screen.resize(columns, rows)
++
+     def now(self) -> float:
+         return time.monotonic() - self.started_at
+ 
+@@ -188,12 +200,22 @@ def sc_slash(s, p, n):
+     time.sleep(0.5)
+ 
+ 
++def _await_reload(s, n) -> None:
++    """The sentinel's marker leaves the screen when the reload starts and returns when it has finished."""
++    end = time.monotonic() + 15
++    while time.monotonic() < end and core.READY_MARKER in s.screen_text():
++        time.sleep(0.01)
++    n["reload_started"] = s.now()
++    n["reload_done"] = s.wait_text(core.READY_MARKER)
++    time.sleep(3)
++
++
+ def sc_reload(s, p, n):
+     n["ready"] = s.wait_text(core.READY_MARKER)
+     time.sleep(2)
+     n["reload_sent"] = s.now()
+     s.write("/reload\r")
+-    time.sleep(8)
++    _await_reload(s, n)
+ 
+ 
+ def sc_reload_busy(s, p, n):
+@@ -204,7 +226,7 @@ def sc_reload_busy(s, p, n):
+     time.sleep(1.2)
+     n["reload_sent"] = s.now()
+     s.write("/reload\r")
+-    time.sleep(10)
++    _await_reload(s, n)
+ 
+ 
+ def sc_resize(s, p, n):
+@@ -329,7 +351,7 @@ def record(args) -> dict:
+                 handle.write(json.dumps({"t": round(t, 4), "o": base64.b64encode(data).decode()}) + "\n")
+             for t, data in session.inputs:
+                 handle.write(json.dumps({"t": round(t, 4), "i": base64.b64encode(data).decode()}) + "\n")
+-        (out / "requests.json").write_text(json.dumps([{"t": r.received_at, "body": r.body} for r in provider.requests], indent=1))
++        (out / "requests.json").write_text(json.dumps([{"t": round(r.received_at - session.started_at, 3), "body": r.body} for r in provider.requests], indent=1))
+         provider.close()
+         shutil.rmtree(out / "homes", ignore_errors=True)
+         shutil.rmtree(out / "extensions", ignore_errors=True)
+@@ -411,6 +433,45 @@ def show_at(directory: Path, at: float) -> str:
+     return last
+ 
+ 
++def screen_at(directory: Path, at: float):
++    last = None
++    for t, _, screen in replay(directory):
++        if t > at:
++            break
++        last = screen
++    return last
++
++
++def row_segments(screen, y: int) -> list[tuple[str, str]]:
++    """Runs of equally styled cells in one row, as (text, "fg/bg/attrs")."""
++    runs: list[tuple[str, str]] = []
++    for x in range(screen.columns):
++        char, style = screen.cell(x, y)
++        key = "/".join(filter(None, [
++            "fg%02x%02x%02x" % style.fg if style.fg else "", "bg%02x%02x%02x" % style.bg if style.bg else "",
++            *(name for name in ("bold", "italic", "underline", "reverse", "dim") if getattr(style, name))]))
++        if runs and runs[-1][1] == key:
++            runs[-1] = (runs[-1][0] + char, key)
++        else:
++            runs.append((char, key))
++    return [(text.rstrip() if i == len(runs) - 1 else text, key) for i, (text, key) in enumerate(runs) if text.strip() or key]
++
++
++def compare(args) -> None:
++    """Last N rows of two recordings at the given times; rows whose text or colours differ are marked."""
++    a, b = (screen_at(Path(d), t) for d, t in ((args.a, args.at_a), (args.b, args.at_b)))
++    for offset in range(args.rows, 0, -1):
++        ya, yb = a.rows - offset, b.rows - offset
++        sa, sb = row_segments(a, ya), row_segments(b, yb)
++        same_text, same_style = a.row(ya) == b.row(yb), sa == sb
++        mark = "  " if same_text and same_style else ("~ " if same_text else "! ")
++        print(f"{mark}A| {a.row(ya)[:args.width]}")
++        print(f"{mark}B| {b.row(yb)[:args.width]}")
++        if same_text and not same_style:
++            print(f"   A styles: {[(t[:12], k) for t, k in sa][:6]}")
++            print(f"   B styles: {[(t[:12], k) for t, k in sb][:6]}")
++
++
+ def diff(args) -> None:
+     for name in args.dirs:
+         directory = Path(name)
+@@ -449,7 +510,17 @@ def main(argv=None) -> int:
+     d.add_argument("dirs", nargs="+")
+     d.add_argument("--at", type=float, default=None)
+     d.add_argument("--max-footers", type=int, default=40)
++    c = sub.add_parser("compare")
++    c.add_argument("a")
++    c.add_argument("b")
++    c.add_argument("--at-a", type=float, required=True)
++    c.add_argument("--at-b", type=float, required=True)
++    c.add_argument("--rows", type=int, default=6)
++    c.add_argument("--width", type=int, default=150)
+     args = parser.parse_args(argv)
++    if args.cmd == "compare":
++        compare(args)
++        return 0
+     if args.cmd == "record":
+         print(json.dumps(record(args), indent=1))
+     else:
+-- 
+2.43.0
+

@@ -1,0 +1,212 @@
+From e93f6a028a496d50115f52f21313fee204d2cc5f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 12:49:30 +0000
+Subject: [PATCH 2/3] Pi compat diagnostics: Rust tests, queued reload wording,
+ design doc
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../extensions/resource_paths/pi_app_tests.rs |  6 +-
+ .../extensions/tests/notification_output.rs   | 29 +++-----
+ .../tests/active_reports_and_status_tests.rs  | 15 +++++
+ docs/design/pi-diagnostics-ux.md              | 67 +++++++++++++++++++
+ extensions/octet-pi-compat/lib/issues.mjs     |  2 +-
+ .../octet-pi-compat/test/issues.test.mjs      | 11 +++
+ 6 files changed, 106 insertions(+), 24 deletions(-)
+ create mode 100644 docs/design/pi-diagnostics-ux.md
+
+diff --git a/crates/octet-coding-agent/src/extensions/resource_paths/pi_app_tests.rs b/crates/octet-coding-agent/src/extensions/resource_paths/pi_app_tests.rs
+index 11170746..dee2b6c0 100644
+--- a/crates/octet-coding-agent/src/extensions/resource_paths/pi_app_tests.rs
++++ b/crates/octet-coding-agent/src/extensions/resource_paths/pi_app_tests.rs
+@@ -936,10 +936,8 @@ async fn configured_pi_callback_start_error_preserves_discovery_and_reload_witho
+     );
+     assert!(issues[0]
+         .message
+-        .contains(root.join("factories/first.mjs").to_str().unwrap()));
+-    assert!(issues[0]
+-        .message
+-        .contains("session_start callback failed and was skipped"));
++        .starts_with("First: session_start hook failed and was skipped."));
++    assert!(!issues[0].message.contains(root.to_str().unwrap()));
+     assert!(!issues[0].message.contains("private start failure details"));
+     let rows = trace(&root);
+     assert_eq!(
+diff --git a/crates/octet-coding-agent/src/extensions/tests/notification_output.rs b/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
+index d87d5593..ef1a8cd9 100644
+--- a/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
++++ b/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
+@@ -134,25 +134,16 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group()
+             "{stderr}\n{}",
+             String::from_utf8_lossy(&output.stdout)
+         );
+-        assert_eq!(stderr.matches("[Extension issues]").count(), 1, "{stderr}");
+-        let rows = stderr.lines().collect::<Vec<_>>();
+-        let header = rows
+-            .iter()
+-            .position(|line| line.contains("[Extension issues]"))
+-            .unwrap();
+-        assert!(rows[header].ends_with("[Extension issues]:"), "{stderr}");
+-        for (offset, name) in [(1, "first.mjs"), (4, "second.mjs")] {
+-            assert!(rows[header + offset].starts_with("    "), "{stderr}");
+-            assert!(rows[header + offset].ends_with(name), "{stderr}");
+-            assert!(
+-                rows[header + offset + 1].contains("failed while loading"),
+-                "{stderr}"
+-            );
+-            assert!(
+-                rows[header + offset + 2].starts_with("      Next:"),
+-                "{stderr}"
+-            );
+-        }
++        let rows = stderr
++            .lines()
++            .filter(|line| line.contains("[Pi extensions Error]"))
++            .collect::<Vec<_>>();
++        assert_eq!(
++            rows,
++            ["[Pi extensions Error] First, Second: skipped: failed while loading. Check dependencies and settings, or disable."],
++            "{stderr}"
++        );
++        assert!(!stderr.contains("first.mjs"), "{stderr}");
+         assert!(!stderr.contains("<U+000A>"), "{stderr}");
+         assert!(!stderr.contains(PRIVATE), "{stderr}");
+         assert!(!String::from_utf8_lossy(&output.stdout).contains(PRIVATE));
+diff --git a/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs b/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
+index fda5c5ba..06dff977 100644
+--- a/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
++++ b/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
+@@ -398,6 +398,21 @@ async fn failed_model_transition_returns_diagnostic_without_changing_status() {
+     assert!(shell.debug_snapshot().is_empty());
+ }
+ 
++#[tokio::test]
++async fn a_queued_extension_action_says_when_it_runs_without_scheduler_jargon() {
++    let mut shell = InteractiveShell::test_shell();
++    let (queue, _) = run_active_command(
++        &mut shell,
++        Command::Extensions(commands::ExtensionsSubcommand::Reload),
++        test_run_inspection(),
++    )
++    .await;
++    assert_eq!(queue.len(), 1);
++    let snapshot = shell.debug_snapshot();
++    assert!(snapshot.contains("extension action queued; it runs when the current response finishes"));
++    assert!(!snapshot.contains("idle boundary"));
++}
++
+ #[tokio::test]
+ async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
+     for command in [
+diff --git a/docs/design/pi-diagnostics-ux.md b/docs/design/pi-diagnostics-ux.md
+new file mode 100644
+index 00000000..510586b8
+--- /dev/null
++++ b/docs/design/pi-diagnostics-ux.md
+@@ -0,0 +1,67 @@
++# Pi extension diagnostics: presentation
++
++Extension problems must read as a short, calm status, never as a log dump. This
++document inventories how they reach the screen, compares that with Pi 1.4.0 and
++records the rules the presentation now follows.
++
++## Paths to the screen
++
++| Source | Where | Before | Now |
++|---|---|---|---|
++| Factory failed or skipped at start | adapter `lib/issues.mjs` -> `notification` | one `[Extension issues]` block: absolute path, 3-line reason, `Next:` per extension, no cap | one notice per severity, extension name, one line each, at most 4 lines |
++| Handler threw, was slow, unsupported field | `ExtensionIssues.callback/slow` | same block per event | same short line, once per (extension, event) per process |
++| Turn projection could not be converted | `ExtensionIssues.observation` | block with "octet could not convert the turn to Pi event data" | `<event> data was unavailable, so some activity was missed` |
++| Custom renderers inert | `inertRenderers` | lists renderer names | `custom display not shown; the default view is used` |
++| Background host-call failure | `runtime.backgroundError` | `Pi compatibility error` with up to 4096 bytes of raw error text, every time | first line, directories stripped, 160 chars, once per distinct text, max 32 |
++| Extension process did not start | host `lifecycle.rs`, `extensions.rs` | `extension X did not start: <whole stack trace> (see /extensions)` | one line: most informative line of the reason, directories dropped, 160 chars |
++| Queued extension action (`/reload`, `/extensions`, commands) | host `modes/interactive.rs` | `extension action queued for the next idle boundary; approval and eligibility are checked there` | `extension action queued; it runs when the current response finishes` |
++| Extension `ctx.ui.notify` | adapter `api.mjs` | verbatim, attributed | unchanged: the extension's own words, as in Pi |
++| Console output of extensions | adapter stderr -> host diagnostics | bounded, only in `/extensions` | unchanged |
++| Pi setup discovery diagnostics | `resources.mjs`, `runtime.mjs` | stderr (log) only | unchanged |
++
++## Pi 1.4.0 reference
++
++- Startup: one `[Extension issues]` heading, each entry `path` + message, with
++  paths shortened relative to the package.
++- A throwing event handler: `Extension "<path>" error: <message>` followed by
++  the dimmed stack, in the chat, every time it throws.
++- Reload while streaming is refused: `Wait for the current response to finish
++  before reloading.`
++
++octet deliberately does less per problem: no stack, no path, no repeat. It
++queues the reload instead of refusing it, and says when it will run.
++
++## Rules
++
++1. A chat notice names the extension (declared display name, else package, else
++   file name) and never a path, stack, error text or console output.
++2. One reason and one action per line; actions are imperative and pronoun-free
++   so a line can name several extensions ("A, B and 3 more: ...").
++3. Identical (reason, action) pairs merge; at most three names are shown.
++4. At most four lines per notice. Overflow ends with
++   `N more problems. See /extensions for details.`
++5. Severity is split: `error` means the extension was skipped; `warning` means
++   it still runs but degraded. Each is its own notice. When the host negotiated
++   `notification_source_v1` the label is `Pi extensions`; the host owns the
++   wording of the header.
++6. Repeats are suppressed per (extension, event) for the process lifetime and
++   per distinct text for background errors. The host additionally drops an
++   identical notice for 30 s.
++7. Details live in the log: every issue, with its path and the same reason, is
++   written to the adapter's stderr, which the host keeps in `/extensions`.
++8. Raw exception text never enters a notice: even an unsupported property name
++   can be prompt data. This is unchanged and still enforced by tests.
++
++## Host primitive
++
++`startup_failure_notice` in `extensions/composition.rs` is generic: it knows
++nothing about Pi. It keeps the most informative line of an arbitrary
++failure reason, drops directories, strips controls and bounds the length. All
++Pi wording stays in `lib/issues.mjs`.
++
++## Not changed
++
++Extension command failures returned as RPC errors (a command handler that
++throws) still show the extension's own message; it is bounded to 4096 bytes by
++the adapter and shown as a single error. Clipping those is a possible
++follow-up.
+diff --git a/extensions/octet-pi-compat/lib/issues.mjs b/extensions/octet-pi-compat/lib/issues.mjs
+index cdda121c..a9d73e51 100644
+--- a/extensions/octet-pi-compat/lib/issues.mjs
++++ b/extensions/octet-pi-compat/lib/issues.mjs
+@@ -211,7 +211,7 @@ export class ExtensionIssues {
+     const runtime = this.runtime;
+     if (this.background.has(summary) || this.background.size >= 32 || runtime.stopping || runtime.transport.closed) return;
+     this.background.add(summary);
+-    runtime.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: `${summary} (details: /extensions)` })
++    runtime.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: summary })
+       .catch(failure => runtime.transport.fail(failure));
+   }
+ }
+diff --git a/extensions/octet-pi-compat/test/issues.test.mjs b/extensions/octet-pi-compat/test/issues.test.mjs
+index a3be00ff..d1831756 100644
+--- a/extensions/octet-pi-compat/test/issues.test.mjs
++++ b/extensions/octet-pi-compat/test/issues.test.mjs
+@@ -190,6 +190,17 @@ test('grouped startup diagnostics name at most three extensions per line, cap th
+   assert.doesNotMatch(diagnostics.join(''), /\x1b/);
+ });
+ 
++test('a background failure is one path-free line, once per distinct text, with the full text in the log', t => {
++  const { runtime, frames, diagnostics } = harness(t);
++  const error = new Error('Cannot find module /home/me/.octet/ext/keys.js\n    at stack frame /home/me/x.js:1:1');
++  for (let n = 0; n < 3; n++) runtime.backgroundError(error);
++  runtime.backgroundError(new Error('another'));
++  assert.deepEqual(frames.map(frame => frame.params.message), ['Cannot find module keys.js', 'another']);
++  assert.ok(frames.every(frame => frame.params.level === 'error'));
++  assert.equal(diagnostics.length, 4, 'every occurrence is logged');
++  assert.match(diagnostics[0], /\/home\/me\/\.octet\/ext\/keys\.js/);
++});
++
+ test('more than four distinct problems end in one pointer to the details instead of a longer list', () => {
+   const lines = formatIssues(Array.from({ length: 9 }, (_, n) => ({ path: `/x/e${n}.ts`, level: 'error', reason: `reason ${n}`, next: 'Act.' })));
+   assert.equal(lines.length, 4);
+-- 
+2.43.0
+

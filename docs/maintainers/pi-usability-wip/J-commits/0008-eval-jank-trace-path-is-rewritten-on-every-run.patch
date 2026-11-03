@@ -1,7 +1,7 @@
 From 155ba10aa0f5f23e33a73ad7cbd0393ac9307a09 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 08:18:45 +0000
-Subject: [PATCH 8/8] eval: jank trace path is rewritten on every run
+Subject: [PATCH 08/10] eval: jank trace path is rewritten on every run
 
 ---
  scripts/pi-eval/jank.py | 2 +-

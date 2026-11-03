@@ -128,38 +128,3 @@ index 2b839887..d928eb3d 100644
  #[cfg(unix)]
  #[tokio::test]
  async fn fatal_stdout_protocol_error_terminates_and_reaps_the_child_group() {
-diff --git a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
-index 8cc03ccf..9acb7df5 100644
---- a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
-+++ b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
-@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
- import { fileURLToPath } from 'node:url';
- import { createJiti as stockCreateJiti } from 'jiti';
- import { readPersisted, writePersisted } from './startup-cache.mjs';
-+import { runCachedScript } from './jiti-code-cache.mjs';
- 
- // Persistent module-resolution map for jiti.
- //
-@@ -29,6 +30,9 @@ const SCHEMA = 'octet.pi-jiti-resolve/v2';
- const FILE = 'jiti-resolve-v2.json';
- const PINNED = '2.7.0';
- const ANCHOR = 'function jitiResolve(e,t,i){let n,a;';
-+// Second exact anchor: the one place jiti evaluates a transformed module. Rewritten (when it
-+// occurs exactly once) to compile through a V8 code cache; see jiti-code-cache.mjs.
-+const RUN_ANCHOR = 'Ii().runInThisContext(F,{filename:c,lineOffset:0,displayErrors:!1})';
- const MAX_ENTRIES = 60000;
- 
- const bigStat = path => { try { const s = statSync(path, { bigint: true }); return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`; } catch { return null; } };
-@@ -169,9 +173,10 @@ function patchedFactory() {
-     if (JSON.parse(readFileSync(manifest, 'utf8')).version !== PINNED || process.env.OCTET_PI_JITI_RESOLVE_CACHE === '0') return patched;
-     const dist = join(dirname(manifest), 'dist', 'jiti.cjs'), source = readFileSync(dist, 'utf8');
-     if (source.split(ANCHOR).length !== 2) return patched;
--    const rewritten = source.replace(ANCHOR, 'function jitiResolve(e,t,i){const h=__octetResolveHook;return h?h(e,t,i,jitiResolveOriginal):jitiResolveOriginal(e,t,i)}function jitiResolveOriginal(e,t,i){let n,a;');
-+    let rewritten = source.replace(ANCHOR, 'function jitiResolve(e,t,i){const h=__octetResolveHook;return h?h(e,t,i,jitiResolveOriginal):jitiResolveOriginal(e,t,i)}function jitiResolveOriginal(e,t,i){let n,a;');
-+    if (source.split(RUN_ANCHOR).length === 2) rewritten = rewritten.replace(RUN_ANCHOR, `__octetRunScript(F,c,()=>${RUN_ANCHOR})`);
-     const module = { exports: {} };
--    new Function('require', 'module', 'exports', '__filename', '__dirname', '__octetResolveHook', rewritten)(createRequire(dist), module, module.exports, dist, dirname(dist), resolveCache().hook);
-+    new Function('require', 'module', 'exports', '__filename', '__dirname', '__octetResolveHook', '__octetRunScript', rewritten)(createRequire(dist), module, module.exports, dist, dirname(dist), resolveCache().hook, runCachedScript);
-     const create = module.exports;
-     const distRequire = createRequire(dist);
-     let babel;

@@ -1,0 +1,31 @@
+From c16685773f7d2f0b2fa16728f4706e210aa189d6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 12:54:27 +0000
+Subject: [PATCH 3/3] Pi compat: update pi-setup stalled-factory test to the
+ compact notice
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ extensions/octet-pi-compat/test/pi-setup.test.mjs | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/test/pi-setup.test.mjs b/extensions/octet-pi-compat/test/pi-setup.test.mjs
+index 60a7053a..dd2806c8 100644
+--- a/extensions/octet-pi-compat/test/pi-setup.test.mjs
++++ b/extensions/octet-pi-compat/test/pi-setup.test.mjs
+@@ -337,9 +337,8 @@ test('pi setup: a factory whose setup never settles is left out of the mirror, n
+   assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(stalled)]);
+   const peer = launch(t, [], { config: join(output, 'bridge.json'), env, cwd: root, metadata });
+   await peer.init(['resource_paths_v1', 'session_entries']);
+-  const issue = await peer.wait(frame => frame.method === 'notification' && /stalled\.mjs/.test(frame.params?.message ?? ''));
+-  assert.match(issue.params.message, /setup did not finish within/);
+-  assert.match(issue.params.message, /left out of the mirror/);
++  const issue = await peer.wait(frame => frame.method === 'notification' && /^Stalled: left out/.test(frame.params?.message ?? ''));
++  assert.match(issue.params.message, /left out: setup did not finish within/);
+   await peer.close();
+ });
+ 
+-- 
+2.43.0
+

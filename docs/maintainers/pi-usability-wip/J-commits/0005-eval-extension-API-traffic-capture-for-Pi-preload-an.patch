@@ -1,8 +1,8 @@
 From d92a8f356b7c9ccf7cf75e94c3105dbcef5dceba Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 07:59:59 +0000
-Subject: [PATCH 5/8] eval: extension API traffic capture for Pi (preload) and
- octet (flag-gated adapter recorder)
+Subject: [PATCH 05/10] eval: extension API traffic capture for Pi (preload)
+ and octet (flag-gated adapter recorder)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

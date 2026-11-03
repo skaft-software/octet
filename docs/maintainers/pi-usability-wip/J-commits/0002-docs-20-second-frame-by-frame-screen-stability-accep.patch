@@ -1,7 +1,7 @@
 From b35bd5e40e8cce55f019467136389c93fa6f5353 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 03:22:32 +0000
-Subject: [PATCH 2/8] docs: 20-second frame-by-frame screen-stability
+Subject: [PATCH 02/10] docs: 20-second frame-by-frame screen-stability
  acceptance for Pi compat [skip ci]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From 5c1b79a4530b7af887e25e2e45c522006efa5b1f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 08:14:12 +0000
-Subject: [PATCH 7/8] eval: jank fixture octet model declares reasoning
+Subject: [PATCH 07/10] eval: jank fixture octet model declares reasoning
 
 ---
  scripts/pi-eval/jank.py | 2 +-

@@ -1,0 +1,607 @@
+From ba3499a2a8603758e2d5fa1b277688ec7ad20bdd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 12:43:05 +0000
+Subject: [PATCH 4/4] tui: footer placeholder drawn in place until the
+ extension footer paints
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/modes/interactive.rs                  |  17 +++
+ .../src/tui/footer_placeholder.rs             | 135 ++++++++++++++++++
+ crates/octet-coding-agent/src/tui/mod.rs      |   1 +
+ crates/octet-coding-agent/src/tui/view.rs     |  38 +++++
+ .../src/tui/view/remote_ui.rs                 |  54 ++++++-
+ .../src/tui/view/remote_ui/tests.rs           | 106 ++++++++++++++
+ docs/design/pi-footer-startup.md              |  58 ++++++++
+ scripts/pi-eval/footer_repro.py               |  12 +-
+ 8 files changed, 413 insertions(+), 8 deletions(-)
+ create mode 100644 crates/octet-coding-agent/src/tui/footer_placeholder.rs
+ create mode 100644 docs/design/pi-footer-startup.md
+
+diff --git a/crates/octet-coding-agent/src/modes/interactive.rs b/crates/octet-coding-agent/src/modes/interactive.rs
+index 497104ea..c807fcba 100644
+--- a/crates/octet-coding-agent/src/modes/interactive.rs
++++ b/crates/octet-coding-agent/src/modes/interactive.rs
+@@ -12944,6 +12944,9 @@ async fn run_interactive_once(
+     // keeps the resources-only `/reload`.
+     let mut reexec = crate::reexec::ReexecController::capture().ok();
+     shell.set_runtime_config(config.clone());
++    shell.set_footer_placeholder(crate::tui::footer_placeholder::FooterPlaceholder::load(
++        &config.workspace,
++    ));
+     let _update_task = startup_update_task(
+         config.offline,
+         crate::update::startup_available_update(),
+@@ -13112,6 +13115,10 @@ async fn run_interactive_once(
+     if app.executable_extensions.startup_pending() {
+         shell.set_run_label(&pending_extension_label(&app));
+     }
++    // The placeholder footer is only for the extensions it was recorded with.
++    let mut footer_extensions = app.executable_extensions.pending_startup_names();
++    footer_extensions.sort();
++    shell.retain_footer_placeholder_for(&footer_extensions);
+     crate::app::bootstrap::startup_phase("frame.ready");
+     shell.finish_startup();
+     shell.render();
+@@ -13162,6 +13169,16 @@ async fn run_interactive_once(
+         for notice in startup_progress.notices {
+             shell.notice(notice);
+         }
++        if !footer_extensions.is_empty() {
++            if let Some(mut footer) = shell.live_footer_text() {
++                // The first live footer is the next launch's placeholder.
++                footer.extensions = std::mem::take(&mut footer_extensions);
++                footer.store(&app.config.workspace);
++            }
++        }
++        if !app.executable_extensions.startup_pending() {
++            shell.set_footer_placeholder(None);
++        }
+         if app.executable_extensions.startup_pending() {
+             shell.set_run_label(&pending_extension_label(&app));
+             extension_status_shown = true;
+diff --git a/crates/octet-coding-agent/src/tui/footer_placeholder.rs b/crates/octet-coding-agent/src/tui/footer_placeholder.rs
+new file mode 100644
+index 00000000..e8690640
+--- /dev/null
++++ b/crates/octet-coding-agent/src/tui/footer_placeholder.rs
+@@ -0,0 +1,135 @@
++//! Placeholder for an extension-owned footer while the extension loads.
++//!
++//! An extension that replaces the footer mounts it only after its process has
++//! started, seconds after the first frame. Showing octet's own footer until
++//! then makes the footer visibly swap. This keeps the plain text of the last
++//! live footer, per workspace, and draws it dimmed in the footer's place until
++//! the live component paints its first frame. It never carries styling, is only
++//! used at the width it was recorded at, and is dropped as soon as the live
++//! footer paints or startup settles without one.
++
++use std::path::{Path, PathBuf};
++
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++
++/// Rows kept per footer; a taller footer is not cached.
++const MAX_ROWS: usize = 8;
++/// Bytes kept per row.
++const MAX_ROW_BYTES: usize = 4096;
++
++#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
++pub(crate) struct FooterPlaceholder {
++    /// Terminal width the rows were recorded at.
++    pub(crate) columns: u16,
++    /// Sorted names of the extensions that were starting when it was recorded.
++    pub(crate) extensions: Vec<String>,
++    /// Plain text rows, top to bottom.
++    pub(crate) rows: Vec<String>,
++}
++
++impl FooterPlaceholder {
++    /// Rows to draw at `columns`: the recorded text at the recorded width, or
++    /// blank rows of the same height at any other width so the layout holds.
++    pub(crate) fn rows_for(&self, columns: u16) -> Vec<String> {
++        if columns == self.columns {
++            self.rows.clone()
++        } else {
++            vec![String::new(); self.rows.len()]
++        }
++    }
++
++    pub(crate) fn load(workspace: &Path) -> Option<Self> {
++        Self::load_from(&cache_path(workspace)?)
++    }
++
++    pub(crate) fn store(&self, workspace: &Path) {
++        if let Some(path) = cache_path(workspace) {
++            self.store_to(&path);
++        }
++    }
++
++    fn load_from(path: &Path) -> Option<Self> {
++        let cached: Self = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
++        cached.is_bounded().then_some(cached)
++    }
++
++    /// Best effort: a cache that cannot be written only costs the placeholder.
++    fn store_to(&self, path: &Path) {
++        if !self.is_bounded() {
++            return;
++        }
++        let Some(parent) = path.parent() else { return };
++        let Ok(bytes) = serde_json::to_vec(self) else {
++            return;
++        };
++        if std::fs::create_dir_all(parent).is_err() {
++            return;
++        }
++        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
++        if std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, path).is_err() {
++            let _ = std::fs::remove_file(&temporary);
++        }
++    }
++
++    fn is_bounded(&self) -> bool {
++        !self.rows.is_empty()
++            && self.rows.len() <= MAX_ROWS
++            && self.rows.iter().all(|row| row.len() <= MAX_ROW_BYTES)
++            && self.rows.iter().any(|row| !row.trim().is_empty())
++    }
++}
++
++fn cache_path(workspace: &Path) -> Option<PathBuf> {
++    let digest = Sha256::digest(workspace.to_string_lossy().as_bytes());
++    let key: String = digest[..12].iter().map(|byte| format!("{byte:02x}")).collect();
++    Some(
++        dirs::home_dir()
++            .filter(|home| home.is_absolute())?
++            .join(".octet/cache/footer")
++            .join(format!("{key}.json")),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn sample() -> FooterPlaceholder {
++        FooterPlaceholder {
++            columns: 80,
++            extensions: vec!["pi".into()],
++            rows: vec!["~/work   Model 0/272K (0%)".into()],
++        }
++    }
++
++    #[test]
++    fn rows_hold_the_height_at_another_width() {
++        let footer = sample();
++        assert_eq!(footer.rows_for(80), footer.rows);
++        assert_eq!(footer.rows_for(100), vec![String::new()]);
++    }
++
++    #[test]
++    fn unbounded_or_empty_footers_are_not_cached() {
++        let mut footer = sample();
++        footer.rows = vec!["x".repeat(MAX_ROW_BYTES + 1)];
++        assert!(!footer.is_bounded());
++        footer.rows = vec!["  ".into()];
++        assert!(!footer.is_bounded());
++        footer.rows = vec!["a".into(); MAX_ROWS + 1];
++        assert!(!footer.is_bounded());
++    }
++
++    #[test]
++    fn a_stored_footer_round_trips_and_workspaces_do_not_share() {
++        let home = tempfile::tempdir().unwrap();
++        let path = home.path().join("nested/footer.json");
++        assert_eq!(FooterPlaceholder::load_from(&path), None);
++        sample().store_to(&path);
++        assert_eq!(FooterPlaceholder::load_from(&path), Some(sample()));
++        std::fs::write(&path, b"not json").unwrap();
++        assert_eq!(FooterPlaceholder::load_from(&path), None);
++        assert_ne!(cache_path(Path::new("/a")), cache_path(Path::new("/b")));
++    }
++}
+diff --git a/crates/octet-coding-agent/src/tui/mod.rs b/crates/octet-coding-agent/src/tui/mod.rs
+index 94b06919..8cbb177a 100644
+--- a/crates/octet-coding-agent/src/tui/mod.rs
++++ b/crates/octet-coding-agent/src/tui/mod.rs
+@@ -5,6 +5,7 @@ pub mod composer_surface;
+ pub(crate) mod context;
+ // Host-owned cache used by negotiated API 0.4 remote components.
+ pub(crate) mod extension_components;
++pub(crate) mod footer_placeholder;
+ pub(crate) mod fuzzy;
+ pub mod keymap;
+ pub(crate) mod layout;
+diff --git a/crates/octet-coding-agent/src/tui/view.rs b/crates/octet-coding-agent/src/tui/view.rs
+index 2a380a11..3a25ecc7 100644
+--- a/crates/octet-coding-agent/src/tui/view.rs
++++ b/crates/octet-coding-agent/src/tui/view.rs
+@@ -1854,6 +1854,9 @@ pub(crate) struct ShellState {
+     /// Current host-projected extension UI. It contains only semantic text and
+     /// finite roles; rendering remains owned by the shell theme and layout.
+     extension_ui: ShellExtensionUi,
++    /// Last live extension footer, drawn dimmed in the footer's place until the
++    /// extension's own footer paints.
++    footer_placeholder: Option<super::footer_placeholder::FooterPlaceholder>,
+     /// Host decision for the composer slot's editor text, delivered by the
+     /// extension host on its next drain. One slot, one latest write: an
+     /// admission refusal replaces a pending clear instead of racing it.
+@@ -2274,6 +2277,7 @@ impl ShellState {
+             slash_scroll: Default::default(),
+             slash_popup_dismissed: Default::default(),
+             extension_ui: Default::default(),
++            footer_placeholder: None,
+             pending_composer_write: Default::default(),
+             desktop_notifications: Default::default(),
+             extension_autocomplete: Default::default(),
+@@ -6617,6 +6621,37 @@ impl InteractiveShell {
+         true
+     }
+ 
++    /// Draw `placeholder` where the footer goes until an extension footer paints.
++    pub(crate) fn set_footer_placeholder(
++        &mut self,
++        placeholder: Option<super::footer_placeholder::FooterPlaceholder>,
++    ) {
++        self.state.borrow_mut().footer_placeholder = placeholder;
++    }
++
++    /// Drop the placeholder unless it was recorded for exactly these extensions.
++    pub(crate) fn retain_footer_placeholder_for(&mut self, extensions: &[String]) {
++        let mut state = self.state.borrow_mut();
++        if state
++            .footer_placeholder
++            .as_ref()
++            .is_some_and(|placeholder| placeholder.extensions != extensions)
++        {
++            state.footer_placeholder = None;
++        }
++    }
++
++    /// Plain text of the live extension footer at the current width, if it has painted.
++    pub(crate) fn live_footer_text(&self) -> Option<super::footer_placeholder::FooterPlaceholder> {
++        let state = self.state.borrow();
++        let (columns, rows) = state.size;
++        Some(super::footer_placeholder::FooterPlaceholder {
++            columns,
++            extensions: Vec::new(),
++            rows: remote_ui::live_footer_rows(&state.extension_ui.remote, columns, rows)?,
++        })
++    }
++
+     /// Install one immutable cached remote UI projection. No extension callback
+     /// runs on the renderer; fullscreen rows use the existing transient overlay.
+     pub(crate) fn set_remote_ui(
+@@ -6637,6 +6672,9 @@ impl InteractiveShell {
+             != projection.mount(Placement::Header)
+             || (projection.mount(Placement::Header).is_some()
+                 && state.extension_ui.remote.components != projection.components);
++        if remote_ui::live_footer_rows(&projection, state.size.0, state.size.1).is_some() {
++            state.footer_placeholder = None;
++        }
+         let chrome = projection.chrome.as_ref();
+         state.extension_ui.working = chrome.map(|chrome| chrome.working.clone());
+         state.extension_ui.hidden_thinking_label =
+diff --git a/crates/octet-coding-agent/src/tui/view/remote_ui.rs b/crates/octet-coding-agent/src/tui/view/remote_ui.rs
+index 7ec77d03..4e03005d 100644
+--- a/crates/octet-coding-agent/src/tui/view/remote_ui.rs
++++ b/crates/octet-coding-agent/src/tui/view/remote_ui.rs
+@@ -31,6 +31,40 @@ fn rows(
+         .collect()
+ }
+ 
++/// Plain text of the extension footer once it has painted at this geometry.
++pub(super) fn live_footer_rows(
++    projection: &Projection,
++    width: u16,
++    height: u16,
++) -> Option<Vec<String>> {
++    let mount = projection.mount(Placement::Footer)?;
++    let rows: Vec<String> = projection
++        .lines(mount, width, height)
++        .iter()
++        .map(|line| {
++            sexy_tui_rs::strip_terminal_sequences(&truncate_to_width(
++                line,
++                usize::from(width),
++                Some(""),
++            ))
++        })
++        .collect();
++    (!rows.is_empty()).then_some(rows)
++}
++
++/// The dimmed placeholder rows for the footer, while an extension footer is
++/// expected but has not painted.
++fn placeholder_rows(state: &ShellState, width: u16) -> Option<Vec<String>> {
++    let placeholder = state.footer_placeholder.as_ref()?;
++    Some(
++        placeholder
++            .rows_for(width)
++            .iter()
++            .map(|row| super::fit_line(&state.theme.dim(row), width))
++            .collect(),
++    )
++}
++
+ pub(super) fn fullscreen_overlay(
+     projection: &Projection,
+     width: u16,
+@@ -76,6 +110,18 @@ pub(super) fn shell_chrome(
+         };
+     }
+     let mut chrome = builtin_shell_chrome::shell_chrome(state, width, now);
++    let placeholder = placeholder_rows(state, width);
++    if state.startup_pending && state.panel.is_none() && state.tool_input_prompt.is_none() {
++        // The startup composer reserves a blank footer row; the placeholder
++        // fills it so the live footer later replaces it in place.
++        if let Some(rows) = placeholder.filter(|_| chrome.composer.last().is_some_and(String::is_empty))
++        {
++            chrome.composer.pop();
++            chrome.transcript_rows = (chrome.transcript_rows + 1).saturating_sub(rows.len());
++            chrome.extension_below = rows;
++        }
++        return chrome;
++    }
+     if state.startup_pending || state.panel.is_some() || state.tool_input_prompt.is_some() {
+         return chrome;
+     }
+@@ -86,7 +132,11 @@ pub(super) fn shell_chrome(
+         // between that prefix and the ordinary composer.
+         chrome.header.clear();
+     }
+-    let footer = remote.mount(Placement::Footer);
++    // A mounted footer that has not painted yet keeps the host's footer row
++    // (the placeholder, or the built-in one) instead of leaving a blank row.
++    let footer = remote
++        .mount(Placement::Footer)
++        .filter(|_| live_footer_rows(remote, width, height).is_some());
+     let editor = remote.mount(Placement::Editor);
+     let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width)
+         && chrome.suggestions.is_empty();
+@@ -103,6 +153,8 @@ pub(super) fn shell_chrome(
+     }
+     let mut footer_rows = if let Some(footer) = footer {
+         rows(remote, footer, width, height, budget)
++    } else if let Some(rows) = placeholder {
++        rows
+     } else {
+         if let Some(footer) = builtin_footer {
+             chrome.composer.push(footer);
+diff --git a/crates/octet-coding-agent/src/tui/view/remote_ui/tests.rs b/crates/octet-coding-agent/src/tui/view/remote_ui/tests.rs
+index bf78c1bb..c70dc1a1 100644
+--- a/crates/octet-coding-agent/src/tui/view/remote_ui/tests.rs
++++ b/crates/octet-coding-agent/src/tui/view/remote_ui/tests.rs
+@@ -343,3 +343,109 @@ async fn remote_ui_fullscreen_keeps_host_picker_priority_and_restores_draft() {
+     assert!(!shell.has_overlay());
+     assert_eq!(shell.extension_editor_snapshot().text, "saved draft");
+ }
++
++fn placeholder(columns: u16, text: &str) -> crate::tui::footer_placeholder::FooterPlaceholder {
++    crate::tui::footer_placeholder::FooterPlaceholder {
++        columns,
++        extensions: vec!["pi".into()],
++        rows: vec![text.into()],
++    }
++}
++
++#[test]
++fn footer_placeholder_takes_the_built_in_footer_row_until_the_live_footer_paints() {
++    let size = (80, 24);
++    let mut state = ShellState {
++        size,
++        ..ShellState::default()
++    };
++    let builtin = shell_chrome(&state, size.0, Instant::now());
++    assert!(builtin.extension_below.is_empty());
++
++    state.footer_placeholder = Some(placeholder(size.0, "~/work  Model 0/272K"));
++    let dimmed = shell_chrome(&state, size.0, Instant::now());
++    assert_eq!(dimmed.composer.len() + 1, builtin.composer.len());
++    assert_eq!(dimmed.extension_below.len(), 1);
++    assert!(dimmed.extension_below[0].contains("~/work  Model 0/272K"));
++    assert_eq!(dimmed.transcript_rows, builtin.transcript_rows);
++
++    // The footer is mounted but has not painted: the placeholder stays, no blank row.
++    let mut remote = projection(size, &[(Placement::Footer, "live footer")]);
++    Arc::make_mut(&mut remote.components)
++        .store_render(&remote.mounts[0].id, size.0, Vec::new())
++        .unwrap();
++    state.extension_ui.remote = remote;
++    assert_eq!(
++        shell_chrome(&state, size.0, Instant::now()).extension_below,
++        dimmed.extension_below
++    );
++
++    // The live footer replaces it in the same row.
++    state.extension_ui.remote = projection(size, &[(Placement::Footer, "live footer")]);
++    let live = shell_chrome(&state, size.0, Instant::now());
++    assert_eq!(live.extension_below, vec!["live footer\x1b[0m"]);
++    assert_eq!(live.composer, dimmed.composer);
++    assert_eq!(live.transcript_rows, dimmed.transcript_rows);
++}
++
++#[test]
++fn unpainted_footer_without_a_placeholder_keeps_the_built_in_footer() {
++    let size = (80, 24);
++    let mut state = ShellState {
++        size,
++        ..ShellState::default()
++    };
++    let builtin = shell_chrome(&state, size.0, Instant::now());
++    let mut remote = projection(size, &[(Placement::Footer, "live footer")]);
++    Arc::make_mut(&mut remote.components)
++        .store_render(&remote.mounts[0].id, size.0, Vec::new())
++        .unwrap();
++    state.extension_ui.remote = remote;
++    let mounted = shell_chrome(&state, size.0, Instant::now());
++    assert_eq!(mounted.composer, builtin.composer);
++    assert!(mounted.extension_below.is_empty());
++}
++
++#[test]
++fn footer_placeholder_keeps_its_height_at_another_width_and_fills_the_startup_row() {
++    let size = (80, 24);
++    let mut state = ShellState {
++        size,
++        ..ShellState::default()
++    };
++    state.footer_placeholder = Some(placeholder(100, "recorded at another width"));
++    let rows = shell_chrome(&state, size.0, Instant::now()).extension_below;
++    assert_eq!(rows.len(), 1);
++    assert!(!rows[0].contains("recorded"));
++
++    state.footer_placeholder = Some(placeholder(size.0, "startup footer"));
++    state.startup_pending = true;
++    let chrome = shell_chrome(&state, size.0, Instant::now());
++    assert!(chrome.extension_below[0].contains("startup footer"));
++    assert!(chrome
++        .composer
++        .iter()
++        .all(|row| !row.contains("startup footer")));
++}
++
++#[test]
++fn live_footer_paint_drops_the_placeholder() {
++    let mut shell = super::super::InteractiveShell::test_shell();
++    let size = shell.terminal_dimensions();
++    shell.set_footer_placeholder(Some(placeholder(size.0, "old footer")));
++    shell.set_remote_ui(projection(size, &[(Placement::BelowEditor, "widget")]));
++    assert!(shell.state.borrow().footer_placeholder.is_some());
++    shell.set_remote_ui(projection(size, &[(Placement::Footer, "live footer")]));
++    assert!(shell.state.borrow().footer_placeholder.is_none());
++    assert_eq!(shell.live_footer_text().unwrap().rows, vec!["live footer"]);
++}
++
++#[test]
++fn placeholder_is_kept_only_for_the_extensions_it_was_recorded_with() {
++    let mut shell = super::super::InteractiveShell::test_shell();
++    shell.set_footer_placeholder(Some(placeholder(80, "footer")));
++    shell.retain_footer_placeholder_for(&["pi".into()]);
++    assert!(shell.state.borrow().footer_placeholder.is_some());
++    shell.retain_footer_placeholder_for(&["pi".into(), "other".into()]);
++    assert!(shell.state.borrow().footer_placeholder.is_none());
++}
+diff --git a/docs/design/pi-footer-startup.md b/docs/design/pi-footer-startup.md
+new file mode 100644
+index 00000000..9d0aac87
+--- /dev/null
++++ b/docs/design/pi-footer-startup.md
+@@ -0,0 +1,58 @@
++# Pi footer at startup: no swap, no gap, same in every directory
++
++Parity reference: Pi 1.4.0. Fixture: the maintainer's Pi setup (13 autoloaded packages,
++`ghostty-dark`, `tuiMode: fullscreen`), model `gpt-5.6-luna` named `GPT-5.6 Luna`, 272K context.
++
++## What owns the footer
++
++Pi's built-in footer (`0.0%/272k (auto)` and the model on one line) is replaced by the
++`powerline-footer` extension of `pi-agent-extensions` 0.5.4: `ctx.ui.setFooter(...)` in
++`session_start`. Its single row is `<short cwd> ... <model name> <used>/<window> (<pct>%)
++[| $cost (sub)] | <elapsed> <clock>`, followed by ` | <extension statuses>`, and the whole row is
++cut to the terminal width with `...`. That is why the maintainer's Pi shows `1m 22...` at the end.
++No other autoloaded package sets a footer (`pi-zentui`, which does, is `autoload: false`).
++
++## Findings (octet before this change, warm, 120 columns)
++
++| t | footer rows |
++|---|---|
++| 0.0 s | none |
++| 0.04 s | octet's own footer `GPT-5.6 Luna · 1%/272K · $0   <path>` |
++| 13.6 s | still octet's footer, `PI-EVAL-READY` printed under it |
++| 14.2 s | blank footer row (the mount exists, its first frame has not arrived) |
++| 14.5 s | the Pi footer |
++
++1. **Swap.** The extension mounts seconds after the first frame; until then the host draws its
++   own footer, then a blank row, then the live one.
++2. **Cwd = home never loads the Pi setup.** `discoverPiSetup` treats everything under
++   `<cwd>/.pi` as project scope. From the home directory that contains the user's agent dir
++   (`~/.pi/agent`), so with an untrusted workspace every extension, theme and keybinding was
++   dropped as "untrusted project .pi paths are not mirrored" and `factories=0`: the footer
++   never appears and octet's footer stays. `lib/pi-setup.mjs` now excludes the agent dir from
++   the project-trust gate (user scope, as in Pi).
++3. **Fidelity.** With the fixture model the live footer is already cell for cell Pi's: same
++   cells, same colours. The facts it reads (`ctx.model.name`, `getContextUsage()`,
++   `modelRegistry.isUsingOAuth`) come from the host's model view, which carries name, window and
++   `oauth`.
++
++## Design: placeholder per workspace, drawn by a generic host primitive
++
++The host (Pi-agnostic) keeps the plain text of the first live extension footer per workspace in
++`~/.octet/cache/footer/<hash>.json` (`tui/footer_placeholder.rs`): columns, the sorted names of
++the extensions that were starting, and at most 8 rows of 4 KiB. At the next launch it:
++
++- loads it when the shell is entered and draws it dimmed in the footer's position, including
++  the startup composer's reserved footer row, so octet's footer never paints;
++- keeps it only when the extensions starting at `frame.ready` are exactly the recorded ones;
++- keeps its height at any other width (blank rows) rather than drawing misaligned text;
++- keeps it while the footer is mounted but has not painted (this was the blank row);
++- drops it when the live footer paints (the live rows take the same position, so nothing moves)
++  or when extension startup settles without a footer (octet's footer returns).
++
++Never stale as live: the placeholder carries no styling, is dimmed, is only ever replaced by the
++live component, and is never written back. A footer that never mounts or is cleared falls back to
++octet's own. Writes are best effort and atomic; a missing, unreadable or oversized cache only means
++no placeholder.
++
++First launch of a setup has no cache and still shows octet's footer until the live one paints;
++only the blank row is gone.
+diff --git a/scripts/pi-eval/footer_repro.py b/scripts/pi-eval/footer_repro.py
+index 101dd9a4..a41b116b 100644
+--- a/scripts/pi-eval/footer_repro.py
++++ b/scripts/pi-eval/footer_repro.py
+@@ -60,7 +60,6 @@ def main(argv: list[str] | None = None) -> int:
+     parser.add_argument("--seconds", type=float, default=20.0)
+     parser.add_argument("--prompt")
+     parser.add_argument("--warm", action="store_true", help="launch once first so the recorded launch starts warm")
+-    parser.add_argument("--homes", type=Path, help="persistent homes directory; an existing home is reused (warm caches) instead of copied")
+     args = parser.parse_args(argv)
+ 
+     out = args.out
+@@ -70,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
+     fixture = fx.Fixture(root=args.fixture, lock={"pi": {"version": meta["pi_version"]}})
+     provider = MockProvider(model_id=MODEL_ID)
+     provider.default_reply("FOOTER-REPLY-OK")
+-    env = run.make_env(args.homes or out / "homes", args.target, 0, provider.port)
++    env = run.make_env(out / "homes", args.target, 0, provider.port)
+     prepare_linked_home(fixture, env)
+     fx.write_provider_config(env.home, provider.port, model=MODEL_ID, name=MODEL_NAME, context_window=CONTEXT)
+     tmp = run.leg_tmp(env)
+@@ -78,12 +77,12 @@ def main(argv: list[str] | None = None) -> int:
+     env.workspace.mkdir(parents=True, exist_ok=True)
+     env.sessions.mkdir(parents=True, exist_ok=True)
+     cwd = env.home if args.cwd == "home" else env.workspace
+-    if args.target == "octet" and args.homes is None:
++    if args.target == "octet":
+         run.reset_adapter_cache(args.extensions_dir)
+         launch_args = run.octet_args(
+             env, name=None, agent=False, extension_dirs=[args.extensions_dir], enable_extensions=["octet-pi-compat"],
+         )
+-        launch_args[launch_args.index("--model") + 1] = f"custom/{MODEL_ID}"
++        launch_args[launch_args.index("--model") + 1] = f"custom/{MODEL_NAME}"
+         launch_args[launch_args.index("--workspace") + 1] = str(cwd)
+         binary = args.octet
+         child = env.child_env(REPO, extra={"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp)})
+@@ -100,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
+ 
+     if args.warm:
+         warm = start("warmup")
+-        deadline = time.monotonic() + 90
++        deadline = time.monotonic() + 420
+         while core.READY_MARKER not in warm.screen_text() and time.monotonic() < deadline:
+             time.sleep(0.1)
+         warm.close(timeout=10)
+@@ -118,8 +117,7 @@ def main(argv: list[str] | None = None) -> int:
+     flicker.dump_chunks([(t - session.started_at, d) for t, d in session.chunks], out / "chunks.jsonl")
+     code = session.close(timeout=10)
+     provider.close()
+-    if args.homes is None:
+-        shutil.rmtree(env.root, ignore_errors=True)
++    shutil.rmtree(env.root, ignore_errors=True)
+     print(f"{args.target} {args.cwd}: ready={ready} exit={code} chunks={len(session.chunks)}")
+     return 0
+ 
+-- 
+2.43.0
+

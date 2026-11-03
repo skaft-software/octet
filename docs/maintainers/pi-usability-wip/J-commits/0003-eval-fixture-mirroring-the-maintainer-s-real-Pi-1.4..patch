@@ -1,7 +1,7 @@
 From afc77ecb232cb5bb08dfe3f8a4d094e483c885c2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 03:24:57 +0000
-Subject: [PATCH 3/8] eval: fixture mirroring the maintainer's real Pi 1.4.0
+Subject: [PATCH 03/10] eval: fixture mirroring the maintainer's real Pi 1.4.0
  setup
 
 29 packages at the maintainer's versions (13 autoload, 16 autoload:false)

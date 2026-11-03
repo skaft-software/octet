@@ -1,7 +1,7 @@
 From abee99bee70f67e25d00e2ddb31ffce4555c92aa Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 08:08:09 +0000
-Subject: [PATCH 3/3] pi-compat: mirror the user agent dir when cwd is the home
+Subject: [PATCH 3/4] pi-compat: mirror the user agent dir when cwd is the home
  directory
 
 From HOME the project .pi contains ~/.pi/agent, so every user-scope extension,

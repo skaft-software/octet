@@ -1,0 +1,210 @@
+From 8ea213937fc578c6a992ee9b5834f161f257d40b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 13:03:59 +0000
+Subject: [PATCH 10/10] eval: jank scenarios (tool call, commands, slash_pkg),
+ stable trace path, mock tool-call replies
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/api-trace.mjs |   2 +-
+ scripts/e2e/octet_e2e/provider.py            |   7 +-
+ scripts/pi-eval/jank.py                      | 101 ++++++++++++++++++-
+ 3 files changed, 103 insertions(+), 7 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/api-trace.mjs b/extensions/octet-pi-compat/lib/api-trace.mjs
+index 131cbb03..1a4f4be7 100644
+--- a/extensions/octet-pi-compat/lib/api-trace.mjs
++++ b/extensions/octet-pi-compat/lib/api-trace.mjs
+@@ -16,7 +16,7 @@ const clip = (value) => {
+     return '[unserialisable]';
+   }
+ };
+-const log = (row) => appendFileSync(out, `${JSON.stringify({ t: +((performance.now() - started) / 1000).toFixed(4), w: Date.now() / 1000, ...row })}\n`);
++const log = (row) => appendFileSync(out, `${JSON.stringify({ t: +((performance.now() - started) / 1000).toFixed(4), w: Date.now() / 1000, p: process.pid, ...row })}\n`);
+ export const extensionLabel = (entry) => String(entry).split('node_modules/').pop().split('/').slice(-4).join('/');
+ 
+ function timed(kind, ext, name, args, run) {
+diff --git a/scripts/e2e/octet_e2e/provider.py b/scripts/e2e/octet_e2e/provider.py
+index 7196e0cc..62660a60 100644
+--- a/scripts/e2e/octet_e2e/provider.py
++++ b/scripts/e2e/octet_e2e/provider.py
+@@ -31,6 +31,8 @@ class Reply:
+     gate: threading.Event | None = None
+     gate_timeout: float = 20.0
+     usage: bool = True
++    #: Tool calls to end the turn with, as (name, JSON arguments text) pairs.
++    tool_calls: tuple[tuple[str, str], ...] = ()
+ 
+ 
+ @dataclass
+@@ -205,8 +207,11 @@ class MockProvider:
+                         )
+                     if reply.gate is not None:
+                         reply.gate.wait(timeout=reply.gate_timeout)
++                    for index, (name, arguments) in enumerate(reply.tool_calls):
++                        call = {"index": index, "id": f"call_mock_{index}", "type": "function", "function": {"name": name, "arguments": arguments}}
++                        self._write_chunk({**base, "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]})
+                     final: dict = {
+-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
++                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if reply.tool_calls else "stop"}],
+                     }
+                     if reply.usage:
+                         words = max(1, len((reply.text or " ").split()))
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 014af51d..5cf035c1 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -18,6 +18,7 @@ import errno
+ import fcntl
+ import json
+ import os
++import re
+ import select
+ import shutil
+ import signal
+@@ -155,6 +156,55 @@ def sc_prompt_idle(s, p, n):
+     time.sleep(2)
+ 
+ 
++def sc_tool(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    notes = s.cwd / "notes.txt"
++    notes.write_text("alpha\nbeta\ngamma\n")
++    with p._lock:
++        p._rules.clear()
++    p.rule(lambda r: any(m.get("role") == "tool" for m in r.messages), lambda r: Reply(text="REPLY-OK after tool"))
++    p.rule(lambda r: True, lambda r: Reply(text="Reading the file.", tool_calls=(("read", json.dumps({"path": str(notes)})),)))
++    n["sent"] = s.now()
++    s.write("read notes.txt\r")
++    n["permission"] = s.wait_text("Permission Required", 15)
++    if n["permission"]:
++        time.sleep(1)
++        s.write("y")
++        time.sleep(0.2)
++        s.write("y")
++    n["reply"] = s.wait_text("REPLY-OK after tool", 40)
++    time.sleep(2)
++
++
++COMMANDS = [
++    "answer", "bg", "bg-tasks", "btw", "claude-cache", "context-simple", "control-sessions", "curator", "end-review", "files", "fusion",
++    "fusion-models", "google-account", "handoff", "jobs", "learn-memory-tool", "lens-health", "lens-map", "lens-perf", "lens-tools",
++    "lens-widget-toggle", "llama", "logs", "loop", "mcp", "mcp-auth", "memory-insights", "memory-skills", "pi-mcp", "permission-system",
++    "prompt-workflow", "review", "run", "search", "session-breakdown", "sessions", "subagent-cost", "subagents", "subagents-doctor",
++    "subagents-fleet", "subagents-guide", "subagents-models", "subagents-profiles", "tasks", "todos", "toggle-auto-read", "websearch",
++    "whimsy", "workflow",
++]
++
++
++def sc_commands(s, p, n):
++    """Each extension command, one at a time; kill/exit/bye/termdraw (which take over the terminal) are left out."""
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(3)
++    for name in COMMANDS:
++        n[f"cmd_{name}"] = s.now()
++        s.write(f"/{name}")
++        time.sleep(0.4)
++        s.write("\r")
++        time.sleep(1.5)
++        n[f"cmd_{name}_end"] = s.now()
++        s.write("\x1b")
++        time.sleep(0.2)
++        s.write("\x1b")
++        time.sleep(0.2)
++        s.write("\x15")
++        time.sleep(0.3)
++
++
+ def sc_back_to_back(s, p, n):
+     n["ready"] = s.wait_text(core.READY_MARKER)
+     _script(p, Reply(text="REPLY-OK one two three four five six seven eight", chunk_delay=0.25))
+@@ -210,6 +260,18 @@ def _await_reload(s, n) -> None:
+     time.sleep(3)
+ 
+ 
++def sc_slash_pkg(s, p, n):
++    """Prompt templates and skills that ship in the bigpowers package: are they in the menu?"""
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++    for name in ("/align-grid", "/skill:align", "/audit"):
++        n[f"query_{name[1:]}"] = s.now()
++        _typed(s, name, 0.05)
++        time.sleep(1.5)
++        s.write("\x15")
++        time.sleep(0.5)
++
++
+ def sc_reload(s, p, n):
+     n["ready"] = s.wait_text(core.READY_MARKER)
+     time.sleep(2)
+@@ -317,7 +379,11 @@ def record(args) -> dict:
+     if args.target == "octet":
+         if not args.keep_home:
+             run.reset_adapter_cache(args.extensions_dir)
+-        extensions_dir = traced_extensions(args.extensions_dir, Path(args.keep_home or out), out / "api-trace.jsonl") if args.trace else args.extensions_dir
++        # The path is baked into the copied adapter source, which keys its startup caches: it must not
++        # change between runs of a warm home, so the trace is written beside the home and moved afterwards.
++        trace_file = Path(args.keep_home or out) / "api-trace.jsonl"
++        trace_file.unlink(missing_ok=True)
++        extensions_dir = traced_extensions(args.extensions_dir, Path(args.keep_home or out), trace_file) if args.trace else args.extensions_dir
+         argv = run.octet_args(env, name=None, agent=False, extension_dirs=[extensions_dir], enable_extensions=["octet-pi-compat"])
+         argv[argv.index("--workspace") + 1] = str(cwd)
+         argv[argv.index("--model") + 1] = f"custom/{MODEL_NAME}"
+@@ -355,6 +421,8 @@ def record(args) -> dict:
+         provider.close()
+         shutil.rmtree(out / "homes", ignore_errors=True)
+         shutil.rmtree(out / "extensions", ignore_errors=True)
++        if args.trace and args.target == "octet" and trace_file != out / "api-trace.jsonl":
++            shutil.move(trace_file, out / "api-trace.jsonl")
+     notes.update(target=args.target, scenario=args.scenario, cwd=args.cwd)
+     (out / "meta.json").write_text(json.dumps(notes, indent=1))
+     return notes
+@@ -373,18 +441,41 @@ def load_frames(directory: Path):
+     return outs, ins
+ 
+ 
++SYNC = re.compile(rb"(\x1b\[\?2026[hl])")
++
++
+ def replay(directory: Path):
+-    """Yield (t, rows_text, screen) after every PTY write, applying recorded resizes."""
++    """Yield (t, rows_text, screen) at every point a terminal could paint.
++
++    Both products bracket frames in synchronized output (CSI ?2026 h ... l), so a state inside a
++    bracket is never visible: states are taken at each closing `l` and at the end of a write that
++    is not inside a bracket. Recorded resizes are applied at their timestamps."""
+     screen = Screen(run.COLUMNS, run.ROWS)
+     meta = json.loads((directory / "meta.json").read_text())
+     resizes = sorted((meta[k], k) for k in meta if k.startswith("resize_"))
++    synchronized = False
++
++    def snapshot(t):
++        screen.responses = []
++        return t, [line.rstrip() for line in screen.text().split("\n")], screen
++
+     for t, data in load_frames(directory)[0]:
+         while resizes and resizes[0][0] <= t:
+             cols, rows = resizes.pop(0)[1][len("resize_"):].split("x")
+             screen.resize(int(cols), int(rows))
+-        screen.feed(data)
+-        screen.responses = []
+-        yield t, [line.rstrip() for line in screen.text().split("\n")], screen
++        dirty = False
++        for piece in SYNC.split(data):
++            if piece == b"\x1b[?2026h":
++                synchronized = True
++            elif piece == b"\x1b[?2026l":
++                synchronized = False
++                yield snapshot(t)
++                dirty = False
++            elif piece:
++                screen.feed(piece)
++                dirty = True
++        if dirty and not synchronized:
++            yield snapshot(t)
+ 
+ 
+ def summarize(directory: Path) -> dict:
+-- 
+2.43.0
+

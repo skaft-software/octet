@@ -1,7 +1,7 @@
 From 0b3f3689cb69975766c02a5c55b7a46e6a717a5e Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 08:10:08 +0000
-Subject: [PATCH 6/8] eval: log event delivery before the handler settles
+Subject: [PATCH 06/10] eval: log event delivery before the handler settles
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
