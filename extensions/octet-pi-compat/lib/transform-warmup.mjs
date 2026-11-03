@@ -2,6 +2,7 @@ import { Worker, isMainThread, parentPort, workerData } from 'node:worker_thread
 import { availableParallelism, setPriority } from 'node:os';
 import { spawn } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const TYPESCRIPT = /\.[cm]?tsx?$/;
 // Everything jiti transforms: TypeScript, and ESM JavaScript (large bundled
@@ -31,7 +32,7 @@ export function startTransformWarmup(files, fsCache, { workers, timeoutMs = 6000
   }).filter(item => item && item.size <= MAX_FILE_BYTES).sort((a, b) => b.size - a.size).map(item => item.file);
   const count = warmupWorkerCount(targets.length, workers);
   if (count < 1) return none;
-  const child = spawn(process.execPath, [new URL(import.meta.url).pathname, CHILD_FLAG, String(count), String(nice)],
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), CHILD_FLAG, String(count), String(nice)],
     { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, OCTET_TRANSFORM_WARMUP_CACHE: fsCache } });
   let output = '';
   child.stdout.setEncoding('utf8');

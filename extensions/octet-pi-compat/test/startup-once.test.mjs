@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { reviewedSourceHashes } from '../lib/runtime.mjs';
 import { SourceFingerprints } from '../lib/source-fingerprints.mjs';
@@ -85,4 +86,18 @@ test('warm-up transforms TypeScript and ESM JavaScript, never .cjs or declaratio
   const result = await warmTransformCache(Object.keys(files).map(name => join(dir, name)), join(dir, 'cache'));
   assert.equal(result.transformed, 2);
   assert.equal(readdirSync(join(dir, 'cache')).length, 2);
+});
+
+test('warm-up child starts when the extension path needs URL decoding (spaces)', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'octet-warm-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lib = join(root, 'with space', 'lib');
+  mkdirSync(lib, { recursive: true });
+  copyFileSync(new URL('../lib/transform-warmup.mjs', import.meta.url), join(lib, 'transform-warmup.mjs'));
+  writeFileSync(join(root, 'with space', 'package.json'), '{"type":"module"}');
+  symlinkSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules'), join(root, 'with space', 'node_modules'));
+  writeFileSync(join(root, 'a.ts'), 'export const a: number = 1;\n');
+  const { warmTransformCache: warm } = await import(join(lib, 'transform-warmup.mjs'));
+  const result = await warm([join(root, 'a.ts')], join(root, 'cache'));
+  assert.equal(result.transformed, 1);
 });
