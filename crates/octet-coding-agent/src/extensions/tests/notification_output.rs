@@ -209,3 +209,24 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group() 
     .unwrap();
     app.executable_extensions.shutdown().await;
 }
+
+#[test]
+fn a_failed_start_is_one_short_line_without_stack_or_directories() {
+    let node = "node:internal/modules/esm/resolve:275\n      throw new ERR_MODULE_NOT_FOUND(\n            ^\n\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/me/.octet/ext/node_modules/pkg/keys.js' imported from /home/me/.octet/ext/lib/api.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:275:11)\n  code: 'ERR_MODULE_NOT_FOUND'\n  Node.js v22.23.4";
+    assert_eq!(
+        startup_failure_notice("octet-pi-compat", node),
+        "extension octet-pi-compat did not start: Error [ERR_MODULE_NOT_FOUND]: Cannot find module keys.js imported from api.mjs (see /extensions)"
+    );
+    assert_eq!(
+        startup_failure_notice("x", "spawn failed\u{1b}[31m\nsecond line"),
+        "extension x did not start: spawn failed [31m (see /extensions)"
+    );
+    let long = startup_failure_notice("x", &"界".repeat(500));
+    assert_eq!(long.lines().count(), 1);
+    assert!(long.chars().count() < 220, "{long}");
+    assert!(long.contains('…'));
+    assert_eq!(
+        startup_failure_notice("x", ""),
+        "extension x did not start: no reason given (see /extensions)"
+    );
+}

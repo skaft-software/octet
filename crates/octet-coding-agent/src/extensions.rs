@@ -590,9 +590,7 @@ impl ExecutableExtensions {
     pub(crate) fn startup_failure_notices(&self) -> Vec<String> {
         self.start_failures
             .iter()
-            .map(|(name, reason)| {
-                format!("extension {name} did not start: {reason} (see /extensions)")
-            })
+            .map(|(name, reason)| startup_failure_notice(name, reason))
             .collect()
     }
 }

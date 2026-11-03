@@ -44,7 +44,7 @@ test('ordinary input handler errors continue without leaking the input', async (
     { factory: 1, handler: () => ({ action: 'transform', text: 'survived' }) }]);
   assert.deepEqual(await transformInput(runtime, input, store), { action: 'transform', text: 'survived', images: [image] });
   assert.equal(errors.length, 1); assert.equal(errors[0].title, '[Extension issues]');
-  assert.match(errors[0].message, /input callback failed/); assert.doesNotMatch(errors[0].message, /secret input/);
+  assert.match(errors[0].message, /input hook failed and was skipped/); assert.doesNotMatch(errors[0].message, /secret input/);
 });
 test('input snapshots handlers once; unsubscribe does not alter an active dispatch', async () => {
   const { runtime, store } = harness(); let second = false;
@@ -198,9 +198,8 @@ test('observation failures report the factory and continue without weakening vet
   assert.deepEqual(await runtime.runEvent('turn_start', {}, store), { action: 'continue' });
   assert.equal(kept, 1);
   assert.equal(errors[0].title, '[Extension issues]');
-  assert.ok(errors[0].message.includes('/reviewed/broken.ts'));
-  assert.match(errors[0].message, /turn_start callback.*API or event field.*not support/);
-  assert.match(errors[0].message, /Next:/);
+  assert.ok(errors[0].message.startsWith('Broken: '));
+  assert.match(errors[0].message, /turn_start hook uses an event field octet does not support/);
   assert.doesNotMatch(errors[0].message, /private text|ctx\.missing/);
   runtime.events.set('tool_call', handlers);
   await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === failure);

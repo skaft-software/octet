@@ -30,10 +30,10 @@ test('a session_start handler that never settles is detached instead of wedging 
 
 test('a detached handler is reported once per event, naming its factory, then skipped while it stays busy', async t => {
   const peer = launch(t, [stalled, healthy], { env: { OCTET_PI_HANDLER_BUDGET_MS: '600' } }); await peer.init(features);
-  const reportFor = event => peer.wait(frame => frame.method === 'notification' && /stalled-lifecycle\.ts/.test(frame.params?.message ?? '') && frame.params.message.includes(event));
+  const reportFor = event => peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? '') && frame.params.message.includes(event));
   await start(peer).response;
   const session = await reportFor('session_start');
-  assert.match(session.params.message, /stopped waiting/);
+  assert.match(session.params.message, /session_start hook took over [0-9.]+ s and was skipped this time/);
   await peer.request('hook/run', prompt(peer, 'one')).response;
   await reportFor('before_agent_start');
   // Still stalled: the next prompt skips it at once and says nothing more.
@@ -41,7 +41,7 @@ test('a detached handler is reported once per event, naming its factory, then sk
   const composed = await peer.request('hook/run', prompt(peer, 'two')).response;
   assert.equal(composed.result?.system_prompt, 'base\nhealthy', JSON.stringify(composed));
   assert.ok(Date.now() - begun < 400, `a busy handler is skipped, not waited on again (${Date.now() - begun} ms)`);
-  await assert.rejects(peer.wait(frame => frame.method === 'notification' && /stalled-lifecycle\.ts/.test(frame.params?.message ?? ''), 800));
+  await assert.rejects(peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? ''), 800));
   await peer.close();
 });
 
@@ -102,9 +102,9 @@ test('a factory whose setup never settles is skipped at load while the others st
 test('a stalled factory is reported by name when the bridge starts', async t => {
   const metadata = JSON.parse(inspectWith([stalledFactory, healthy], { OCTET_PI_HANDLER_BUDGET_MS: '300' }).stdout).result;
   const peer = launch(t, [stalledFactory, healthy], { metadata, env: { OCTET_PI_HANDLER_BUDGET_MS: '300' } }); await peer.init(features);
-  const issue = await peer.wait(frame => frame.method === 'notification' && /stalled-factory\.ts/.test(frame.params?.message ?? ''));
-  assert.match(issue.params.message, /still setting itself up|did not finish/);
-  assert.match(issue.params.message, /Next:/);
+  const issue = await peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? ''));
+  assert.equal(issue.params.level, 'error');
+  assert.match(issue.params.message, /skipped: setup did not finish within [0-9.]+ s\. Check that its services are reachable, or disable\./);
   await peer.close();
 });
 

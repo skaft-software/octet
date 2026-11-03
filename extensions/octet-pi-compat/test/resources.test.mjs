@@ -120,8 +120,7 @@ test('resources: ordinary callback failures are diagnosed with factory provenanc
   await set(peer, { mode: 'throw' });
   assert.deepEqual((await discover(peer).response).result.resource_paths.skill_paths, [join(root, 'more-skills'), join(root, 'skills')]);
   const diagnostic = await peer.wait(f => f.method === 'notification' && f.params.title === '[Extension issues]');
-  assert.ok(diagnostic.params.message.includes(fixture)); assert.match(diagnostic.params.message, /resources_discover callback failed/);
-  assert.match(diagnostic.params.message, /Next:/);
+  assert.match(diagnostic.params.message, /^Octet Pi Compat: resources_discover hook failed and was skipped\. Update or disable/);
   assert.doesNotMatch(diagnostic.params.message, /ordinary discovery callback failure/);
   assert.deepEqual(labels(await state(peer)), ['first', 'middle', 'last']);
   await set(peer, { mode: 'unsupported' });

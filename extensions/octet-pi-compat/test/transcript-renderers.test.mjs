@@ -45,7 +45,7 @@ export default pi => pi.registerCommand('install', {handler: () => {
 // registrations stay inert and one warning names them instead of refusing the
 // whole bridge, as Pi itself falls back when a renderer is absent.
 const rendererNotice = frame => frame.method === 'notification' && frame.params.level === 'warning'
-  && frame.params.title === '[Extension issues]' && /Custom renderers are not shown/.test(frame.params.message);
+  && frame.params.title === '[Extension issues]' && /custom display not shown/.test(frame.params.message);
 
 test('load-time terminal renderers without a native consumer start and warn once', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'octet-pi-transcript-unavailable-'));
@@ -59,8 +59,7 @@ test('load-time terminal renderers without a native consumer start and warn once
   const peer = launch(t, [factory]);
   await peer.init(['remote_ui', 'composer']);
   const notice = await peer.wait(rendererNotice);
-  assert.match(notice.params.message, /notice/);
-  assert.match(notice.params.message, /saved/);
+  assert.match(notice.params.message, /^Render: custom display not shown/);
   assert.ok((await peer.command('install').response).result);
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.ok(!peer.seen.some(frame => frame !== notice && rendererNotice(frame)), 'one renderer warning per process');
@@ -80,7 +79,7 @@ test('late terminal renderer registration without a native consumer is inert and
   const response = await peer.command('install').response;
   assert.ok(response.result, JSON.stringify(response));
   const notice = await peer.wait(rendererNotice);
-  assert.match(notice.params.message, /notice/);
+  assert.match(notice.params.message, /^Render: custom display not shown/);
   await peer.close();
 });
 

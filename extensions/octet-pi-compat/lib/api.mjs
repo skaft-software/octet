@@ -75,7 +75,7 @@ function snapshot(host, key, api) {
   if (!(key in host)) unsupported(api, `${key} snapshot not supplied by the host`);
   return host[key];
 }
-function humanizeExtensionName(value) {
+export function humanizeExtensionName(value) {
   let name = value.trim();
   const parts = name.split('/');
   if (name.startsWith('@') && parts.length > 1) name = parts[1] === 'pi' ? parts[0].slice(1) : parts[1];
@@ -83,7 +83,8 @@ function humanizeExtensionName(value) {
   return name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[._-]+/g, ' ')
     .replace(/\b\w/g, character => character.toUpperCase());
 }
-export function extensionDisplayName(entry) {
+// The declared or humanized name of the package an entry belongs to, if any.
+export function packageDisplayName(entry) {
   let directory = dirname(resolve(entry));
   for (;;) {
     try {
@@ -93,10 +94,12 @@ export function extensionDisplayName(entry) {
       if (typeof manifest.name === 'string' && manifest.name.trim()) return bounded(humanizeExtensionName(manifest.name), 'extension display name', 128);
     } catch {}
     const parent = dirname(directory);
-    if (parent === directory || directory === parse(directory).root) break;
+    if (parent === directory || directory === parse(directory).root) return undefined;
     directory = parent;
   }
-  return bounded(humanizeExtensionName(basename(dirname(resolve(entry)))), 'extension display name', 128);
+}
+export function extensionDisplayName(entry) {
+  return packageDisplayName(entry) ?? bounded(humanizeExtensionName(basename(dirname(resolve(entry)))), 'extension display name', 128);
 }
 const actionMethods = new Set(['sendMessage', 'sendUserMessage', 'appendEntry', 'setSessionName', 'getSessionName', 'setLabel',
   'getActiveTools', 'getAllTools', 'getSettings', 'setActiveTools', 'getCommands', 'getThinkingLevel', 'setThinkingLevel']);

@@ -3096,7 +3096,7 @@ where
             // dispatcher — but their current state renders now.
             shell.show_overlay_text(extensions.inspect_text());
             push_pending_action(queue, PendingIdleAction::Extensions(sub));
-            shell.notice("extension action queued for the next idle boundary");
+            shell.notice("extension action queued; it runs when the current response finishes");
         }
         Command::Fast(requested) => {
             if fast_route_available(shell, &inspection.model) {
@@ -3343,7 +3343,7 @@ where
                             arguments,
                         },
                     );
-                    shell.notice("extension command queued for the next idle boundary");
+                    shell.notice("extension command queued; it runs when the current response finishes");
                 }
             } else if shell.has_prompt_template(name) {
                 shell.queue_follow_up(ComposedInput::from_text(text));
@@ -4326,7 +4326,7 @@ where
                                             shell.error("command queue is full; extension unchanged".into());
                                         } else {
                                             push_pending_action(pending_actions, PendingIdleAction::ExtensionMenuEffect(Box::new(effect)));
-                                            shell.notice("extension action queued for the next idle boundary; approval and eligibility are checked there");
+                                            shell.notice("extension action queued; it runs when the current response finishes");
                                         }
                                     }
                                 }

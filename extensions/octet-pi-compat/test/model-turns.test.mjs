@@ -90,9 +90,7 @@ test('one durable native tool-result batch supplies every Pi tool result without
   // Like Pi, a turn observation that cannot be shown is reported, never a failed turn.
   assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [missing], 'tool_use'))).response).result, expected);
   const issue = await peer.wait(issueNotice);
-  assert.ok(issue.params.message.includes(factory));
-  assert.match(issue.params.message, /turn_end: octet could not convert/);
-  assert.match(issue.params.message, /Next:/);
+  assert.match(issue.params.message, /^Octet Pi Compat: turn_end data was unavailable, so some activity was missed\. Update octet if this keeps happening\.$/);
   await peer.close();
 });
 
@@ -178,8 +176,7 @@ test('turn observations ignore results and report problems once per extension/ev
   const unavailable = { ...end(), assistant_metadata: null };
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);
   const skipped = await peer.wait(issueNotice);
-  assert.ok(skipped.params.message.includes(factory));
-  assert.match(skipped.params.message, /turn_end callback.*API or event field.*not support/);
+  assert.match(skipped.params.message, /^Octet Pi Compat: turn_end hook uses an event field octet does not support and was skipped\./);
   const opaque = structuredClone(assistant); opaque.value.Assistant.content.push({ Reasoning: { text: 'reason', state: { secret: 'opaque' } } });
   assert.deepEqual((await peer.request('hook/run', params(peer, end(opaque))).response).result, expected);
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);

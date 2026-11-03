@@ -142,6 +142,45 @@ pub(super) fn clip_lifecycle_reason(reason: &str, limit: usize) -> String {
     format!("{}{marker}", &reason[..end])
 }
 
+/// The chat line for an extension that did not start. `reason` is whatever the
+/// process or its runtime printed, often a stack: only its most informative
+/// line stays, directories are dropped and the length is bounded. `/extensions`
+/// keeps the full text.
+pub(super) fn startup_failure_notice(name: &str, reason: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let lines = reason
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("at "));
+    let line = lines
+        .clone()
+        .find(|line| line.to_ascii_lowercase().contains("error"))
+        .or_else(|| lines.clone().next())
+        .unwrap_or("no reason given");
+    let compact = line
+        .split_whitespace()
+        .map(|word| {
+            let path = word.trim_matches(|ch| matches!(ch, '\'' | '"' | '(' | ')' | ',' | ';'));
+            let looks_like_path = path.starts_with('/') || path.starts_with("file://");
+            match path.rsplit(['/', '\\']).next() {
+                Some(base) if looks_like_path && !base.is_empty() => base.to_owned(),
+                _ => word.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let compact = if compact.chars().count() > MAX_CHARS {
+        let kept = compact.chars().take(MAX_CHARS - 1).collect::<String>();
+        format!("{kept}…")
+    } else {
+        compact
+    };
+    format!("extension {name} did not start: {compact} (see /extensions)")
+}
+
 pub struct ExtensionPromptComposition {
     pub custom_messages: Vec<octet_agent::session::CustomMessage>,
     pub system: String,

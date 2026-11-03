@@ -340,10 +340,7 @@ export class Runtime {
     while (store.pending.size) await Promise.all([...store.pending]);
     if (store.errors.length) throw store.errors[0];
   }
-  backgroundError(error) {
-    console.error(`[pi-compat] ${String(error?.message || error).slice(0, 4096)}`);
-    if (!this.stopping && !this.transport.closed) this.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: String(error?.message || error).slice(0, 4096) }).catch(e => this.transport.fail(e));
-  }
+  backgroundError(error) { this.issues.backgroundError(error); }
   reportCallbackError(event, factory, error) { this.issues.callback(event, factory, error); }
   reportObservationError(event) { this.issues.observation(event); }
   async load() {

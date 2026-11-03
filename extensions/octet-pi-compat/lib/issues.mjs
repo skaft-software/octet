@@ -1,9 +1,15 @@
+import { basename, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { humanizeExtensionName, packageDisplayName } from './api.mjs';
 
-// Pi's interactive diagnostics put load errors and warnings under one
-// [Extension issues] heading, with a path on its own line. Callback notices
+// Extension problems reach the chat as at most one short notice per severity:
+// the extension's name (never its path), what happened, and the one thing to
+// do. Paths and every full reason go to the log (stderr). Callback notices
 // additionally have a process-lifetime (extension, event) ledger: reporting a
 // problem does not unsubscribe the handler or change any fail-closed boundary.
+//
+// Severity separates a problem that takes an extension away ('error': it was
+// skipped) from one that only degrades it ('warning').
 
 // Diagnostics are plain text, never terminal instructions. Do not interpolate
 // exception messages here: even an unsupported property name can be prompt data.
@@ -28,80 +34,110 @@ function reportedCode(text) {
   return code && code.length <= 96 ? code : undefined;
 }
 
+const stalledFor = text => /setup did not finish within [0-9.]+ s/.exec(String(text))?.[0];
+
+// `reason` follows the extension's name ("<name>: <reason>.") and `next` is the
+// one action. Neither contains a path, an error message or an identifier a user
+// could not act on, and both read the same for one extension or several.
 export function loadIssue(failure) {
   const { entry, code, name, error = '' } = failure;
   let reason, next;
   if (error.startsWith('invalid_request reviewed factory changed:')) {
-    reason = 'The reviewed extension file changed and was skipped.';
-    next = 'Review the changed file, then rerun configure.mjs --reviewed with your original options.';
+    reason = 'skipped: changed since review';
+    next = 'Review the change, then run configure.mjs --reviewed again.';
   } else if (code === 'ENOENT' || code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND') {
-    reason = 'The extension file or one of its dependencies was not found; the extension was skipped.';
-    next = 'Restore the file or install its reviewed dependencies, then reconfigure and restart octet.';
+    reason = 'skipped: a file is missing';
+    next = 'Reinstall, or remove from your Pi settings.';
   } else if (name === 'FactoryStalled') {
-    reason = `The extension's ${error}; octet stopped waiting and skipped it (it may still be running).`;
-    next = 'If it waits on the network or another service, check that it is reachable; otherwise update or disable this extension.';
+    reason = `skipped: ${stalledFor(error) ?? 'still starting'}`;
+    next = 'Check that its services are reachable, or disable.';
   } else if (code === 'EACCES' || code === 'EPERM') {
-    reason = 'The extension file or a dependency could not be read; the extension was skipped.';
-    next = 'Check file permissions, then reconfigure and restart octet.';
+    reason = 'skipped: a file could not be read';
+    next = 'Check file permissions, then restart octet.';
   } else if (code === -32030) {
-    reason = 'The extension needs Pi helpers that octet does not emulate and was skipped.';
-    next = 'Review the installed-Pi fallback, then re-import with configure.mjs --reviewed --from-pi and your original --output, or disable this extension.';
+    reason = 'skipped: needs Pi features octet does not provide';
+    next = 'Disable, or run configure.mjs --reviewed --from-pi again.';
   } else if (code === -32031) {
-    reason = 'The managed Pi install this extension runs on is missing or unsupported; the extension was skipped.';
-    next = 'Install Pi 1.0.2 through 1.4.x, then reconfigure, or disable this extension.';
+    reason = 'skipped: needs a Pi install that is missing or unsupported';
+    next = 'Install Pi 1.0.2 to 1.4.x, or disable.';
   } else if (error.startsWith('invalid_request duplicate registration ')) {
-    reason = 'A registration conflicts with another extension; this extension was skipped.';
-    next = 'Disable one of the conflicting extensions, then reconfigure and restart octet.';
+    reason = 'skipped: conflicts with another extension';
+    next = 'Disable one of the two, then restart octet.';
   } else if (code === -32601) {
-    reason = 'The extension uses an API or registration that octet does not support and was skipped.';
-    next = 'Update octet and the extension, or disable this extension, then reconfigure.';
+    reason = 'skipped: uses an API octet does not support';
+    next = 'Update octet or the extension, or disable.';
   } else if (name === 'SyntaxError' || error.startsWith('invalid_request default export must be a factory:')) {
-    reason = 'The extension source is invalid or does not export a factory; it was skipped.';
-    next = 'Fix the extension source or update it, then review and reconfigure.';
-  } else if (reportedCode(error)) {
-    reason = `The extension stopped while loading with "${reportedCode(error)}" and was skipped.`;
-    next = 'Check its dependencies and settings; update or disable this extension, then reconfigure.';
+    reason = 'skipped: invalid source';
+    next = 'Update or fix the extension.';
   } else {
-    reason = 'The extension failed while loading and was skipped (private error details redacted).';
-    next = 'Check its dependencies and settings; update or disable this extension, then reconfigure.';
+    reason = `skipped: failed while loading${reportedCode(error) ? ` ("${reportedCode(error)}")` : ''}`;
+    next = 'Check dependencies and settings, or disable.';
   }
-  return { path: entry, reason, next };
+  return { path: entry, level: 'error', reason, next };
 }
 
 // A factory left out of the mirror when the setup was captured: said once at
 // start, with the one reason that is safe to show, never its raw error text.
 export function excludedIssue({ entry, reason = '' }) {
-  const stalled = /setup did not finish within [0-9.]+ s/.exec(reason)?.[0];
   const code = reportedCode(reason);
-  return { path: entry,
-    reason: stalled
-      ? `The extension's ${stalled}; it was left out of the mirror.`
-      : code ? `The extension stopped while loading with "${code}"; it was left out of the mirror.`
-        : 'The extension could not be loaded by the adapter and was left out of the mirror (private error details redacted).',
-    next: 'Update or disable this extension. octet tries it again the next time it starts.' };
+  return { path: entry, level: 'error',
+    reason: `left out: ${stalledFor(reason) ?? (code ? `failed with "${code}"` : 'could not be loaded')}`,
+    next: 'Update or disable; octet tries again at the next start.' };
 }
 
-function formatIssue(issue) {
-  return `  ${display(issue.path)}\n    ${issue.reason}\n    Next: ${issue.next}`;
+// The extension's own name: its package's, otherwise its file's (or its
+// folder's, for an index file).
+function nameOf(path) {
+  try {
+    const file = basename(String(path), extname(String(path)));
+    return display(packageDisplayName(path) ?? humanizeExtensionName(file === 'index' ? basename(dirname(String(path))) : file), 64);
+  } catch { return display(basename(String(path)), 64); }
 }
+
+const MAX_LINES = 4;
+
+// Extensions with the same reason and action read as one line naming them all.
+// What does not fit stays in the log, and the last line says so.
+export function formatIssues(issues) {
+  const groups = new Map();
+  for (const issue of issues) {
+    const key = JSON.stringify([issue.reason, issue.next]);
+    const group = groups.get(key) ?? { names: [], issue };
+    const name = nameOf(issue.path);
+    if (!group.names.includes(name)) group.names.push(name);
+    groups.set(key, group);
+  }
+  const lines = [...groups.values()].map(({ names, issue }) => {
+    const shown = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+    return `${shown}: ${issue.reason}. ${issue.next}`;
+  });
+  if (lines.length > MAX_LINES) lines.splice(MAX_LINES - 1, lines.length, `${lines.length - MAX_LINES + 1} more problems. See /extensions for details.`);
+  return lines;
+}
+
+const SEVERITIES = ['error', 'warning'];
 
 export class ExtensionIssues {
   constructor(runtime) {
     this.runtime = runtime; this.started = false;
-    this.callbacks = new Set(); this.renderers = new Set();
+    this.callbacks = new Set(); this.renderers = new Set(); this.background = new Set();
     // Last extension-originated notice write, kept as an ordering barrier.
     this.pending = undefined;
   }
   publish(issues) {
     if (!issues.length) return;
-    // There are at most 64 factories, and each diagnostic/path is bounded.
-    // Keep every issue instead of slicing a fleet's later failures off the block.
-    const message = issues.map(formatIssue).join('\n');
-    console.error(`[Extension issues]\n${message}`);
     const runtime = this.runtime;
-    if (!runtime.stopping && !runtime.transport.closed) this.pending = runtime.transport.notify('notification', {
-      level: 'warning', title: '[Extension issues]', message,
-    }).catch(error => runtime.transport.fail(error));
+    for (const issue of issues) console.error(`[Extension issues] ${display(issue.path)}: ${issue.reason}. ${issue.next}`);
+    if (runtime.stopping || runtime.transport.closed) return;
+    // The host labels a negotiated source itself; without one the title carries it.
+    const source = runtime.features.has('notification_source_v1') ? 'Pi extensions' : undefined;
+    for (const level of SEVERITIES) {
+      const group = issues.filter(issue => (issue.level ?? 'warning') === level);
+      if (!group.length) continue;
+      this.pending = runtime.transport.notify('notification', {
+        level, title: '[Extension issues]', message: formatIssues(group).join('\n'), ...(source ? { source } : {}),
+      }).catch(error => runtime.transport.fail(error));
+    }
   }
   // Resolve once every notice published so far has been written to the host.
   // A later request reply must not overtake a notice the host has not seen.
@@ -120,11 +156,9 @@ export class ExtensionIssues {
       const path = runtime.config.extensions[renderer.factory];
       if (this.renderers.has(path)) continue;
       this.renderers.add(path);
-      const names = [...renderer.messages, ...renderer.entries,
-        ...(renderer.markdown ? ['markdown transformer'] : []), ...(renderer.tools ? [`${renderer.tools} tool renderer(s)`] : [])];
-      issues.push({ path,
-        reason: `Custom renderers are not shown; octet uses its default transcript view (${display(names.join(', '), 512)}).`,
-        next: 'Keep the default view, or disable this extension if its custom rendering is required.' });
+      issues.push({ path, level: 'warning',
+        reason: 'custom display not shown; the default view is used',
+        next: 'Disable if you need the custom display.' });
     }
     return issues;
   }
@@ -148,25 +182,36 @@ export class ExtensionIssues {
     // A pre-subscribed hook may have no Pi consumers at all. No native payload
     // or exception text enters either this fallback or an attributed notice.
     if (!paths.size) paths.add(fileURLToPath(new URL('./model-turns.mjs', import.meta.url)));
-    this.publish([...paths].filter(path => this.firstEventIssue(event, path)).map(path => ({ path,
-      reason: `${display(event, 128)}: octet could not convert the turn to Pi event data; some extension observations were skipped.`,
-      next: 'Update octet or report this event with a sanitized reproduction. The committed turn has not been changed.' })));
+    this.publish([...paths].filter(path => this.firstEventIssue(event, path)).map(path => ({ path, level: 'warning',
+      reason: `${display(event, 128)} data was unavailable, so some activity was missed`,
+      next: 'Update octet if this keeps happening.' })));
   }
   // A handler outlived its budget and the hook stopped waiting for it. One
   // notice per extension and event; the handler itself keeps running. Each item
   // is [path, milliseconds the hook actually waited].
   slow(event, items) {
-    this.publish(items.filter(([path]) => this.firstEventIssue(`slow:${event}`, path)).map(([path, milliseconds]) => ({ path,
-      reason: `${display(event, 128)} did not finish within ${Math.round(milliseconds / 100) / 10} s; octet stopped waiting and continued without it (the extension keeps running).`,
-      next: 'If its footer, status or prompt additions are missing, update or disable this extension.' })));
+    this.publish(items.filter(([path]) => this.firstEventIssue(`slow:${event}`, path)).map(([path, milliseconds]) => ({ path, level: 'warning',
+      reason: `${display(event, 128)} hook took over ${Math.round(milliseconds / 100) / 10} s and was skipped this time`,
+      next: 'If status or prompt additions are missing, update or disable.' })));
   }
   callback(event, factory, error) {
     const path = this.runtime.config.extensions[factory];
     if (!this.firstEventIssue(event, path)) return;
     const reason = error?.code === -32601
-      ? `${display(event, 128)} callback needs an API or event field that octet does not support; the callback was skipped.`
-      : `${display(event, 128)} callback failed and was skipped (private error details redacted).`;
-    this.publish([{ path, reason,
-      next: 'Update octet and the extension, or disable this extension, then restart octet. Report this path and event if it persists.' }]);
+      ? `${display(event, 128)} hook uses an event field octet does not support and was skipped`
+      : `${display(event, 128)} hook failed and was skipped`;
+    this.publish([{ path, level: 'warning', reason, next: 'Update or disable if this keeps happening.' }]);
+  }
+  // A failure with no extension to name. One line, once per distinct message;
+  // the full text is in the log.
+  backgroundError(error) {
+    const full = String(error?.message || error).slice(0, 4096);
+    console.error(`[pi-compat] ${full}`);
+    const summary = display(full.split('\n', 1)[0].replace(/(?:file:\/\/)?\/(?:[^\s/'"]+\/)+/g, ''), 160);
+    const runtime = this.runtime;
+    if (this.background.has(summary) || this.background.size >= 32 || runtime.stopping || runtime.transport.closed) return;
+    this.background.add(summary);
+    runtime.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: `${summary} (details: /extensions)` })
+      .catch(failure => runtime.transport.fail(failure));
   }
 }

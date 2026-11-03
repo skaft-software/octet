@@ -178,7 +178,7 @@ test('failed turn projection settles the streamed partial without failing the ho
   unknownFinalMetadata(ended[1].message);
   assert.deepEqual(events.at(-1).messages, ended.map(e => e.message));
   assert.equal(events.some(e => e.type === 'turn_end'), false);
-  assert.equal(peer.seen.filter(f => f.method === 'notification' && f.params.title === '[Extension issues]' && f.params.message.includes('turn_end: octet could not convert')).length, 1);
+  assert.equal(peer.seen.filter(f => f.method === 'notification' && f.params.title === '[Extension issues]' && f.params.message.includes('turn_end data was unavailable')).length, 1);
   await peer.close();
 });
 

@@ -34,8 +34,7 @@ for (const mode of ['replace', 'in-place', 'throws']) test(`real process context
     const issue = peer.seen.find(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]');
     assert.ok(issue, peer.stderr());
     assert.equal(issue.params.level, 'warning');
-    assert.ok(issue.params.message.includes(fixture));
-    assert.match(issue.params.message, /context callback failed and was skipped/);
+    assert.match(issue.params.message, /^Octet Pi Compat: context hook failed and was skipped\./);
     assert.match(peer.stderr(), /\[Extension issues\]/);
     assert.doesNotMatch(issue.params.message + peer.stderr(), /ordinary context failure/);
   }
