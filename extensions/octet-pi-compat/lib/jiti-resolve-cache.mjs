@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti as stockCreateJiti } from 'jiti';
 import { readPersisted, writePersisted } from './startup-cache.mjs';
@@ -93,7 +93,7 @@ class ResolveCache {
       const parent = dirname(parentFile);
       out.add(parent);
       if (!/^\.{0,2}\//.test(specifier) && specifier !== '.' && specifier !== '..') {
-        const marker = resolved.lastIndexOf('/node_modules/'), supplied = marker >= 0 ? resolved.slice(0, marker + '/node_modules'.length) : undefined;
+        const marker = resolved.lastIndexOf(`${sep}node_modules${sep}`), supplied = marker >= 0 ? resolved.slice(0, marker + `${sep}node_modules`.length) : undefined;
         for (let dir = parent, last; dir !== last; last = dir, dir = dirname(dir)) {
           const modules = join(dir, 'node_modules');
           out.add(modules);
@@ -103,7 +103,7 @@ class ResolveCache {
     }
     // Inside a dependency, every package.json up to the package root counts: a
     // nested `{"type":"module"}` must not hide an edited `exports` map above it.
-    const dependency = resolved.includes('/node_modules/');
+    const dependency = resolved.includes(`${sep}node_modules${sep}`);
     const packageRoot = dir => { const scope = dirname(dir); return basename(scope) === 'node_modules' || (basename(scope).startsWith('@') && basename(dirname(scope)) === 'node_modules'); };
     for (let dir = dirname(resolved), last; dir !== last; last = dir, dir = dirname(dir)) {
       out.add(join(dir, 'package.json'));

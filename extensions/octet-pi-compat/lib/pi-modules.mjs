@@ -3,7 +3,7 @@
 // packages/coding-agent/src/core/extensions/loader.ts getAliases). Both the
 // emulated path and the installed-Pi fallback resolve exactly these names, so
 // an extension sees the same module graph it sees in Pi.
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export const PI_VERSION = '1.4.0';
@@ -51,10 +51,14 @@ export function piModule(specifier) {
   return null;
 }
 
-const shimFile = shim => fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url));
+// Node resolves bare specifiers through realpath, so an alias target that goes
+// through a symlinked directory (pnpm layouts, a linked node_modules) would load
+// a second copy of the same module. Aliases therefore point at real paths.
+const real = path => { try { return realpathSync(path); } catch { return path; } };
+const shimFile = shim => real(fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url)));
 // Imported on the emulated path in place of a Pi module octet does not
 // emulate; loading it fails, and the load is retried on the installed Pi.
-export const UNAVAILABLE_MODULE = fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url));
+export const UNAVAILABLE_MODULE = real(fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url)));
 
 /** Emulated-path aliases for every Pi specifier Pi resolves. */
 export function emulatedPiAliases() {
@@ -85,7 +89,7 @@ export function typeboxAliases() {
     const file = pick(target);
     if (typeof file !== 'string') continue;
     const subpath = key === '.' ? '' : key.slice(1);
-    for (const spelling of TYPEBOX_SPELLINGS) aliases[`${spelling}${subpath}`] = fileURLToPath(new URL(file, root));
+    for (const spelling of TYPEBOX_SPELLINGS) aliases[`${spelling}${subpath}`] = real(fileURLToPath(new URL(file, root)));
   }
   return aliases;
 }
