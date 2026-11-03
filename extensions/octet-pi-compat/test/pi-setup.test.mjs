@@ -396,3 +396,22 @@ test('pi setup: non-mirror palette discovery respects package deltas and live pr
   }
   await peer.close();
 });
+
+test('pi setup: from the home directory the user agent dir is user scope, not an untrusted project path', async t => {
+  const root = temporary(t);
+  const agent = piHome(root);
+  const home = join(root, 'home');
+  // `<home>/.pi` is both Pi's project root and the parent of the agent dir.
+  put(join(home, '.pi/extensions/project.js'), 'export default pi => pi.registerCommand("project", {handler(){}});');
+  const setup = discoverPiSetup({ agentDir: agent, cwd: home, projectTrusted: false });
+  assert.deepEqual(setup.extensions, [
+    join(agent, 'elsewhere/extra.ts'),
+    join(agent, 'extensions/one.mjs'),
+    join(agent, 'extensions/two.js'),
+  ]);
+  assert.deepEqual(setup.themesPaths, [join(agent, 'themes/pi-setup-theme.json')]);
+  assert.equal(setup.keybindingsPath, join(agent, 'keybindings.json'));
+  assert.equal(setup.defaultTheme, 'pi-setup-theme');
+  assert.ok(!setup.diagnostics.some(message => message.includes(agent)), setup.diagnostics.join('\n'));
+  assert.ok(setup.diagnostics.some(message => message.includes('untrusted project .pi paths') && message.includes('project.js')) || !setup.extensions.includes(join(home, '.pi/extensions/project.js')));
+});

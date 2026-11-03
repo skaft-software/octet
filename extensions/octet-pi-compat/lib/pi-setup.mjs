@@ -48,7 +48,9 @@ function markIncomplete(ctx, key, limit, message) {
 // Check every component: lstat on only the leaf still follows linked parents.
 function safeStat(path, ctx, label, required = false) {
   path = resolve(path);
-  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot)) {
+  // From the home directory the project `.pi` contains the user's agent directory,
+  // which is user scope and never gated by project trust.
+  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot) && !within(path, ctx.agentDir)) {
     diagnostic(ctx, `${label} ${path}: untrusted project .pi paths are not mirrored`);
     return undefined;
   }
@@ -474,7 +476,7 @@ export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
   const resolvedAgentDir = agentDirectory(agentDir, env);
   const projectRoot = resolve(cwd, '.pi');
-  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
+  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, agentDir: resolvedAgentDir, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
   const projectSettings = ctx.projectTrusted ? settingsObject(join(projectRoot, 'settings.json'), 'project settings.json', ctx) : {};
   const settings = mergeSettings(globalSettings ?? {}, projectSettings ?? {});
