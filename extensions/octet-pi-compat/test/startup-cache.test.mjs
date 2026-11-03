@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,7 @@ import { join } from 'node:path';
 // The cache module reads its directory from the environment on each call, so a
 // test can point it at a scratch directory without touching the user cache.
 process.env.OCTET_PI_COMPAT_CACHE = mkdtempSync(join(tmpdir(), 'octet-pi-cache-'));
-const { startupCacheDirectory, jitiCacheOptions } = await import('../lib/startup-cache.mjs');
+const { startupCacheDirectory, jitiCacheOptions, writePersisted } = await import('../lib/startup-cache.mjs');
 
 test('the startup cache directory is owner-only and reused', () => {
   const directory = startupCacheDirectory();
@@ -17,6 +17,15 @@ test('the startup cache directory is owner-only and reused', () => {
   const mode = statSync(directory).mode & 0o777;
   assert.equal(mode, 0o700, `cache directory mode ${mode.toString(8)}`);
   assert.equal(startupCacheDirectory(), directory);
+});
+
+test('a failed persisted write leaves no temporary file behind', () => {
+  const directory = startupCacheDirectory();
+  mkdirSync(join(directory, 'blocked.json')); // renaming a file over a directory fails after the write
+  try {
+    assert.equal(writePersisted('blocked.json', { value: 1 }), false);
+    assert.deepEqual(readdirSync(directory).filter(name => name.endsWith('.tmp')), []);
+  } finally { rmSync(join(directory, 'blocked.json'), { recursive: true }); }
 });
 
 test('jiti keeps its content-hashed cache inside the private directory', () => {

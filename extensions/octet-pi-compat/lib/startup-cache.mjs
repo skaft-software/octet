@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import module from 'node:module';
@@ -94,8 +94,14 @@ export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
     const text = JSON.stringify(value);
     if (Buffer.byteLength(text) > maxBytes) return false;
     const file = join(directory, name), temporary = `${file}.${process.pid}.tmp`;
-    writeFileSync(temporary, text, { mode: 0o600 });
-    renameSync(temporary, file);
+    try {
+      writeFileSync(temporary, text, { mode: 0o600 });
+      renameSync(temporary, file);
+    } catch (error) {
+      // The name is per process, so a leftover from a full disk would never be reused.
+      try { unlinkSync(temporary); } catch { /* nothing was written */ }
+      throw error;
+    }
     return true;
   } catch { return false; }
 }
