@@ -1,0 +1,40 @@
+diff --git a/extensions/octet-pi-compat/lib/before-agent-start.mjs b/extensions/octet-pi-compat/lib/before-agent-start.mjs
+index 60a2524c..85f3e490 100644
+--- a/extensions/octet-pi-compat/lib/before-agent-start.mjs
++++ b/extensions/octet-pi-compat/lib/before-agent-start.mjs
+@@ -38,7 +38,7 @@ export async function beforeAgentStart(runtime, payload, store) {
+         if (!run.ran) continue;
+         result = run.value;
+       } catch (error) {
+-        if (error?.code || store.controller.signal.aborted) throw error;
++        if (Number.isInteger(error?.code) || store.controller.signal.aborted) throw error;
+         runtime.reportCallbackError('before_agent_start', entry.factory, error);
+         continue;
+       }
+diff --git a/scripts/e2e/octet_e2e/provider.py b/scripts/e2e/octet_e2e/provider.py
+index 7196e0cc..2d0c4f67 100644
+--- a/scripts/e2e/octet_e2e/provider.py
++++ b/scripts/e2e/octet_e2e/provider.py
+@@ -31,6 +31,8 @@ class Reply:
+     gate: threading.Event | None = None
+     gate_timeout: float = 20.0
+     usage: bool = True
++    #: Finish the turn with one tool call, `(name, JSON arguments)`, instead of "stop".
++    tool_call: tuple[str, str] | None = None
+ 
+ 
+ @dataclass
+@@ -205,8 +207,12 @@ class MockProvider:
+                         )
+                     if reply.gate is not None:
+                         reply.gate.wait(timeout=reply.gate_timeout)
++                    if reply.tool_call is not None:
++                        name, arguments = reply.tool_call
++                        call = {"index": 0, "id": "call_mock_1", "type": "function", "function": {"name": name, "arguments": arguments}}
++                        self._write_chunk({**base, "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]})
+                     final: dict = {
+-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
++                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if reply.tool_call else "stop"}],
+                     }
+                     if reply.usage:
+                         words = max(1, len((reply.text or " ").split()))

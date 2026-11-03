@@ -1,0 +1,794 @@
+diff --git a/docs/maintainers/pi-usability-wip/J-commits/0001-docs-usability-performance-pass-brief-and-workstream.patch b/docs/maintainers/pi-usability-wip/J-commits/0001-docs-usability-performance-pass-brief-and-workstream.patch
+new file mode 100644
+index 00000000..73780b02
+--- /dev/null
++++ b/docs/maintainers/pi-usability-wip/J-commits/0001-docs-usability-performance-pass-brief-and-workstream.patch
+@@ -0,0 +1,165 @@
++From a62def0ad6eb3853fa389db3052cd8ea1c263da2 Mon Sep 17 00:00:00 2001
++From: Claude <noreply@anthropic.com>
++Date: Tue, 3 Nov 2026 03:21:22 +0000
++Subject: [PATCH 1/3] docs: usability/performance pass brief and workstreams
++ [skip ci]
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
++---
++ .../maintainers/pi-extensions-eval-handoff.md |  21 ++++
++ docs/maintainers/pi-usability-brief.md        | 110 ++++++++++++++++++
++ 2 files changed, 131 insertions(+)
++ create mode 100644 docs/maintainers/pi-usability-brief.md
++
++diff --git a/docs/maintainers/pi-extensions-eval-handoff.md b/docs/maintainers/pi-extensions-eval-handoff.md
++index f009833a..9251ff89 100644
++--- a/docs/maintainers/pi-extensions-eval-handoff.md
+++++ b/docs/maintainers/pi-extensions-eval-handoff.md
++@@ -222,6 +222,27 @@ being observed on both base and candidate; this does not explain the historical
++ or qualify cleanup of arbitrary process trees. The <=1.6 s warm goal and an improvement to
++ the real-workload exit remain unverified.
++ 
+++## Usability and performance pass (2026-11-03): maintainer macOS qualification found
+++
+++1. octet's native footer is drawn first, then the Pi footer swaps in, which looks janky.
+++2. The footer is inconsistent: it appears in one session but not in another (cwd `~`).
+++3. The footer does not match Pi: model ID instead of display name, and the context and cost
+++   segments are missing.
+++4. Extension prompt composition and `before_agent_start` fail.
+++
+++The shared brief, rules and fixture/repro instructions are in `docs/maintainers/pi-usability-brief.md`.
+++Workstreams (local worktrees, unpushed; the branch names say what each owns):
+++- `fix/pi-footer`: issues 1-3, including a cached footer placeholder primitive (design
+++  `docs/design/pi-footer-startup.md`).
+++- `fix/pi-before-prompt`: issue 4. Prompt request bodies must match Pi byte for byte;
+++  Pi-equivalent hook budgets; the missing API fields behind skipped handlers.
+++- `perf/pi-warm-exit`: salvages `perf/pi-warm` (`eedffd48`) and the `perf/pi-exit` diff;
+++  warm <=1.6 s; exit near Pi's 0.16 s; cold must not regress after `852ca760`.
+++- `review/pi-compat`: rigorous review of `c610a671..852ca760` (macOS, concurrency, cache
+++  locations, native-ESM semantics).
+++- `eval/pi-functional`: functional parity eval with Pi as the oracle (tools, commands,
+++  handlers, UI, prompt bodies), plus a scorecard.
+++
++ ## Next steps
++ 
++ 1. Reproduce the pinned 23-package Pi 1.4.0 benchmark in a disposable Linux sandbox with
++diff --git a/docs/maintainers/pi-usability-brief.md b/docs/maintainers/pi-usability-brief.md
++new file mode 100644
++index 00000000..0e0a5798
++--- /dev/null
+++++ b/docs/maintainers/pi-usability-brief.md
++@@ -0,0 +1,110 @@
+++# Common brief: octet v0.10.0 Pi compatibility, usability and performance
+++
+++Read this whole file before starting.
+++
+++## Goal
+++
+++Make octet's Pi compatibility usable for any Pi user, with no regressions and no slop.
+++Measure against Pi 1.4.0. Prove every claim with a reproduction on the real fixture, not
+++just a unit test.
+++
+++## Repo and branches
+++
+++- Repo: `/home/user/octet`. The release branch is `release/v0.10.0-candidate` at `852ca760`.
+++  The coordinator's branch `claude/admiring-feynman-2sqpfb` is identical to it.
+++- You are in your own git worktree. First run
+++  `git checkout -B <your-branch> 852ca760` (your branch name is in your task).
+++- Commit locally, early and often: after every passing step. End each message with
+++  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Do NOT push. Uncommitted work
+++  is lost if you are stopped by a usage limit.
+++- Read first: `docs/maintainers/pi-extensions-eval-handoff.md`,
+++  `docs/maintainers/pi-v0.10-perf-handoff.md`, `docs/design/pi-native-esm.md`,
+++  `docs/design/pi-single-import.md` and `extensions/octet-pi-compat/README.md`.
+++
+++## The maintainer's bug reports (manual qualification on macOS, their real Pi 1.4.x setup)
+++
+++Screenshots: `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/images/1.webp`,
+++`2.webp` and `3.png`. Open them with the Read tool.
+++
+++1. **Footer swap jank.** octet first draws its own native footer, then the Pi footer
+++   replaces it seconds later, once the extensions load. With Pi compat enabled, the Pi
+++   footer must appear immediately, with no visible swap.
+++2. **Footer inconsistent across sessions.** In one session (cwd `~/github/skaft-software/octet`)
+++   the Pi footer appeared after a long delay. In another (cwd `~`, the home directory) it
+++   never appeared, and the native footer `GPT-6.1-Sol · max · 5%/272K   ~` stayed.
+++   Screenshot 2 shows real Pi on the left (footer
+++   `~   GPT-5.6 Luna 0/272K (0%) | $0.000 (sub) | 1m 22...`) and octet on the right.
+++3. **Footer fidelity is poor.** When the Pi footer does appear in octet (screenshot 1) it
+++   looks wrong: a separate `pi-lens` status line, the path on its own line, and
+++   `GPT-5.6-Luna | 1m 22...` on the right. The model ID is shown instead of the display
+++   name, and the context-usage (`0/272K (0%)`) and cost (`$0.000 (sub)`) segments are
+++   missing. It must look exactly like Pi.
+++4. **Prompt composition and `before_agent_start` failing.** Extension prompt composition
+++   fails and the before-prompt hook fails. The exact error text is unknown, so reproduce it.
+++   Relevant code: `extensions/octet-pi-compat/lib/before-agent-start.mjs` and
+++   `lib/handler-budget.mjs`, which set per-handler 2 s and total 4 s budgets, plus the
+++   host's 5 s before_prompt deadline. Check what Pi 1.4.0 actually does.
+++
+++Screenshot 3 also shows `extension action queued for the next idle boundary; approval and
+++eligibility are checked there` and a `Controls · queued / command · idle` block after a
+++`/reload` issued while a turn was running.
+++
+++## Real fixture (use it; don't mock what you can run)
+++
+++- The cached fixture for Pi 1.4.0 plus 23 real npm packages, including
+++  pi-powerline-footer, pi-lens and pi-hermes-memory, is at
+++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/pi-eval-cache/`.
+++  Build or locate it with `scripts/pi-eval/fixture.py` (`fx.build_fixture(cache)` returns
+++  `.home`, `.pi_cli`, etc.).
+++- The eval harness is `scripts/pi-eval/run.py`, with helpers `launch`, `make_env`,
+++  `prepare_home`, `EvalSession` (a PTY session with stderr written to a file) and `leg_tmp`.
+++  It uses a mock OpenAI-compatible provider from `scripts/e2e/octet_e2e/provider.py`.
+++- Repro starting point:
+++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/repro/repro.py`.
+++  It is untested. Usage: `python3 repro.py <octet|pi> <workspace|home> <outdir>`. It
+++  samples footer states over time, sends one prompt, and saves the screens. Copy it into
+++  your own outdir and adapt it.
+++- The octet release binary is `/home/user/octet/target/release/octet`. If you change Rust,
+++  build your own (`cargo build --release -p octet-coding-agent`, about 15 min on 4 cores)
+++  and use `--octet <your binary>` and `--extensions-dir <worktree>/extensions`.
+++- Running the Pi CLI and the fixture packages is allowed here: this is a disposable sandbox.
+++
+++## Machine discipline (4 cores, shared with other workers)
+++
+++- Every command that launches octet or Pi on the fixture, runs a cargo build or test, or
+++  runs the full adapter suite must be wrapped in
+++  `flock -s /tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/measure.lock <cmd>`.
+++- Only timing measurements use the exclusive form, `flock -x`. That keeps other workers'
+++  runs from distorting timings.
+++- Use isolated HOME and cache directories for adapter tests:
+++  `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
+++
+++## Rules (non-negotiable)
+++
+++- **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
+++  `extensions/octet-pi-compat`. Touch the host only for a generic primitive, and name it as such.
+++- **No weakening.** Do not weaken trust, review, source integrity (including the per-import
+++  recheck from `852ca760`), owner or generation fences, credential boundaries, process
+++  cleanup, or test deadlines. Never skip hooks to look faster.
+++- **Pi is the reference.** When behaviour is in doubt, read Pi 1.4.0's installed source
+++  (read-only) under the fixture's `.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/`
+++  and match it.
+++- **No slop.**
+++  - Smallest correct diff.
+++  - No dead code, speculative abstractions, debug leftovers or commented-out code.
+++  - Comments only where they explain *why*.
+++  - Match the surrounding style.
+++  - Every behaviour change gets a regression test that fails before the change and passes after.
+++- **Adapter tests.** Run the focused tests you touch, then the full adapter suite. The known
+++  pre-existing failures differ by environment (60 to 118); compare failing-name lists before
+++  and after your change, and they must be identical. A baseline list is at
+++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/after.sorted`,
+++  but regenerate it on `852ca760` in your own environment.
+++- If the sandbox denies an action, stop that line of work and report it. Do not work around it.
+++
+++## Report back
+++
+++- Branch, commits, and root causes with file:line references.
+++- The fix and why the guarantees still hold.
+++- Before/after evidence from the real fixture: screens, timings, and the failing-name comparison.
+++- Remaining risks, and anything you could not verify.
++-- 
++2.43.0
++
+diff --git a/docs/maintainers/pi-usability-wip/J-commits/0002-docs-20-second-frame-by-frame-screen-stability-accep.patch b/docs/maintainers/pi-usability-wip/J-commits/0002-docs-20-second-frame-by-frame-screen-stability-accep.patch
+new file mode 100644
+index 00000000..39dccdc1
+--- /dev/null
++++ b/docs/maintainers/pi-usability-wip/J-commits/0002-docs-20-second-frame-by-frame-screen-stability-accep.patch
+@@ -0,0 +1,43 @@
++From b35bd5e40e8cce55f019467136389c93fa6f5353 Mon Sep 17 00:00:00 2001
++From: Claude <noreply@anthropic.com>
++Date: Tue, 3 Nov 2026 03:22:32 +0000
++Subject: [PATCH 2/3] docs: 20-second frame-by-frame screen-stability
++ acceptance for Pi compat [skip ci]
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
++---
++ docs/maintainers/pi-usability-brief.md | 17 +++++++++++++++++
++ 1 file changed, 17 insertions(+)
++
++diff --git a/docs/maintainers/pi-usability-brief.md b/docs/maintainers/pi-usability-brief.md
++index 0e0a5798..fa73ca6a 100644
++--- a/docs/maintainers/pi-usability-brief.md
+++++ b/docs/maintainers/pi-usability-brief.md
++@@ -79,6 +79,23 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
++ - Use isolated HOME and cache directories for adapter tests:
++   `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
++ 
+++## Screen-stability acceptance (maintainer requirement)
+++
+++Checking the first frame is not enough. Every UI-affecting change must pass 20-second windows,
+++analysed frame by frame:
+++- **Windows:** from launch (cold and warm), and after prompts (before READY, at READY, after
+++  idle, back to back, a streamed reply, a tool-call reply, after /reload).
+++- **Replay:** run the raw PTY byte stream through `scripts/e2e/octet_e2e/vt.py` after every
+++  write chunk, not at fixed intervals.
+++- **Fail on:**
+++  - a native-footer flash while Pi compat is on;
+++  - flicker (a state visible for less than ~100 ms, or A→B→A);
+++  - more than one footer content change (snapshot → live);
+++  - footer, composer or transcript height or position jumps;
+++  - blank or partial frames.
+++- **Compare:** run the same windows on Pi 1.4.0.
+++- **Tool:** the reusable checker is `scripts/pi-eval/flicker.py`.
+++
++ ## Rules (non-negotiable)
++ 
++ - **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
++-- 
++2.43.0
++
+diff --git a/docs/maintainers/pi-usability-wip/J-commits/0003-eval-fixture-mirroring-the-maintainer-s-real-Pi-1.4..patch b/docs/maintainers/pi-usability-wip/J-commits/0003-eval-fixture-mirroring-the-maintainer-s-real-Pi-1.4..patch
+new file mode 100644
+index 00000000..b5b97b5d
+--- /dev/null
++++ b/docs/maintainers/pi-usability-wip/J-commits/0003-eval-fixture-mirroring-the-maintainer-s-real-Pi-1.4..patch
+@@ -0,0 +1,138 @@
++From afc77ecb232cb5bb08dfe3f8a4d094e483c885c2 Mon Sep 17 00:00:00 2001
++From: Claude <noreply@anthropic.com>
++Date: Tue, 3 Nov 2026 03:24:57 +0000
++Subject: [PATCH 3/3] eval: fixture mirroring the maintainer's real Pi 1.4.0
++ setup
++
++29 packages at the maintainer's versions (13 autoload, 16 autoload:false)
++and their Pi settings (ghostty-dark theme, fullscreen TUI, codemode, max
++thinking, steering all). Provider is the eval mock; deviceId is omitted.
++
++Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
++Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
++---
++ docs/maintainers/pi-usability-brief.md | 50 +++++++++++++++++---------
++ scripts/pi-eval/maintainer_fixture.py  | 46 ++++++++++++++++++++++++
++ 2 files changed, 79 insertions(+), 17 deletions(-)
++ create mode 100644 scripts/pi-eval/maintainer_fixture.py
++
++diff --git a/docs/maintainers/pi-usability-brief.md b/docs/maintainers/pi-usability-brief.md
++index fa73ca6a..967ddedd 100644
++--- a/docs/maintainers/pi-usability-brief.md
+++++ b/docs/maintainers/pi-usability-brief.md
++@@ -79,23 +79,6 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
++ - Use isolated HOME and cache directories for adapter tests:
++   `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
++ 
++-## Screen-stability acceptance (maintainer requirement)
++-
++-Checking the first frame is not enough. Every UI-affecting change must pass 20-second windows,
++-analysed frame by frame:
++-- **Windows:** from launch (cold and warm), and after prompts (before READY, at READY, after
++-  idle, back to back, a streamed reply, a tool-call reply, after /reload).
++-- **Replay:** run the raw PTY byte stream through `scripts/e2e/octet_e2e/vt.py` after every
++-  write chunk, not at fixed intervals.
++-- **Fail on:**
++-  - a native-footer flash while Pi compat is on;
++-  - flicker (a state visible for less than ~100 ms, or A→B→A);
++-  - more than one footer content change (snapshot → live);
++-  - footer, composer or transcript height or position jumps;
++-  - blank or partial frames.
++-- **Compare:** run the same windows on Pi 1.4.0.
++-- **Tool:** the reusable checker is `scripts/pi-eval/flicker.py`.
++-
++ ## Rules (non-negotiable)
++ 
++ - **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
++@@ -125,3 +108,36 @@ analysed frame by frame:
++ - The fix and why the guarantees still hold.
++ - Before/after evidence from the real fixture: screens, timings, and the failing-name comparison.
++ - Remaining risks, and anything you could not verify.
+++
+++## PRIMARY fixture: the maintainer's real Pi setup (added 2026-11-03)
+++
+++- **Location:** `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/pi-eval-cache/03dc02b6ce9f3a89`.
+++  Its home is in `home/`. It is built by `scratchpad/maint/build_maintainer_fixture.py`; load it with
+++  `fx.Fixture(root=Path(that), lock=json.load(...))`, or point `HOME` at a copy of `home/`. Always use a
+++  copy (`fx.copy_tree`); never mutate the cached template.
+++- **Packages:** the same 29 packages and versions as the maintainer, with Pi 1.4.0.
+++  - 13 autoload: pi-agent-extensions, pi-mcp-adapter, pi-web-access, pi-subagents,
+++    pi-background-tasks, pi-lens, pi-permission-system, pi-hermes-memory,
+++    rpiv-ask-user-question, pi-hashline-edit-pro, bigpowers, awesome-pi-themes, and
+++    @termdraw/pi.
+++  - 16 installed with `autoload: false`. octet must NOT load these, exactly as Pi does not;
+++    verify it.
+++- **Settings:** the same Pi settings as the maintainer:
+++  - `theme: ghostty-dark` (from awesome-pi-themes);
+++  - `tuiMode: fullscreen`;
+++  - `defaultTools: ["+codemode"]` with `codemode.mode: on`;
+++  - `steeringMode: all`;
+++  - `defaultThinkingLevel: max`;
+++  - `terminal.showTerminalProgress`;
+++  - `markdown.mermaid: streaming`;
+++  - `compaction.enabled`.
+++
+++  octet must honour every one the way Pi does. Report any it ignores.
+++- **Footer:** there is NO pi-powerline-footer here. The maintainer's footer comes from one
+++  of these packages or from Pi's built-in footer. Find out which.
+++- **Provider:** the maintainer uses `openai-codex`; the fixture uses the mock provider. To
+++  catch the model-ID vs display-name bug, configure the mock model with id `gpt-5.6-luna`
+++  and name `GPT-5.6 Luna`, a context window of 272000 and a subscription-style zero cost,
+++  in BOTH Pi (`models.json`) and octet (`custom.json`).
+++- **Usage:** this fixture is primary for every acceptance check. The 23-package fixture is
+++  secondary, for breadth.
++diff --git a/scripts/pi-eval/maintainer_fixture.py b/scripts/pi-eval/maintainer_fixture.py
++new file mode 100644
++index 00000000..8a52382b
++--- /dev/null
+++++ b/scripts/pi-eval/maintainer_fixture.py
++@@ -0,0 +1,46 @@
+++"""Build a Pi 1.4.0 fixture mirroring the maintainer's real ~/.pi/agent/settings.json.
+++
+++Same package set, versions and autoload flags; same Pi settings. deviceId and the
+++openai-codex provider are replaced: the provider by the eval's mock (configured per
+++leg by fixture.write_provider_config).
+++"""
+++import json, sys
+++from pathlib import Path
+++sys.path.insert(0, str(Path(__file__).resolve().parent))
+++import fixture as fx
+++
+++PACKAGES = [  # (name, version, autoload)
+++    ("pi-agent-extensions", "0.5.4", True), ("pi-mcp-adapter", "2.31.0", True), ("pi-web-access", "0.27.0", True),
+++    ("pi-subagents", "0.59.0", True), ("pi-background-tasks", "2.4.2", True), ("pi-lens", "4.1.3", True),
+++    ("@gotgenes/pi-permission-system", "27.1.2", True), ("pi-hermes-memory", "0.9.7", True),
+++    ("@juicesharp/rpiv-ask-user-question", "2.8.0", True), ("@juicesharp/rpiv-todo", "2.8.0", False),
+++    ("pi-hashline-edit-pro", "2.8.3", True), ("bigpowers", "2.87.5", True), ("awesome-pi-themes", "1.1.19", True),
+++    ("context-mode", "1.0.169", False), ("@plannotator/pi-extension", "0.27.9", False), ("pi-fabric", "0.70.0", False),
+++    ("@narumitw/pi-plan-mode", "0.56.0", False), ("@narumitw/pi-lsp", "0.49.6", False),
+++    ("pi-agent-browser-native", "0.5.0", False), ("@llblab/pi-telegram", "0.39.5", False), ("pi-langfuse", "1.5.15", False),
+++    ("pi-interactive-shell", "0.15.1", False), ("pi-claude-bridge", "0.7.0", False), ("pi-memory", "0.4.2", False),
+++    ("@narumitw/pi-goal", "0.54.3", False), ("@tintinweb/pi-subagents", "0.19.0", False),
+++    ("@dietrichgebert/ponytail", "4.9.0", False), ("pi-zentui", "0.21.0", False), ("@termdraw/pi", "0.4.1", True),
+++]
+++LOCK = {
+++    "schema": "octet.pi-eval-lock/v1",
+++    "pi": {"package": "@earendil-works/pi-coding-agent", "version": "1.4.0"},
+++    "note": "Maintainer's real Pi setup (2026-11-03); @termdraw/pi pinned to its latest (unpinned in the original).",
+++    "packages": [{"name": n, "version": v, "autoload": a} for n, v, a in PACKAGES],
+++    "settings": {
+++        "theme": "ghostty-dark", "defaultThinkingLevel": "max", "defaultTools": ["+codemode"], "codemode": {"mode": "on"},
+++        "compaction": {"enabled": True}, "steeringMode": "all", "terminal": {"showTerminalProgress": True},
+++        "markdown": {"mermaid": "streaming"}, "tuiMode": "fullscreen",
+++    },
+++}
+++
+++def settings_document(lock):
+++    packages = [f"npm:{p['name']}@{p['version']}" if p["autoload"] else {"source": f"npm:{p['name']}@{p['version']}", "autoload": False}
+++                for p in lock["packages"]]
+++    return {"packages": packages, "extensions": [fx.SENTINEL_SETTING], "defaultProvider": fx.PROVIDER, "defaultModel": fx.MODEL,
+++            "enableInstallTelemetry": False, "lastChangelogVersion": lock["pi"]["version"], **lock["settings"]}
+++
+++fx.settings_document = settings_document
+++cache = Path(sys.argv[1]) if len(sys.argv) > 1 else fx.default_cache()
+++f = fx.build_fixture(cache, LOCK)
+++print("FIXTURE", f.root)
++-- 
++2.43.0
++
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+new file mode 100644
+index 00000000..6c32b8d3
+--- /dev/null
++++ b/scripts/pi-eval/jank.py
+@@ -0,0 +1,424 @@
++#!/usr/bin/env python3
++"""Record octet and Pi 1.4.0 on the same scripted input timeline, then diff what each drew.
++
++    python3 scripts/pi-eval/jank.py record --target octet --scenario prompt_ready --out DIR
++    python3 scripts/pi-eval/jank.py diff DIR_octet DIR_pi [--at SECONDS]
++
++`record` writes `frames.jsonl` (every PTY write and every input, with timestamps), `requests.json`
++(provider request bodies) and `meta.json`. `diff` replays the writes through the VT model after
++each chunk and reports first-visible times, input echo latency and the bottom rows over time.
++Both products run the same scenario (SCENARIOS) on the maintainer fixture.
++"""
++
++from __future__ import annotations
++
++import argparse
++import base64
++import errno
++import json
++import os
++import select
++import shutil
++import sys
++import time
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++REPO = HERE.parent.parent
++sys.path.insert(0, str(REPO / "scripts" / "e2e"))
++sys.path.insert(0, str(HERE))
++
++import core  # noqa: E402
++import fixture as fx  # noqa: E402
++import run  # noqa: E402
++from octet_e2e.provider import MockProvider, Reply  # noqa: E402
++from octet_e2e.vt import Screen  # noqa: E402
++
++MODEL_ID, MODEL_NAME, CONTEXT = "gpt-5.6-luna", "GPT-5.6 Luna", 272000
++DEFAULT_FIXTURE = Path(os.environ.get("PI_EVAL_CACHE", fx.default_cache())) / "03dc02b6ce9f3a89"
++
++
++class FrameSession(run.EvalSession):
++    """EvalSession that keeps (seconds since spawn, bytes) for every PTY read and every write."""
++
++    def __init__(self, *args, **kwargs):
++        self.chunks: list[tuple[float, bytes]] = []
++        self.inputs: list[tuple[float, bytes]] = []
++        super().__init__(*args, **kwargs)
++
++    def _read_loop(self) -> None:
++        while True:
++            try:
++                ready, _, _ = select.select([self.master], [], [], 0.005)
++            except (OSError, ValueError):
++                return
++            if not ready:
++                if self.process.poll() is not None:
++                    self._drain()
++                    return
++                continue
++            try:
++                data = os.read(self.master, 65536)
++            except OSError as error:
++                if error.errno == errno.EIO:
++                    return
++                raise
++            if not data:
++                return
++            with self._lock:
++                self.chunks.append((self.now(), data))
++                self._transcript.extend(data)
++                self._screen.feed(data)
++                pending, self._screen.responses = self._screen.responses, []
++            for response in pending:
++                self.write(response)
++
++    def write(self, data) -> None:
++        payload = data.encode() if isinstance(data, str) else data
++        self.inputs.append((self.now(), payload))
++        super().write(payload)
++
++    def now(self) -> float:
++        return time.monotonic() - self.started_at
++
++    def wait_text(self, needle: str, timeout: float = 60.0) -> float | None:
++        end = time.monotonic() + timeout
++        while time.monotonic() < end:
++            if needle in self.screen_text():
++                return self.now()
++            if self.process.poll() is not None:
++                return None
++            time.sleep(0.01)
++        return None
++
++
++# --------------------------------------------------------------------------- scenarios
++# Each takes (session, provider, notes) and drives the session; `notes` collects named timestamps.
++
++def _typed(s: FrameSession, text: str, gap: float) -> None:
++    for char in text:
++        s.write(char)
++        time.sleep(gap)
++
++
++def _script(p, reply: Reply) -> None:
++    """Replace the provider's scripted reply (rules are first-match, so earlier ones must go)."""
++    with p._lock:
++        p._rules.clear()
++    p.reply_with(lambda request: True, reply)
++
++
++def _prompt(s, p, n, text, name):
++    _script(p, Reply(text="REPLY-OK " + name))
++    n[f"{name}_sent"] = s.now()
++    s.write(text)
++    time.sleep(0.05)
++    s.write("\r")
++    n[f"{name}_reply"] = s.wait_text("REPLY-OK " + name, 40)
++
++
++def sc_start(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(3)
++
++
++def sc_prompt_early(s, p, n):
++    time.sleep(0.6)
++    _prompt(s, p, n, "early prompt", "early")
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++
++
++def sc_prompt_ready(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    _prompt(s, p, n, "ready prompt", "ready")
++    time.sleep(2)
++
++
++def sc_prompt_idle(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(5)
++    _prompt(s, p, n, "idle prompt", "idle")
++    time.sleep(2)
++
++
++def sc_back_to_back(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    _script(p, Reply(text="REPLY-OK one two three four five six seven eight", chunk_delay=0.25))
++    s.write("first\r")
++    time.sleep(0.5)
++    s.write("second\r")
++    n["second_sent"] = s.now()
++    time.sleep(8)
++
++
++def sc_stream(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    text = "\n".join(f"line {i} of a streamed reply with `code` and **bold**" for i in range(30))
++    _script(p, Reply(text=text, chunk_delay=0.05))
++    n["sent"] = s.now()
++    s.write("stream please\r")
++    n["first_line"] = s.wait_text("line 0 of", 20)
++    time.sleep(0.8)
++    n["type_start"] = s.now()
++    _typed(s, "typing during stream", 0.05)
++    n["done"] = s.wait_text("line 29 of", 30)
++    time.sleep(1.5)
++
++
++def sc_type_load(s, p, n):
++    time.sleep(0.3)
++    n["type_start"] = s.now()
++    _typed(s, "typed while loading", 0.1)
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++
++
++def sc_slash(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(1)
++    n["slash"] = s.now()
++    s.write("/")
++    time.sleep(1.5)
++    n["type_start"] = s.now()
++    _typed(s, "re", 0.2)
++    time.sleep(1)
++    s.write("\x1b")
++    time.sleep(0.5)
++
++
++def sc_reload(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++    n["reload_sent"] = s.now()
++    s.write("/reload\r")
++    time.sleep(8)
++
++
++def sc_reload_busy(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(1)
++    _script(p, Reply(text="REPLY-OK slow slow slow slow slow slow slow slow", chunk_delay=0.5))
++    s.write("busy\r")
++    time.sleep(1.2)
++    n["reload_sent"] = s.now()
++    s.write("/reload\r")
++    time.sleep(10)
++
++
++def sc_resize(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++    for cols, rows in ((100, 30), (140, 45), (120, 40)):
++        n[f"resize_{cols}x{rows}"] = s.now()
++        s.resize(cols, rows)
++        time.sleep(1.5)
++
++
++SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith("sc_")}
++
++
++# --------------------------------------------------------------------------- recording
++
++def write_provider_config(home: Path, port: int) -> None:
++    """The maintainer's model shape: id gpt-5.6-luna, display name GPT-5.6 Luna, 272K, zero cost."""
++    agent = home / ".pi" / "agent"
++    model = {"id": MODEL_ID, "name": MODEL_NAME, "contextWindow": CONTEXT, "maxTokens": 4096, "reasoning": True,
++             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
++    (agent / "models.json").write_text(json.dumps({"providers": {fx.PROVIDER: {
++        "baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "mock-key", "models": [model]}}}, indent=2))
++    settings = json.loads((agent / "settings.json").read_text())
++    settings["defaultModel"] = MODEL_ID
++    (agent / "settings.json").write_text(json.dumps(settings, indent=2))
++    credentials = home / ".octet" / "credentials"
++    credentials.mkdir(parents=True, exist_ok=True)
++    path = credentials / "custom.json"
++    path.write_text(json.dumps({"base_url": f"http://127.0.0.1:{port}/v1/", "api_key": "", "api_name": MODEL_ID, "headers": [], "auto_discover": False,
++                                "models": [{"api_name": MODEL_ID, "display_name": MODEL_NAME, "context_window": CONTEXT, "max_output_tokens": 4096}]}))
++    path.chmod(0o600)
++
++
++def load_fixture(root: Path) -> fx.Fixture:
++    return fx.Fixture(root=root, lock={"pi": {"version": json.loads((root / "fixture.json").read_text())["pi_version"]}})
++
++
++def record(args) -> dict:
++    fixture = load_fixture(args.fixture)
++    out = Path(args.out)
++    shutil.rmtree(out, ignore_errors=True)
++    out.mkdir(parents=True)
++    provider = MockProvider(model_id=MODEL_ID)
++    provider.default_reply("REPLY-OK default")
++    fx.MODEL = MODEL_ID
++    env = run.make_env(out / "homes", args.target, 0, provider.port)
++    run.prepare_home(fixture, env, cold=True)
++    write_provider_config(env.home, provider.port)
++    tmp = run.leg_tmp(env)
++    tmp.mkdir(parents=True, exist_ok=True)
++    env.workspace.mkdir(parents=True, exist_ok=True)
++    env.sessions.mkdir(parents=True, exist_ok=True)
++    cwd = env.home if args.cwd == "home" else env.workspace
++    if args.target == "octet":
++        if not args.warm:
++            run.reset_adapter_cache(args.extensions_dir)
++        argv = run.octet_args(env, name=None, agent=False, extension_dirs=[args.extensions_dir], enable_extensions=["octet-pi-compat"])
++        argv[argv.index("--workspace") + 1] = str(cwd)
++        argv[argv.index("--model") + 1] = f"custom/{MODEL_ID}"
++        binary = args.octet
++        extra = {"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp), **dict(kv.split("=", 1) for kv in args.env)}
++        child = env.child_env(REPO, extra=extra)
++    else:
++        binary = Path("node")
++        argv = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{MODEL_ID}"]
++        if args.preload:
++            argv = ["--import", args.preload, *argv]
++        child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
++        child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
++                     PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp),
++                     JANK_TRACE=str(out / "api-trace.jsonl"))
++    session = FrameSession(binary, args=argv, env=child, cwd=cwd, columns=run.COLUMNS, rows=run.ROWS,
++                           log_path=out / "transcript.ansi", stderr_path=out / "stderr.log")
++    notes: dict = {}
++    try:
++        SCENARIOS[args.scenario](session, provider, notes)
++        before = time.monotonic()
++        notes["ctrl_d"] = session.now()
++        notes["exit_code"] = session.close(timeout=run.EXIT_GRACE_S)
++        notes["exit_s"] = time.monotonic() - before
++    except BaseException:
++        session.kill()
++        raise
++    finally:
++        with open(out / "frames.jsonl", "w") as handle:
++            for t, data in session.chunks:
++                handle.write(json.dumps({"t": round(t, 4), "o": base64.b64encode(data).decode()}) + "\n")
++            for t, data in session.inputs:
++                handle.write(json.dumps({"t": round(t, 4), "i": base64.b64encode(data).decode()}) + "\n")
++        (out / "requests.json").write_text(json.dumps([{"t": r.received_at, "body": r.body} for r in provider.requests], indent=1))
++        provider.close()
++    notes.update(target=args.target, scenario=args.scenario, cwd=args.cwd)
++    (out / "meta.json").write_text(json.dumps(notes, indent=1))
++    return notes
++
++
++# --------------------------------------------------------------------------- analysis
++
++def load_frames(directory: Path):
++    outs, ins = [], []
++    for line in (directory / "frames.jsonl").read_text().splitlines():
++        row = json.loads(line)
++        if "o" in row:
++            outs.append((row["t"], base64.b64decode(row["o"])))
++        else:
++            ins.append((row["t"], base64.b64decode(row["i"])))
++    return outs, ins
++
++
++def replay(directory: Path):
++    """Yield (t, rows_text, screen) after every PTY write, applying recorded resizes."""
++    screen = Screen(run.COLUMNS, run.ROWS)
++    meta = json.loads((directory / "meta.json").read_text())
++    resizes = sorted((meta[k], k) for k in meta if k.startswith("resize_"))
++    for t, data in load_frames(directory)[0]:
++        while resizes and resizes[0][0] <= t:
++            cols, rows = resizes.pop(0)[1][len("resize_"):].split("x")
++            screen.resize(int(cols), int(rows))
++        screen.feed(data)
++        screen.responses = []
++        yield t, [line.rstrip() for line in screen.text().split("\n")], screen
++
++
++def summarize(directory: Path) -> dict:
++    first: dict[str, float] = {}
++    writes, changes, last = 0, 0, None
++    bottoms: list[tuple[float, str]] = []
++    for t, text, _ in replay(directory):
++        writes += 1
++        changes += text != last
++        last = text
++        joined = "\n".join(text)
++        for key, needle in (("model_label", "GPT-5.6 Luna"), ("model_id", MODEL_ID), ("context_segment", "/272K"), ("ready", core.READY_MARKER)):
++            if key not in first and needle in joined:
++                first[key] = t
++        bottom = " / ".join(line for line in text[-4:] if line)
++        if not bottoms or bottoms[-1][1] != bottom:
++            bottoms.append((t, bottom))
++    return {"first_visible": first, "pty_writes": writes, "screen_changes": changes, "bottom_states": bottoms,
++            "bytes": sum(len(d) for _, d in load_frames(directory)[0])}
++
++
++def echo_latency(directory: Path) -> list[float | None]:
++    """For each typed letter: seconds until the screen next changed (None: never)."""
++    outs, ins = load_frames(directory)
++    screen = Screen(run.COLUMNS, run.ROWS)
++    states = []
++    for t, data in outs:
++        screen.feed(data)
++        screen.responses = []
++        states.append((t, screen.text()))
++    results = []
++    for t_in, data in ins:
++        if len(data) != 1 or not (data.isalpha() or data == b" "):
++            continue
++        before = next((text for t, text in reversed(states) if t <= t_in), "")
++        results.append(next((t - t_in for t, text in states if t > t_in and text != before), None))
++    return results
++
++
++def show_at(directory: Path, at: float) -> str:
++    last = ""
++    for t, text, _ in replay(directory):
++        if t > at:
++            break
++        last = "\n".join(text)
++    return last
++
++
++def diff(args) -> None:
++    for name in args.dirs:
++        directory = Path(name)
++        summary = summarize(directory)
++        print(f"== {directory}")
++        print(json.dumps({k: v for k, v in summary.items() if k != "bottom_states"}, indent=1))
++        print("meta:", json.loads((directory / "meta.json").read_text()))
++        echo = echo_latency(directory)
++        seen = sorted(v for v in echo if v is not None)
++        if seen:
++            print(f"echo: n={len(echo)} missing={echo.count(None)} median={seen[len(seen) // 2] * 1000:.0f}ms max={seen[-1] * 1000:.0f}ms")
++        print(f"bottom-4-row states: {len(summary['bottom_states'])}")
++        for t, bottom in summary["bottom_states"][: args.max_footers]:
++            print(f"  t={t:6.2f}s | {bottom[:200]}")
++    if args.at is not None:
++        for name in args.dirs:
++            print(f"--- {name} at t={args.at}s")
++            print(show_at(Path(name), args.at))
++
++
++def main(argv=None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = parser.add_subparsers(dest="cmd", required=True)
++    r = sub.add_parser("record")
++    r.add_argument("--target", choices=["octet", "pi"], required=True)
++    r.add_argument("--scenario", choices=sorted(SCENARIOS), required=True)
++    r.add_argument("--out", required=True)
++    r.add_argument("--cwd", choices=["workspace", "home"], default="workspace")
++    r.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
++    r.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
++    r.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
++    r.add_argument("--warm", action="store_true", help="keep the adapter cache (octet)")
++    r.add_argument("--preload", default=None, help="Node --import module for Pi (API traffic capture)")
++    r.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for octet")
++    d = sub.add_parser("diff")
++    d.add_argument("dirs", nargs="+")
++    d.add_argument("--at", type=float, default=None)
++    d.add_argument("--max-footers", type=int, default=40)
++    args = parser.parse_args(argv)
++    if args.cmd == "record":
++        print(json.dumps(record(args), indent=1))
++    else:
++        diff(args)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
