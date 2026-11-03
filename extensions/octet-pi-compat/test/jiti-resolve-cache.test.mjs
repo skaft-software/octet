@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,4 +69,23 @@ test('cold and warm resolution keep different alias targets separate and corrupt
   assert.equal(readFileSync(cacheFile, 'utf8'), cold, 'warm hits need no rewritten cache');
   writeFileSync(cacheFile, '{broken');
   assert.deepEqual(run(script), ['shim', 'installed']);
+});
+
+test('editing the governing package.json invalidates a resolution that stopped at a nested one', t => {
+  const { dir, run } = fixture(t);
+  const lib = join(dir, 'node_modules', '@scope', 'foo', 'lib'), manifest = join(dir, 'node_modules', '@scope', 'foo', 'package.json');
+  mkdirSync(lib, { recursive: true });
+  writeFileSync(join(lib, 'package.json'), '{"type":"module"}');
+  for (const name of ['a', 'b']) writeFileSync(join(lib, `${name}.mjs`), `export default ${JSON.stringify(name)};`);
+  writeFileSync(manifest, '{"name":"@scope/foo","exports":"./lib/a.mjs"}');
+  writeFileSync(join(dir, 'entry.ts'), "import foo from '@scope/foo'; export default foo as string;");
+  const script = `
+    import { createJiti, flushResolveCache } from ${JSON.stringify(moduleUrl)};
+    const jiti = createJiti(import.meta.url, { moduleCache: false, tryNative: false });
+    console.log(JSON.stringify(await jiti.import(${JSON.stringify(join(dir, 'entry.ts'))}, { default: true })));
+    flushResolveCache();
+  `;
+  assert.equal(run(script), 'a');
+  writeFileSync(manifest, '{"name":"@scope/foo","exports":"./lib/b.mjs"}');
+  assert.equal(run(script), 'b');
 });

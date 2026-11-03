@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti as stockCreateJiti } from 'jiti';
 import { readPersisted, writePersisted } from './startup-cache.mjs';
@@ -101,9 +101,13 @@ class ResolveCache {
         }
       }
     }
+    // Inside a dependency, every package.json up to the package root counts: a
+    // nested `{"type":"module"}` must not hide an edited `exports` map above it.
+    const dependency = resolved.includes('/node_modules/');
+    const packageRoot = dir => { const scope = dirname(dir); return basename(scope) === 'node_modules' || (basename(scope).startsWith('@') && basename(dirname(scope)) === 'node_modules'); };
     for (let dir = dirname(resolved), last; dir !== last; last = dir, dir = dirname(dir)) {
       out.add(join(dir, 'package.json'));
-      try { statSync(join(dir, 'package.json')); break; } catch { /* keep walking up */ }
+      if (dependency ? packageRoot(dir) : existsSync(join(dir, 'package.json'))) break;
     }
     return out;
   }
