@@ -79,23 +79,6 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
 - Use isolated HOME and cache directories for adapter tests:
   `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
 
-## Screen-stability acceptance (maintainer requirement)
-
-Checking the first frame is not enough. Every UI-affecting change must pass 20-second windows,
-analysed frame by frame:
-- **Windows:** from launch (cold and warm), and after prompts (before READY, at READY, after
-  idle, back to back, a streamed reply, a tool-call reply, after /reload).
-- **Replay:** run the raw PTY byte stream through `scripts/e2e/octet_e2e/vt.py` after every
-  write chunk, not at fixed intervals.
-- **Fail on:**
-  - a native-footer flash while Pi compat is on;
-  - flicker (a state visible for less than ~100 ms, or A→B→A);
-  - more than one footer content change (snapshot → live);
-  - footer, composer or transcript height or position jumps;
-  - blank or partial frames.
-- **Compare:** run the same windows on Pi 1.4.0.
-- **Tool:** the reusable checker is `scripts/pi-eval/flicker.py`.
-
 ## Rules (non-negotiable)
 
 - **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
@@ -125,3 +108,36 @@ analysed frame by frame:
 - The fix and why the guarantees still hold.
 - Before/after evidence from the real fixture: screens, timings, and the failing-name comparison.
 - Remaining risks, and anything you could not verify.
+
+## PRIMARY fixture: the maintainer's real Pi setup (added 2026-11-03)
+
+- **Location:** `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/pi-eval-cache/03dc02b6ce9f3a89`.
+  Its home is in `home/`. It is built by `scratchpad/maint/build_maintainer_fixture.py`; load it with
+  `fx.Fixture(root=Path(that), lock=json.load(...))`, or point `HOME` at a copy of `home/`. Always use a
+  copy (`fx.copy_tree`); never mutate the cached template.
+- **Packages:** the same 29 packages and versions as the maintainer, with Pi 1.4.0.
+  - 13 autoload: pi-agent-extensions, pi-mcp-adapter, pi-web-access, pi-subagents,
+    pi-background-tasks, pi-lens, pi-permission-system, pi-hermes-memory,
+    rpiv-ask-user-question, pi-hashline-edit-pro, bigpowers, awesome-pi-themes, and
+    @termdraw/pi.
+  - 16 installed with `autoload: false`. octet must NOT load these, exactly as Pi does not;
+    verify it.
+- **Settings:** the same Pi settings as the maintainer:
+  - `theme: ghostty-dark` (from awesome-pi-themes);
+  - `tuiMode: fullscreen`;
+  - `defaultTools: ["+codemode"]` with `codemode.mode: on`;
+  - `steeringMode: all`;
+  - `defaultThinkingLevel: max`;
+  - `terminal.showTerminalProgress`;
+  - `markdown.mermaid: streaming`;
+  - `compaction.enabled`.
+
+  octet must honour every one the way Pi does. Report any it ignores.
+- **Footer:** there is NO pi-powerline-footer here. The maintainer's footer comes from one
+  of these packages or from Pi's built-in footer. Find out which.
+- **Provider:** the maintainer uses `openai-codex`; the fixture uses the mock provider. To
+  catch the model-ID vs display-name bug, configure the mock model with id `gpt-5.6-luna`
+  and name `GPT-5.6 Luna`, a context window of 272000 and a subscription-style zero cost,
+  in BOTH Pi (`models.json`) and octet (`custom.json`).
+- **Usage:** this fixture is primary for every acceptance check. The 23-package fixture is
+  secondary, for breadth.
