@@ -316,7 +316,7 @@ def ensure_probe(fixture: Fixture, *, log=print, force: bool = False) -> dict:
     return probe
 
 
-def write_provider_config(home: Path, port: int) -> None:
+def write_provider_config(home: Path, port: int, *, model: str = MODEL, name: str | None = None, context_window: int = 128000) -> None:
     """Point both Pi (models.json) and octet (custom credential) at the mock provider."""
     agent = home / ".pi" / "agent"
     agent.mkdir(parents=True, exist_ok=True)
@@ -328,7 +328,7 @@ def write_provider_config(home: Path, port: int) -> None:
                         "baseUrl": f"http://127.0.0.1:{port}/v1",
                         "api": "openai-completions",
                         "apiKey": "mock-key",
-                        "models": [{"id": MODEL, "name": MODEL, "contextWindow": 128000, "maxTokens": 4096}],
+                        "models": [{"id": model, "name": name or model, "contextWindow": context_window, "maxTokens": 4096}],
                     }
                 }
             },
@@ -343,12 +343,12 @@ def write_provider_config(home: Path, port: int) -> None:
             {
                 "base_url": f"http://127.0.0.1:{port}/v1/",
                 "api_key": "",
-                "api_name": MODEL,
+                "api_name": model,
                 "headers": [],
                 "auto_discover": False,
                 # The legacy single-model shape (api_name only) no longer yields a model in
                 # current builds; an explicit models list does.
-                "models": [{"api_name": MODEL, "display_name": MODEL, "context_window": 128000, "max_output_tokens": 4096}],
+                "models": [{"api_name": model, "display_name": name or model, "context_window": context_window, "max_output_tokens": 4096}],
             }
         )
     )

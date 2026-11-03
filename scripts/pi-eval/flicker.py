@@ -155,22 +155,37 @@ def analyze(
     window: tuple[float, float] | None = None,
     min_ms: float = 100.0,
     native: str = NATIVE_FOOTER,
+    mask: str | None = None,
 ) -> dict:
-    """Stability report for the frames inside ``window`` (seconds from the first chunk)."""
+    """Stability report for the frames inside ``window`` (seconds from the first chunk).
+
+    ``mask`` is a regex whose matches are blanked before states are compared, for text that
+    legitimately ticks (a footer's clock or elapsed time) and must not count as a change.
+    """
     if window is not None:
         frames = [f for f in frames if window[0] <= f.t <= window[1]]
     if not frames:
         return {"frames": 0}
     end = window[1] if window else frames[-1].t
     pattern = re.compile(native)
+    ticking = re.compile(mask) if mask else None
+
+    def masked(rows: tuple[str, ...]) -> tuple[str, ...]:
+        # Styled rows interleave `\x00style\x00` keys with text; only the text may be blanked.
+        def row(value: str) -> str:
+            parts = value.split("\x00")
+            return "\x00".join(part if i % 2 else ticking.sub("#", part) for i, part in enumerate(parts))
+
+        return tuple(map(row, rows)) if ticking else rows
+
     footer = _states(
         frames,
-        lambda f: footer_rows(f, columns)[1],
+        lambda f: masked(footer_rows(f, columns)[1]),
         lambda f: footer_rows(f, columns)[0],
         end,
     )
     # Cursor motion is layout, not content: compare the visible text only.
-    whole = _states(frames, lambda f: f.styled, lambda f: f.text, end)
+    whole = _states(frames, lambda f: masked(f.styled), lambda f: f.text, end)
     seen_content = False
     blank_frames, blank_footer = [], []
     for f in frames:
@@ -348,12 +363,13 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--window", help="START:END seconds from the first chunk")
     report.add_argument("--native", default=NATIVE_FOOTER)
     report.add_argument("--max-footer-changes", type=int, default=1)
+    report.add_argument("--mask", help="regex blanked before comparing states, e.g. '\\d' for a ticking clock")
     args = parser.parse_args(argv)
     if args.command == "selftest":
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
         return 0 if unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful() else 1
     window = tuple(map(float, args.window.split(":"))) if args.window else None
-    result = analyze(replay(load_chunks(args.chunks), args.columns, args.rows), args.columns, window=window, native=args.native)
+    result = analyze(replay(load_chunks(args.chunks), args.columns, args.rows), args.columns, window=window, native=args.native, mask=args.mask)
     failures = verdict(result, max_footer_changes=args.max_footer_changes)
     print(json.dumps({"report": result, "failures": failures}, indent=2, ensure_ascii=False))
     return 1 if failures else 0
