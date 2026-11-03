@@ -141,3 +141,12 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
   in BOTH Pi (`models.json`) and octet (`custom.json`).
 - **Usage:** this fixture is primary for every acceptance check. The 23-package fixture is
   secondary, for breadth.
+
+## Diagnostics presentation (maintainer requirement, added 2026-11-03)
+
+Extension warnings, errors and notices must be polished, concise and grouped/deduplicated, and
+must never dump logs, stack traces, absolute paths or extension console output into the chat.
+Worker `fix/pi-diagnostics-ux` owns the presentation layer: lib/issues.mjs, the notification and
+diagnostic paths, and the host rendering of extension diagnostics. Other workers must not add
+new user-facing messages ad hoc. Route them through the existing issue/diagnostic paths with a
+short label and a one-line action, and put detail in the payload.
