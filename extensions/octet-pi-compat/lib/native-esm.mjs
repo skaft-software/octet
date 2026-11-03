@@ -19,6 +19,11 @@ const REVIEW = 'OCTET_PI_NATIVE_REVIEW_CHANGED';
 const WRAPPER_NAMES = ['require', 'module', 'exports', '__filename', '__dirname'];
 const ESM_SOURCE = /\.m?js$/;
 const SPECIAL_META = /\bimport\.meta\.(?!(?:url|dirname|filename|resolve)\b)[\w$]+/;
+// A write to the CommonJS export objects. The prelude only lets such names be
+// read (feature detection); the module's real exports are its ESM ones, so a
+// file that publishes through `module.exports` would load natively with an
+// empty namespace instead of falling back to jiti's CommonJS interop.
+const CJS_EXPORT_WRITE = /\b(?:module\.exports|exports(?:\.[\w$]+|\[[^\]]*\]))\s*=(?!=)|\bObject\.(?:defineProperty|assign)\(\s*(?:module\.)?exports\b/;
 const PI_HEAD = /^(?:@earendil-works\/|@mariozechner\/|typebox|@sinclair\/typebox)/;
 
 function fallback(reason) {
@@ -60,6 +65,7 @@ export function nativeIneligibleReason(entry, hashes) {
     try { text = readFileSync(file, 'utf8'); } catch { return `unreadable: ${file}`; }
     if (text.startsWith('#!')) return `hashbang: ${file}`;
     if (SPECIAL_META.test(text)) return `import.meta extension: ${file}`;
+    if (CJS_EXPORT_WRITE.test(text)) return `CommonJS export assignment: ${file}`;
   }
   return undefined;
 }

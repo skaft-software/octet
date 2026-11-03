@@ -109,6 +109,26 @@ export const own = (() => { const module = 1; return module; })();`,
   assert.equal((await import(pathToFileURL(owned).href)).r, 7);
 });
 
+test('a file that publishes through module.exports stays on jiti instead of loading with an empty namespace', async t => {
+  const dir = project({
+    'cjs-style.js': 'module.exports = function factory() { return 1; };',
+    'umd.js': '(function (r, f) { if (typeof exports === "object") module.exports = f(); else r.X = f(); })(globalThis, () => 1);\nexport default function factory() {}',
+    'assign.js': 'exports.factory = () => 1; export const x = 1;',
+    'define.js': 'Object.defineProperty(exports, "__esModule", { value: true }); export default function factory() {}',
+    'reads.js': 'export default function factory() {}\nexport const t = typeof module === "object" && module.exports === module.exports;\nexport const eq = exports == null;',
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const name of ['cjs-style.js', 'umd.js', 'assign.js', 'define.js']) {
+    const file = join(dir, name);
+    assert.match(nativeIneligibleReason(file, reviewedSourceHashes(file)), /CommonJS export assignment/, name);
+  }
+  const reads = join(dir, 'reads.js');
+  assert.equal(nativeIneligibleReason(reads, reviewedSourceHashes(reads)), undefined);
+  // jiti still gives the CommonJS file its factory, which is where the entry now goes.
+  const { jiti } = setup();
+  assert.equal(typeof await jiti.import(join(dir, 'cjs-style.js'), { default: true }), 'function');
+});
+
 test('a live scope keeps resolving aliases for later dynamic imports from the closure', async t => {
   const dir = project({ 'index.js': `export default () => {}; export const later = () => import('${CODING}');` });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
