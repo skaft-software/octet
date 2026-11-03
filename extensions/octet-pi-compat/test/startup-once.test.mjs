@@ -69,7 +69,7 @@ const jiti = createJiti(import.meta.url, { moduleCache: false, tryNative: false 
 console.log(await jiti.import(${JSON.stringify(join(dir, 'x.ts'))}, { default: true })); flushResolveCache();`);
   const run = () => spawnSync(process.execPath, [script], { env: { ...process.env, OCTET_PI_COMPAT_CACHE: cache }, encoding: 'utf8' });
   assert.equal(run().stdout.trim(), 'js-ts');
-  assert.ok(JSON.parse(readFileSync(join(cache, 'jiti-resolve-v1.json'), 'utf8')).entries);
+  assert.ok(JSON.parse(readFileSync(join(cache, 'jiti-resolve-v2.json'), 'utf8')).entries);
   assert.equal(run().stdout.trim(), 'js-ts');
   // A new earlier candidate changes the parent directory: the cached entry must not win.
   writeFileSync(join(dir, 'y.js'), 'export const y = "-js";');

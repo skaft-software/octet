@@ -46,8 +46,8 @@ work starts from. This file is updated at every milestone so work can resume at 
   use Pi's own installer semantics.
 - **Blocker:** the sandbox's auto-mode classifier refuses to execute downloaded
   third-party code (the Pi CLI and npm Pi packages). The eval, by design, runs both. It
-  needs either a permission rule allowing it in this environment, or running the eval
-  on a maintainer machine. Everything not executing downloaded code can proceed here.
+  needs a disposable sandbox where those packages may be executed. Do not run the
+  downloaded third-party code on the maintainer's host. Other work can proceed here.
 - Workstreams briefed, then stopped by an interrupt before writing anything (relaunch
   on request):
   1. Eval harness at `scripts/pi-eval/`: pinned `packages.lock.json` (Pi 1.4.0 plus
@@ -187,15 +187,47 @@ Residuals:
 Cold full UI: 25.62 s (Pi) vs **17.20 s (octet), 0.67x**. Warm: 2.34 s vs 2.26 s, 0.97x, a
 tie within noise. Parity is 1.0 and all 20 launches were clean.
 
-In flight (worktrees; gated so timing runs stay quiet):
+Workstreams recorded at the time (their unpushed cloud work was unavailable on continuation):
 - `perf/pi-warm`: warm target <=1.6 s. Profiles the runner's 1.76 s and the 0.40 s warm
   prepare. Candidates: V8 code cache for jiti-evaluated code, lazy imports, and prefetching
   the next factory while preserving order. It creates `<scratchpad>/WARM_DONE` when timing is done.
 - `perf/pi-exit`: exit 2.06 s vs Pi 0.16 s. It waits on `WARM_DONE` before release builds.
 
+## Continuation: review integrity and synthetic warm work
+
+The v3 runner had batched reviewed-source checks before any factory registered. An
+only-then-running earlier factory could modify a later reviewed entrypoint or relative
+import. A failed native probe could likewise modify reviewed sources before jiti fallback.
+The runner now rechecks at each ordered import boundary and after a failed probe, including
+cold combined capture. Mutation regressions cover shim and installed routes and continued
+loading of healthy factories. These checks do not create an OS privilege boundary.
+
+The jiti resolution cache now hashes the complete ordered alias table instead of repeating
+it in every key; its private cache format advances to v2 and repopulates on first use. On
+an Apple M3 with Node 22.20.0, nine alternating synthetic trials of 23 generated TypeScript
+factories measured median prepare plus inspect subprocess time of 423.41 ms before and
+393.83 ms after. Both variants included the review repair. This is not a full-UI or Linux
+23-package result. Method, samples' limitations and reproduction instructions are in
+`extensions/octet-pi-compat/test/benchmarks/README.md`.
+
+An independent focused adapter suite passed 50 tests; the built native-editor host suite
+passed 194. Running the 132 ordinary adapter test files in bounded groups produced 1,304
+passes, 60 failures and 30 skips; the same 60 failure names reproduced on the clean base
+under the same isolated HOME, mostly without an installed Pi release. The Pi eval self-test
+passed 17 tests. A worktree debug octet binary was built; optimized builds timed out.
+
+Synthetic PTY tests with a single generated factory observed normal shutdown delivery and
+no surviving test child. A deliberately hung startup prevented the shutdown callback from
+being observed on both base and candidate; this does not explain the historical Linux exit
+or qualify cleanup of arbitrary process trees. The <=1.6 s warm goal and an improvement to
+the real-workload exit remain unverified.
+
 ## Next steps
 
-1. Resolve the execution blocker (permission rule, or run legs locally).
-2. Relaunch the three workstreams above.
-3. Record the baseline (Pi 1.4.0 vs octet, cold and warm, >=5 alternating reps) in `docs/benchmarks/`.
-4. Hillclimb on octet warm and cold full_ui_s relative to Pi; target below 1.0x on both.
+1. Reproduce the pinned 23-package Pi 1.4.0 benchmark in a disposable Linux sandbox with
+   the matching optimized binary; alternate baseline and candidate runs.
+2. Profile warm full-UI startup and trace the slow exit through session-end hooks, request
+   drain, shutdown acknowledgement and process-tree cleanup. Do not shorten deadlines,
+   skip hooks or weaken cleanup merely to improve the measurement.
+3. Run the remaining installed-Pi and applicable Rust qualification in the appropriate
+   environment, and retain baseline failures and any skips explicitly in release evidence.

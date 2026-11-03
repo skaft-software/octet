@@ -63,9 +63,11 @@ native attempt succeed. `lib/native-esm.mjs`:
    importing a file outside the reviewed closure that is not under `node_modules`, a target that is not
    native ESM (CJS, JSON, TS, native addon: where jiti's interop proxy semantics apply), non-`file:`/`node:` URLs.
    Any rejection of the probe (including a link `SyntaxError` for a missing named export and
-   evaluation errors) disables that scope and falls back to today's `jiti.import`, which then re-runs
-   exactly as before (jiti itself already re-runs on a native evaluation error). Success marks the scope
-   `live`: later dynamic imports from the closure still get alias resolution but are never rejected.
+   evaluation errors) disables that scope and falls back to `jiti.import` (jiti itself already re-runs
+   on a native evaluation error). Before fallback, the runner checks the reviewed sources again: a failed
+   evaluation may have changed them. A mismatch refuses that factory instead of running changed code.
+   Success marks the scope `live`: later dynamic imports from the closure still get alias resolution but
+   are never rejected.
 7. After a successful probe, `jiti.import(entry, { default: true })` is still what returns the factory:
    jiti's native attempt hits the already-evaluated module (same instance) and applies its default/interop
    wrapper, so the returned function is exactly what it was. Registration order and `fn(pi)` sequencing are
@@ -83,8 +85,11 @@ what the shims import natively. Test: `test/native-esm.test.mjs`.
 
 ## Integrity argument
 
-The file set that executes is the same as before: the closure files (already hashed pre-import) plus
-node_modules deps (unreviewed both ways). Native loads execute only files reached by specifiers that Node
+The file set that executes is the same as before: the closure files (hashed immediately before each
+ordered factory import, and checked again after a failed native probe) plus node_modules deps (unreviewed
+both ways). This also applies to cold combined capture when it carries reviewed source hashes. An earlier
+factory can change a later factory's files, so the per-factory checks cannot be batched ahead of
+registration. Native loads execute only files reached by specifiers that Node
 resolves; during probing any closure-to-non-closure, non-node_modules resolution aborts to jiti, so native
 loading can never execute a source file the review did not list that jiti would not also have executed.
 The hash check in `load` means native execution is of exactly the reviewed bytes (closing the usual

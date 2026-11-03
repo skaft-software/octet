@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +25,8 @@ import { readPersisted, writePersisted } from './startup-cache.mjs';
 // stored; failures and `try` misses are never cached. The cache directory is
 // the same owner-only directory as the transform and V8 compile caches and is
 // trusted to the same degree.
-const SCHEMA = 'octet.pi-jiti-resolve/v1';
-const FILE = 'jiti-resolve-v1.json';
+const SCHEMA = 'octet.pi-jiti-resolve/v2';
+const FILE = 'jiti-resolve-v2.json';
 const PINNED = '2.7.0';
 const ANCHOR = 'function jitiResolve(e,t,i){let n,a;';
 const MAX_ENTRIES = 60000;
@@ -67,7 +68,14 @@ class ResolveCache {
   aliasKey(alias) {
     if (!alias || typeof alias !== 'object') return '';
     let key = this.aliasKeys.get(alias);
-    if (key === undefined) { key = JSON.stringify(alias); this.aliasKeys.set(alias, key); }
+    if (key === undefined) {
+      // The full table is several KiB and identical across hundreds of import
+      // keys. Keep its exact ordered identity without copying/parsing those
+      // bytes in every key on every warm launch. Never hash only alias names:
+      // the shim and installed routes must retain distinct target identities.
+      key = createHash('sha256').update(JSON.stringify(alias)).digest('hex');
+      this.aliasKeys.set(alias, key);
+    }
     return key;
   }
   key(ctx, specifier, options) {

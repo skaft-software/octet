@@ -415,50 +415,43 @@ export class Runtime {
     this.loadFailures = [];
     const isolate = extensions.length > 1;
     const setupBudget = new LoadBudget();
-    // Every factory's read-only preparation (path identity, reviewed digest,
-    // and the static import-gap gate) runs before anything registers. These
-    // checks share no state, so they run concurrently; a factory's own failure
-    // is still reported against that factory, in order, below. The import and
-    // the `fn(pi)` invocation stay strictly sequential: Pi's registration
-    // ORDER is the contract, and jiti's transform path is synchronous anyway.
+    // Earlier factories may change later factories, so path and source checks
+    // belong at each ordered import boundary, not in a batch before registration.
     const fingerprints = sharedSourceFingerprints();
-    const prepared = await Promise.all(extensions.map(async (entry, factory) => {
-      let resolved = entry;
-      let mode = routes[entry] ?? globalMode;
-      let preparationError;
+    for (const [factory, requestedEntry] of extensions.entries()) {
+      let entry = requestedEntry, mode = routes[entry] ?? globalMode, preparationError, verificationFailure;
       try {
-        resolved = realpathSync(entry);
-        mode = routes[resolved] ?? globalMode;
-        if (this.mirrorPiSetup && !isDeepStrictEqual(this.config.entrypoint_sources[resolved], reviewedSourceHashes(resolved, { fingerprints }))) invalid(`reviewed factory sources changed: ${resolved}; review and configure again`);
-        if (this.config.entrypoint_sha256?.[resolved]) {
-          const actual = createHash('sha256').update(readFileSync(resolved)).digest('hex');
-          if (actual !== this.config.entrypoint_sha256[resolved]) invalid(`reviewed factory changed: ${resolved}; configure again`);
-        }
-      } catch (error) {
-        preparationError = error;
-      }
-      return { factory, entry: resolved, mode, preparationError };
-    }));
-    fingerprints.flush();
-    for (const { factory, entry, mode, preparationError } of prepared) {
+        entry = realpathSync(entry);
+        mode = routes[entry] ?? globalMode;
+      } catch (error) { preparationError = error; }
+      const verifySources = () => {
+        try {
+          // Cold combined capture carries the same reviewed closure as a live mirror.
+          const reviewed = nativeSources?.[entry];
+          if ((this.mirrorPiSetup || reviewed) && !isDeepStrictEqual(reviewed, reviewedSourceHashes(entry, { fingerprints }))) invalid(`reviewed factory sources changed: ${entry}; review and configure again`);
+          if (this.config.entrypoint_sha256?.[entry]) {
+            const actual = createHash('sha256').update(readFileSync(entry)).digest('hex');
+            if (actual !== this.config.entrypoint_sha256[entry]) invalid(`reviewed factory changed: ${entry}; configure again`);
+          }
+        } catch (error) { verificationFailure = error; throw error; }
+      };
       const previousTools = new Map(this.tools);
       const restoreProviders = checkpointFactoryProviders(this);
       try {
-        // Preserve U28's per-extension notification attribution. Path and
-        // reviewed-digest checks already ran in the concurrent preparation pass.
+        // Preserve U28's per-extension notification attribution.
         this.extensionNames.set(factory, extensionDisplayName(entry));
-        // A changed reviewed source must refuse before importing fallback code.
         if (preparationError && this.mirrorPiSetup) throw preparationError;
-        const jiti = await jitiFor(mode);
+        // A changed reviewed source must refuse before importing installed Pi.
+        if ((this.mirrorPiSetup || nativeSources?.[entry]) && mode === 'installed' && !installedJiti) verifySources();
+        const jiti = mode === 'installed' ? await jitiFor(mode) : this.jiti;
         try {
-          // Preparation failures (digest mismatch, import-gap gate) take the
-          // same classification path as a load failure, exactly as they did
-          // when the scan ran inline here.
           if (preparationError) throw preparationError;
           const fn = await setupBudget.settle(async () => {
+            verifySources();
             // A native probe evaluates the module once; jiti then returns that same
-            // instance through its usual default/interop wrapper.
-            if (native && mode !== 'installed') await native.attempt(entry, nativeSources[entry]);
+            // instance through its usual default/interop wrapper. A declined probe
+            // may have executed code before failing, so recheck before fallback.
+            if (native && mode !== 'installed') await native.attempt(entry, nativeSources[entry], verifySources);
             return jiti.import(entry, { default: true });
           });
           tracePhase(`adapter.factory.import.${factory}`);
@@ -497,7 +490,7 @@ export class Runtime {
               throw rpcError(-32601, `unsupported_feature mirror hook ${unsupportedHooks.join(', ')}: not advertised by this mirror configuration; re-run configure.mjs --mirror after reviewing the Pi setup`);
             }
           }
-        } catch (error) { throw mode === 'installed' || error?.name === 'FactoryStalled' ? error : await classifyLoadFailure(error, entry, this.jiti); }
+        } catch (error) { throw error === verificationFailure || mode === 'installed' || error?.name === 'FactoryStalled' ? error : await classifyLoadFailure(error, entry, this.jiti); }
       } catch (error) {
         this.forgetFactory(factory, entry);
         // A single explicit entrypoint keeps its failure, which is how configure
@@ -514,6 +507,7 @@ export class Runtime {
         if (this.initializingId === undefined) console.error(`[pi-compat] skipped ${entry}: ${failure.error}`);
       }
     }
+    fingerprints.flush();
     this.loaded = true;
     flushResolveCache(); // persist newly learned module resolutions once per launch
     tracePhase('adapter.load.ready', `factories=${extensions.length} failures=${this.loadFailures.length}`);

@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Pi mirror loading rechecks reviewed sources at each ordered factory import and
+  after a failed native-ESM probe before fallback. A changed source is refused;
+  this review check is not an operating-system sandbox.
 - Pi's `ctx.isProjectTrusted()` applies its plain-repository rule for already
   enabled factories, allowing repo tooling such as language servers to start
   when no trust-requiring project resources exist. The signal cannot silently
@@ -25,6 +28,12 @@
   while the native input pump retains typing and resize handling. Cold catalog
   capture still precedes the fully initialized branded frame; no cold-start
   performance parity is claimed.
+
+### Changed
+
+- Pi startup reuses source fingerprints and module resolutions and can import
+  eligible reviewed ESM factories natively. Ordered registration and jiti
+  fallback remain; the resolution cache repopulates after the format change.
 
 ### Known limitations
 

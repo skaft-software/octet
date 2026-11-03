@@ -164,7 +164,7 @@ export class NativeEsm {
     return parts.length ? parts.join('') + source : source;
   }
   /** Probes a native import of `entry`. True: evaluated natively and the scope is live. False: use jiti. */
-  async attempt(entry, hashes) {
+  async attempt(entry, hashes, beforeFallback) {
     const reason = nativeIneligibleReason(entry, hashes);
     if (reason) { tracePhase('adapter.native.ineligible', reason); return false; }
     this.install();
@@ -179,6 +179,7 @@ export class NativeEsm {
       scope.state = 'disabled';
       if (error?.code === REVIEW) throw error;
       tracePhase('adapter.native.declined', `${entry} ${String(error?.code ?? error?.name)} ${String(error?.message).slice(0, 600)}`);
+      beforeFallback?.(); // a failed evaluation may have modified the reviewed files
       return false;
     }
   }
