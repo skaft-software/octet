@@ -1737,6 +1737,8 @@ fn build_config_with_global_path_and_diagnostics(
         )?;
     }
 
+    let model_saved = values.model.is_some();
+    let reasoning_saved = values.reasoning.is_some();
     let model = resolve_model_id(
         cli.model.clone().map(octet_ai::ModelId),
         values.model.clone().map(octet_ai::ModelId),
@@ -2071,6 +2073,8 @@ fn build_config_with_global_path_and_diagnostics(
         model_explicit,
         reasoning,
         reasoning_explicit,
+        model_saved,
+        reasoning_saved,
         reasoning_mode,
         reasoning_mode_explicit,
         cache_retention,

@@ -2642,3 +2642,24 @@ fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
     assert_eq!(value["reasoning_mode"].as_str(), Some("standard"));
     assert_eq!(value["reload"].as_bool(), Some(true));
 }
+
+#[test]
+fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
+    let directory = cwd();
+    let config = config_with_empty_global(base(), directory.path()).unwrap();
+    assert!(config.accepts_extension_model() && config.accepts_extension_reasoning());
+
+    let global = directory.path().join("global.toml");
+    std::fs::write(&global, "model = \"gpt-4o-mini\"\nreasoning = \"low\"\n").unwrap();
+    let config = build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
+    assert!(config.model_saved && config.reasoning_saved);
+    assert!(!config.model_explicit && !config.reasoning_explicit);
+    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+
+    let mut cli = base();
+    cli.model = Some("gpt-4o-mini".into());
+    cli.reasoning = Some("high".into());
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+    assert!(!config.model_saved && !config.reasoning_saved);
+    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+}

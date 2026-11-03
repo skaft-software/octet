@@ -261,8 +261,11 @@ impl ModelessExtensions {
             loaded.is_current(&self.extensions) && lease.matches(&self.extensions),
             "stale model-less resource candidate"
         );
-        if loaded.default_model.is_some() || loaded.default_thinking_level.is_some() {
-            shell.notice("Pi model/thinking defaults require a configured model and restart; prompts remain disabled");
+        if (loaded.default_model.is_some() && self.config.accepts_extension_model())
+            || (loaded.default_thinking_level.is_some()
+                && self.config.accepts_extension_reasoning())
+        {
+            shell.notice("Pi's default model and thinking level apply once a model is configured and octet restarts");
         }
         for diagnostic in loaded.diagnostics {
             shell.notice(diagnostic);

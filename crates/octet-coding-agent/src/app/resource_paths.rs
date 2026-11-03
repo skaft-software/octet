@@ -93,7 +93,8 @@ impl ResourcePathConsumer {
                 .map(|(model, _)| model.clone())
                 .or_else(|| self.model.clone());
         }
-        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
+        if config.accepts_extension_reasoning()
+            && (self.model_default_active || self.thinking_default_active)
         {
             if let Some((_, reasoning)) = &self.selection {
                 config.reasoning = Some(reasoning.clone());
@@ -174,14 +175,15 @@ impl App {
         &mut self,
         requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
         requested_thinking: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let baseline = self
             .resource_paths
             .selection
             .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
             .clone();
-        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
-        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
+        let model_preference = requested_model.filter(|_| self.config.accepts_extension_model());
+        let thinking_preference =
+            requested_thinking.filter(|_| self.config.accepts_extension_reasoning());
         let withdraw_model = !self.config.model_explicit
             && model_preference.is_none()
             && self.resource_paths.model_default_active;
@@ -202,12 +204,13 @@ impl App {
         let model = self.catalog.resolve(&id)?;
         let changed_model = id != self.model.spec.id;
         let subagents = self.executable_extensions.has_agent_session_service();
-        let reasoning = if self.config.reasoning_explicit && changed_model {
+        // The user's own effort follows a model they did not pick; Pi's only fills a gap.
+        let reasoning = if !self.config.accepts_extension_reasoning() && changed_model {
             let requested = self
                 .config
                 .reasoning
                 .as_ref()
-                .context("explicit invocation reasoning is unset")?;
+                .context("configured reasoning is unset")?;
             if matches!(requested, ReasoningConfig::Budget(_)) {
                 // Custom explicit budgets have no portable level; core admission
                 // validates the exact budget rather than silently normalizing it.
@@ -223,7 +226,8 @@ impl App {
             // The protocol has already required exact Pi spellings. Native
             // admission rejects unsupported levels instead of lowering max.
             requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
-        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
+        } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
+        {
             if id == baseline.0 {
                 baseline.1.clone()
             } else {
@@ -235,18 +239,30 @@ impl App {
             // Theme/path-only reloads must not reset a live reasoning choice.
             self.reasoning.clone()
         };
+        let mut notice = None;
         if changed_model || reasoning != self.reasoning {
             self.agent.select_model_at_idle(
                 model.clone(),
                 reasoning.clone(),
                 reasoning_label(&reasoning),
             )?;
+            if model_preference.is_some() || thinking_preference.is_some() {
+                notice = Some(format!(
+                    "Using Pi's default {} · {} for this session",
+                    model
+                        .spec
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&model.spec.api_name),
+                    reasoning_label(&reasoning),
+                ));
+            }
             self.model = model;
             self.reasoning = reasoning;
         }
         self.resource_paths.model_default_active = model_preference.is_some();
         self.resource_paths.thinking_default_active = thinking_preference.is_some();
-        Ok(())
+        Ok(notice)
     }
 
     pub(crate) fn mark_resource_paths_reload(&mut self) {
@@ -311,17 +327,18 @@ impl App {
         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
         let system = format!("{prefix}{suffix}");
         let mut diagnostics = loaded.diagnostics;
-        if let Err(error) = self.apply_resource_defaults(
+        match self.apply_resource_defaults(
             loaded.default_model.as_ref(),
             loaded.default_thinking_level.as_deref(),
         ) {
-            diagnostics.push(
+            Ok(notice) => diagnostics.extend(notice),
+            Err(error) => diagnostics.push(
                 format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .take(4096)
                     .collect(),
-            );
+            ),
         }
         // Default resolution may complete the native provider catalog. Publish
         // those genuine model facts as well as the invocation scope, without

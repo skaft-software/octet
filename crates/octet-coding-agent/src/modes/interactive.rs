@@ -7611,6 +7611,10 @@ where
     // later rebuilds and stay authoritative over session-only resource
     // contributions (for example a mirrored Pi default model).
     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
+    let explicit_reasoning_change = matches!(
+        &reconfig,
+        Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. }
+    );
     let in_place = if let Reconfig::Model(id) = &reconfig {
         match crate::app::try_apply_model_reconfig(&mut app, id) {
             Ok(selected) => selected,
@@ -7632,6 +7636,10 @@ where
     };
     if explicit_model_change {
         app.config.model_explicit = true;
+    }
+    if explicit_reasoning_change {
+        app.config.reasoning = Some(app.reasoning.clone());
+        app.config.reasoning_explicit = true;
     }
     if !in_place {
         refresh_resource_paths(&mut app, shell, input).await?;

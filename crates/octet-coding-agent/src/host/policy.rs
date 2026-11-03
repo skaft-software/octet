@@ -122,6 +122,8 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
             .map(crate::config::parse_reasoning)
             .transpose()?,
         reasoning_explicit: request.reasoning.is_some(),
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: true,
         cache_retention: CacheRetention::Short,

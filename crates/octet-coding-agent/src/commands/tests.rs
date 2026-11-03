@@ -794,6 +794,8 @@ fn app_for_status() -> (tempfile::TempDir, App) {
         model_explicit: false,
         reasoning: None,
         reasoning_explicit: false,
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,

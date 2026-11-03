@@ -20,6 +20,8 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         model_explicit: false,
         reasoning: None,
         reasoning_explicit: false,
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,

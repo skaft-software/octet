@@ -399,3 +399,88 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
     assert_eq!(app.model.endpoint.id.0, "openai-codex");
     process.shutdown().await;
 }
+
+fn pi_defaults() -> Value {
+    json!({
+        "default_model": {"provider": "synthetic", "model": "preferred"},
+        "default_thinking_level": "max"
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_octet_defaults_are_never_overridden_by_pi_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, baseline, _) = fixture(&root).await;
+    app.config.model_saved = true;
+    app.config.reasoning_saved = true;
+    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+    for _ in 0..2 {
+        let diagnostics = publish(&mut app, &root, pi_defaults()).await;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_selection(&app, &baseline, low.clone());
+    }
+    publish(&mut app, &root, json!({})).await;
+    assert_selection(&app, &baseline, low);
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_fills_only_the_field_octet_has_no_saved_default_for() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, baseline, preferred) = fixture(&root).await;
+    app.config.model_saved = true;
+    publish(&mut app, &root, pi_defaults()).await;
+    assert_selection(
+        &app,
+        &baseline,
+        ReasoningConfig::Effort(ReasoningEffort::Max),
+    );
+    publish(&mut app, &root, json!({})).await;
+    assert_selection(
+        &app,
+        &baseline,
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+    );
+
+    app.config.model_saved = false;
+    app.config.reasoning_saved = true;
+    publish(&mut app, &root, pi_defaults()).await;
+    assert_selection(
+        &app,
+        &preferred,
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+    );
+    publish(&mut app, &root, json!({})).await;
+    assert_selection(
+        &app,
+        &baseline,
+        ReasoningConfig::Effort(ReasoningEffort::Low),
+    );
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_session_choices_outrank_saved_and_pi_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, baseline, _) = fixture(&root).await;
+    app.config.model_saved = true;
+    app.config.reasoning_saved = true;
+    app.config.model_explicit = true;
+    app.config.reasoning_explicit = true;
+    app.config.reasoning = Some(ReasoningConfig::Effort(ReasoningEffort::High));
+    choose(
+        &mut app,
+        baseline.clone(),
+        ReasoningConfig::Effort(ReasoningEffort::High),
+    );
+    publish(&mut app, &root, pi_defaults()).await;
+    assert_selection(
+        &app,
+        &baseline,
+        ReasoningConfig::Effort(ReasoningEffort::High),
+    );
+    process.shutdown().await;
+}

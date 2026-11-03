@@ -571,6 +571,11 @@ pub struct Config {
     pub reasoning: Option<ReasoningConfig>,
     /// True when `reasoning` came from an explicit command-line override.
     pub reasoning_explicit: bool,
+    /// True when `model` came from the user's own saved, project or environment
+    /// configuration. Extension-contributed defaults never replace it.
+    pub model_saved: bool,
+    /// As `model_saved`, for `reasoning`.
+    pub reasoning_saved: bool,
     /// Standard or Pro execution, selected independently from reasoning effort.
     pub reasoning_mode: ReasoningMode,
     /// True when the reasoning mode came from an explicit command-line override.
@@ -662,6 +667,17 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether an extension-contributed default model may apply: only when the
+    /// user has neither chosen a model nor saved their own default.
+    pub(crate) fn accepts_extension_model(&self) -> bool {
+        !self.model_explicit && !self.model_saved
+    }
+
+    /// As `accepts_extension_model`, for the reasoning level.
+    pub(crate) fn accepts_extension_reasoning(&self) -> bool {
+        !self.reasoning_explicit && !self.reasoning_saved
+    }
+
     /// Whether a tool will survive both the model-visible allowlist and the
     /// matching execution capability gate for this process.
     pub fn tool_available(&self, name: &str) -> bool {
