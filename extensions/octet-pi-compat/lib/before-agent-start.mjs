@@ -38,7 +38,7 @@ export async function beforeAgentStart(runtime, payload, store) {
         if (!run.ran) continue;
         result = run.value;
       } catch (error) {
-        if (error?.code || store.controller.signal.aborted) throw error;
+        if (Number.isInteger(error?.code) || store.controller.signal.aborted) throw error;
         runtime.reportCallbackError('before_agent_start', entry.factory, error);
         continue;
       }

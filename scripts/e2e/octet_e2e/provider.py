@@ -31,6 +31,8 @@ class Reply:
     gate: threading.Event | None = None
     gate_timeout: float = 20.0
     usage: bool = True
+    #: Finish the turn with one tool call, `(name, JSON arguments)`, instead of "stop".
+    tool_call: tuple[str, str] | None = None
 
 
 @dataclass
@@ -205,8 +207,12 @@ class MockProvider:
                         )
                     if reply.gate is not None:
                         reply.gate.wait(timeout=reply.gate_timeout)
+                    if reply.tool_call is not None:
+                        name, arguments = reply.tool_call
+                        call = {"index": 0, "id": "call_mock_1", "type": "function", "function": {"name": name, "arguments": arguments}}
+                        self._write_chunk({**base, "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]})
                     final: dict = {
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if reply.tool_call else "stop"}],
                     }
                     if reply.usage:
                         words = max(1, len((reply.text or " ").split()))

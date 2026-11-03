@@ -31,3 +31,10 @@ test('cancelled before_agent_start cannot publish a late effective system', asyn
   assert.equal((await request.response).error.code, -32800);
   peer.send({ jsonrpc: '2.0', id: pending.id, result: { confirmed: true } }); await peer.close();
 });
+test('a before_agent_start handler failing with a Node error code is isolated, as in Pi', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/before-agent-start-code-error.ts')]); await peer.init(['before_prompt_state_v1']);
+  const composed = await peer.request('hook/run', params(peer, 'hello')).response;
+  assert.ok(!composed.error, JSON.stringify(composed.error));
+  assert.equal(composed.result.system_prompt, 'real base\nlater handler ran');
+  await peer.close();
+});
