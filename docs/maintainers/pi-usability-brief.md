@@ -79,6 +79,23 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
 - Use isolated HOME and cache directories for adapter tests:
   `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
 
+## Screen-stability acceptance (maintainer requirement)
+
+Checking the first frame is not enough. Every UI-affecting change must pass 20-second windows,
+analysed frame by frame:
+- **Windows:** from launch (cold and warm), and after prompts (before READY, at READY, after
+  idle, back to back, a streamed reply, a tool-call reply, after /reload).
+- **Replay:** run the raw PTY byte stream through `scripts/e2e/octet_e2e/vt.py` after every
+  write chunk, not at fixed intervals.
+- **Fail on:**
+  - a native-footer flash while Pi compat is on;
+  - flicker (a state visible for less than ~100 ms, or A→B→A);
+  - more than one footer content change (snapshot → live);
+  - footer, composer or transcript height or position jumps;
+  - blank or partial frames.
+- **Compare:** run the same windows on Pi 1.4.0.
+- **Tool:** the reusable checker is `scripts/pi-eval/flicker.py`.
+
 ## Rules (non-negotiable)
 
 - **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
