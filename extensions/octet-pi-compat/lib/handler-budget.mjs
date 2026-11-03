@@ -27,6 +27,13 @@ const TOTAL_MS = { before_agent_start: 4000, input: 4000, resources_discover: 40
 const DEFAULT_PER_HANDLER_MS = 5000;
 const DEFAULT_TOTAL_MS = 15000;
 const MIN_WAIT_MS = 250;
+// A tool guard may ask the user (a permission dialog) and the user takes as long
+// as they take, as in Pi. That time is not charged to the guard, up to a cap kept
+// below the host's 30 s request timeout, so a guard whose dialog never settles
+// still fails closed. before_agent_start is not listed: the host's 5 s prompt
+// deadline applies to it regardless.
+const USER_WAIT_EVENTS = new Set(['tool_call']);
+const USER_WAIT_CAP_MS = 20000;
 const TIMED_OUT = Symbol('handler budget exceeded');
 
 // The suite shortens every budget; the variable never reaches a bridge started
@@ -90,18 +97,48 @@ export class LoadBudget {
   }
 }
 
+// Time one handler spends awaiting a dialog the user answers. `ctx.ui` marks
+// those waits through `child.userWait` while the budget runs the handler.
+export class UserWait {
+  constructor() { this.active = 0; this.since = 0; this.total = 0; this.release = undefined; }
+
+  track(promise) {
+    if (this.active++ === 0) this.since = performance.now();
+    const end = () => {
+      if (--this.active > 0) return;
+      this.total += performance.now() - this.since;
+      this.release?.(); this.release = undefined;
+    };
+    promise.then(end, end);
+    return promise;
+  }
+
+  spent() {
+    return Math.min(USER_WAIT_CAP_MS, this.total + (this.active ? performance.now() - this.since : 0));
+  }
+
+  // Resolves when no dialog is open or the cap is reached.
+  idle() {
+    const room = USER_WAIT_CAP_MS - this.spent();
+    if (!this.active || room <= 0) return Promise.resolve();
+    const timer = nativeTimer(room);
+    return Promise.race([new Promise(resolve => { this.release = resolve; }), timer.promise]).finally(() => timer.cancel());
+  }
+}
+
 export class HookBudget {
   constructor(runtime, store, event) {
     this.runtime = runtime; this.store = store; this.event = event;
     ({ perHandler: this.perHandler, total: this.total } = budgetFor(event));
     this.started = performance.now();
     this.detached = new Map(); // factory path -> milliseconds actually waited
+    this.excluded = 0; // milliseconds the hook's handlers spent awaiting the user
   }
 
   // Keep a small shared reserve for healthy handlers reached late, but never
   // let their individual floors extend the hook's absolute total deadline.
   wait() {
-    const left = this.total - (performance.now() - this.started);
+    const left = this.total - (performance.now() - this.started - this.excluded);
     const reserve = Math.min(MIN_WAIT_MS, this.perHandler);
     const share = Math.max(reserve, Math.min(this.perHandler, left - reserve));
     return Math.max(0, Math.min(left, share));
@@ -128,7 +165,7 @@ export class HookBudget {
     const { store } = this;
     const started = performance.now();
     const pendingBefore = new Set(store.pending);
-    const timer = nativeTimer(waited);
+    const userWait = USER_WAIT_EVENTS.has(this.event) ? child.userWait = new UserWait() : undefined;
     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
     entry.busy = true;
     settled.then(late => {
@@ -139,8 +176,20 @@ export class HookBudget {
       }
     });
     let outcome;
-    try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
-    finally { timer.cancel(); }
+    for (;;) {
+      const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
+      if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
+        outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT)]);
+        if (outcome !== TIMED_OUT) break;
+        continue;
+      }
+      if (left <= 0) { outcome = TIMED_OUT; break; }
+      const timer = nativeTimer(left);
+      try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
+      finally { timer.cancel(); }
+      if (outcome !== TIMED_OUT) break;
+    }
+    this.excluded += userWait?.spent() ?? 0;
     if (outcome === TIMED_OUT) {
       // Work the handler already queued on this hook must not hold the hook's
       // own flush, and anything it queues later is observed but never joined.

@@ -54,6 +54,17 @@ test('a stalled tool_call guard fails closed instead of wedging the bridge', asy
   await peer.close();
 });
 
+test('a tool guard waiting for the user is not charged for the time the user takes', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/asking-guard.ts')], { ...options, hold: ['confirmation/request'] }); await peer.init([...features, 'remote_ui']); await peer.start();
+  const guarded = peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'bash', tool_call_id: 'call-1', arguments: { command: 'true' } }, context: peer.context() });
+  const asked = await peer.wait(frame => frame.method === 'confirmation/request');
+  await new Promise(resolve => setTimeout(resolve, 1500)); // five budgets
+  peer.send({ jsonrpc: '2.0', id: asked.id, result: { confirmed: true } });
+  const answer = await guarded.response;
+  assert.equal(answer.result?.disposition?.action, 'continue', JSON.stringify(answer));
+  await peer.close();
+});
+
 const stalledPipeline = join(root, 'test/fixtures/stalled-pipeline.ts');
 const pipelineFeatures = ['resource_paths_v1', 'pipeline_hooks_v1', 'session_entries'];
 

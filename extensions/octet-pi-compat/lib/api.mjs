@@ -306,6 +306,7 @@ export function createContext(runtime, store, replaced = false) {
     const promise = previous.then(action); state.uiQueues.set(slot, promise.catch(() => {}));
     return runtime.track(promise, store);
   };
+  const userAnswer = promise => store.userWait?.track(promise) ?? promise;
   const custom = (factory, options = {}) => {
     runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
     if (typeof factory !== 'function') invalid('ui.custom factory');
@@ -315,6 +316,7 @@ export function createContext(runtime, store, replaced = false) {
     const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
     const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle });
     runtime.track(mounting, store);
+    userAnswer(result);
     return Promise.all([mounting, result]).then(([, value]) => value);
   };
   const ui = facade({
@@ -328,11 +330,11 @@ export function createContext(runtime, store, replaced = false) {
     ...dialogAPI(custom, {
       async confirm(title, message) {
         foreground();
-        return (await runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store)).confirmed;
+        return (await userAnswer(runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store))).confirmed;
       },
       async input(title) {
         foreground();
-        return (await runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store)).value ?? undefined;
+        return (await userAnswer(runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store))).value ?? undefined;
       },
     }),
     custom,
