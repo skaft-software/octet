@@ -1,0 +1,248 @@
+From d3527343e48c651572f84ab39a6c2e4d33a4473a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:45:20 +0000
+Subject: [PATCH 2/3] pi-eval: footer repro driver, flicker --mask,
+ parametrised provider model
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ scripts/pi-eval/fixture.py      |   8 +-
+ scripts/pi-eval/flicker.py      |  24 +++++-
+ scripts/pi-eval/footer_repro.py | 128 ++++++++++++++++++++++++++++++++
+ 3 files changed, 152 insertions(+), 8 deletions(-)
+ create mode 100644 scripts/pi-eval/footer_repro.py
+
+diff --git a/scripts/pi-eval/fixture.py b/scripts/pi-eval/fixture.py
+index a44156cd..941dbf19 100644
+--- a/scripts/pi-eval/fixture.py
++++ b/scripts/pi-eval/fixture.py
+@@ -316,7 +316,7 @@ def ensure_probe(fixture: Fixture, *, log=print, force: bool = False) -> dict:
+     return probe
+ 
+ 
+-def write_provider_config(home: Path, port: int) -> None:
++def write_provider_config(home: Path, port: int, *, model: str = MODEL, name: str | None = None, context_window: int = 128000) -> None:
+     """Point both Pi (models.json) and octet (custom credential) at the mock provider."""
+     agent = home / ".pi" / "agent"
+     agent.mkdir(parents=True, exist_ok=True)
+@@ -328,7 +328,7 @@ def write_provider_config(home: Path, port: int) -> None:
+                         "baseUrl": f"http://127.0.0.1:{port}/v1",
+                         "api": "openai-completions",
+                         "apiKey": "mock-key",
+-                        "models": [{"id": MODEL, "name": MODEL, "contextWindow": 128000, "maxTokens": 4096}],
++                        "models": [{"id": model, "name": name or model, "contextWindow": context_window, "maxTokens": 4096}],
+                     }
+                 }
+             },
+@@ -343,12 +343,12 @@ def write_provider_config(home: Path, port: int) -> None:
+             {
+                 "base_url": f"http://127.0.0.1:{port}/v1/",
+                 "api_key": "",
+-                "api_name": MODEL,
++                "api_name": model,
+                 "headers": [],
+                 "auto_discover": False,
+                 # The legacy single-model shape (api_name only) no longer yields a model in
+                 # current builds; an explicit models list does.
+-                "models": [{"api_name": MODEL, "display_name": MODEL, "context_window": 128000, "max_output_tokens": 4096}],
++                "models": [{"api_name": model, "display_name": name or model, "context_window": context_window, "max_output_tokens": 4096}],
+             }
+         )
+     )
+diff --git a/scripts/pi-eval/flicker.py b/scripts/pi-eval/flicker.py
+index f5a71ed8..09574efb 100644
+--- a/scripts/pi-eval/flicker.py
++++ b/scripts/pi-eval/flicker.py
+@@ -155,22 +155,37 @@ def analyze(
+     window: tuple[float, float] | None = None,
+     min_ms: float = 100.0,
+     native: str = NATIVE_FOOTER,
++    mask: str | None = None,
+ ) -> dict:
+-    """Stability report for the frames inside ``window`` (seconds from the first chunk)."""
++    """Stability report for the frames inside ``window`` (seconds from the first chunk).
++
++    ``mask`` is a regex whose matches are blanked before states are compared, for text that
++    legitimately ticks (a footer's clock or elapsed time) and must not count as a change.
++    """
+     if window is not None:
+         frames = [f for f in frames if window[0] <= f.t <= window[1]]
+     if not frames:
+         return {"frames": 0}
+     end = window[1] if window else frames[-1].t
+     pattern = re.compile(native)
++    ticking = re.compile(mask) if mask else None
++
++    def masked(rows: tuple[str, ...]) -> tuple[str, ...]:
++        # Styled rows interleave `\x00style\x00` keys with text; only the text may be blanked.
++        def row(value: str) -> str:
++            parts = value.split("\x00")
++            return "\x00".join(part if i % 2 else ticking.sub("#", part) for i, part in enumerate(parts))
++
++        return tuple(map(row, rows)) if ticking else rows
++
+     footer = _states(
+         frames,
+-        lambda f: footer_rows(f, columns)[1],
++        lambda f: masked(footer_rows(f, columns)[1]),
+         lambda f: footer_rows(f, columns)[0],
+         end,
+     )
+     # Cursor motion is layout, not content: compare the visible text only.
+-    whole = _states(frames, lambda f: f.styled, lambda f: f.text, end)
++    whole = _states(frames, lambda f: masked(f.styled), lambda f: f.text, end)
+     seen_content = False
+     blank_frames, blank_footer = [], []
+     for f in frames:
+@@ -348,12 +363,13 @@ def main(argv: list[str] | None = None) -> int:
+     report.add_argument("--window", help="START:END seconds from the first chunk")
+     report.add_argument("--native", default=NATIVE_FOOTER)
+     report.add_argument("--max-footer-changes", type=int, default=1)
++    report.add_argument("--mask", help="regex blanked before comparing states, e.g. '\\d' for a ticking clock")
+     args = parser.parse_args(argv)
+     if args.command == "selftest":
+         suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
+         return 0 if unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful() else 1
+     window = tuple(map(float, args.window.split(":"))) if args.window else None
+-    result = analyze(replay(load_chunks(args.chunks), args.columns, args.rows), args.columns, window=window, native=args.native)
++    result = analyze(replay(load_chunks(args.chunks), args.columns, args.rows), args.columns, window=window, native=args.native, mask=args.mask)
+     failures = verdict(result, max_footer_changes=args.max_footer_changes)
+     print(json.dumps({"report": result, "failures": failures}, indent=2, ensure_ascii=False))
+     return 1 if failures else 0
+diff --git a/scripts/pi-eval/footer_repro.py b/scripts/pi-eval/footer_repro.py
+new file mode 100644
+index 00000000..101dd9a4
+--- /dev/null
++++ b/scripts/pi-eval/footer_repro.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python3
++"""Record a footer/startup window of octet or Pi on a built fixture.
++
++Usage: footer_repro.py {octet|pi} {workspace|home} OUTDIR --fixture ROOT [--seconds 20] [--prompt TEXT]
++
++Starts the product on a PTY with the model `gpt-5.6-luna` (display name `GPT-5.6 Luna`, 272K context),
++records timestamped PTY chunks for the window (analyse them with `flicker.py report`), optionally sends one
++prompt, and writes the final screen. Run it under `flock -s <measure.lock>`.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import shutil
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import core  # noqa: E402
++import fixture as fx  # noqa: E402
++import run  # noqa: E402
++import flicker  # noqa: E402
++from octet_e2e.provider import MockProvider  # noqa: E402
++
++REPO = Path(__file__).resolve().parents[2]
++MODEL_ID, MODEL_NAME, CONTEXT = "gpt-5.6-luna", "GPT-5.6 Luna", 272000
++
++
++def prepare_linked_home(fixture: fx.Fixture, env) -> None:
++    """Fresh home whose read-only `install/` and `npm/` trees are hardlinks (disk is shared); the rest is copied."""
++    if env.root.exists():
++        shutil.rmtree(env.root)
++    env.home.mkdir(parents=True)
++    source = fixture.agent
++    target = env.home / ".pi" / "agent"
++    target.mkdir(parents=True)
++    for entry in source.iterdir():
++        if entry.name in ("install", "npm"):
++            subprocess.run(["cp", "-al", str(entry), str(target / entry.name)], check=True)
++        else:
++            fx.copy_tree(entry, target / entry.name)
++    for entry in fixture.home.iterdir():
++        if entry.name != ".pi":
++            fx.copy_tree(entry, env.home / entry.name)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("target", choices=["octet", "pi"])
++    parser.add_argument("cwd", choices=["workspace", "home"])
++    parser.add_argument("out", type=Path)
++    parser.add_argument("--fixture", type=Path, required=True, help="fixture root (contains home/ and fixture.json)")
++    parser.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
++    parser.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
++    parser.add_argument("--seconds", type=float, default=20.0)
++    parser.add_argument("--prompt")
++    parser.add_argument("--warm", action="store_true", help="launch once first so the recorded launch starts warm")
++    parser.add_argument("--homes", type=Path, help="persistent homes directory; an existing home is reused (warm caches) instead of copied")
++    args = parser.parse_args(argv)
++
++    out = args.out
++    shutil.rmtree(out, ignore_errors=True)
++    out.mkdir(parents=True)
++    meta = json.loads((args.fixture / "fixture.json").read_text())
++    fixture = fx.Fixture(root=args.fixture, lock={"pi": {"version": meta["pi_version"]}})
++    provider = MockProvider(model_id=MODEL_ID)
++    provider.default_reply("FOOTER-REPLY-OK")
++    env = run.make_env(args.homes or out / "homes", args.target, 0, provider.port)
++    prepare_linked_home(fixture, env)
++    fx.write_provider_config(env.home, provider.port, model=MODEL_ID, name=MODEL_NAME, context_window=CONTEXT)
++    tmp = run.leg_tmp(env)
++    tmp.mkdir(parents=True, exist_ok=True)
++    env.workspace.mkdir(parents=True, exist_ok=True)
++    env.sessions.mkdir(parents=True, exist_ok=True)
++    cwd = env.home if args.cwd == "home" else env.workspace
++    if args.target == "octet" and args.homes is None:
++        run.reset_adapter_cache(args.extensions_dir)
++        launch_args = run.octet_args(
++            env, name=None, agent=False, extension_dirs=[args.extensions_dir], enable_extensions=["octet-pi-compat"],
++        )
++        launch_args[launch_args.index("--model") + 1] = f"custom/{MODEL_ID}"
++        launch_args[launch_args.index("--workspace") + 1] = str(cwd)
++        binary = args.octet
++        child = env.child_env(REPO, extra={"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp)})
++    else:
++        binary = Path("node")
++        launch_args = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{MODEL_ID}"]
++        child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
++        child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
++                     PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp))
++
++    def start(log: str) -> run.EvalSession:
++        return run.EvalSession(binary, args=launch_args, env=child, cwd=cwd, columns=120, rows=40,
++                               log_path=out / f"{log}.ansi", stderr_path=out / f"{log}.stderr.log")
++
++    if args.warm:
++        warm = start("warmup")
++        deadline = time.monotonic() + 90
++        while core.READY_MARKER not in warm.screen_text() and time.monotonic() < deadline:
++            time.sleep(0.1)
++        warm.close(timeout=10)
++    session = start("transcript")
++    started = time.monotonic()
++    ready, sent = None, False
++    while time.monotonic() - started < args.seconds:
++        if ready is None and core.READY_MARKER in session.screen_text():
++            ready = time.monotonic() - started
++        if args.prompt and not sent and ready is not None and time.monotonic() - started > ready + 1:
++            session.submit(args.prompt)
++            sent = True
++        time.sleep(0.05)
++    (out / "screen.txt").write_text(session.screen_text())
++    flicker.dump_chunks([(t - session.started_at, d) for t, d in session.chunks], out / "chunks.jsonl")
++    code = session.close(timeout=10)
++    provider.close()
++    if args.homes is None:
++        shutil.rmtree(env.root, ignore_errors=True)
++    print(f"{args.target} {args.cwd}: ready={ready} exit={code} chunks={len(session.chunks)}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.43.0
+

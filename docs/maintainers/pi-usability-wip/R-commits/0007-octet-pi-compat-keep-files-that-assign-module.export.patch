@@ -1,0 +1,74 @@
+From f93146fe29b4ceae81bb3a6a172a412d75853f0a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:56:42 +0000
+Subject: [PATCH 7/8] octet-pi-compat: keep files that assign module.exports on
+ the jiti path
+
+The native prelude defines module/exports only for reads, so such a file
+loaded natively with an empty namespace instead of falling back.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ extensions/octet-pi-compat/lib/native-esm.mjs |  6 ++++++
+ .../octet-pi-compat/test/native-esm.test.mjs  | 20 +++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/extensions/octet-pi-compat/lib/native-esm.mjs b/extensions/octet-pi-compat/lib/native-esm.mjs
+index 492d5180..b4acc473 100644
+--- a/extensions/octet-pi-compat/lib/native-esm.mjs
++++ b/extensions/octet-pi-compat/lib/native-esm.mjs
+@@ -19,6 +19,11 @@ const REVIEW = 'OCTET_PI_NATIVE_REVIEW_CHANGED';
+ const WRAPPER_NAMES = ['require', 'module', 'exports', '__filename', '__dirname'];
+ const ESM_SOURCE = /\.m?js$/;
+ const SPECIAL_META = /\bimport\.meta\.(?!(?:url|dirname|filename|resolve)\b)[\w$]+/;
++// A write to the CommonJS export objects. The prelude only lets such names be
++// read (feature detection); the module's real exports are its ESM ones, so a
++// file that publishes through `module.exports` would load natively with an
++// empty namespace instead of falling back to jiti's CommonJS interop.
++const CJS_EXPORT_WRITE = /\b(?:module\.exports|exports(?:\.[\w$]+|\[[^\]]*\]))\s*=(?!=)|\bObject\.(?:defineProperty|assign)\(\s*(?:module\.)?exports\b/;
+ const PI_HEAD = /^(?:@earendil-works\/|@mariozechner\/|typebox|@sinclair\/typebox)/;
+ 
+ function fallback(reason) {
+@@ -60,6 +65,7 @@ export function nativeIneligibleReason(entry, hashes) {
+     try { text = readFileSync(file, 'utf8'); } catch { return `unreadable: ${file}`; }
+     if (text.startsWith('#!')) return `hashbang: ${file}`;
+     if (SPECIAL_META.test(text)) return `import.meta extension: ${file}`;
++    if (CJS_EXPORT_WRITE.test(text)) return `CommonJS export assignment: ${file}`;
+   }
+   return undefined;
+ }
+diff --git a/extensions/octet-pi-compat/test/native-esm.test.mjs b/extensions/octet-pi-compat/test/native-esm.test.mjs
+index 2f3853d1..bb5a7b95 100644
+--- a/extensions/octet-pi-compat/test/native-esm.test.mjs
++++ b/extensions/octet-pi-compat/test/native-esm.test.mjs
+@@ -109,6 +109,26 @@ export const own = (() => { const module = 1; return module; })();`,
+   assert.equal((await import(pathToFileURL(owned).href)).r, 7);
+ });
+ 
++test('a file that publishes through module.exports stays on jiti instead of loading with an empty namespace', async t => {
++  const dir = project({
++    'cjs-style.js': 'module.exports = function factory() { return 1; };',
++    'umd.js': '(function (r, f) { if (typeof exports === "object") module.exports = f(); else r.X = f(); })(globalThis, () => 1);\nexport default function factory() {}',
++    'assign.js': 'exports.factory = () => 1; export const x = 1;',
++    'define.js': 'Object.defineProperty(exports, "__esModule", { value: true }); export default function factory() {}',
++    'reads.js': 'export default function factory() {}\nexport const t = typeof module === "object" && module.exports === module.exports;\nexport const eq = exports == null;',
++  });
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  for (const name of ['cjs-style.js', 'umd.js', 'assign.js', 'define.js']) {
++    const file = join(dir, name);
++    assert.match(nativeIneligibleReason(file, reviewedSourceHashes(file)), /CommonJS export assignment/, name);
++  }
++  const reads = join(dir, 'reads.js');
++  assert.equal(nativeIneligibleReason(reads, reviewedSourceHashes(reads)), undefined);
++  // jiti still gives the CommonJS file its factory, which is where the entry now goes.
++  const { jiti } = setup();
++  assert.equal(typeof await jiti.import(join(dir, 'cjs-style.js'), { default: true }), 'function');
++});
++
+ test('a live scope keeps resolving aliases for later dynamic imports from the closure', async t => {
+   const dir = project({ 'index.js': `export default () => {}; export const later = () => import('${CODING}');` });
+   t.after(() => rmSync(dir, { recursive: true, force: true }));
+-- 
+2.43.0
+

@@ -1,0 +1,80 @@
+From ea4bdfca6f2476ad22dc9ccc3a2f36225542db58 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:42:57 +0000
+Subject: [PATCH 4/8] octet-pi-compat: remove temporary file when a persisted
+ cache write fails
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ extensions/octet-pi-compat/lib/startup-cache.mjs    | 12 +++++++++---
+ .../octet-pi-compat/test/startup-cache.test.mjs     | 13 +++++++++++--
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/startup-cache.mjs b/extensions/octet-pi-compat/lib/startup-cache.mjs
+index 521b0666..eb5cfa45 100644
+--- a/extensions/octet-pi-compat/lib/startup-cache.mjs
++++ b/extensions/octet-pi-compat/lib/startup-cache.mjs
+@@ -1,4 +1,4 @@
+-import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
++import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+ import { homedir } from 'node:os';
+ import { join } from 'node:path';
+ import module from 'node:module';
+@@ -94,8 +94,14 @@ export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
+     const text = JSON.stringify(value);
+     if (Buffer.byteLength(text) > maxBytes) return false;
+     const file = join(directory, name), temporary = `${file}.${process.pid}.tmp`;
+-    writeFileSync(temporary, text, { mode: 0o600 });
+-    renameSync(temporary, file);
++    try {
++      writeFileSync(temporary, text, { mode: 0o600 });
++      renameSync(temporary, file);
++    } catch (error) {
++      // The name is per process, so a leftover from a full disk would never be reused.
++      try { unlinkSync(temporary); } catch { /* nothing was written */ }
++      throw error;
++    }
+     return true;
+   } catch { return false; }
+ }
+diff --git a/extensions/octet-pi-compat/test/startup-cache.test.mjs b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+index d04dbba6..746f20ad 100644
+--- a/extensions/octet-pi-compat/test/startup-cache.test.mjs
++++ b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
++import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+ import { spawnSync } from 'node:child_process';
+ import { fileURLToPath, pathToFileURL } from 'node:url';
+ import { tmpdir } from 'node:os';
+@@ -9,7 +9,7 @@ import { join } from 'node:path';
+ // The cache module reads its directory from the environment on each call, so a
+ // test can point it at a scratch directory without touching the user cache.
+ process.env.OCTET_PI_COMPAT_CACHE = mkdtempSync(join(tmpdir(), 'octet-pi-cache-'));
+-const { startupCacheDirectory, jitiCacheOptions } = await import('../lib/startup-cache.mjs');
++const { startupCacheDirectory, jitiCacheOptions, writePersisted } = await import('../lib/startup-cache.mjs');
+ 
+ test('the startup cache directory is owner-only and reused', () => {
+   const directory = startupCacheDirectory();
+@@ -19,6 +19,15 @@ test('the startup cache directory is owner-only and reused', () => {
+   assert.equal(startupCacheDirectory(), directory);
+ });
+ 
++test('a failed persisted write leaves no temporary file behind', () => {
++  const directory = startupCacheDirectory();
++  mkdirSync(join(directory, 'blocked.json')); // renaming a file over a directory fails after the write
++  try {
++    assert.equal(writePersisted('blocked.json', { value: 1 }), false);
++    assert.deepEqual(readdirSync(directory).filter(name => name.endsWith('.tmp')), []);
++  } finally { rmSync(join(directory, 'blocked.json'), { recursive: true }); }
++});
++
+ test('jiti keeps its content-hashed cache inside the private directory', () => {
+   assert.deepEqual(jitiCacheOptions(), { fsCache: join(process.env.OCTET_PI_COMPAT_CACHE, 'jiti') });
+ });
+-- 
+2.43.0
+

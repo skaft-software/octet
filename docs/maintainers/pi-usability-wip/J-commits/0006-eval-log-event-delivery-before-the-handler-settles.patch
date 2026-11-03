@@ -1,0 +1,70 @@
+From 0b3f3689cb69975766c02a5c55b7a46e6a717a5e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 08:10:08 +0000
+Subject: [PATCH 6/8] eval: log event delivery before the handler settles
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/api-trace.mjs |  4 +++-
+ scripts/pi-eval/jank.py                      | 18 ++++++++++--------
+ 2 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/api-trace.mjs b/extensions/octet-pi-compat/lib/api-trace.mjs
+index 6d2900d4..131cbb03 100644
+--- a/extensions/octet-pi-compat/lib/api-trace.mjs
++++ b/extensions/octet-pi-compat/lib/api-trace.mjs
+@@ -21,7 +21,9 @@ export const extensionLabel = (entry) => String(entry).split('node_modules/').po
+ 
+ function timed(kind, ext, name, args, run) {
+   const begin = performance.now();
+-  const finish = (note) => log({ k: kind, ext, n: name, a: args.map(clip), d: +(performance.now() - begin).toFixed(1), ...note });
++  // Long handlers may still be running when the process is torn down, so delivery is logged up front.
++  if (kind === 'event') log({ k: kind, ext, n: name, a: args.map(clip) });
++  const finish = (note) => log({ k: kind === 'event' ? 'event.done' : kind, ext, n: name, a: args.map(clip), d: +(performance.now() - begin).toFixed(1), ...note });
+   try {
+     const result = run();
+     if (result && typeof result.then === 'function') {
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 4ce86a47..63cf768f 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -82,7 +82,7 @@ class FrameSession(run.EvalSession):
+     def now(self) -> float:
+         return time.monotonic() - self.started_at
+ 
+-    def wait_text(self, needle: str, timeout: float = 150.0) -> float | None:
++    def wait_text(self, needle: str, timeout: float = 400.0) -> float | None:
+         end = time.monotonic() + timeout
+         while time.monotonic() < end:
+             if needle in self.screen_text():
+@@ -254,18 +254,20 @@ def prepare_home(fixture: fx.Fixture, env) -> None:
+ 
+ 
+ def traced_extensions(source: Path, into: Path, trace: Path) -> Path:
+-    """A hardlinked copy of the extensions dir whose adapter manifest sets OCTET_PI_API_TRACE.
++    """A hardlinked copy of the extensions dir whose adapter records its API traffic to `trace`.
+ 
+-    The host hands an extension only the environment its manifest declares, so the flag has to be
+-    in the copy's extension.toml. Reused when it exists (a warm start keeps the adapter caches)."""
++    The host gives an extension only the environment its manifest declares, and the session runs in a
++    mirror process whose manifest the adapter generates, so OCTET_PI_API_TRACE cannot reach it; the
++    copy's lib/api-trace.mjs gets the path as a constant instead. Reused when it exists (a warm start
++    keeps the adapter caches)."""
+     target = into / "extensions"
+     if not target.exists():
+         into.mkdir(parents=True, exist_ok=True)
+         subprocess.run(["cp", "-al", str(source), str(target)], check=True)
+-    manifest = target / "octet-pi-compat" / "extension.toml"
+-    text = manifest.read_text().split("\nOCTET_PI_API_TRACE")[0].rstrip("\n")
+-    manifest.unlink()
+-    manifest.write_text(text.replace("OCTET_PI_AUTO_MIRROR = \"1\"", f"OCTET_PI_AUTO_MIRROR = \"1\"\nOCTET_PI_API_TRACE = \"{trace}\"", 1) + "\n")
++    module = target / "octet-pi-compat" / "lib" / "api-trace.mjs"
++    text = module.read_text()
++    module.unlink()
++    module.write_text(text.replace("process.env.OCTET_PI_API_TRACE", json.dumps(str(trace)), 1))
+     return target
+ 
+ 
+-- 
+2.43.0
+

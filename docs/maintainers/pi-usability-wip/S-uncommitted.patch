@@ -1,222 +1,165 @@
-diff --git a/docs/maintainers/pi-usability-wip/S-commits/0001-eval-warm-full-UI-and-exit-timing-harness-Pi-vs-octe.patch b/docs/maintainers/pi-usability-wip/S-commits/0001-eval-warm-full-UI-and-exit-timing-harness-Pi-vs-octe.patch
-new file mode 100644
-index 00000000..6aff9e2a
---- /dev/null
-+++ b/docs/maintainers/pi-usability-wip/S-commits/0001-eval-warm-full-UI-and-exit-timing-harness-Pi-vs-octe.patch
-@@ -0,0 +1,216 @@
-+From 2267028c9737b120dfd4b71536e42df99a0a7186 Mon Sep 17 00:00:00 2001
-+From: Claude <noreply@anthropic.com>
-+Date: Tue, 3 Nov 2026 03:45:16 +0000
-+Subject: [PATCH] eval: warm full-UI and exit timing harness (Pi vs octet,
-+ primary fixture)
+diff --git a/crates/octet-agent/src/extension_process/connection.rs b/crates/octet-agent/src/extension_process/connection.rs
+index 6331b153..d6c22669 100644
+--- a/crates/octet-agent/src/extension_process/connection.rs
++++ b/crates/octet-agent/src/extension_process/connection.rs
+@@ -68,6 +68,9 @@ pub(super) type ProviderStreams = Arc<StdMutex<HashMap<String, ProviderStreamIng
+ 
+ pub(super) struct ProcessConnection {
+     pub(super) writer: mpsc::Sender<WriterFrame>,
++    /// Asks the writer task to drop the child's stdin once shutdown has been
++    /// acknowledged, so a child blocked reading stdin sees EOF and can exit.
++    pub(super) writer_close: Arc<Notify>,
+     pub(super) child: Arc<Mutex<Child>>,
+     pub(super) pending: PendingRequests,
+     pub(super) resources: Resources,
+@@ -575,6 +578,7 @@ pub(super) fn update_health(
+ pub(super) async fn run_protocol_writer(
+     mut stdin: ChildStdin,
+     mut frames: mpsc::Receiver<WriterFrame>,
++    writer_close: Arc<Notify>,
+     closed: Arc<AtomicBool>,
+     draining: Arc<AtomicBool>,
+     pending: PendingRequests,
+@@ -586,7 +590,13 @@ pub(super) async fn run_protocol_writer(
+     termination: ProcessTerminationHandle,
+     frame_limit: Arc<ProtocolFrameLimit>,
+ ) {
+-    while let Some(mut frame) = frames.recv().await {
++    loop {
++        let next = tokio::select! {
++            biased;
++            () = writer_close.notified() => None,
++            frame = frames.recv() => frame,
++        };
++        let Some(mut frame) = next else { break };
+         if frame
+             .bus_delivery
+             .as_ref()
+@@ -688,6 +698,9 @@ pub(super) async fn run_protocol_writer(
+         }
+     }
+ 
++    // Dropping stdin delivers EOF to the child before the lines below settle
++    // health, matching a closed channel.
++    drop(stdin);
+     remote_ui.clear();
+     if !closed.swap(true, Ordering::AcqRel) {
+         let coordinated = draining.load(Ordering::Acquire);
+@@ -2039,6 +2052,11 @@ impl ProcessConnection {
+             }
+         };
+ 
++        // Shutdown is settled (acknowledged or timed out): nothing more will be
++        // sent. Close the child's stdin so a runtime blocked reading it (Node
++        // cannot exit while a worker thread holds a pending stdin read) exits
++        // now instead of after the full shutdown timeout and a group kill.
++        self.writer_close.notify_one();
+         let exited = {
+             let mut child = self.child.lock().await;
+             match tokio::time::timeout(self.shutdown_timeout, child.wait()).await {
+diff --git a/crates/octet-agent/src/extension_process/spawn.rs b/crates/octet-agent/src/extension_process/spawn.rs
+index 10d29515..6ff2d5eb 100644
+--- a/crates/octet-agent/src/extension_process/spawn.rs
++++ b/crates/octet-agent/src/extension_process/spawn.rs
+@@ -248,9 +248,11 @@ pub(super) async fn spawn_connection(
+     };
+     let provider_streams = Arc::new(StdMutex::new(HashMap::new()));
+     let (writer, writer_frames) = mpsc::channel(config.writer_queue_capacity);
++    let writer_close = Arc::new(Notify::new());
+     tokio::spawn(run_protocol_writer(
+         stdin,
+         writer_frames,
++        Arc::clone(&writer_close),
+         Arc::clone(&closed),
+         Arc::clone(&draining),
+         Arc::clone(&pending),
+@@ -339,6 +341,7 @@ pub(super) async fn spawn_connection(
+ 
+     let connection = Arc::new(ProcessConnection {
+         writer,
++        writer_close,
+         child,
+         pending,
+         resources,
+diff --git a/crates/octet-agent/src/extension_process/tests.rs b/crates/octet-agent/src/extension_process/tests.rs
+index 2b839887..d928eb3d 100644
+--- a/crates/octet-agent/src/extension_process/tests.rs
++++ b/crates/octet-agent/src/extension_process/tests.rs
+@@ -7503,6 +7503,42 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+     );
+ }
+ 
++#[cfg(unix)]
++#[tokio::test]
++async fn shutdown_closes_child_stdin_so_a_blocked_reader_exits_promptly() {
++    let temp = TempDir::new().expect("tempdir");
++    let script_path = temp.path().join("stdin-reader.sh");
++    // Models a runtime (Node) that cannot exit while a thread is blocked on
++    // stdin: after acknowledging shutdown it exits only once stdin hits EOF.
++    write_executable_script(
++        &script_path,
++        r#"#!/bin/sh
++IFS= read -r initialize
++printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"api_version":"0.1","tools":[],"commands":[]}}'
++IFS= read -r shutdown
++printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
++cat > /dev/null
++"#,
++    );
++    let descriptor = trusted_descriptor(
++        temp.path(),
++        minimal_manifest("stdin-reader", "stdin-reader.sh"),
++    );
++    let mut config = ExtensionRuntimeConfig::new(temp.path());
++    config.shutdown_timeout = Duration::from_secs(5);
++    let process = ExtensionProcess::start(descriptor, config)
++        .await
++        .expect("start process");
 +
-+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
-+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
-+---
-+ scripts/pi-eval/warm_exit.py | 194 +++++++++++++++++++++++++++++++++++
-+ 1 file changed, 194 insertions(+)
-+ create mode 100644 scripts/pi-eval/warm_exit.py
++    let started = Instant::now();
++    assert!(process.shutdown().await, "child must exit gracefully");
++    assert!(
++        started.elapsed() < Duration::from_secs(2),
++        "shutdown waited out the exit timeout instead of closing stdin: {:?}",
++        started.elapsed()
++    );
++}
 +
-+diff --git a/scripts/pi-eval/warm_exit.py b/scripts/pi-eval/warm_exit.py
-+new file mode 100644
-+index 00000000..2c17ff98
-+--- /dev/null
-++++ b/scripts/pi-eval/warm_exit.py
-+@@ -0,0 +1,194 @@
-++#!/usr/bin/env python3
-++"""Warm full-UI and exit timings, Pi 1.4.0 vs octet, on one fixture home per target.
-++
-++    flock -x measure.lock python3 scripts/pi-eval/warm_exit.py --fixture <cache>/<hash> --reps 5 --out <dir>
-++
-++Each target gets one copy of the fixture home. A priming launch warms every cache the
-++product keeps; the measured launches then reuse that home, as a real second launch does.
-++Per rep and target: a warm launch exited at READY (`exit_idle_s`), and one that answers a
-++prompt first (`exit_after_prompt_s`). Targets alternate who goes first. Every exit is
-++checked for a restored terminal and for surviving processes (matched by an env marker).
-++Also samples the whole screen every 20 ms for `--window` seconds after launch and counts
-++distinct frames, so a change that adds repaint churn shows up.
-++"""
-++
-++from __future__ import annotations
-++
-++import argparse
-++import json
-++import os
-++import shutil
-++import statistics
-++import subprocess
-++import sys
-++import time
-++import uuid
-++from pathlib import Path
-++
-++HERE = Path(__file__).resolve().parent
-++REPO = HERE.parent.parent
-++sys.path.insert(0, str(REPO / "scripts" / "e2e"))
-++sys.path.insert(0, str(HERE))
-++
-++import core  # noqa: E402
-++import fixture as fx  # noqa: E402
-++import run  # noqa: E402
-++from octet_e2e.provider import MockProvider  # noqa: E402
-++from octet_e2e.session import KEYS  # noqa: E402
-++
-++REPLY = "WARM-EXIT-REPLY"
-++
-++
-++def link_home(fixture, env):
-++    """Fresh home whose read-only install/ and npm/ trees are hardlinks of the fixture's (disk budget)."""
-++    shutil.rmtree(env.root, ignore_errors=True)
-++    agent = env.home / ".pi" / "agent"
-++    agent.mkdir(parents=True)
-++    for entry in fixture.agent.iterdir():
-++        if entry.name in ("install", "npm"):
-++            subprocess.run(["cp", "-al", str(entry), str(agent / entry.name)], check=True)
-++        else:
-++            fx.copy_tree(entry, agent / entry.name)
-++
-++
-++def survivors(marker: str) -> list[str]:
-++    found = []
-++    for entry in Path("/proc").iterdir():
-++        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-++            continue
-++        try:
-++            if marker.encode() in (entry / "environ").read_bytes():
-++                found.append(f"{entry.name} {(entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')[:120]}")
-++        except OSError:
-++            continue
-++    return found
-++
-++
-++def launch(target, env, fixture, octet_bin, extensions_dir, work, *, prompt, window, ceiling=120.0):
-++    marker = f"WARMEXIT-{uuid.uuid4().hex}"
-++    tmp = run.leg_tmp(env)
-++    tmp.mkdir(parents=True, exist_ok=True)
-++    env.workspace.mkdir(parents=True, exist_ok=True)
-++    env.sessions.mkdir(parents=True, exist_ok=True)
-++    if target == "octet":
-++        args = run.octet_args(env, name=None, agent=False, extension_dirs=[extensions_dir], enable_extensions=["octet-pi-compat"])
-++        child = env.child_env(REPO, extra={"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp), "EVAL_MARK": marker})
-++        binary = octet_bin
-++    else:
-++        binary = Path("node")
-++        args = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{fx.MODEL}"]
-++        child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
-++        child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
-++                     PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp), EVAL_MARK=marker)
-++    work.mkdir(parents=True, exist_ok=True)
-++    session = run.EvalSession(binary, args=args, env=child, cwd=env.workspace, columns=120, rows=40,
-++                              log_path=work / "transcript.ansi", stderr_path=work / "stderr.log")
-++    started = session.started_at
-++    row = {"typeable_s": None, "full_ui_s": None, "frames": 0, "failure": None}
-++    last = None
-++    try:
-++        while True:
-++            now = time.monotonic() - started
-++            text = session.screen_text()
-++            if text != last:
-++                row["frames"] += 1 if now <= window else 0
-++                last = text
-++            if row["typeable_s"] is None and core.MODEL_LABEL in text:
-++                row["typeable_s"] = now
-++            if row["full_ui_s"] is None and core.READY_MARKER in text:
-++                row["full_ui_s"] = now
-++            if row["full_ui_s"] is not None and now > window:
-++                break
-++            if session.process.poll() is not None:
-++                row["failure"] = f"exited {session.process.returncode} before ready"
-++                break
-++            if now > ceiling:
-++                row["failure"] = "ceiling"
-++                break
-++            time.sleep(0.02)
-++        if row["failure"] is None and prompt:
-++            session.submit("hello")
-++            before = time.monotonic()
-++            session.wait_for_text(REPLY, timeout=60)
-++            session.wait_idle(timeout=60)
-++            row["prompt_s"] = time.monotonic() - before
-++            time.sleep(0.3)
-++        t0 = time.monotonic()
-++        if row["failure"] is None:
-++            session.write(KEYS["ctrl_d"])
-++            while session.process.poll() is None and time.monotonic() - t0 < 20:
-++                time.sleep(0.002)
-++            row["exit_s"] = time.monotonic() - t0
-++            row["exit_code"] = session.process.poll()
-++        if session.process.poll() is None:
-++            session.kill()
-++    except BaseException:
-++        session.kill()
-++        raise
-++    session.close(ctrl_d=False, timeout=2)
-++    row["restored"] = core.terminal_restore(session.transcript())["restored"]
-++    time.sleep(0.5)
-++    row["survivors"] = survivors(marker)
-++    row["stderr_tail"] = (work / "stderr.log").read_text(errors="replace")[-600:] if row["failure"] else ""
-++    return row
-++
-++
-++def median(values):
-++    values = [v for v in values if v is not None]
-++    return statistics.median(values) if values else None
-++
-++
-++def main():
-++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-++    parser.add_argument("--fixture", type=Path, required=True)
-++    parser.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
-++    parser.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
-++    parser.add_argument("--reps", type=int, default=5)
-++    parser.add_argument("--targets", default="pi,octet")
-++    parser.add_argument("--window", type=float, default=20.0, help="seconds each launch is sampled before exit")
-++    parser.add_argument("--out", type=Path, required=True)
-++    args = parser.parse_args()
-++    args.extensions_dir = args.extensions_dir.resolve()
-++    args.out.mkdir(parents=True, exist_ok=True)
-++    fixture = fx.Fixture(root=args.fixture, lock={"pi": {"version": "1.4.0"}})
-++    targets = args.targets.split(",")
-++    homes = args.out / "homes"
-++    shutil.rmtree(homes, ignore_errors=True)
-++    providers, envs = {}, {}
-++    run.reset_adapter_cache(args.extensions_dir)
-++    for target in targets:
-++        provider = MockProvider(model_id=fx.MODEL)
-++        provider.default_reply(REPLY)
-++        providers[target] = provider
-++        env = run.make_env(homes, target, 0, provider.port)
-++        link_home(fixture, env)
-++        fx.write_provider_config(env.home, provider.port)
-++        envs[target] = env
-++    results = args.out / "results.jsonl"
-++    try:
-++        for target in targets:
-++            print(f"priming {target}", flush=True)
-++            prime = launch(target, envs[target], fixture, args.octet, args.extensions_dir, args.out / "work" / f"{target}-prime", prompt=False, window=0)
-++            print(f"  prime full_ui={prime['full_ui_s']} failure={prime['failure']}", flush=True)
-++        for rep in range(args.reps):
-++            for target in (targets if rep % 2 == 0 else targets[::-1]):
-++                for scenario, prompt in (("idle", False), ("prompt", True)):
-++                    row = launch(target, envs[target], fixture, args.octet, args.extensions_dir, args.out / "work" / f"{target}-{scenario}-{rep}", prompt=prompt, window=args.window)
-++                    row.update(target=target, scenario=scenario, rep=rep)
-++                    core.append_jsonl(results, row)
-++                    print(f"rep{rep} {target:5} {scenario:6} typeable={row['typeable_s']} full={row['full_ui_s']} exit={row.get('exit_s')} code={row.get('exit_code')} restored={row['restored']} survivors={len(row['survivors'])} frames={row['frames']} {row['failure'] or ''}", flush=True)
-++    finally:
-++        for provider in providers.values():
-++            provider.close()
-++        run.reset_adapter_cache(args.extensions_dir)
-++        shutil.rmtree(homes, ignore_errors=True)
-++    rows = core.load_jsonl(results)
-++    print("\nmedians")
-++    for target in targets:
-++        for scenario in ("idle", "prompt"):
-++            sel = [r for r in rows if r["target"] == target and r["scenario"] == scenario and not r["failure"]]
-++            print(f"{target:5} {scenario:6} n={len(sel)} typeable={median(r['typeable_s'] for r in sel)} full_ui={median(r['full_ui_s'] for r in sel)} exit={median(r.get('exit_s') for r in sel)} frames={median(r['frames'] for r in sel)} bad={[r['rep'] for r in sel if r.get('exit_code') != 0 or not r['restored'] or r['survivors']]}")
-++
-++
-++if __name__ == "__main__":
-++    main()
-+-- 
-+2.43.0
-+
+ #[cfg(unix)]
+ #[tokio::test]
+ async fn fatal_stdout_protocol_error_terminates_and_reaps_the_child_group() {
+diff --git a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
+index 8cc03ccf..9acb7df5 100644
+--- a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
++++ b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
+@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { createJiti as stockCreateJiti } from 'jiti';
+ import { readPersisted, writePersisted } from './startup-cache.mjs';
++import { runCachedScript } from './jiti-code-cache.mjs';
+ 
+ // Persistent module-resolution map for jiti.
+ //
+@@ -29,6 +30,9 @@ const SCHEMA = 'octet.pi-jiti-resolve/v2';
+ const FILE = 'jiti-resolve-v2.json';
+ const PINNED = '2.7.0';
+ const ANCHOR = 'function jitiResolve(e,t,i){let n,a;';
++// Second exact anchor: the one place jiti evaluates a transformed module. Rewritten (when it
++// occurs exactly once) to compile through a V8 code cache; see jiti-code-cache.mjs.
++const RUN_ANCHOR = 'Ii().runInThisContext(F,{filename:c,lineOffset:0,displayErrors:!1})';
+ const MAX_ENTRIES = 60000;
+ 
+ const bigStat = path => { try { const s = statSync(path, { bigint: true }); return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`; } catch { return null; } };
+@@ -169,9 +173,10 @@ function patchedFactory() {
+     if (JSON.parse(readFileSync(manifest, 'utf8')).version !== PINNED || process.env.OCTET_PI_JITI_RESOLVE_CACHE === '0') return patched;
+     const dist = join(dirname(manifest), 'dist', 'jiti.cjs'), source = readFileSync(dist, 'utf8');
+     if (source.split(ANCHOR).length !== 2) return patched;
+-    const rewritten = source.replace(ANCHOR, 'function jitiResolve(e,t,i){const h=__octetResolveHook;return h?h(e,t,i,jitiResolveOriginal):jitiResolveOriginal(e,t,i)}function jitiResolveOriginal(e,t,i){let n,a;');
++    let rewritten = source.replace(ANCHOR, 'function jitiResolve(e,t,i){const h=__octetResolveHook;return h?h(e,t,i,jitiResolveOriginal):jitiResolveOriginal(e,t,i)}function jitiResolveOriginal(e,t,i){let n,a;');
++    if (source.split(RUN_ANCHOR).length === 2) rewritten = rewritten.replace(RUN_ANCHOR, `__octetRunScript(F,c,()=>${RUN_ANCHOR})`);
+     const module = { exports: {} };
+-    new Function('require', 'module', 'exports', '__filename', '__dirname', '__octetResolveHook', rewritten)(createRequire(dist), module, module.exports, dist, dirname(dist), resolveCache().hook);
++    new Function('require', 'module', 'exports', '__filename', '__dirname', '__octetResolveHook', '__octetRunScript', rewritten)(createRequire(dist), module, module.exports, dist, dirname(dist), resolveCache().hook, runCachedScript);
+     const create = module.exports;
+     const distRequire = createRequire(dist);
+     let babel;

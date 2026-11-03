@@ -1,0 +1,89 @@
+From 5aee6ef2694f5d0db965634ef6813b586b2d0bd0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:43:45 +0000
+Subject: [PATCH 1/2] fix(pi-compat): isolate before_agent_start handlers that
+ fail with a Node error code
+
+A handler throwing an error with a string code (SQLITE_BUSY, ENOENT) failed
+the whole before_prompt hook, so the prompt was refused with 'extension prompt
+composition failed'. Pi reports the handler and continues; only integer RPC
+codes are adapter/host refusals, as in every sibling event.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/before-agent-start.mjs     | 2 +-
+ .../octet-pi-compat/test/before-agent-start.test.mjs      | 7 +++++++
+ .../test/fixtures/before-agent-start-code-error.ts        | 5 +++++
+ scripts/e2e/octet_e2e/provider.py                         | 8 +++++++-
+ 4 files changed, 20 insertions(+), 2 deletions(-)
+ create mode 100644 extensions/octet-pi-compat/test/fixtures/before-agent-start-code-error.ts
+
+diff --git a/extensions/octet-pi-compat/lib/before-agent-start.mjs b/extensions/octet-pi-compat/lib/before-agent-start.mjs
+index 60a2524c..85f3e490 100644
+--- a/extensions/octet-pi-compat/lib/before-agent-start.mjs
++++ b/extensions/octet-pi-compat/lib/before-agent-start.mjs
+@@ -38,7 +38,7 @@ export async function beforeAgentStart(runtime, payload, store) {
+         if (!run.ran) continue;
+         result = run.value;
+       } catch (error) {
+-        if (error?.code || store.controller.signal.aborted) throw error;
++        if (Number.isInteger(error?.code) || store.controller.signal.aborted) throw error;
+         runtime.reportCallbackError('before_agent_start', entry.factory, error);
+         continue;
+       }
+diff --git a/extensions/octet-pi-compat/test/before-agent-start.test.mjs b/extensions/octet-pi-compat/test/before-agent-start.test.mjs
+index d31dd445..0caf4c07 100644
+--- a/extensions/octet-pi-compat/test/before-agent-start.test.mjs
++++ b/extensions/octet-pi-compat/test/before-agent-start.test.mjs
+@@ -31,3 +31,10 @@ test('cancelled before_agent_start cannot publish a late effective system', asyn
+   assert.equal((await request.response).error.code, -32800);
+   peer.send({ jsonrpc: '2.0', id: pending.id, result: { confirmed: true } }); await peer.close();
+ });
++test('a before_agent_start handler failing with a Node error code is isolated, as in Pi', async t => {
++  const peer = launch(t, [join(root, 'test/fixtures/before-agent-start-code-error.ts')]); await peer.init(['before_prompt_state_v1']);
++  const composed = await peer.request('hook/run', params(peer, 'hello')).response;
++  assert.ok(!composed.error, JSON.stringify(composed.error));
++  assert.equal(composed.result.system_prompt, 'real base\nlater handler ran');
++  await peer.close();
++});
+diff --git a/extensions/octet-pi-compat/test/fixtures/before-agent-start-code-error.ts b/extensions/octet-pi-compat/test/fixtures/before-agent-start-code-error.ts
+new file mode 100644
+index 00000000..788cf764
+--- /dev/null
++++ b/extensions/octet-pi-compat/test/fixtures/before-agent-start-code-error.ts
+@@ -0,0 +1,5 @@
++export default pi => {
++  // A Node-style failure (string code), e.g. a locked SQLite memory database.
++  pi.on('before_agent_start', () => { throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }); });
++  pi.on('before_agent_start', event => ({ systemPrompt: `${event.systemPrompt}\nlater handler ran` }));
++}
+diff --git a/scripts/e2e/octet_e2e/provider.py b/scripts/e2e/octet_e2e/provider.py
+index 7196e0cc..2d0c4f67 100644
+--- a/scripts/e2e/octet_e2e/provider.py
++++ b/scripts/e2e/octet_e2e/provider.py
+@@ -31,6 +31,8 @@ class Reply:
+     gate: threading.Event | None = None
+     gate_timeout: float = 20.0
+     usage: bool = True
++    #: Finish the turn with one tool call, `(name, JSON arguments)`, instead of "stop".
++    tool_call: tuple[str, str] | None = None
+ 
+ 
+ @dataclass
+@@ -205,8 +207,12 @@ class MockProvider:
+                         )
+                     if reply.gate is not None:
+                         reply.gate.wait(timeout=reply.gate_timeout)
++                    if reply.tool_call is not None:
++                        name, arguments = reply.tool_call
++                        call = {"index": 0, "id": "call_mock_1", "type": "function", "function": {"name": name, "arguments": arguments}}
++                        self._write_chunk({**base, "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": None}]})
+                     final: dict = {
+-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
++                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if reply.tool_call else "stop"}],
+                     }
+                     if reply.usage:
+                         words = max(1, len((reply.text or " ").split()))
+-- 
+2.43.0
+

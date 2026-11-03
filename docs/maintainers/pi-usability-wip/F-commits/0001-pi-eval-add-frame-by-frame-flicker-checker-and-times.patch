@@ -1,0 +1,414 @@
+From 0a82df9074ca7bfb875f619d28fdf5c6d4fbd04c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:25:11 +0000
+Subject: [PATCH 1/3] pi-eval: add frame-by-frame flicker checker and
+ timestamped PTY chunks
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ scripts/e2e/octet_e2e/session.py |   4 +
+ scripts/pi-eval/flicker.py       | 363 +++++++++++++++++++++++++++++++
+ 2 files changed, 367 insertions(+)
+ create mode 100644 scripts/pi-eval/flicker.py
+
+diff --git a/scripts/e2e/octet_e2e/session.py b/scripts/e2e/octet_e2e/session.py
+index 8c7bcff9..4328a8bf 100644
+--- a/scripts/e2e/octet_e2e/session.py
++++ b/scripts/e2e/octet_e2e/session.py
+@@ -88,6 +88,8 @@ class OctetSession:
+         self._lock = threading.Lock()
+         self._screen = Screen(columns, rows)
+         self._transcript = bytearray()
++        # (monotonic seconds, bytes) per PTY read, for frame-by-frame replay.
++        self.chunks: list[tuple[float, bytes]] = []
+         self._reader: threading.Thread | None = None
+         self._closed = False
+         self.started_at = 0.0
+@@ -132,6 +134,7 @@ class OctetSession:
+             if not data:
+                 return
+             with self._lock:
++                self.chunks.append((time.monotonic(), data))
+                 self._transcript.extend(data)
+                 self._screen.feed(data)
+                 pending = self._screen.responses
+@@ -146,6 +149,7 @@ class OctetSession:
+                 if not data:
+                     return
+                 with self._lock:
++                    self.chunks.append((time.monotonic(), data))
+                     self._transcript.extend(data)
+                     self._screen.feed(data)
+         except OSError:
+diff --git a/scripts/pi-eval/flicker.py b/scripts/pi-eval/flicker.py
+new file mode 100644
+index 00000000..f5a71ed8
+--- /dev/null
++++ b/scripts/pi-eval/flicker.py
+@@ -0,0 +1,363 @@
++#!/usr/bin/env python3
++"""Frame-by-frame stability checker for a recorded PTY byte stream.
++
++Replays timestamped PTY chunks (``OctetSession.chunks``) through the VT model
++and snapshots the screen after every write chunk, but never inside a DEC 2026
++synchronized update, which a real terminal would not paint. Sampling at fixed
++intervals would miss transient frames; this does not.
++
++For the footer region (the rows below the composer's bottom rule) and for the
++whole screen it reports every distinct state with its duration, flicker
++(a state shorter than ``min_ms`` that is replaced, or A -> B -> A), blank
++frames, footer/composer height or position changes, frames showing a native
++footer, and cursor row jumps.
++
++CLI: ``flicker.py report chunks.jsonl [--window 0:20] [--native REGEX]``.
++"""
++
++from __future__ import annotations
++
++import argparse
++import base64
++import json
++import re
++import sys
++import unittest
++from dataclasses import dataclass, field
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
++from octet_e2e.vt import Screen  # noqa: E402
++
++SYNC_BEGIN = b"\x1b[?2026h"
++SYNC_END = b"\x1b[?2026l"
++# octet's built-in footer: `<model> · <n>%/<n>K[ · $cost]`.
++NATIVE_FOOTER = r"\S+ · \d+%/\d+(\.\d+)?[KM]"
++
++
++@dataclass(frozen=True)
++class Frame:
++    t: float
++    text: tuple[str, ...]
++    styled: tuple[str, ...]
++    cursor: tuple[int, int]
++
++
++def _styled_row(screen: Screen, y: int) -> str:
++    runs: list[str] = []
++    previous = None
++    for x in range(screen.columns):
++        char, style = screen.cell(x, y)
++        key = (style.fg, style.bg, style.bold, style.dim, style.italic, style.underline, style.reverse)
++        if key != previous:
++            runs.append(f"\x00{key}\x00")
++            previous = key
++        runs.append(char)
++    return "".join(runs).rstrip()
++
++
++def _snapshot(screen: Screen, t: float) -> Frame:
++    return Frame(
++        t,
++        tuple(screen.row(y) for y in range(screen.rows)),
++        tuple(_styled_row(screen, y) for y in range(screen.rows)),
++        (screen.x, screen.y),
++    )
++
++
++def replay(chunks: list[tuple[float, bytes]], columns: int, rows: int) -> list[Frame]:
++    """Snapshot after each chunk that does not end inside a synchronized update.
++
++    Times are relative to the first chunk. Several sync blocks inside one chunk
++    reach the terminal in one read, so they are one snapshot.
++    """
++    screen = Screen(columns, rows)
++    frames: list[Frame] = []
++    in_sync = False
++    for stamp, data in chunks:
++        screen.feed(data)
++        begin, end = data.rfind(SYNC_BEGIN), data.rfind(SYNC_END)
++        if begin != -1 or end != -1:
++            in_sync = begin > end
++        if not in_sync:
++            frames.append(_snapshot(screen, stamp - chunks[0][0]))
++    return frames
++
++
++def _is_rule(row: str, columns: int) -> bool:
++    return len(row) >= columns // 2 and row.count("─") >= 0.8 * len(row)
++
++
++def footer_start(frame: Frame, columns: int) -> int | None:
++    """Row index just below the composer's bottom rule, or None before a composer exists."""
++    rules = [y for y, row in enumerate(frame.text) if _is_rule(row, columns)]
++    return rules[-1] + 1 if len(rules) >= 2 else None
++
++
++def footer_rows(frame: Frame, columns: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
++    start = footer_start(frame, columns)
++    if start is None:
++        return (), ()
++    text, styled = list(frame.text[start:]), list(frame.styled[start:])
++    while text and not text[-1]:
++        text.pop()
++        styled.pop()
++    return tuple(text), tuple(styled)
++
++
++@dataclass
++class State:
++    start: float
++    end: float
++    key: object
++    text: tuple[str, ...]
++
++    @property
++    def duration(self) -> float:
++        return self.end - self.start
++
++
++def _states(frames: list[Frame], key, text, end: float) -> list[State]:
++    out: list[State] = []
++    for frame in frames:
++        k = key(frame)
++        if out and out[-1].key == k:
++            continue
++        if out:
++            out[-1].end = frame.t
++        out.append(State(frame.t, end, k, text(frame)))
++    if out:
++        out[-1].end = end
++    return out
++
++
++def _flicker(states: list[State], min_ms: float) -> list[dict]:
++    found = []
++    for i in range(1, len(states) - 1):
++        state = states[i]
++        revert = states[i - 1].key == states[i + 1].key
++        if state.duration * 1000 < min_ms or revert:
++            found.append(
++                {
++                    "at": round(state.start, 3),
++                    "duration_ms": round(state.duration * 1000, 1),
++                    "reverts": revert,
++                    "text": list(state.text),
++                }
++            )
++    return found
++
++
++def analyze(
++    frames: list[Frame],
++    columns: int,
++    *,
++    window: tuple[float, float] | None = None,
++    min_ms: float = 100.0,
++    native: str = NATIVE_FOOTER,
++) -> dict:
++    """Stability report for the frames inside ``window`` (seconds from the first chunk)."""
++    if window is not None:
++        frames = [f for f in frames if window[0] <= f.t <= window[1]]
++    if not frames:
++        return {"frames": 0}
++    end = window[1] if window else frames[-1].t
++    pattern = re.compile(native)
++    footer = _states(
++        frames,
++        lambda f: footer_rows(f, columns)[1],
++        lambda f: footer_rows(f, columns)[0],
++        end,
++    )
++    # Cursor motion is layout, not content: compare the visible text only.
++    whole = _states(frames, lambda f: f.styled, lambda f: f.text, end)
++    seen_content = False
++    blank_frames, blank_footer = [], []
++    for f in frames:
++        empty = not any(f.text)
++        if seen_content and empty:
++            blank_frames.append(round(f.t, 3))
++        seen_content |= not empty
++    seen_footer = False
++    for f in frames:
++        has = bool(footer_rows(f, columns)[0])
++        if seen_footer and not has and footer_start(f, columns) is not None:
++            blank_footer.append(round(f.t, 3))
++        seen_footer |= has
++    native_frames = [f.t for f in frames if any(pattern.search(row) for row in footer_rows(f, columns)[0])]
++    starts = [(f.t, footer_start(f, columns)) for f in frames]
++    layout = []
++    for (_, a), (t, b) in zip(starts, starts[1:]):
++        if a is not None and b is not None and a != b:
++            layout.append({"at": round(t, 3), "footer_start": [a, b]})
++    heights = [(f.t, len(footer_rows(f, columns)[0])) for f in frames]
++    height_changes = [
++        {"at": round(t, 3), "height": [a, b]}
++        for (_, a), (t, b) in zip(heights, heights[1:])
++        if a and b and a != b
++    ]
++    cursor_rows = []
++    for f in frames:
++        if not cursor_rows or cursor_rows[-1][1] != f.cursor[1]:
++            cursor_rows.append((round(f.t, 3), f.cursor[1]))
++    return {
++        "frames": len(frames),
++        "footer_states": [
++            {"at": round(s.start, 3), "duration_s": round(s.duration, 3), "text": list(s.text)} for s in footer
++        ],
++        "footer_changes": max(0, len(footer) - 1),
++        "footer_flicker": _flicker(footer, min_ms),
++        "screen_states": len(whole),
++        "screen_flicker": _flicker(whole, min_ms),
++        "blank_frames": blank_frames,
++        "blank_footer_frames": blank_footer,
++        "footer_position_changes": layout,
++        "footer_height_changes": height_changes,
++        "native_footer_frames": len(native_frames),
++        "native_footer_first_last": [round(native_frames[0], 3), round(native_frames[-1], 3)] if native_frames else None,
++        "cursor_row_moves": len(cursor_rows) - 1,
++        "cursor_rows": cursor_rows[:40],
++    }
++
++
++def verdict(report: dict, *, max_footer_changes: int = 1, allow_native: bool = False) -> list[str]:
++    """Failed criteria for one window; empty means pass."""
++    if not report.get("frames"):
++        return ["no frames recorded"]
++    failures = []
++    if not allow_native and report["native_footer_frames"]:
++        failures.append(f"native footer visible in {report['native_footer_frames']} frames")
++    if report["footer_changes"] > max_footer_changes:
++        failures.append(f"{report['footer_changes']} footer content changes (max {max_footer_changes})")
++    if report["footer_flicker"]:
++        failures.append(f"{len(report['footer_flicker'])} footer flicker states")
++    if report["screen_flicker"]:
++        failures.append(f"{len(report['screen_flicker'])} whole-screen flicker states")
++    if report["blank_frames"] or report["blank_footer_frames"]:
++        failures.append("blank frames after content")
++    if report["footer_position_changes"] or report["footer_height_changes"]:
++        failures.append("footer moved or changed height")
++    return failures
++
++
++def dump_chunks(chunks: list[tuple[float, bytes]], path: Path) -> None:
++    with open(path, "w") as out:
++        for stamp, data in chunks:
++            out.write(json.dumps([stamp, base64.b64encode(data).decode()]) + "\n")
++
++
++def load_chunks(path: Path) -> list[tuple[float, bytes]]:
++    return [(stamp, base64.b64decode(data)) for stamp, data in map(json.loads, Path(path).read_text().splitlines())]
++
++
++# ---------------------------------------------------------------------------
++# Self-test on synthetic streams
++# ---------------------------------------------------------------------------
++
++RULE = "─" * 40
++
++
++def _paint(*rows: str, sync: bool = False) -> bytes:
++    body = "\x1b[H\x1b[2J" + "\r\n".join(rows)
++    return (SYNC_BEGIN + body.encode() + SYNC_END) if sync else body.encode()
++
++
++class SelfTest(unittest.TestCase):
++    def frames(self, *chunks: tuple[float, bytes]):
++        return replay(list(chunks), 40, 6)
++
++    def test_clean_snapshot_to_live_passes(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "~  gpt 0%/1K")),
++            (1.0, _paint(RULE, "> ", RULE, "~  gpt 0%/1K $0.1")),
++        )
++        report = analyze(frames, 40, native=r"native")
++        self.assertEqual(report["footer_changes"], 1)
++        self.assertEqual(verdict(report), [])
++
++    def test_native_flash_flagged(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "mock-1 · 1%/128K")),
++            (1.0, _paint(RULE, "> ", RULE, "~  Mock One 0%/128K")),
++        )
++        failures = verdict(analyze(frames, 40))
++        self.assertTrue(any("native footer" in f for f in failures))
++
++    def test_transient_and_revert_flagged(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "A")),
++            (0.5, _paint(RULE, "> ", RULE, "B")),
++            (0.52, _paint(RULE, "> ", RULE, "A")),
++            (2.0, _paint(RULE, "> ", RULE, "A")),
++        )
++        report = analyze(frames, 40, native="zz")
++        self.assertEqual(len(report["footer_flicker"]), 1)
++        self.assertTrue(report["footer_flicker"][0]["reverts"])
++
++    def test_sync_update_hides_intermediate_frame(self):
++        torn = SYNC_BEGIN + b"\x1b[H\x1b[2J" + RULE.encode() + b"\r\n> \r\n" + RULE.encode() + b"\r\nold"
++        done = b"\x1b[H\x1b[2J" + "\r\n".join([RULE, "> ", RULE, "new"]).encode() + SYNC_END
++        frames = self.frames((0.0, _paint(RULE, "> ", RULE, "old")), (0.5, torn), (0.5001, done))
++        report = analyze(frames, 40, native="zz")
++        self.assertEqual([s["text"] for s in report["footer_states"]], [["old"], ["new"]])
++
++    def test_blank_frame_flagged(self):
++        frames = self.frames((0.0, _paint(RULE, "> ", RULE, "a")), (0.5, b"\x1b[2J"))
++        self.assertEqual(analyze(frames, 40, native="zz")["blank_frames"], [0.5])
++
++    def test_height_change_flagged(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "a")),
++            (0.6, _paint(RULE, "> ", RULE, "a", "b")),
++        )
++        report = analyze(frames, 40, native="zz")
++        self.assertEqual(report["footer_height_changes"][0]["height"], [1, 2])
++
++    def test_style_change_is_a_state(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "a")),
++            (1.0, _paint(RULE, "> ", RULE, "\x1b[31ma\x1b[0m")),
++        )
++        self.assertEqual(analyze(frames, 40, native="zz")["footer_changes"], 1)
++
++    def test_window_limits_the_report(self):
++        frames = self.frames(
++            (0.0, _paint(RULE, "> ", RULE, "a")),
++            (5.0, _paint(RULE, "> ", RULE, "b")),
++        )
++        self.assertEqual(analyze(frames, 40, window=(0, 2), native="zz")["footer_changes"], 0)
++
++    def test_chunk_round_trip(self):
++        import tempfile
++
++        chunks = [(1.5, b"\x1b[31mhi\x00"), (2.0, b"x")]
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "c.jsonl"
++            dump_chunks(chunks, path)
++            self.assertEqual(load_chunks(path), chunks)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = parser.add_subparsers(dest="command", required=True)
++    sub.add_parser("selftest")
++    report = sub.add_parser("report")
++    report.add_argument("chunks", type=Path)
++    report.add_argument("--columns", type=int, default=120)
++    report.add_argument("--rows", type=int, default=40)
++    report.add_argument("--window", help="START:END seconds from the first chunk")
++    report.add_argument("--native", default=NATIVE_FOOTER)
++    report.add_argument("--max-footer-changes", type=int, default=1)
++    args = parser.parse_args(argv)
++    if args.command == "selftest":
++        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
++        return 0 if unittest.TextTestRunner(verbosity=1).run(suite).wasSuccessful() else 1
++    window = tuple(map(float, args.window.split(":"))) if args.window else None
++    result = analyze(replay(load_chunks(args.chunks), args.columns, args.rows), args.columns, window=window, native=args.native)
++    failures = verdict(result, max_footer_changes=args.max_footer_changes)
++    print(json.dumps({"report": result, "failures": failures}, indent=2, ensure_ascii=False))
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.43.0
+

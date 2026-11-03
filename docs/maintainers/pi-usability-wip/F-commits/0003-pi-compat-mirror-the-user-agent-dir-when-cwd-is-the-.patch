@@ -1,0 +1,70 @@
+From abee99bee70f67e25d00e2ddb31ffce4555c92aa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 08:08:09 +0000
+Subject: [PATCH 3/3] pi-compat: mirror the user agent dir when cwd is the home
+ directory
+
+From HOME the project .pi contains ~/.pi/agent, so every user-scope extension,
+theme and keybinding was dropped as an untrusted project path and the Pi footer
+never loaded (factories=0). The agent dir is user scope and never trust-gated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/pi-setup.mjs   |  6 ++++--
+ .../octet-pi-compat/test/pi-setup.test.mjs    | 19 +++++++++++++++++++
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/pi-setup.mjs b/extensions/octet-pi-compat/lib/pi-setup.mjs
+index e0cbe637..9eb93bbd 100644
+--- a/extensions/octet-pi-compat/lib/pi-setup.mjs
++++ b/extensions/octet-pi-compat/lib/pi-setup.mjs
+@@ -48,7 +48,9 @@ function markIncomplete(ctx, key, limit, message) {
+ // Check every component: lstat on only the leaf still follows linked parents.
+ function safeStat(path, ctx, label, required = false) {
+   path = resolve(path);
+-  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot)) {
++  // From the home directory the project `.pi` contains the user's agent directory,
++  // which is user scope and never gated by project trust.
++  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot) && !within(path, ctx.agentDir)) {
+     diagnostic(ctx, `${label} ${path}: untrusted project .pi paths are not mirrored`);
+     return undefined;
+   }
+@@ -474,7 +476,7 @@ export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(
+ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
+   const resolvedAgentDir = agentDirectory(agentDir, env);
+   const projectRoot = resolve(cwd, '.pi');
+-  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
++  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, agentDir: resolvedAgentDir, projectTrusted: projectTrusted === true };
+   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
+   const projectSettings = ctx.projectTrusted ? settingsObject(join(projectRoot, 'settings.json'), 'project settings.json', ctx) : {};
+   const settings = mergeSettings(globalSettings ?? {}, projectSettings ?? {});
+diff --git a/extensions/octet-pi-compat/test/pi-setup.test.mjs b/extensions/octet-pi-compat/test/pi-setup.test.mjs
+index 60a7053a..0d6f9b66 100644
+--- a/extensions/octet-pi-compat/test/pi-setup.test.mjs
++++ b/extensions/octet-pi-compat/test/pi-setup.test.mjs
+@@ -396,3 +396,22 @@ test('pi setup: non-mirror palette discovery respects package deltas and live pr
+   }
+   await peer.close();
+ });
++
++test('pi setup: from the home directory the user agent dir is user scope, not an untrusted project path', async t => {
++  const root = temporary(t);
++  const agent = piHome(root);
++  const home = join(root, 'home');
++  // `<home>/.pi` is both Pi's project root and the parent of the agent dir.
++  put(join(home, '.pi/extensions/project.js'), 'export default pi => pi.registerCommand("project", {handler(){}});');
++  const setup = discoverPiSetup({ agentDir: agent, cwd: home, projectTrusted: false });
++  assert.deepEqual(setup.extensions, [
++    join(agent, 'elsewhere/extra.ts'),
++    join(agent, 'extensions/one.mjs'),
++    join(agent, 'extensions/two.js'),
++  ]);
++  assert.deepEqual(setup.themesPaths, [join(agent, 'themes/pi-setup-theme.json')]);
++  assert.equal(setup.keybindingsPath, join(agent, 'keybindings.json'));
++  assert.equal(setup.defaultTheme, 'pi-setup-theme');
++  assert.ok(!setup.diagnostics.some(message => message.includes(agent)), setup.diagnostics.join('\n'));
++  assert.ok(setup.diagnostics.some(message => message.includes('untrusted project .pi paths') && message.includes('project.js')) || !setup.extensions.includes(join(home, '.pi/extensions/project.js')));
++});
+-- 
+2.43.0
+

@@ -1,0 +1,124 @@
+From 370a27bbd795a4b84a6f7c6d7a7e0c854f626a12 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:48:56 +0000
+Subject: [PATCH 5/8] octet-pi-compat: realpath module alias targets; use path
+ separator in dependency check
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../lib/jiti-resolve-cache.mjs                |  6 ++--
+ extensions/octet-pi-compat/lib/pi-modules.mjs | 12 +++++---
+ .../test/pi-modules-symlink.test.mjs          | 30 +++++++++++++++++++
+ 3 files changed, 41 insertions(+), 7 deletions(-)
+ create mode 100644 extensions/octet-pi-compat/test/pi-modules-symlink.test.mjs
+
+diff --git a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
+index 2e7234f1..b84af7a3 100644
+--- a/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
++++ b/extensions/octet-pi-compat/lib/jiti-resolve-cache.mjs
+@@ -1,7 +1,7 @@
+ import { createRequire } from 'node:module';
+ import { createHash } from 'node:crypto';
+ import { existsSync, readFileSync, statSync } from 'node:fs';
+-import { basename, dirname, isAbsolute, join } from 'node:path';
++import { basename, dirname, isAbsolute, join, sep } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { createJiti as stockCreateJiti } from 'jiti';
+ import { readPersisted, writePersisted } from './startup-cache.mjs';
+@@ -93,7 +93,7 @@ class ResolveCache {
+       const parent = dirname(parentFile);
+       out.add(parent);
+       if (!/^\.{0,2}\//.test(specifier) && specifier !== '.' && specifier !== '..') {
+-        const marker = resolved.lastIndexOf('/node_modules/'), supplied = marker >= 0 ? resolved.slice(0, marker + '/node_modules'.length) : undefined;
++        const marker = resolved.lastIndexOf(`${sep}node_modules${sep}`), supplied = marker >= 0 ? resolved.slice(0, marker + `${sep}node_modules`.length) : undefined;
+         for (let dir = parent, last; dir !== last; last = dir, dir = dirname(dir)) {
+           const modules = join(dir, 'node_modules');
+           out.add(modules);
+@@ -103,7 +103,7 @@ class ResolveCache {
+     }
+     // Inside a dependency, every package.json up to the package root counts: a
+     // nested `{"type":"module"}` must not hide an edited `exports` map above it.
+-    const dependency = resolved.includes('/node_modules/');
++    const dependency = resolved.includes(`${sep}node_modules${sep}`);
+     const packageRoot = dir => { const scope = dirname(dir); return basename(scope) === 'node_modules' || (basename(scope).startsWith('@') && basename(dirname(scope)) === 'node_modules'); };
+     for (let dir = dirname(resolved), last; dir !== last; last = dir, dir = dirname(dir)) {
+       out.add(join(dir, 'package.json'));
+diff --git a/extensions/octet-pi-compat/lib/pi-modules.mjs b/extensions/octet-pi-compat/lib/pi-modules.mjs
+index c02979bf..9d8a42f0 100644
+--- a/extensions/octet-pi-compat/lib/pi-modules.mjs
++++ b/extensions/octet-pi-compat/lib/pi-modules.mjs
+@@ -3,7 +3,7 @@
+ // packages/coding-agent/src/core/extensions/loader.ts getAliases). Both the
+ // emulated path and the installed-Pi fallback resolve exactly these names, so
+ // an extension sees the same module graph it sees in Pi.
+-import { readFileSync } from 'node:fs';
++import { readFileSync, realpathSync } from 'node:fs';
+ import { fileURLToPath } from 'node:url';
+ 
+ export const PI_VERSION = '1.4.0';
+@@ -51,10 +51,14 @@ export function piModule(specifier) {
+   return null;
+ }
+ 
+-const shimFile = shim => fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url));
++// Node resolves bare specifiers through realpath, so an alias target that goes
++// through a symlinked directory (pnpm layouts, a linked node_modules) would load
++// a second copy of the same module. Aliases therefore point at real paths.
++const real = path => { try { return realpathSync(path); } catch { return path; } };
++const shimFile = shim => real(fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url)));
+ // Imported on the emulated path in place of a Pi module octet does not
+ // emulate; loading it fails, and the load is retried on the installed Pi.
+-export const UNAVAILABLE_MODULE = fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url));
++export const UNAVAILABLE_MODULE = real(fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url)));
+ 
+ /** Emulated-path aliases for every Pi specifier Pi resolves. */
+ export function emulatedPiAliases() {
+@@ -85,7 +89,7 @@ export function typeboxAliases() {
+     const file = pick(target);
+     if (typeof file !== 'string') continue;
+     const subpath = key === '.' ? '' : key.slice(1);
+-    for (const spelling of TYPEBOX_SPELLINGS) aliases[`${spelling}${subpath}`] = fileURLToPath(new URL(file, root));
++    for (const spelling of TYPEBOX_SPELLINGS) aliases[`${spelling}${subpath}`] = real(fileURLToPath(new URL(file, root)));
+   }
+   return aliases;
+ }
+diff --git a/extensions/octet-pi-compat/test/pi-modules-symlink.test.mjs b/extensions/octet-pi-compat/test/pi-modules-symlink.test.mjs
+new file mode 100644
+index 00000000..c0b6b04a
+--- /dev/null
++++ b/extensions/octet-pi-compat/test/pi-modules-symlink.test.mjs
+@@ -0,0 +1,30 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { pathToFileURL } from 'node:url';
++
++// pnpm-style layout: the adapter's node_modules is a symlink into a store.
++// Alias targets must be real paths, or Node's own (realpath) resolution of the
++// same module yields a second instance.
++test('typebox aliases resolve through symlinked node_modules to real paths', async () => {
++  const root = mkdtempSync(join(tmpdir(), 'octet-pi-symlink-'));
++  try {
++    const store = join(root, 'store');
++    mkdirSync(store);
++    cpSync(new URL('../node_modules/typebox/', import.meta.url), join(store, 'typebox'), { recursive: true });
++    const adapter = join(root, 'adapter');
++    mkdirSync(adapter);
++    cpSync(new URL('../lib/', import.meta.url), join(adapter, 'lib'), { recursive: true });
++    cpSync(new URL('../shims/', import.meta.url), join(adapter, 'shims'), { recursive: true });
++    symlinkSync(store, join(adapter, 'node_modules'));
++    const { typeboxAliases, emulatedPiAliases } = await import(pathToFileURL(join(adapter, 'lib', 'pi-modules.mjs')).href);
++    const aliases = typeboxAliases();
++    assert.ok(Object.keys(aliases).length > 0);
++    for (const target of [...Object.values(aliases), ...Object.values(emulatedPiAliases())]) {
++      assert.equal(target, realpathSync(target), `${target} is not a real path`);
++    }
++    assert.ok(aliases.typebox.startsWith(realpathSync(store)), aliases.typebox);
++  } finally { rmSync(root, { recursive: true, force: true }); }
++});
+-- 
+2.43.0
+

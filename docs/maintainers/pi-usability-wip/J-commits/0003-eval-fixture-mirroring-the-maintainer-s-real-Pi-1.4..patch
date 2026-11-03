@@ -1,0 +1,138 @@
+From afc77ecb232cb5bb08dfe3f8a4d094e483c885c2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:24:57 +0000
+Subject: [PATCH 3/8] eval: fixture mirroring the maintainer's real Pi 1.4.0
+ setup
+
+29 packages at the maintainer's versions (13 autoload, 16 autoload:false)
+and their Pi settings (ghostty-dark theme, fullscreen TUI, codemode, max
+thinking, steering all). Provider is the eval mock; deviceId is omitted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ docs/maintainers/pi-usability-brief.md | 50 +++++++++++++++++---------
+ scripts/pi-eval/maintainer_fixture.py  | 46 ++++++++++++++++++++++++
+ 2 files changed, 79 insertions(+), 17 deletions(-)
+ create mode 100644 scripts/pi-eval/maintainer_fixture.py
+
+diff --git a/docs/maintainers/pi-usability-brief.md b/docs/maintainers/pi-usability-brief.md
+index fa73ca6a..967ddedd 100644
+--- a/docs/maintainers/pi-usability-brief.md
++++ b/docs/maintainers/pi-usability-brief.md
+@@ -79,23 +79,6 @@ eligibility are checked there` and a `Controls · queued / command · idle` bloc
+ - Use isolated HOME and cache directories for adapter tests:
+   `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
+ 
+-## Screen-stability acceptance (maintainer requirement)
+-
+-Checking the first frame is not enough. Every UI-affecting change must pass 20-second windows,
+-analysed frame by frame:
+-- **Windows:** from launch (cold and warm), and after prompts (before READY, at READY, after
+-  idle, back to back, a streamed reply, a tool-call reply, after /reload).
+-- **Replay:** run the raw PTY byte stream through `scripts/e2e/octet_e2e/vt.py` after every
+-  write chunk, not at fixed intervals.
+-- **Fail on:**
+-  - a native-footer flash while Pi compat is on;
+-  - flicker (a state visible for less than ~100 ms, or A→B→A);
+-  - more than one footer content change (snapshot → live);
+-  - footer, composer or transcript height or position jumps;
+-  - blank or partial frames.
+-- **Compare:** run the same windows on Pi 1.4.0.
+-- **Tool:** the reusable checker is `scripts/pi-eval/flicker.py`.
+-
+ ## Rules (non-negotiable)
+ 
+ - **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
+@@ -125,3 +108,36 @@ analysed frame by frame:
+ - The fix and why the guarantees still hold.
+ - Before/after evidence from the real fixture: screens, timings, and the failing-name comparison.
+ - Remaining risks, and anything you could not verify.
++
++## PRIMARY fixture: the maintainer's real Pi setup (added 2026-11-03)
++
++- **Location:** `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/pi-eval-cache/03dc02b6ce9f3a89`.
++  Its home is in `home/`. It is built by `scratchpad/maint/build_maintainer_fixture.py`; load it with
++  `fx.Fixture(root=Path(that), lock=json.load(...))`, or point `HOME` at a copy of `home/`. Always use a
++  copy (`fx.copy_tree`); never mutate the cached template.
++- **Packages:** the same 29 packages and versions as the maintainer, with Pi 1.4.0.
++  - 13 autoload: pi-agent-extensions, pi-mcp-adapter, pi-web-access, pi-subagents,
++    pi-background-tasks, pi-lens, pi-permission-system, pi-hermes-memory,
++    rpiv-ask-user-question, pi-hashline-edit-pro, bigpowers, awesome-pi-themes, and
++    @termdraw/pi.
++  - 16 installed with `autoload: false`. octet must NOT load these, exactly as Pi does not;
++    verify it.
++- **Settings:** the same Pi settings as the maintainer:
++  - `theme: ghostty-dark` (from awesome-pi-themes);
++  - `tuiMode: fullscreen`;
++  - `defaultTools: ["+codemode"]` with `codemode.mode: on`;
++  - `steeringMode: all`;
++  - `defaultThinkingLevel: max`;
++  - `terminal.showTerminalProgress`;
++  - `markdown.mermaid: streaming`;
++  - `compaction.enabled`.
++
++  octet must honour every one the way Pi does. Report any it ignores.
++- **Footer:** there is NO pi-powerline-footer here. The maintainer's footer comes from one
++  of these packages or from Pi's built-in footer. Find out which.
++- **Provider:** the maintainer uses `openai-codex`; the fixture uses the mock provider. To
++  catch the model-ID vs display-name bug, configure the mock model with id `gpt-5.6-luna`
++  and name `GPT-5.6 Luna`, a context window of 272000 and a subscription-style zero cost,
++  in BOTH Pi (`models.json`) and octet (`custom.json`).
++- **Usage:** this fixture is primary for every acceptance check. The 23-package fixture is
++  secondary, for breadth.
+diff --git a/scripts/pi-eval/maintainer_fixture.py b/scripts/pi-eval/maintainer_fixture.py
+new file mode 100644
+index 00000000..8a52382b
+--- /dev/null
++++ b/scripts/pi-eval/maintainer_fixture.py
+@@ -0,0 +1,46 @@
++"""Build a Pi 1.4.0 fixture mirroring the maintainer's real ~/.pi/agent/settings.json.
++
++Same package set, versions and autoload flags; same Pi settings. deviceId and the
++openai-codex provider are replaced: the provider by the eval's mock (configured per
++leg by fixture.write_provider_config).
++"""
++import json, sys
++from pathlib import Path
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import fixture as fx
++
++PACKAGES = [  # (name, version, autoload)
++    ("pi-agent-extensions", "0.5.4", True), ("pi-mcp-adapter", "2.31.0", True), ("pi-web-access", "0.27.0", True),
++    ("pi-subagents", "0.59.0", True), ("pi-background-tasks", "2.4.2", True), ("pi-lens", "4.1.3", True),
++    ("@gotgenes/pi-permission-system", "27.1.2", True), ("pi-hermes-memory", "0.9.7", True),
++    ("@juicesharp/rpiv-ask-user-question", "2.8.0", True), ("@juicesharp/rpiv-todo", "2.8.0", False),
++    ("pi-hashline-edit-pro", "2.8.3", True), ("bigpowers", "2.87.5", True), ("awesome-pi-themes", "1.1.19", True),
++    ("context-mode", "1.0.169", False), ("@plannotator/pi-extension", "0.27.9", False), ("pi-fabric", "0.70.0", False),
++    ("@narumitw/pi-plan-mode", "0.56.0", False), ("@narumitw/pi-lsp", "0.49.6", False),
++    ("pi-agent-browser-native", "0.5.0", False), ("@llblab/pi-telegram", "0.39.5", False), ("pi-langfuse", "1.5.15", False),
++    ("pi-interactive-shell", "0.15.1", False), ("pi-claude-bridge", "0.7.0", False), ("pi-memory", "0.4.2", False),
++    ("@narumitw/pi-goal", "0.54.3", False), ("@tintinweb/pi-subagents", "0.19.0", False),
++    ("@dietrichgebert/ponytail", "4.9.0", False), ("pi-zentui", "0.21.0", False), ("@termdraw/pi", "0.4.1", True),
++]
++LOCK = {
++    "schema": "octet.pi-eval-lock/v1",
++    "pi": {"package": "@earendil-works/pi-coding-agent", "version": "1.4.0"},
++    "note": "Maintainer's real Pi setup (2026-11-03); @termdraw/pi pinned to its latest (unpinned in the original).",
++    "packages": [{"name": n, "version": v, "autoload": a} for n, v, a in PACKAGES],
++    "settings": {
++        "theme": "ghostty-dark", "defaultThinkingLevel": "max", "defaultTools": ["+codemode"], "codemode": {"mode": "on"},
++        "compaction": {"enabled": True}, "steeringMode": "all", "terminal": {"showTerminalProgress": True},
++        "markdown": {"mermaid": "streaming"}, "tuiMode": "fullscreen",
++    },
++}
++
++def settings_document(lock):
++    packages = [f"npm:{p['name']}@{p['version']}" if p["autoload"] else {"source": f"npm:{p['name']}@{p['version']}", "autoload": False}
++                for p in lock["packages"]]
++    return {"packages": packages, "extensions": [fx.SENTINEL_SETTING], "defaultProvider": fx.PROVIDER, "defaultModel": fx.MODEL,
++            "enableInstallTelemetry": False, "lastChangelogVersion": lock["pi"]["version"], **lock["settings"]}
++
++fx.settings_document = settings_document
++cache = Path(sys.argv[1]) if len(sys.argv) > 1 else fx.default_cache()
++f = fx.build_fixture(cache, LOCK)
++print("FIXTURE", f.root)
+-- 
+2.43.0
+

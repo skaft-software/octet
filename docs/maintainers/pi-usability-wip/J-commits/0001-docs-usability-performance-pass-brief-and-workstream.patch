@@ -1,0 +1,165 @@
+From a62def0ad6eb3853fa389db3052cd8ea1c263da2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:21:22 +0000
+Subject: [PATCH 1/8] docs: usability/performance pass brief and workstreams
+ [skip ci]
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../maintainers/pi-extensions-eval-handoff.md |  21 ++++
+ docs/maintainers/pi-usability-brief.md        | 110 ++++++++++++++++++
+ 2 files changed, 131 insertions(+)
+ create mode 100644 docs/maintainers/pi-usability-brief.md
+
+diff --git a/docs/maintainers/pi-extensions-eval-handoff.md b/docs/maintainers/pi-extensions-eval-handoff.md
+index f009833a..9251ff89 100644
+--- a/docs/maintainers/pi-extensions-eval-handoff.md
++++ b/docs/maintainers/pi-extensions-eval-handoff.md
+@@ -222,6 +222,27 @@ being observed on both base and candidate; this does not explain the historical
+ or qualify cleanup of arbitrary process trees. The <=1.6 s warm goal and an improvement to
+ the real-workload exit remain unverified.
+ 
++## Usability and performance pass (2026-11-03): maintainer macOS qualification found
++
++1. octet's native footer is drawn first, then the Pi footer swaps in, which looks janky.
++2. The footer is inconsistent: it appears in one session but not in another (cwd `~`).
++3. The footer does not match Pi: model ID instead of display name, and the context and cost
++   segments are missing.
++4. Extension prompt composition and `before_agent_start` fail.
++
++The shared brief, rules and fixture/repro instructions are in `docs/maintainers/pi-usability-brief.md`.
++Workstreams (local worktrees, unpushed; the branch names say what each owns):
++- `fix/pi-footer`: issues 1-3, including a cached footer placeholder primitive (design
++  `docs/design/pi-footer-startup.md`).
++- `fix/pi-before-prompt`: issue 4. Prompt request bodies must match Pi byte for byte;
++  Pi-equivalent hook budgets; the missing API fields behind skipped handlers.
++- `perf/pi-warm-exit`: salvages `perf/pi-warm` (`eedffd48`) and the `perf/pi-exit` diff;
++  warm <=1.6 s; exit near Pi's 0.16 s; cold must not regress after `852ca760`.
++- `review/pi-compat`: rigorous review of `c610a671..852ca760` (macOS, concurrency, cache
++  locations, native-ESM semantics).
++- `eval/pi-functional`: functional parity eval with Pi as the oracle (tools, commands,
++  handlers, UI, prompt bodies), plus a scorecard.
++
+ ## Next steps
+ 
+ 1. Reproduce the pinned 23-package Pi 1.4.0 benchmark in a disposable Linux sandbox with
+diff --git a/docs/maintainers/pi-usability-brief.md b/docs/maintainers/pi-usability-brief.md
+new file mode 100644
+index 00000000..0e0a5798
+--- /dev/null
++++ b/docs/maintainers/pi-usability-brief.md
+@@ -0,0 +1,110 @@
++# Common brief: octet v0.10.0 Pi compatibility, usability and performance
++
++Read this whole file before starting.
++
++## Goal
++
++Make octet's Pi compatibility usable for any Pi user, with no regressions and no slop.
++Measure against Pi 1.4.0. Prove every claim with a reproduction on the real fixture, not
++just a unit test.
++
++## Repo and branches
++
++- Repo: `/home/user/octet`. The release branch is `release/v0.10.0-candidate` at `852ca760`.
++  The coordinator's branch `claude/admiring-feynman-2sqpfb` is identical to it.
++- You are in your own git worktree. First run
++  `git checkout -B <your-branch> 852ca760` (your branch name is in your task).
++- Commit locally, early and often: after every passing step. End each message with
++  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Do NOT push. Uncommitted work
++  is lost if you are stopped by a usage limit.
++- Read first: `docs/maintainers/pi-extensions-eval-handoff.md`,
++  `docs/maintainers/pi-v0.10-perf-handoff.md`, `docs/design/pi-native-esm.md`,
++  `docs/design/pi-single-import.md` and `extensions/octet-pi-compat/README.md`.
++
++## The maintainer's bug reports (manual qualification on macOS, their real Pi 1.4.x setup)
++
++Screenshots: `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/images/1.webp`,
++`2.webp` and `3.png`. Open them with the Read tool.
++
++1. **Footer swap jank.** octet first draws its own native footer, then the Pi footer
++   replaces it seconds later, once the extensions load. With Pi compat enabled, the Pi
++   footer must appear immediately, with no visible swap.
++2. **Footer inconsistent across sessions.** In one session (cwd `~/github/skaft-software/octet`)
++   the Pi footer appeared after a long delay. In another (cwd `~`, the home directory) it
++   never appeared, and the native footer `GPT-6.1-Sol · max · 5%/272K   ~` stayed.
++   Screenshot 2 shows real Pi on the left (footer
++   `~   GPT-5.6 Luna 0/272K (0%) | $0.000 (sub) | 1m 22...`) and octet on the right.
++3. **Footer fidelity is poor.** When the Pi footer does appear in octet (screenshot 1) it
++   looks wrong: a separate `pi-lens` status line, the path on its own line, and
++   `GPT-5.6-Luna | 1m 22...` on the right. The model ID is shown instead of the display
++   name, and the context-usage (`0/272K (0%)`) and cost (`$0.000 (sub)`) segments are
++   missing. It must look exactly like Pi.
++4. **Prompt composition and `before_agent_start` failing.** Extension prompt composition
++   fails and the before-prompt hook fails. The exact error text is unknown, so reproduce it.
++   Relevant code: `extensions/octet-pi-compat/lib/before-agent-start.mjs` and
++   `lib/handler-budget.mjs`, which set per-handler 2 s and total 4 s budgets, plus the
++   host's 5 s before_prompt deadline. Check what Pi 1.4.0 actually does.
++
++Screenshot 3 also shows `extension action queued for the next idle boundary; approval and
++eligibility are checked there` and a `Controls · queued / command · idle` block after a
++`/reload` issued while a turn was running.
++
++## Real fixture (use it; don't mock what you can run)
++
++- The cached fixture for Pi 1.4.0 plus 23 real npm packages, including
++  pi-powerline-footer, pi-lens and pi-hermes-memory, is at
++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/pi-eval-cache/`.
++  Build or locate it with `scripts/pi-eval/fixture.py` (`fx.build_fixture(cache)` returns
++  `.home`, `.pi_cli`, etc.).
++- The eval harness is `scripts/pi-eval/run.py`, with helpers `launch`, `make_env`,
++  `prepare_home`, `EvalSession` (a PTY session with stderr written to a file) and `leg_tmp`.
++  It uses a mock OpenAI-compatible provider from `scripts/e2e/octet_e2e/provider.py`.
++- Repro starting point:
++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/repro/repro.py`.
++  It is untested. Usage: `python3 repro.py <octet|pi> <workspace|home> <outdir>`. It
++  samples footer states over time, sends one prompt, and saves the screens. Copy it into
++  your own outdir and adapt it.
++- The octet release binary is `/home/user/octet/target/release/octet`. If you change Rust,
++  build your own (`cargo build --release -p octet-coding-agent`, about 15 min on 4 cores)
++  and use `--octet <your binary>` and `--extensions-dir <worktree>/extensions`.
++- Running the Pi CLI and the fixture packages is allowed here: this is a disposable sandbox.
++
++## Machine discipline (4 cores, shared with other workers)
++
++- Every command that launches octet or Pi on the fixture, runs a cargo build or test, or
++  runs the full adapter suite must be wrapped in
++  `flock -s /tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/measure.lock <cmd>`.
++- Only timing measurements use the exclusive form, `flock -x`. That keeps other workers'
++  runs from distorting timings.
++- Use isolated HOME and cache directories for adapter tests:
++  `HOME=$(mktemp -d) OCTET_PI_COMPAT_CACHE=$(mktemp -d)`.
++
++## Rules (non-negotiable)
++
++- **Lean core.** Rust stays Pi-agnostic. Pi-specific behaviour lives in
++  `extensions/octet-pi-compat`. Touch the host only for a generic primitive, and name it as such.
++- **No weakening.** Do not weaken trust, review, source integrity (including the per-import
++  recheck from `852ca760`), owner or generation fences, credential boundaries, process
++  cleanup, or test deadlines. Never skip hooks to look faster.
++- **Pi is the reference.** When behaviour is in doubt, read Pi 1.4.0's installed source
++  (read-only) under the fixture's `.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/`
++  and match it.
++- **No slop.**
++  - Smallest correct diff.
++  - No dead code, speculative abstractions, debug leftovers or commented-out code.
++  - Comments only where they explain *why*.
++  - Match the surrounding style.
++  - Every behaviour change gets a regression test that fails before the change and passes after.
++- **Adapter tests.** Run the focused tests you touch, then the full adapter suite. The known
++  pre-existing failures differ by environment (60 to 118); compare failing-name lists before
++  and after your change, and they must be identical. A baseline list is at
++  `/tmp/claude-0/-home-user-octet/cd824a8e-e848-5e07-a6dc-ce8284284071/scratchpad/after.sorted`,
++  but regenerate it on `852ca760` in your own environment.
++- If the sandbox denies an action, stop that line of work and report it. Do not work around it.
++
++## Report back
++
++- Branch, commits, and root causes with file:line references.
++- The fix and why the guarantees still hold.
++- Before/after evidence from the real fixture: screens, timings, and the failing-name comparison.
++- Remaining risks, and anything you could not verify.
+-- 
+2.43.0
+

@@ -1,0 +1,216 @@
+From 2267028c9737b120dfd4b71536e42df99a0a7186 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:45:16 +0000
+Subject: [PATCH 1/2] eval: warm full-UI and exit timing harness (Pi vs octet,
+ primary fixture)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ scripts/pi-eval/warm_exit.py | 194 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 194 insertions(+)
+ create mode 100644 scripts/pi-eval/warm_exit.py
+
+diff --git a/scripts/pi-eval/warm_exit.py b/scripts/pi-eval/warm_exit.py
+new file mode 100644
+index 00000000..2c17ff98
+--- /dev/null
++++ b/scripts/pi-eval/warm_exit.py
+@@ -0,0 +1,194 @@
++#!/usr/bin/env python3
++"""Warm full-UI and exit timings, Pi 1.4.0 vs octet, on one fixture home per target.
++
++    flock -x measure.lock python3 scripts/pi-eval/warm_exit.py --fixture <cache>/<hash> --reps 5 --out <dir>
++
++Each target gets one copy of the fixture home. A priming launch warms every cache the
++product keeps; the measured launches then reuse that home, as a real second launch does.
++Per rep and target: a warm launch exited at READY (`exit_idle_s`), and one that answers a
++prompt first (`exit_after_prompt_s`). Targets alternate who goes first. Every exit is
++checked for a restored terminal and for surviving processes (matched by an env marker).
++Also samples the whole screen every 20 ms for `--window` seconds after launch and counts
++distinct frames, so a change that adds repaint churn shows up.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import shutil
++import statistics
++import subprocess
++import sys
++import time
++import uuid
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++REPO = HERE.parent.parent
++sys.path.insert(0, str(REPO / "scripts" / "e2e"))
++sys.path.insert(0, str(HERE))
++
++import core  # noqa: E402
++import fixture as fx  # noqa: E402
++import run  # noqa: E402
++from octet_e2e.provider import MockProvider  # noqa: E402
++from octet_e2e.session import KEYS  # noqa: E402
++
++REPLY = "WARM-EXIT-REPLY"
++
++
++def link_home(fixture, env):
++    """Fresh home whose read-only install/ and npm/ trees are hardlinks of the fixture's (disk budget)."""
++    shutil.rmtree(env.root, ignore_errors=True)
++    agent = env.home / ".pi" / "agent"
++    agent.mkdir(parents=True)
++    for entry in fixture.agent.iterdir():
++        if entry.name in ("install", "npm"):
++            subprocess.run(["cp", "-al", str(entry), str(agent / entry.name)], check=True)
++        else:
++            fx.copy_tree(entry, agent / entry.name)
++
++
++def survivors(marker: str) -> list[str]:
++    found = []
++    for entry in Path("/proc").iterdir():
++        if not entry.name.isdigit() or int(entry.name) == os.getpid():
++            continue
++        try:
++            if marker.encode() in (entry / "environ").read_bytes():
++                found.append(f"{entry.name} {(entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')[:120]}")
++        except OSError:
++            continue
++    return found
++
++
++def launch(target, env, fixture, octet_bin, extensions_dir, work, *, prompt, window, ceiling=120.0):
++    marker = f"WARMEXIT-{uuid.uuid4().hex}"
++    tmp = run.leg_tmp(env)
++    tmp.mkdir(parents=True, exist_ok=True)
++    env.workspace.mkdir(parents=True, exist_ok=True)
++    env.sessions.mkdir(parents=True, exist_ok=True)
++    if target == "octet":
++        args = run.octet_args(env, name=None, agent=False, extension_dirs=[extensions_dir], enable_extensions=["octet-pi-compat"])
++        child = env.child_env(REPO, extra={"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp), "EVAL_MARK": marker})
++        binary = octet_bin
++    else:
++        binary = Path("node")
++        args = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{fx.MODEL}"]
++        child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
++        child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
++                     PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp), EVAL_MARK=marker)
++    work.mkdir(parents=True, exist_ok=True)
++    session = run.EvalSession(binary, args=args, env=child, cwd=env.workspace, columns=120, rows=40,
++                              log_path=work / "transcript.ansi", stderr_path=work / "stderr.log")
++    started = session.started_at
++    row = {"typeable_s": None, "full_ui_s": None, "frames": 0, "failure": None}
++    last = None
++    try:
++        while True:
++            now = time.monotonic() - started
++            text = session.screen_text()
++            if text != last:
++                row["frames"] += 1 if now <= window else 0
++                last = text
++            if row["typeable_s"] is None and core.MODEL_LABEL in text:
++                row["typeable_s"] = now
++            if row["full_ui_s"] is None and core.READY_MARKER in text:
++                row["full_ui_s"] = now
++            if row["full_ui_s"] is not None and now > window:
++                break
++            if session.process.poll() is not None:
++                row["failure"] = f"exited {session.process.returncode} before ready"
++                break
++            if now > ceiling:
++                row["failure"] = "ceiling"
++                break
++            time.sleep(0.02)
++        if row["failure"] is None and prompt:
++            session.submit("hello")
++            before = time.monotonic()
++            session.wait_for_text(REPLY, timeout=60)
++            session.wait_idle(timeout=60)
++            row["prompt_s"] = time.monotonic() - before
++            time.sleep(0.3)
++        t0 = time.monotonic()
++        if row["failure"] is None:
++            session.write(KEYS["ctrl_d"])
++            while session.process.poll() is None and time.monotonic() - t0 < 20:
++                time.sleep(0.002)
++            row["exit_s"] = time.monotonic() - t0
++            row["exit_code"] = session.process.poll()
++        if session.process.poll() is None:
++            session.kill()
++    except BaseException:
++        session.kill()
++        raise
++    session.close(ctrl_d=False, timeout=2)
++    row["restored"] = core.terminal_restore(session.transcript())["restored"]
++    time.sleep(0.5)
++    row["survivors"] = survivors(marker)
++    row["stderr_tail"] = (work / "stderr.log").read_text(errors="replace")[-600:] if row["failure"] else ""
++    return row
++
++
++def median(values):
++    values = [v for v in values if v is not None]
++    return statistics.median(values) if values else None
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--fixture", type=Path, required=True)
++    parser.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
++    parser.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
++    parser.add_argument("--reps", type=int, default=5)
++    parser.add_argument("--targets", default="pi,octet")
++    parser.add_argument("--window", type=float, default=20.0, help="seconds each launch is sampled before exit")
++    parser.add_argument("--out", type=Path, required=True)
++    args = parser.parse_args()
++    args.extensions_dir = args.extensions_dir.resolve()
++    args.out.mkdir(parents=True, exist_ok=True)
++    fixture = fx.Fixture(root=args.fixture, lock={"pi": {"version": "1.4.0"}})
++    targets = args.targets.split(",")
++    homes = args.out / "homes"
++    shutil.rmtree(homes, ignore_errors=True)
++    providers, envs = {}, {}
++    run.reset_adapter_cache(args.extensions_dir)
++    for target in targets:
++        provider = MockProvider(model_id=fx.MODEL)
++        provider.default_reply(REPLY)
++        providers[target] = provider
++        env = run.make_env(homes, target, 0, provider.port)
++        link_home(fixture, env)
++        fx.write_provider_config(env.home, provider.port)
++        envs[target] = env
++    results = args.out / "results.jsonl"
++    try:
++        for target in targets:
++            print(f"priming {target}", flush=True)
++            prime = launch(target, envs[target], fixture, args.octet, args.extensions_dir, args.out / "work" / f"{target}-prime", prompt=False, window=0)
++            print(f"  prime full_ui={prime['full_ui_s']} failure={prime['failure']}", flush=True)
++        for rep in range(args.reps):
++            for target in (targets if rep % 2 == 0 else targets[::-1]):
++                for scenario, prompt in (("idle", False), ("prompt", True)):
++                    row = launch(target, envs[target], fixture, args.octet, args.extensions_dir, args.out / "work" / f"{target}-{scenario}-{rep}", prompt=prompt, window=args.window)
++                    row.update(target=target, scenario=scenario, rep=rep)
++                    core.append_jsonl(results, row)
++                    print(f"rep{rep} {target:5} {scenario:6} typeable={row['typeable_s']} full={row['full_ui_s']} exit={row.get('exit_s')} code={row.get('exit_code')} restored={row['restored']} survivors={len(row['survivors'])} frames={row['frames']} {row['failure'] or ''}", flush=True)
++    finally:
++        for provider in providers.values():
++            provider.close()
++        run.reset_adapter_cache(args.extensions_dir)
++        shutil.rmtree(homes, ignore_errors=True)
++    rows = core.load_jsonl(results)
++    print("\nmedians")
++    for target in targets:
++        for scenario in ("idle", "prompt"):
++            sel = [r for r in rows if r["target"] == target and r["scenario"] == scenario and not r["failure"]]
++            print(f"{target:5} {scenario:6} n={len(sel)} typeable={median(r['typeable_s'] for r in sel)} full_ui={median(r['full_ui_s'] for r in sel)} exit={median(r.get('exit_s') for r in sel)} frames={median(r['frames'] for r in sel)} bad={[r['rep'] for r in sel if r.get('exit_code') != 0 or not r['restored'] or r['survivors']]}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.43.0
+

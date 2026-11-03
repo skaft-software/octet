@@ -1,565 +1,1026 @@
+diff --git a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
+index 8b0fd80b..2b9beded 100644
+--- a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
++++ b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
+@@ -14,8 +14,6 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
+         model_explicit: model.is_some(),
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
 diff --git a/crates/octet-coding-agent/src/app/resource_paths.rs b/crates/octet-coding-agent/src/app/resource_paths.rs
-index d939b65d..356a3a77 100644
+index 356a3a77..7fb790df 100644
 --- a/crates/octet-coding-agent/src/app/resource_paths.rs
 +++ b/crates/octet-coding-agent/src/app/resource_paths.rs
-@@ -265,6 +265,12 @@ impl App {
-         Ok(notice)
+@@ -93,8 +93,7 @@ impl ResourcePathConsumer {
+                 .map(|(model, _)| model.clone())
+                 .or_else(|| self.model.clone());
+         }
+-        if config.accepts_extension_reasoning()
+-            && (self.model_default_active || self.thinking_default_active)
++        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
+         {
+             if let Some((_, reasoning)) = &self.selection {
+                 config.reasoning = Some(reasoning.clone());
+@@ -175,15 +174,14 @@ impl App {
+         &mut self,
+         requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
+         requested_thinking: Option<&str>,
+-    ) -> anyhow::Result<Option<String>> {
++    ) -> anyhow::Result<()> {
+         let baseline = self
+             .resource_paths
+             .selection
+             .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
+             .clone();
+-        let model_preference = requested_model.filter(|_| self.config.accepts_extension_model());
+-        let thinking_preference =
+-            requested_thinking.filter(|_| self.config.accepts_extension_reasoning());
++        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
++        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
+         let withdraw_model = !self.config.model_explicit
+             && model_preference.is_none()
+             && self.resource_paths.model_default_active;
+@@ -204,13 +202,12 @@ impl App {
+         let model = self.catalog.resolve(&id)?;
+         let changed_model = id != self.model.spec.id;
+         let subagents = self.executable_extensions.has_agent_session_service();
+-        // The user's own effort follows a model they did not pick; Pi's only fills a gap.
+-        let reasoning = if !self.config.accepts_extension_reasoning() && changed_model {
++        let reasoning = if self.config.reasoning_explicit && changed_model {
+             let requested = self
+                 .config
+                 .reasoning
+                 .as_ref()
+-                .context("configured reasoning is unset")?;
++                .context("explicit invocation reasoning is unset")?;
+             if matches!(requested, ReasoningConfig::Budget(_)) {
+                 // Custom explicit budgets have no portable level; core admission
+                 // validates the exact budget rather than silently normalizing it.
+@@ -226,8 +223,7 @@ impl App {
+             // The protocol has already required exact Pi spellings. Native
+             // admission rejects unsupported levels instead of lowering max.
+             requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
+-        } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
+-        {
++        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
+             if id == baseline.0 {
+                 baseline.1.clone()
+             } else {
+@@ -239,36 +235,18 @@ impl App {
+             // Theme/path-only reloads must not reset a live reasoning choice.
+             self.reasoning.clone()
+         };
+-        let mut notice = None;
+         if changed_model || reasoning != self.reasoning {
+             self.agent.select_model_at_idle(
+                 model.clone(),
+                 reasoning.clone(),
+                 reasoning_label(&reasoning),
+             )?;
+-            if model_preference.is_some() || thinking_preference.is_some() {
+-                notice = Some(format!(
+-                    "Using Pi's default {} · {} for this session",
+-                    model
+-                        .spec
+-                        .display_name
+-                        .as_deref()
+-                        .unwrap_or(&model.spec.api_name),
+-                    reasoning_label(&reasoning),
+-                ));
+-            }
+             self.model = model;
+             self.reasoning = reasoning;
+         }
+         self.resource_paths.model_default_active = model_preference.is_some();
+         self.resource_paths.thinking_default_active = thinking_preference.is_some();
+-        Ok(notice)
+-    }
+-
+-    /// An in-session effort choice outranks saved and Pi defaults on every later reload.
+-    pub(crate) fn keep_thinking_choice(&mut self) {
+-        self.config.reasoning = Some(self.reasoning.clone());
+-        self.config.reasoning_explicit = true;
++        Ok(())
      }
  
-+    /// An in-session effort choice outranks saved and Pi defaults on every later reload.
-+    pub(crate) fn keep_thinking_choice(&mut self) {
-+        self.config.reasoning = Some(self.reasoning.clone());
-+        self.config.reasoning_explicit = true;
-+    }
-+
      pub(crate) fn mark_resource_paths_reload(&mut self) {
-         self.resource_paths.pending = Some(Reason::Reload);
-         self.resource_paths.guard.clear();
+@@ -333,18 +311,17 @@ impl App {
+         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
+         let system = format!("{prefix}{suffix}");
+         let mut diagnostics = loaded.diagnostics;
+-        match self.apply_resource_defaults(
++        if let Err(error) = self.apply_resource_defaults(
+             loaded.default_model.as_ref(),
+             loaded.default_thinking_level.as_deref(),
+         ) {
+-            Ok(notice) => diagnostics.extend(notice),
+-            Err(error) => diagnostics.push(
++            diagnostics.push(
+                 format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
+                     .chars()
+                     .map(|c| if c.is_control() { ' ' } else { c })
+                     .take(4096)
+                     .collect(),
+-            ),
++            );
+         }
+         // Default resolution may complete the native provider catalog. Publish
+         // those genuine model facts as well as the invocation scope, without
+diff --git a/crates/octet-coding-agent/src/cli.rs b/crates/octet-coding-agent/src/cli.rs
+index 893480b1..5a263626 100644
+--- a/crates/octet-coding-agent/src/cli.rs
++++ b/crates/octet-coding-agent/src/cli.rs
+@@ -1737,8 +1737,6 @@ fn build_config_with_global_path_and_diagnostics(
+         )?;
+     }
+ 
+-    let model_saved = values.model.is_some();
+-    let reasoning_saved = values.reasoning.is_some();
+     let model = resolve_model_id(
+         cli.model.clone().map(octet_ai::ModelId),
+         values.model.clone().map(octet_ai::ModelId),
+@@ -2073,8 +2071,6 @@ fn build_config_with_global_path_and_diagnostics(
+         model_explicit,
+         reasoning,
+         reasoning_explicit,
+-        model_saved,
+-        reasoning_saved,
+         reasoning_mode,
+         reasoning_mode_explicit,
+         cache_retention,
+diff --git a/crates/octet-coding-agent/src/cli/tests.rs b/crates/octet-coding-agent/src/cli/tests.rs
+index 7eb9537a..acd7d8e3 100644
+--- a/crates/octet-coding-agent/src/cli/tests.rs
++++ b/crates/octet-coding-agent/src/cli/tests.rs
+@@ -2642,24 +2642,3 @@ fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
+     assert_eq!(value["reasoning_mode"].as_str(), Some("standard"));
+     assert_eq!(value["reload"].as_bool(), Some(true));
+ }
+-
+-#[test]
+-fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
+-    let directory = cwd();
+-    let config = config_with_empty_global(base(), directory.path()).unwrap();
+-    assert!(config.accepts_extension_model() && config.accepts_extension_reasoning());
+-
+-    let global = directory.path().join("global.toml");
+-    std::fs::write(&global, "model = \"gpt-4o-mini\"\nreasoning = \"low\"\n").unwrap();
+-    let config = build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
+-    assert!(config.model_saved && config.reasoning_saved);
+-    assert!(!config.model_explicit && !config.reasoning_explicit);
+-    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+-
+-    let mut cli = base();
+-    cli.model = Some("gpt-4o-mini".into());
+-    cli.reasoning = Some("high".into());
+-    let config = config_with_empty_global(cli, directory.path()).unwrap();
+-    assert!(!config.model_saved && !config.reasoning_saved);
+-    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+-}
+diff --git a/crates/octet-coding-agent/src/commands/tests.rs b/crates/octet-coding-agent/src/commands/tests.rs
+index bc70bfad..261f9223 100644
+--- a/crates/octet-coding-agent/src/commands/tests.rs
++++ b/crates/octet-coding-agent/src/commands/tests.rs
+@@ -794,8 +794,6 @@ fn app_for_status() -> (tempfile::TempDir, App) {
+         model_explicit: false,
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
+diff --git a/crates/octet-coding-agent/src/compaction.rs b/crates/octet-coding-agent/src/compaction.rs
+index e362efc2..59b4bd8b 100644
+--- a/crates/octet-coding-agent/src/compaction.rs
++++ b/crates/octet-coding-agent/src/compaction.rs
+@@ -518,8 +518,6 @@ pub(crate) mod tests {
+             model_explicit: false,
+             reasoning: None,
+             reasoning_explicit: false,
+-            model_saved: false,
+-            reasoning_saved: false,
+             reasoning_mode: octet_ai::ReasoningMode::Standard,
+             reasoning_mode_explicit: false,
+             cache_retention: octet_ai::CacheRetention::Short,
+diff --git a/crates/octet-coding-agent/src/config.rs b/crates/octet-coding-agent/src/config.rs
+index 86181079..09dd9edc 100644
+--- a/crates/octet-coding-agent/src/config.rs
++++ b/crates/octet-coding-agent/src/config.rs
+@@ -571,11 +571,6 @@ pub struct Config {
+     pub reasoning: Option<ReasoningConfig>,
+     /// True when `reasoning` came from an explicit command-line override.
+     pub reasoning_explicit: bool,
+-    /// True when `model` came from the user's own saved, project or environment
+-    /// configuration. Extension-contributed defaults never replace it.
+-    pub model_saved: bool,
+-    /// As `model_saved`, for `reasoning`.
+-    pub reasoning_saved: bool,
+     /// Standard or Pro execution, selected independently from reasoning effort.
+     pub reasoning_mode: ReasoningMode,
+     /// True when the reasoning mode came from an explicit command-line override.
+@@ -667,17 +662,6 @@ pub struct Config {
+ }
+ 
+ impl Config {
+-    /// Whether an extension-contributed default model may apply: only when the
+-    /// user has neither chosen a model nor saved their own default.
+-    pub(crate) fn accepts_extension_model(&self) -> bool {
+-        !self.model_explicit && !self.model_saved
+-    }
+-
+-    /// As `accepts_extension_model`, for the reasoning level.
+-    pub(crate) fn accepts_extension_reasoning(&self) -> bool {
+-        !self.reasoning_explicit && !self.reasoning_saved
+-    }
+-
+     /// Whether a tool will survive both the model-visible allowlist and the
+     /// matching execution capability gate for this process.
+     pub fn tool_available(&self, name: &str) -> bool {
 diff --git a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
-index be989e3e..b6c9cb38 100644
+index 1f285a59..d16a1bbb 100644
 --- a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
 +++ b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
-@@ -484,3 +484,36 @@ async fn in_session_choices_outrank_saved_and_pi_defaults() {
-     );
+@@ -103,13 +103,6 @@ async fn publish(app: &mut App, root: &Path, paths: Value) -> Vec<String> {
+     app.apply_extension_resource_paths(loaded, lease).unwrap().1
+ }
+ 
+-fn assert_pi_default_notice(diagnostics: &[String]) {
+-    assert!(
+-        matches!(diagnostics, [notice] if notice.starts_with("Using Pi's default ")),
+-        "{diagnostics:?}"
+-    );
+-}
+-
+ fn assert_selection(app: &App, model: &Model, reasoning: ReasoningConfig) {
+     assert_eq!(app.model.spec.id, model.spec.id);
+     assert_eq!(app.agent.model().spec.id, model.spec.id);
+@@ -132,7 +125,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
+         }),
+     )
+     .await;
+-    assert_pi_default_notice(&diagnostics);
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+     assert_selection(
+         &app,
+         &preferred,
+@@ -151,7 +144,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
+         }),
+     )
+     .await;
+-    assert_pi_default_notice(&diagnostics);
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+     assert_selection(
+         &app,
+         &preferred,
+@@ -182,7 +175,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
+         }),
+     )
+     .await;
+-    assert_pi_default_notice(&diagnostics);
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+     assert_selection(
+         &app,
+         &baseline,
+@@ -212,7 +205,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
+         }),
+     )
+     .await;
+-    assert_pi_default_notice(&diagnostics);
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+     assert_selection(
+         &app,
+         &preferred,
+@@ -401,126 +394,8 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
+         }),
+     )
+     .await;
+-    assert_pi_default_notice(&diagnostics);
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+     assert_selection(&app, &codex, ReasoningConfig::Effort(ReasoningEffort::Max));
+     assert_eq!(app.model.endpoint.id.0, "openai-codex");
      process.shutdown().await;
  }
-+
-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn kept_thinking_choice_survives_pi_defaults_and_reloads() {
-+    let temp = tempfile::tempdir().unwrap();
-+    let root = temp.path().canonicalize().unwrap();
-+    let (mut app, process, baseline, _) = fixture(&root).await;
-+    choose(
-+        &mut app,
-+        baseline.clone(),
-+        ReasoningConfig::Effort(ReasoningEffort::High),
-+    );
-+    app.keep_thinking_choice();
-+    for _ in 0..2 {
-+        publish(&mut app, &root, json!({"default_thinking_level": "max"})).await;
-+        assert_selection(
-+            &app,
-+            &baseline,
-+            ReasoningConfig::Effort(ReasoningEffort::High),
-+        );
-+    }
-+    process.shutdown().await;
-+}
-+
-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn applied_pi_default_is_announced_once() {
-+    let temp = tempfile::tempdir().unwrap();
-+    let root = temp.path().canonicalize().unwrap();
-+    let (mut app, process, _, _) = fixture(&root).await;
-+    let first = publish(&mut app, &root, pi_defaults()).await;
-+    assert_eq!(first, ["Using Pi's default preferred · max for this session"]);
-+    assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
-+    process.shutdown().await;
-+}
+-
+-fn pi_defaults() -> Value {
+-    json!({
+-        "default_model": {"provider": "synthetic", "model": "preferred"},
+-        "default_thinking_level": "max"
+-    })
+-}
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn saved_octet_defaults_are_never_overridden_by_pi_defaults() {
+-    let temp = tempfile::tempdir().unwrap();
+-    let root = temp.path().canonicalize().unwrap();
+-    let (mut app, process, baseline, _) = fixture(&root).await;
+-    app.config.model_saved = true;
+-    app.config.reasoning_saved = true;
+-    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+-    for _ in 0..2 {
+-        let diagnostics = publish(&mut app, &root, pi_defaults()).await;
+-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+-        assert_selection(&app, &baseline, low.clone());
+-    }
+-    publish(&mut app, &root, json!({})).await;
+-    assert_selection(&app, &baseline, low);
+-    process.shutdown().await;
+-}
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn pi_fills_only_the_field_octet_has_no_saved_default_for() {
+-    let temp = tempfile::tempdir().unwrap();
+-    let root = temp.path().canonicalize().unwrap();
+-    let (mut app, process, baseline, preferred) = fixture(&root).await;
+-    app.config.model_saved = true;
+-    publish(&mut app, &root, pi_defaults()).await;
+-    assert_selection(
+-        &app,
+-        &baseline,
+-        ReasoningConfig::Effort(ReasoningEffort::Max),
+-    );
+-    publish(&mut app, &root, json!({})).await;
+-    assert_selection(
+-        &app,
+-        &baseline,
+-        ReasoningConfig::Effort(ReasoningEffort::Low),
+-    );
+-
+-    app.config.model_saved = false;
+-    app.config.reasoning_saved = true;
+-    publish(&mut app, &root, pi_defaults()).await;
+-    assert_selection(
+-        &app,
+-        &preferred,
+-        ReasoningConfig::Effort(ReasoningEffort::Low),
+-    );
+-    publish(&mut app, &root, json!({})).await;
+-    assert_selection(
+-        &app,
+-        &baseline,
+-        ReasoningConfig::Effort(ReasoningEffort::Low),
+-    );
+-    process.shutdown().await;
+-}
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn in_session_choices_outrank_saved_and_pi_defaults() {
+-    let temp = tempfile::tempdir().unwrap();
+-    let root = temp.path().canonicalize().unwrap();
+-    let (mut app, process, baseline, _) = fixture(&root).await;
+-    app.config.model_saved = true;
+-    app.config.reasoning_saved = true;
+-    app.config.model_explicit = true;
+-    app.config.reasoning_explicit = true;
+-    app.config.reasoning = Some(ReasoningConfig::Effort(ReasoningEffort::High));
+-    choose(
+-        &mut app,
+-        baseline.clone(),
+-        ReasoningConfig::Effort(ReasoningEffort::High),
+-    );
+-    publish(&mut app, &root, pi_defaults()).await;
+-    assert_selection(
+-        &app,
+-        &baseline,
+-        ReasoningConfig::Effort(ReasoningEffort::High),
+-    );
+-    process.shutdown().await;
+-}
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn kept_thinking_choice_survives_pi_defaults_and_reloads() {
+-    let temp = tempfile::tempdir().unwrap();
+-    let root = temp.path().canonicalize().unwrap();
+-    let (mut app, process, baseline, _) = fixture(&root).await;
+-    choose(
+-        &mut app,
+-        baseline.clone(),
+-        ReasoningConfig::Effort(ReasoningEffort::High),
+-    );
+-    app.keep_thinking_choice();
+-    for _ in 0..2 {
+-        publish(&mut app, &root, json!({"default_thinking_level": "max"})).await;
+-        assert_selection(
+-            &app,
+-            &baseline,
+-            ReasoningConfig::Effort(ReasoningEffort::High),
+-        );
+-    }
+-    process.shutdown().await;
+-}
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn applied_pi_default_is_announced_once() {
+-    let temp = tempfile::tempdir().unwrap();
+-    let root = temp.path().canonicalize().unwrap();
+-    let (mut app, process, _, _) = fixture(&root).await;
+-    let first = publish(&mut app, &root, pi_defaults()).await;
+-    assert_eq!(first, ["Using Pi's default preferred · max for this session"]);
+-    assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
+-    process.shutdown().await;
+-}
+diff --git a/crates/octet-coding-agent/src/extensions/tests/support.rs b/crates/octet-coding-agent/src/extensions/tests/support.rs
+index a10dc735..52d31fc6 100644
+--- a/crates/octet-coding-agent/src/extensions/tests/support.rs
++++ b/crates/octet-coding-agent/src/extensions/tests/support.rs
+@@ -22,8 +22,6 @@ pub(in crate::extensions) fn executable_extension_config(
+         model_explicit: false,
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
+diff --git a/crates/octet-coding-agent/src/host/policy.rs b/crates/octet-coding-agent/src/host/policy.rs
+index 48aa97ae..3ceef34b 100644
+--- a/crates/octet-coding-agent/src/host/policy.rs
++++ b/crates/octet-coding-agent/src/host/policy.rs
+@@ -122,8 +122,6 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
+             .map(crate::config::parse_reasoning)
+             .transpose()?,
+         reasoning_explicit: request.reasoning.is_some(),
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: true,
+         cache_retention: CacheRetention::Short,
 diff --git a/crates/octet-coding-agent/src/modes/interactive.rs b/crates/octet-coding-agent/src/modes/interactive.rs
-index 6cbdd3b5..f506d1b5 100644
+index f506d1b5..497104ea 100644
 --- a/crates/octet-coding-agent/src/modes/interactive.rs
 +++ b/crates/octet-coding-agent/src/modes/interactive.rs
-@@ -7638,8 +7638,7 @@ where
+@@ -7611,10 +7611,6 @@ where
+     // later rebuilds and stay authoritative over session-only resource
+     // contributions (for example a mirrored Pi default model).
+     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
+-    let explicit_reasoning_change = matches!(
+-        &reconfig,
+-        Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. }
+-    );
+     let in_place = if let Reconfig::Model(id) = &reconfig {
+         match crate::app::try_apply_model_reconfig(&mut app, id) {
+             Ok(selected) => selected,
+@@ -7637,9 +7633,6 @@ where
+     if explicit_model_change {
          app.config.model_explicit = true;
      }
-     if explicit_reasoning_change {
--        app.config.reasoning = Some(app.reasoning.clone());
--        app.config.reasoning_explicit = true;
-+        app.keep_thinking_choice();
-     }
+-    if explicit_reasoning_change {
+-        app.keep_thinking_choice();
+-    }
      if !in_place {
          refresh_resource_paths(&mut app, shell, input).await?;
+         shell.hydrate(app.agent.session())?;
+diff --git a/crates/octet-coding-agent/src/modes/interactive/modeless.rs b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
+index d1380053..1f08fff6 100644
+--- a/crates/octet-coding-agent/src/modes/interactive/modeless.rs
++++ b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
+@@ -261,11 +261,8 @@ impl ModelessExtensions {
+             loaded.is_current(&self.extensions) && lease.matches(&self.extensions),
+             "stale model-less resource candidate"
+         );
+-        if (loaded.default_model.is_some() && self.config.accepts_extension_model())
+-            || (loaded.default_thinking_level.is_some()
+-                && self.config.accepts_extension_reasoning())
+-        {
+-            shell.notice("Pi's default model and thinking level apply once a model is configured and octet restarts");
++        if loaded.default_model.is_some() || loaded.default_thinking_level.is_some() {
++            shell.notice("Pi model/thinking defaults require a configured model and restart; prompts remain disabled");
+         }
+         for diagnostic in loaded.diagnostics {
+             shell.notice(diagnostic);
+diff --git a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
+index 1ea36323..a8777005 100644
+--- a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
++++ b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
+@@ -20,8 +20,6 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
+         model_explicit: false,
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
 diff --git a/crates/octet-coding-agent/src/modes/rpc.rs b/crates/octet-coding-agent/src/modes/rpc.rs
-index fc70d4d6..85414e9d 100644
+index 85414e9d..fc70d4d6 100644
 --- a/crates/octet-coding-agent/src/modes/rpc.rs
 +++ b/crates/octet-coding-agent/src/modes/rpc.rs
-@@ -1382,6 +1382,7 @@ async fn handle_idle_command(
+@@ -1382,7 +1382,6 @@ async fn handle_idle_command(
                  Err(error) => respond_error!(error),
              };
              app = apply_reconfig(app, Reconfig::Thinking(reasoning))?;
-+            app.keep_thinking_choice();
+-            app.keep_thinking_choice();
              output.success(id.as_deref(), &kind, None)?;
          }
          "cycle_thinking_level" => {
-@@ -1401,6 +1402,7 @@ async fn handle_idle_command(
+@@ -1402,7 +1401,6 @@ async fn handle_idle_command(
                      app.subagents_available(),
                  )?;
                  app = apply_reconfig(app, Reconfig::Thinking(reasoning))?;
-+                app.keep_thinking_choice();
+-                app.keep_thinking_choice();
                  output.success(id.as_deref(), &kind, Some(json!({"level": level.label()})))?;
              }
          }
+diff --git a/crates/octet-coding-agent/src/resources/tests.rs b/crates/octet-coding-agent/src/resources/tests.rs
+index c744d7c0..8e6aade7 100644
+--- a/crates/octet-coding-agent/src/resources/tests.rs
++++ b/crates/octet-coding-agent/src/resources/tests.rs
+@@ -15,8 +15,6 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
+         model_explicit: false,
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
+diff --git a/crates/octet-coding-agent/src/tui/theme/tests.rs b/crates/octet-coding-agent/src/tui/theme/tests.rs
+index ee7361b7..d4068371 100644
+--- a/crates/octet-coding-agent/src/tui/theme/tests.rs
++++ b/crates/octet-coding-agent/src/tui/theme/tests.rs
+@@ -15,8 +15,6 @@ fn config(workspace: PathBuf) -> Config {
+         model_explicit: false,
+         reasoning: None,
+         reasoning_explicit: false,
+-        model_saved: false,
+-        reasoning_saved: false,
+         reasoning_mode: octet_ai::ReasoningMode::Standard,
+         reasoning_mode_explicit: false,
+         cache_retention: octet_ai::CacheRetention::Short,
 diff --git a/docs/maintainers/pi-usability-wip/M-commits/0001-WIP-saved-octet-defaults-outrank-Pi-defaults-unverif.patch b/docs/maintainers/pi-usability-wip/M-commits/0001-WIP-saved-octet-defaults-outrank-Pi-defaults-unverif.patch
-new file mode 100644
-index 00000000..023cfce7
---- /dev/null
-+++ b/docs/maintainers/pi-usability-wip/M-commits/0001-WIP-saved-octet-defaults-outrank-Pi-defaults-unverif.patch
-@@ -0,0 +1,467 @@
-+From 1e3d227329f8cae4fcf8d56e36c53bd12b759423 Mon Sep 17 00:00:00 2001
-+From: Claude <noreply@anthropic.com>
-+Date: Tue, 3 Nov 2026 03:39:04 +0000
-+Subject: [PATCH] WIP: saved octet defaults outrank Pi defaults (unverified:
-+ build blocked by disk space)
-+
-+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-+---
-+ .../src/app/bootstrap/tests/support.rs        |  2 +
-+ .../src/app/resource_paths.rs                 | 39 ++++++---
-+ crates/octet-coding-agent/src/cli.rs          |  4 +
-+ crates/octet-coding-agent/src/cli/tests.rs    | 21 +++++
-+ .../octet-coding-agent/src/commands/tests.rs  |  2 +
-+ crates/octet-coding-agent/src/compaction.rs   |  2 +
-+ crates/octet-coding-agent/src/config.rs       | 16 ++++
-+ .../resource_paths/native_defaults_tests.rs   | 85 +++++++++++++++++++
-+ .../src/extensions/tests/support.rs           |  2 +
-+ crates/octet-coding-agent/src/host/policy.rs  |  2 +
-+ .../src/modes/interactive.rs                  |  8 ++
-+ .../src/modes/interactive/modeless.rs         |  7 +-
-+ .../src/modes/interactive/tests/support.rs    |  2 +
-+ .../octet-coding-agent/src/resources/tests.rs |  2 +
-+ .../octet-coding-agent/src/tui/theme/tests.rs |  2 +
-+ 15 files changed, 183 insertions(+), 13 deletions(-)
-+
-+diff --git a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
-+index 2b9beded..8b0fd80b 100644
-+--- a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
-++++ b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
-+@@ -14,6 +14,8 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
-+         model_explicit: model.is_some(),
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/app/resource_paths.rs b/crates/octet-coding-agent/src/app/resource_paths.rs
-+index 7fb790df..d939b65d 100644
-+--- a/crates/octet-coding-agent/src/app/resource_paths.rs
-++++ b/crates/octet-coding-agent/src/app/resource_paths.rs
-+@@ -93,7 +93,8 @@ impl ResourcePathConsumer {
-+                 .map(|(model, _)| model.clone())
-+                 .or_else(|| self.model.clone());
-+         }
-+-        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
-++        if config.accepts_extension_reasoning()
-++            && (self.model_default_active || self.thinking_default_active)
-+         {
-+             if let Some((_, reasoning)) = &self.selection {
-+                 config.reasoning = Some(reasoning.clone());
-+@@ -174,14 +175,15 @@ impl App {
-+         &mut self,
-+         requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
-+         requested_thinking: Option<&str>,
-+-    ) -> anyhow::Result<()> {
-++    ) -> anyhow::Result<Option<String>> {
-+         let baseline = self
-+             .resource_paths
-+             .selection
-+             .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
-+             .clone();
-+-        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
-+-        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
-++        let model_preference = requested_model.filter(|_| self.config.accepts_extension_model());
-++        let thinking_preference =
-++            requested_thinking.filter(|_| self.config.accepts_extension_reasoning());
-+         let withdraw_model = !self.config.model_explicit
-+             && model_preference.is_none()
-+             && self.resource_paths.model_default_active;
-+@@ -202,12 +204,13 @@ impl App {
-+         let model = self.catalog.resolve(&id)?;
-+         let changed_model = id != self.model.spec.id;
-+         let subagents = self.executable_extensions.has_agent_session_service();
-+-        let reasoning = if self.config.reasoning_explicit && changed_model {
-++        // The user's own effort follows a model they did not pick; Pi's only fills a gap.
-++        let reasoning = if !self.config.accepts_extension_reasoning() && changed_model {
-+             let requested = self
-+                 .config
-+                 .reasoning
-+                 .as_ref()
-+-                .context("explicit invocation reasoning is unset")?;
-++                .context("configured reasoning is unset")?;
-+             if matches!(requested, ReasoningConfig::Budget(_)) {
-+                 // Custom explicit budgets have no portable level; core admission
-+                 // validates the exact budget rather than silently normalizing it.
-+@@ -223,7 +226,8 @@ impl App {
-+             // The protocol has already required exact Pi spellings. Native
-+             // admission rejects unsupported levels instead of lowering max.
-+             requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
-+-        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
-++        } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
-++        {
-+             if id == baseline.0 {
-+                 baseline.1.clone()
-+             } else {
-+@@ -235,18 +239,30 @@ impl App {
-+             // Theme/path-only reloads must not reset a live reasoning choice.
-+             self.reasoning.clone()
-+         };
-++        let mut notice = None;
-+         if changed_model || reasoning != self.reasoning {
-+             self.agent.select_model_at_idle(
-+                 model.clone(),
-+                 reasoning.clone(),
-+                 reasoning_label(&reasoning),
-+             )?;
-++            if model_preference.is_some() || thinking_preference.is_some() {
-++                notice = Some(format!(
-++                    "Using Pi's default {} · {} for this session",
-++                    model
-++                        .spec
-++                        .display_name
-++                        .as_deref()
-++                        .unwrap_or(&model.spec.api_name),
-++                    reasoning_label(&reasoning),
-++                ));
-++            }
-+             self.model = model;
-+             self.reasoning = reasoning;
-+         }
-+         self.resource_paths.model_default_active = model_preference.is_some();
-+         self.resource_paths.thinking_default_active = thinking_preference.is_some();
-+-        Ok(())
-++        Ok(notice)
-+     }
-+ 
-+     pub(crate) fn mark_resource_paths_reload(&mut self) {
-+@@ -311,17 +327,18 @@ impl App {
-+         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
-+         let system = format!("{prefix}{suffix}");
-+         let mut diagnostics = loaded.diagnostics;
-+-        if let Err(error) = self.apply_resource_defaults(
-++        match self.apply_resource_defaults(
-+             loaded.default_model.as_ref(),
-+             loaded.default_thinking_level.as_deref(),
-+         ) {
-+-            diagnostics.push(
-++            Ok(notice) => diagnostics.extend(notice),
-++            Err(error) => diagnostics.push(
-+                 format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
-+                     .chars()
-+                     .map(|c| if c.is_control() { ' ' } else { c })
-+                     .take(4096)
-+                     .collect(),
-+-            );
-++            ),
-+         }
-+         // Default resolution may complete the native provider catalog. Publish
-+         // those genuine model facts as well as the invocation scope, without
-+diff --git a/crates/octet-coding-agent/src/cli.rs b/crates/octet-coding-agent/src/cli.rs
-+index 5a263626..893480b1 100644
-+--- a/crates/octet-coding-agent/src/cli.rs
-++++ b/crates/octet-coding-agent/src/cli.rs
-+@@ -1737,6 +1737,8 @@ fn build_config_with_global_path_and_diagnostics(
-+         )?;
-+     }
-+ 
-++    let model_saved = values.model.is_some();
-++    let reasoning_saved = values.reasoning.is_some();
-+     let model = resolve_model_id(
-+         cli.model.clone().map(octet_ai::ModelId),
-+         values.model.clone().map(octet_ai::ModelId),
-+@@ -2071,6 +2073,8 @@ fn build_config_with_global_path_and_diagnostics(
-+         model_explicit,
-+         reasoning,
-+         reasoning_explicit,
-++        model_saved,
-++        reasoning_saved,
-+         reasoning_mode,
-+         reasoning_mode_explicit,
-+         cache_retention,
-+diff --git a/crates/octet-coding-agent/src/cli/tests.rs b/crates/octet-coding-agent/src/cli/tests.rs
-+index acd7d8e3..7eb9537a 100644
-+--- a/crates/octet-coding-agent/src/cli/tests.rs
-++++ b/crates/octet-coding-agent/src/cli/tests.rs
-+@@ -2642,3 +2642,24 @@ fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
-+     assert_eq!(value["reasoning_mode"].as_str(), Some("standard"));
-+     assert_eq!(value["reload"].as_bool(), Some(true));
-+ }
-++
-++#[test]
-++fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
-++    let directory = cwd();
-++    let config = config_with_empty_global(base(), directory.path()).unwrap();
-++    assert!(config.accepts_extension_model() && config.accepts_extension_reasoning());
-++
-++    let global = directory.path().join("global.toml");
-++    std::fs::write(&global, "model = \"gpt-4o-mini\"\nreasoning = \"low\"\n").unwrap();
-++    let config = build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
-++    assert!(config.model_saved && config.reasoning_saved);
-++    assert!(!config.model_explicit && !config.reasoning_explicit);
-++    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
-++
-++    let mut cli = base();
-++    cli.model = Some("gpt-4o-mini".into());
-++    cli.reasoning = Some("high".into());
-++    let config = config_with_empty_global(cli, directory.path()).unwrap();
-++    assert!(!config.model_saved && !config.reasoning_saved);
-++    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
-++}
-+diff --git a/crates/octet-coding-agent/src/commands/tests.rs b/crates/octet-coding-agent/src/commands/tests.rs
-+index 261f9223..bc70bfad 100644
-+--- a/crates/octet-coding-agent/src/commands/tests.rs
-++++ b/crates/octet-coding-agent/src/commands/tests.rs
-+@@ -794,6 +794,8 @@ fn app_for_status() -> (tempfile::TempDir, App) {
-+         model_explicit: false,
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/compaction.rs b/crates/octet-coding-agent/src/compaction.rs
-+index 59b4bd8b..e362efc2 100644
-+--- a/crates/octet-coding-agent/src/compaction.rs
-++++ b/crates/octet-coding-agent/src/compaction.rs
-+@@ -518,6 +518,8 @@ pub(crate) mod tests {
-+             model_explicit: false,
-+             reasoning: None,
-+             reasoning_explicit: false,
-++            model_saved: false,
-++            reasoning_saved: false,
-+             reasoning_mode: octet_ai::ReasoningMode::Standard,
-+             reasoning_mode_explicit: false,
-+             cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/config.rs b/crates/octet-coding-agent/src/config.rs
-+index 09dd9edc..86181079 100644
-+--- a/crates/octet-coding-agent/src/config.rs
-++++ b/crates/octet-coding-agent/src/config.rs
-+@@ -571,6 +571,11 @@ pub struct Config {
-+     pub reasoning: Option<ReasoningConfig>,
-+     /// True when `reasoning` came from an explicit command-line override.
-+     pub reasoning_explicit: bool,
-++    /// True when `model` came from the user's own saved, project or environment
-++    /// configuration. Extension-contributed defaults never replace it.
-++    pub model_saved: bool,
-++    /// As `model_saved`, for `reasoning`.
-++    pub reasoning_saved: bool,
-+     /// Standard or Pro execution, selected independently from reasoning effort.
-+     pub reasoning_mode: ReasoningMode,
-+     /// True when the reasoning mode came from an explicit command-line override.
-+@@ -662,6 +667,17 @@ pub struct Config {
-+ }
-+ 
-+ impl Config {
-++    /// Whether an extension-contributed default model may apply: only when the
-++    /// user has neither chosen a model nor saved their own default.
-++    pub(crate) fn accepts_extension_model(&self) -> bool {
-++        !self.model_explicit && !self.model_saved
-++    }
-++
-++    /// As `accepts_extension_model`, for the reasoning level.
-++    pub(crate) fn accepts_extension_reasoning(&self) -> bool {
-++        !self.reasoning_explicit && !self.reasoning_saved
-++    }
-++
-+     /// Whether a tool will survive both the model-visible allowlist and the
-+     /// matching execution capability gate for this process.
-+     pub fn tool_available(&self, name: &str) -> bool {
-+diff --git a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
-+index d16a1bbb..be989e3e 100644
-+--- a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
-++++ b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
-+@@ -399,3 +399,88 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
-+     assert_eq!(app.model.endpoint.id.0, "openai-codex");
-+     process.shutdown().await;
-+ }
-++
-++fn pi_defaults() -> Value {
-++    json!({
-++        "default_model": {"provider": "synthetic", "model": "preferred"},
-++        "default_thinking_level": "max"
-++    })
-++}
-++
-++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-++async fn saved_octet_defaults_are_never_overridden_by_pi_defaults() {
-++    let temp = tempfile::tempdir().unwrap();
-++    let root = temp.path().canonicalize().unwrap();
-++    let (mut app, process, baseline, _) = fixture(&root).await;
-++    app.config.model_saved = true;
-++    app.config.reasoning_saved = true;
-++    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
-++    for _ in 0..2 {
-++        let diagnostics = publish(&mut app, &root, pi_defaults()).await;
-++        assert!(diagnostics.is_empty(), "{diagnostics:?}");
-++        assert_selection(&app, &baseline, low.clone());
-++    }
-++    publish(&mut app, &root, json!({})).await;
-++    assert_selection(&app, &baseline, low);
-++    process.shutdown().await;
-++}
-++
-++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-++async fn pi_fills_only_the_field_octet_has_no_saved_default_for() {
-++    let temp = tempfile::tempdir().unwrap();
-++    let root = temp.path().canonicalize().unwrap();
-++    let (mut app, process, baseline, preferred) = fixture(&root).await;
-++    app.config.model_saved = true;
-++    publish(&mut app, &root, pi_defaults()).await;
-++    assert_selection(
-++        &app,
-++        &baseline,
-++        ReasoningConfig::Effort(ReasoningEffort::Max),
-++    );
-++    publish(&mut app, &root, json!({})).await;
-++    assert_selection(
-++        &app,
-++        &baseline,
-++        ReasoningConfig::Effort(ReasoningEffort::Low),
-++    );
-++
-++    app.config.model_saved = false;
-++    app.config.reasoning_saved = true;
-++    publish(&mut app, &root, pi_defaults()).await;
-++    assert_selection(
-++        &app,
-++        &preferred,
-++        ReasoningConfig::Effort(ReasoningEffort::Low),
-++    );
-++    publish(&mut app, &root, json!({})).await;
-++    assert_selection(
-++        &app,
-++        &baseline,
-++        ReasoningConfig::Effort(ReasoningEffort::Low),
-++    );
-++    process.shutdown().await;
-++}
-++
-++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-++async fn in_session_choices_outrank_saved_and_pi_defaults() {
-++    let temp = tempfile::tempdir().unwrap();
-++    let root = temp.path().canonicalize().unwrap();
-++    let (mut app, process, baseline, _) = fixture(&root).await;
-++    app.config.model_saved = true;
-++    app.config.reasoning_saved = true;
-++    app.config.model_explicit = true;
-++    app.config.reasoning_explicit = true;
-++    app.config.reasoning = Some(ReasoningConfig::Effort(ReasoningEffort::High));
-++    choose(
-++        &mut app,
-++        baseline.clone(),
-++        ReasoningConfig::Effort(ReasoningEffort::High),
-++    );
-++    publish(&mut app, &root, pi_defaults()).await;
-++    assert_selection(
-++        &app,
-++        &baseline,
-++        ReasoningConfig::Effort(ReasoningEffort::High),
-++    );
-++    process.shutdown().await;
-++}
-+diff --git a/crates/octet-coding-agent/src/extensions/tests/support.rs b/crates/octet-coding-agent/src/extensions/tests/support.rs
-+index 52d31fc6..a10dc735 100644
-+--- a/crates/octet-coding-agent/src/extensions/tests/support.rs
-++++ b/crates/octet-coding-agent/src/extensions/tests/support.rs
-+@@ -22,6 +22,8 @@ pub(in crate::extensions) fn executable_extension_config(
-+         model_explicit: false,
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/host/policy.rs b/crates/octet-coding-agent/src/host/policy.rs
-+index 3ceef34b..48aa97ae 100644
-+--- a/crates/octet-coding-agent/src/host/policy.rs
-++++ b/crates/octet-coding-agent/src/host/policy.rs
-+@@ -122,6 +122,8 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
-+             .map(crate::config::parse_reasoning)
-+             .transpose()?,
-+         reasoning_explicit: request.reasoning.is_some(),
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: true,
-+         cache_retention: CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/modes/interactive.rs b/crates/octet-coding-agent/src/modes/interactive.rs
-+index 497104ea..6cbdd3b5 100644
-+--- a/crates/octet-coding-agent/src/modes/interactive.rs
-++++ b/crates/octet-coding-agent/src/modes/interactive.rs
-+@@ -7611,6 +7611,10 @@ where
-+     // later rebuilds and stay authoritative over session-only resource
-+     // contributions (for example a mirrored Pi default model).
-+     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
-++    let explicit_reasoning_change = matches!(
-++        &reconfig,
-++        Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. }
-++    );
-+     let in_place = if let Reconfig::Model(id) = &reconfig {
-+         match crate::app::try_apply_model_reconfig(&mut app, id) {
-+             Ok(selected) => selected,
-+@@ -7633,6 +7637,10 @@ where
-+     if explicit_model_change {
-+         app.config.model_explicit = true;
-+     }
-++    if explicit_reasoning_change {
-++        app.config.reasoning = Some(app.reasoning.clone());
-++        app.config.reasoning_explicit = true;
-++    }
-+     if !in_place {
-+         refresh_resource_paths(&mut app, shell, input).await?;
-+         shell.hydrate(app.agent.session())?;
-+diff --git a/crates/octet-coding-agent/src/modes/interactive/modeless.rs b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
-+index 1f08fff6..d1380053 100644
-+--- a/crates/octet-coding-agent/src/modes/interactive/modeless.rs
-++++ b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
-+@@ -261,8 +261,11 @@ impl ModelessExtensions {
-+             loaded.is_current(&self.extensions) && lease.matches(&self.extensions),
-+             "stale model-less resource candidate"
-+         );
-+-        if loaded.default_model.is_some() || loaded.default_thinking_level.is_some() {
-+-            shell.notice("Pi model/thinking defaults require a configured model and restart; prompts remain disabled");
-++        if (loaded.default_model.is_some() && self.config.accepts_extension_model())
-++            || (loaded.default_thinking_level.is_some()
-++                && self.config.accepts_extension_reasoning())
-++        {
-++            shell.notice("Pi's default model and thinking level apply once a model is configured and octet restarts");
-+         }
-+         for diagnostic in loaded.diagnostics {
-+             shell.notice(diagnostic);
-+diff --git a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
-+index a8777005..1ea36323 100644
-+--- a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
-++++ b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
-+@@ -20,6 +20,8 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
-+         model_explicit: false,
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/resources/tests.rs b/crates/octet-coding-agent/src/resources/tests.rs
-+index 8e6aade7..c744d7c0 100644
-+--- a/crates/octet-coding-agent/src/resources/tests.rs
-++++ b/crates/octet-coding-agent/src/resources/tests.rs
-+@@ -15,6 +15,8 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
-+         model_explicit: false,
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+diff --git a/crates/octet-coding-agent/src/tui/theme/tests.rs b/crates/octet-coding-agent/src/tui/theme/tests.rs
-+index d4068371..ee7361b7 100644
-+--- a/crates/octet-coding-agent/src/tui/theme/tests.rs
-++++ b/crates/octet-coding-agent/src/tui/theme/tests.rs
-+@@ -15,6 +15,8 @@ fn config(workspace: PathBuf) -> Config {
-+         model_explicit: false,
-+         reasoning: None,
-+         reasoning_explicit: false,
-++        model_saved: false,
-++        reasoning_saved: false,
-+         reasoning_mode: octet_ai::ReasoningMode::Standard,
-+         reasoning_mode_explicit: false,
-+         cache_retention: octet_ai::CacheRetention::Short,
-+-- 
-+2.43.0
-+
+deleted file mode 100644
+index 023cfce7..00000000
+--- a/docs/maintainers/pi-usability-wip/M-commits/0001-WIP-saved-octet-defaults-outrank-Pi-defaults-unverif.patch
++++ /dev/null
+@@ -1,467 +0,0 @@
+-From 1e3d227329f8cae4fcf8d56e36c53bd12b759423 Mon Sep 17 00:00:00 2001
+-From: Claude <noreply@anthropic.com>
+-Date: Tue, 3 Nov 2026 03:39:04 +0000
+-Subject: [PATCH] WIP: saved octet defaults outrank Pi defaults (unverified:
+- build blocked by disk space)
+-
+-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+----
+- .../src/app/bootstrap/tests/support.rs        |  2 +
+- .../src/app/resource_paths.rs                 | 39 ++++++---
+- crates/octet-coding-agent/src/cli.rs          |  4 +
+- crates/octet-coding-agent/src/cli/tests.rs    | 21 +++++
+- .../octet-coding-agent/src/commands/tests.rs  |  2 +
+- crates/octet-coding-agent/src/compaction.rs   |  2 +
+- crates/octet-coding-agent/src/config.rs       | 16 ++++
+- .../resource_paths/native_defaults_tests.rs   | 85 +++++++++++++++++++
+- .../src/extensions/tests/support.rs           |  2 +
+- crates/octet-coding-agent/src/host/policy.rs  |  2 +
+- .../src/modes/interactive.rs                  |  8 ++
+- .../src/modes/interactive/modeless.rs         |  7 +-
+- .../src/modes/interactive/tests/support.rs    |  2 +
+- .../octet-coding-agent/src/resources/tests.rs |  2 +
+- .../octet-coding-agent/src/tui/theme/tests.rs |  2 +
+- 15 files changed, 183 insertions(+), 13 deletions(-)
+-
+-diff --git a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
+-index 2b9beded..8b0fd80b 100644
+---- a/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
+-+++ b/crates/octet-coding-agent/src/app/bootstrap/tests/support.rs
+-@@ -14,6 +14,8 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
+-         model_explicit: model.is_some(),
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/app/resource_paths.rs b/crates/octet-coding-agent/src/app/resource_paths.rs
+-index 7fb790df..d939b65d 100644
+---- a/crates/octet-coding-agent/src/app/resource_paths.rs
+-+++ b/crates/octet-coding-agent/src/app/resource_paths.rs
+-@@ -93,7 +93,8 @@ impl ResourcePathConsumer {
+-                 .map(|(model, _)| model.clone())
+-                 .or_else(|| self.model.clone());
+-         }
+--        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
+-+        if config.accepts_extension_reasoning()
+-+            && (self.model_default_active || self.thinking_default_active)
+-         {
+-             if let Some((_, reasoning)) = &self.selection {
+-                 config.reasoning = Some(reasoning.clone());
+-@@ -174,14 +175,15 @@ impl App {
+-         &mut self,
+-         requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
+-         requested_thinking: Option<&str>,
+--    ) -> anyhow::Result<()> {
+-+    ) -> anyhow::Result<Option<String>> {
+-         let baseline = self
+-             .resource_paths
+-             .selection
+-             .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
+-             .clone();
+--        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
+--        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
+-+        let model_preference = requested_model.filter(|_| self.config.accepts_extension_model());
+-+        let thinking_preference =
+-+            requested_thinking.filter(|_| self.config.accepts_extension_reasoning());
+-         let withdraw_model = !self.config.model_explicit
+-             && model_preference.is_none()
+-             && self.resource_paths.model_default_active;
+-@@ -202,12 +204,13 @@ impl App {
+-         let model = self.catalog.resolve(&id)?;
+-         let changed_model = id != self.model.spec.id;
+-         let subagents = self.executable_extensions.has_agent_session_service();
+--        let reasoning = if self.config.reasoning_explicit && changed_model {
+-+        // The user's own effort follows a model they did not pick; Pi's only fills a gap.
+-+        let reasoning = if !self.config.accepts_extension_reasoning() && changed_model {
+-             let requested = self
+-                 .config
+-                 .reasoning
+-                 .as_ref()
+--                .context("explicit invocation reasoning is unset")?;
+-+                .context("configured reasoning is unset")?;
+-             if matches!(requested, ReasoningConfig::Budget(_)) {
+-                 // Custom explicit budgets have no portable level; core admission
+-                 // validates the exact budget rather than silently normalizing it.
+-@@ -223,7 +226,8 @@ impl App {
+-             // The protocol has already required exact Pi spellings. Native
+-             // admission rejects unsupported levels instead of lowering max.
+-             requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
+--        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
+-+        } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
+-+        {
+-             if id == baseline.0 {
+-                 baseline.1.clone()
+-             } else {
+-@@ -235,18 +239,30 @@ impl App {
+-             // Theme/path-only reloads must not reset a live reasoning choice.
+-             self.reasoning.clone()
+-         };
+-+        let mut notice = None;
+-         if changed_model || reasoning != self.reasoning {
+-             self.agent.select_model_at_idle(
+-                 model.clone(),
+-                 reasoning.clone(),
+-                 reasoning_label(&reasoning),
+-             )?;
+-+            if model_preference.is_some() || thinking_preference.is_some() {
+-+                notice = Some(format!(
+-+                    "Using Pi's default {} · {} for this session",
+-+                    model
+-+                        .spec
+-+                        .display_name
+-+                        .as_deref()
+-+                        .unwrap_or(&model.spec.api_name),
+-+                    reasoning_label(&reasoning),
+-+                ));
+-+            }
+-             self.model = model;
+-             self.reasoning = reasoning;
+-         }
+-         self.resource_paths.model_default_active = model_preference.is_some();
+-         self.resource_paths.thinking_default_active = thinking_preference.is_some();
+--        Ok(())
+-+        Ok(notice)
+-     }
+- 
+-     pub(crate) fn mark_resource_paths_reload(&mut self) {
+-@@ -311,17 +327,18 @@ impl App {
+-         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
+-         let system = format!("{prefix}{suffix}");
+-         let mut diagnostics = loaded.diagnostics;
+--        if let Err(error) = self.apply_resource_defaults(
+-+        match self.apply_resource_defaults(
+-             loaded.default_model.as_ref(),
+-             loaded.default_thinking_level.as_deref(),
+-         ) {
+--            diagnostics.push(
+-+            Ok(notice) => diagnostics.extend(notice),
+-+            Err(error) => diagnostics.push(
+-                 format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
+-                     .chars()
+-                     .map(|c| if c.is_control() { ' ' } else { c })
+-                     .take(4096)
+-                     .collect(),
+--            );
+-+            ),
+-         }
+-         // Default resolution may complete the native provider catalog. Publish
+-         // those genuine model facts as well as the invocation scope, without
+-diff --git a/crates/octet-coding-agent/src/cli.rs b/crates/octet-coding-agent/src/cli.rs
+-index 5a263626..893480b1 100644
+---- a/crates/octet-coding-agent/src/cli.rs
+-+++ b/crates/octet-coding-agent/src/cli.rs
+-@@ -1737,6 +1737,8 @@ fn build_config_with_global_path_and_diagnostics(
+-         )?;
+-     }
+- 
+-+    let model_saved = values.model.is_some();
+-+    let reasoning_saved = values.reasoning.is_some();
+-     let model = resolve_model_id(
+-         cli.model.clone().map(octet_ai::ModelId),
+-         values.model.clone().map(octet_ai::ModelId),
+-@@ -2071,6 +2073,8 @@ fn build_config_with_global_path_and_diagnostics(
+-         model_explicit,
+-         reasoning,
+-         reasoning_explicit,
+-+        model_saved,
+-+        reasoning_saved,
+-         reasoning_mode,
+-         reasoning_mode_explicit,
+-         cache_retention,
+-diff --git a/crates/octet-coding-agent/src/cli/tests.rs b/crates/octet-coding-agent/src/cli/tests.rs
+-index acd7d8e3..7eb9537a 100644
+---- a/crates/octet-coding-agent/src/cli/tests.rs
+-+++ b/crates/octet-coding-agent/src/cli/tests.rs
+-@@ -2642,3 +2642,24 @@ fn thinking_preferences_commit_together_with_a_verified_metadata_receipt() {
+-     assert_eq!(value["reasoning_mode"].as_str(), Some("standard"));
+-     assert_eq!(value["reload"].as_bool(), Some(true));
+- }
+-+
+-+#[test]
+-+fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
+-+    let directory = cwd();
+-+    let config = config_with_empty_global(base(), directory.path()).unwrap();
+-+    assert!(config.accepts_extension_model() && config.accepts_extension_reasoning());
+-+
+-+    let global = directory.path().join("global.toml");
+-+    std::fs::write(&global, "model = \"gpt-4o-mini\"\nreasoning = \"low\"\n").unwrap();
+-+    let config = build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
+-+    assert!(config.model_saved && config.reasoning_saved);
+-+    assert!(!config.model_explicit && !config.reasoning_explicit);
+-+    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+-+
+-+    let mut cli = base();
+-+    cli.model = Some("gpt-4o-mini".into());
+-+    cli.reasoning = Some("high".into());
+-+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+-+    assert!(!config.model_saved && !config.reasoning_saved);
+-+    assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+-+}
+-diff --git a/crates/octet-coding-agent/src/commands/tests.rs b/crates/octet-coding-agent/src/commands/tests.rs
+-index 261f9223..bc70bfad 100644
+---- a/crates/octet-coding-agent/src/commands/tests.rs
+-+++ b/crates/octet-coding-agent/src/commands/tests.rs
+-@@ -794,6 +794,8 @@ fn app_for_status() -> (tempfile::TempDir, App) {
+-         model_explicit: false,
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/compaction.rs b/crates/octet-coding-agent/src/compaction.rs
+-index 59b4bd8b..e362efc2 100644
+---- a/crates/octet-coding-agent/src/compaction.rs
+-+++ b/crates/octet-coding-agent/src/compaction.rs
+-@@ -518,6 +518,8 @@ pub(crate) mod tests {
+-             model_explicit: false,
+-             reasoning: None,
+-             reasoning_explicit: false,
+-+            model_saved: false,
+-+            reasoning_saved: false,
+-             reasoning_mode: octet_ai::ReasoningMode::Standard,
+-             reasoning_mode_explicit: false,
+-             cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/config.rs b/crates/octet-coding-agent/src/config.rs
+-index 09dd9edc..86181079 100644
+---- a/crates/octet-coding-agent/src/config.rs
+-+++ b/crates/octet-coding-agent/src/config.rs
+-@@ -571,6 +571,11 @@ pub struct Config {
+-     pub reasoning: Option<ReasoningConfig>,
+-     /// True when `reasoning` came from an explicit command-line override.
+-     pub reasoning_explicit: bool,
+-+    /// True when `model` came from the user's own saved, project or environment
+-+    /// configuration. Extension-contributed defaults never replace it.
+-+    pub model_saved: bool,
+-+    /// As `model_saved`, for `reasoning`.
+-+    pub reasoning_saved: bool,
+-     /// Standard or Pro execution, selected independently from reasoning effort.
+-     pub reasoning_mode: ReasoningMode,
+-     /// True when the reasoning mode came from an explicit command-line override.
+-@@ -662,6 +667,17 @@ pub struct Config {
+- }
+- 
+- impl Config {
+-+    /// Whether an extension-contributed default model may apply: only when the
+-+    /// user has neither chosen a model nor saved their own default.
+-+    pub(crate) fn accepts_extension_model(&self) -> bool {
+-+        !self.model_explicit && !self.model_saved
+-+    }
+-+
+-+    /// As `accepts_extension_model`, for the reasoning level.
+-+    pub(crate) fn accepts_extension_reasoning(&self) -> bool {
+-+        !self.reasoning_explicit && !self.reasoning_saved
+-+    }
+-+
+-     /// Whether a tool will survive both the model-visible allowlist and the
+-     /// matching execution capability gate for this process.
+-     pub fn tool_available(&self, name: &str) -> bool {
+-diff --git a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
+-index d16a1bbb..be989e3e 100644
+---- a/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
+-+++ b/crates/octet-coding-agent/src/extensions/resource_paths/native_defaults_tests.rs
+-@@ -399,3 +399,88 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
+-     assert_eq!(app.model.endpoint.id.0, "openai-codex");
+-     process.shutdown().await;
+- }
+-+
+-+fn pi_defaults() -> Value {
+-+    json!({
+-+        "default_model": {"provider": "synthetic", "model": "preferred"},
+-+        "default_thinking_level": "max"
+-+    })
+-+}
+-+
+-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-+async fn saved_octet_defaults_are_never_overridden_by_pi_defaults() {
+-+    let temp = tempfile::tempdir().unwrap();
+-+    let root = temp.path().canonicalize().unwrap();
+-+    let (mut app, process, baseline, _) = fixture(&root).await;
+-+    app.config.model_saved = true;
+-+    app.config.reasoning_saved = true;
+-+    let low = ReasoningConfig::Effort(ReasoningEffort::Low);
+-+    for _ in 0..2 {
+-+        let diagnostics = publish(&mut app, &root, pi_defaults()).await;
+-+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+-+        assert_selection(&app, &baseline, low.clone());
+-+    }
+-+    publish(&mut app, &root, json!({})).await;
+-+    assert_selection(&app, &baseline, low);
+-+    process.shutdown().await;
+-+}
+-+
+-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-+async fn pi_fills_only_the_field_octet_has_no_saved_default_for() {
+-+    let temp = tempfile::tempdir().unwrap();
+-+    let root = temp.path().canonicalize().unwrap();
+-+    let (mut app, process, baseline, preferred) = fixture(&root).await;
+-+    app.config.model_saved = true;
+-+    publish(&mut app, &root, pi_defaults()).await;
+-+    assert_selection(
+-+        &app,
+-+        &baseline,
+-+        ReasoningConfig::Effort(ReasoningEffort::Max),
+-+    );
+-+    publish(&mut app, &root, json!({})).await;
+-+    assert_selection(
+-+        &app,
+-+        &baseline,
+-+        ReasoningConfig::Effort(ReasoningEffort::Low),
+-+    );
+-+
+-+    app.config.model_saved = false;
+-+    app.config.reasoning_saved = true;
+-+    publish(&mut app, &root, pi_defaults()).await;
+-+    assert_selection(
+-+        &app,
+-+        &preferred,
+-+        ReasoningConfig::Effort(ReasoningEffort::Low),
+-+    );
+-+    publish(&mut app, &root, json!({})).await;
+-+    assert_selection(
+-+        &app,
+-+        &baseline,
+-+        ReasoningConfig::Effort(ReasoningEffort::Low),
+-+    );
+-+    process.shutdown().await;
+-+}
+-+
+-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-+async fn in_session_choices_outrank_saved_and_pi_defaults() {
+-+    let temp = tempfile::tempdir().unwrap();
+-+    let root = temp.path().canonicalize().unwrap();
+-+    let (mut app, process, baseline, _) = fixture(&root).await;
+-+    app.config.model_saved = true;
+-+    app.config.reasoning_saved = true;
+-+    app.config.model_explicit = true;
+-+    app.config.reasoning_explicit = true;
+-+    app.config.reasoning = Some(ReasoningConfig::Effort(ReasoningEffort::High));
+-+    choose(
+-+        &mut app,
+-+        baseline.clone(),
+-+        ReasoningConfig::Effort(ReasoningEffort::High),
+-+    );
+-+    publish(&mut app, &root, pi_defaults()).await;
+-+    assert_selection(
+-+        &app,
+-+        &baseline,
+-+        ReasoningConfig::Effort(ReasoningEffort::High),
+-+    );
+-+    process.shutdown().await;
+-+}
+-diff --git a/crates/octet-coding-agent/src/extensions/tests/support.rs b/crates/octet-coding-agent/src/extensions/tests/support.rs
+-index 52d31fc6..a10dc735 100644
+---- a/crates/octet-coding-agent/src/extensions/tests/support.rs
+-+++ b/crates/octet-coding-agent/src/extensions/tests/support.rs
+-@@ -22,6 +22,8 @@ pub(in crate::extensions) fn executable_extension_config(
+-         model_explicit: false,
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/host/policy.rs b/crates/octet-coding-agent/src/host/policy.rs
+-index 3ceef34b..48aa97ae 100644
+---- a/crates/octet-coding-agent/src/host/policy.rs
+-+++ b/crates/octet-coding-agent/src/host/policy.rs
+-@@ -122,6 +122,8 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
+-             .map(crate::config::parse_reasoning)
+-             .transpose()?,
+-         reasoning_explicit: request.reasoning.is_some(),
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: true,
+-         cache_retention: CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/modes/interactive.rs b/crates/octet-coding-agent/src/modes/interactive.rs
+-index 497104ea..6cbdd3b5 100644
+---- a/crates/octet-coding-agent/src/modes/interactive.rs
+-+++ b/crates/octet-coding-agent/src/modes/interactive.rs
+-@@ -7611,6 +7611,10 @@ where
+-     // later rebuilds and stay authoritative over session-only resource
+-     // contributions (for example a mirrored Pi default model).
+-     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
+-+    let explicit_reasoning_change = matches!(
+-+        &reconfig,
+-+        Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. }
+-+    );
+-     let in_place = if let Reconfig::Model(id) = &reconfig {
+-         match crate::app::try_apply_model_reconfig(&mut app, id) {
+-             Ok(selected) => selected,
+-@@ -7633,6 +7637,10 @@ where
+-     if explicit_model_change {
+-         app.config.model_explicit = true;
+-     }
+-+    if explicit_reasoning_change {
+-+        app.config.reasoning = Some(app.reasoning.clone());
+-+        app.config.reasoning_explicit = true;
+-+    }
+-     if !in_place {
+-         refresh_resource_paths(&mut app, shell, input).await?;
+-         shell.hydrate(app.agent.session())?;
+-diff --git a/crates/octet-coding-agent/src/modes/interactive/modeless.rs b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
+-index 1f08fff6..d1380053 100644
+---- a/crates/octet-coding-agent/src/modes/interactive/modeless.rs
+-+++ b/crates/octet-coding-agent/src/modes/interactive/modeless.rs
+-@@ -261,8 +261,11 @@ impl ModelessExtensions {
+-             loaded.is_current(&self.extensions) && lease.matches(&self.extensions),
+-             "stale model-less resource candidate"
+-         );
+--        if loaded.default_model.is_some() || loaded.default_thinking_level.is_some() {
+--            shell.notice("Pi model/thinking defaults require a configured model and restart; prompts remain disabled");
+-+        if (loaded.default_model.is_some() && self.config.accepts_extension_model())
+-+            || (loaded.default_thinking_level.is_some()
+-+                && self.config.accepts_extension_reasoning())
+-+        {
+-+            shell.notice("Pi's default model and thinking level apply once a model is configured and octet restarts");
+-         }
+-         for diagnostic in loaded.diagnostics {
+-             shell.notice(diagnostic);
+-diff --git a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
+-index a8777005..1ea36323 100644
+---- a/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
+-+++ b/crates/octet-coding-agent/src/modes/interactive/tests/support.rs
+-@@ -20,6 +20,8 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
+-         model_explicit: false,
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/resources/tests.rs b/crates/octet-coding-agent/src/resources/tests.rs
+-index 8e6aade7..c744d7c0 100644
+---- a/crates/octet-coding-agent/src/resources/tests.rs
+-+++ b/crates/octet-coding-agent/src/resources/tests.rs
+-@@ -15,6 +15,8 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
+-         model_explicit: false,
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+-diff --git a/crates/octet-coding-agent/src/tui/theme/tests.rs b/crates/octet-coding-agent/src/tui/theme/tests.rs
+-index d4068371..ee7361b7 100644
+---- a/crates/octet-coding-agent/src/tui/theme/tests.rs
+-+++ b/crates/octet-coding-agent/src/tui/theme/tests.rs
+-@@ -15,6 +15,8 @@ fn config(workspace: PathBuf) -> Config {
+-         model_explicit: false,
+-         reasoning: None,
+-         reasoning_explicit: false,
+-+        model_saved: false,
+-+        reasoning_saved: false,
+-         reasoning_mode: octet_ai::ReasoningMode::Standard,
+-         reasoning_mode_explicit: false,
+-         cache_retention: octet_ai::CacheRetention::Short,
+--- 
+-2.43.0
+-
