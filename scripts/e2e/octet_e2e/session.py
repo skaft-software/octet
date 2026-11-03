@@ -88,6 +88,8 @@ class OctetSession:
         self._lock = threading.Lock()
         self._screen = Screen(columns, rows)
         self._transcript = bytearray()
+        # (monotonic seconds, bytes) per PTY read, for frame-by-frame replay.
+        self.chunks: list[tuple[float, bytes]] = []
         self._reader: threading.Thread | None = None
         self._closed = False
         self.started_at = 0.0
@@ -132,6 +134,7 @@ class OctetSession:
             if not data:
                 return
             with self._lock:
+                self.chunks.append((time.monotonic(), data))
                 self._transcript.extend(data)
                 self._screen.feed(data)
                 pending = self._screen.responses
@@ -146,6 +149,7 @@ class OctetSession:
                 if not data:
                     return
                 with self._lock:
+                    self.chunks.append((time.monotonic(), data))
                     self._transcript.extend(data)
                     self._screen.feed(data)
         except OSError:
