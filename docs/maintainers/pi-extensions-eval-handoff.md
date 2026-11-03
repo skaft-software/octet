@@ -222,6 +222,27 @@ being observed on both base and candidate; this does not explain the historical 
 or qualify cleanup of arbitrary process trees. The <=1.6 s warm goal and an improvement to
 the real-workload exit remain unverified.
 
+## Usability and performance pass (2026-11-03): maintainer macOS qualification found
+
+1. octet's native footer is drawn first, then the Pi footer swaps in, which looks janky.
+2. The footer is inconsistent: it appears in one session but not in another (cwd `~`).
+3. The footer does not match Pi: model ID instead of display name, and the context and cost
+   segments are missing.
+4. Extension prompt composition and `before_agent_start` fail.
+
+The shared brief, rules and fixture/repro instructions are in `docs/maintainers/pi-usability-brief.md`.
+Workstreams (local worktrees, unpushed; the branch names say what each owns):
+- `fix/pi-footer`: issues 1-3, including a cached footer placeholder primitive (design
+  `docs/design/pi-footer-startup.md`).
+- `fix/pi-before-prompt`: issue 4. Prompt request bodies must match Pi byte for byte;
+  Pi-equivalent hook budgets; the missing API fields behind skipped handlers.
+- `perf/pi-warm-exit`: salvages `perf/pi-warm` (`eedffd48`) and the `perf/pi-exit` diff;
+  warm <=1.6 s; exit near Pi's 0.16 s; cold must not regress after `852ca760`.
+- `review/pi-compat`: rigorous review of `c610a671..852ca760` (macOS, concurrency, cache
+  locations, native-ESM semantics).
+- `eval/pi-functional`: functional parity eval with Pi as the oracle (tools, commands,
+  handlers, UI, prompt bodies), plus a scorecard.
+
 ## Next steps
 
 1. Reproduce the pinned 23-package Pi 1.4.0 benchmark in a disposable Linux sandbox with
