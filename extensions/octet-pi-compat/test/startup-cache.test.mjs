@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,28 @@ test('the startup cache directory is owner-only and reused', () => {
   const mode = statSync(directory).mode & 0o777;
   assert.equal(mode, 0o700, `cache directory mode ${mode.toString(8)}`);
   assert.equal(startupCacheDirectory(), directory);
+});
+
+test('a pre-existing group/world-writable directory is tightened, not trusted', () => {
+  const previous = process.env.OCTET_PI_COMPAT_CACHE;
+  const loose = mkdtempSync(join(tmpdir(), 'octet-pi-loose-'));
+  try {
+    chmodSync(loose, 0o777);
+    process.env.OCTET_PI_COMPAT_CACHE = loose;
+    assert.equal(startupCacheDirectory(), loose);
+    assert.equal(statSync(loose).mode & 0o777, 0o700);
+  } finally { process.env.OCTET_PI_COMPAT_CACHE = previous; rmSync(loose, { recursive: true, force: true }); }
+});
+
+test('a directory owned by another user is never used', { skip: process.getuid?.() !== 0 }, () => {
+  const previous = process.env.OCTET_PI_COMPAT_CACHE;
+  const foreign = mkdtempSync(join(tmpdir(), 'octet-pi-foreign-'));
+  try {
+    chownSync(foreign, 65534, 65534);
+    process.env.OCTET_PI_COMPAT_CACHE = foreign;
+    assert.equal(startupCacheDirectory(), undefined);
+    assert.deepEqual(jitiCacheOptions(), {});
+  } finally { process.env.OCTET_PI_COMPAT_CACHE = previous; rmSync(foreign, { recursive: true, force: true }); }
 });
 
 test('a failed persisted write leaves no temporary file behind', () => {

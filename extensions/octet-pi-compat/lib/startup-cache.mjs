@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import module from 'node:module';
@@ -38,6 +38,14 @@ export function startupCacheDirectory() {
 function ensure(directory) {
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // Cached transforms and resolutions are executed code, so the directory must
+    // be this user's alone. A pre-existing directory is not trusted just because
+    // it is writable: another owner's is refused and loose modes are tightened.
+    if (typeof process.getuid === 'function') {
+      const info = statSync(directory);
+      if (!info.isDirectory() || info.uid !== process.getuid()) return undefined;
+      if (info.mode & 0o077) chmodSync(directory, 0o700);
+    }
     accessSync(directory, constants.W_OK | constants.X_OK);
     return directory;
   } catch {
