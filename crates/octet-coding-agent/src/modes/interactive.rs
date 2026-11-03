@@ -7638,8 +7638,7 @@ where
         app.config.model_explicit = true;
     }
     if explicit_reasoning_change {
-        app.config.reasoning = Some(app.reasoning.clone());
-        app.config.reasoning_explicit = true;
+        app.keep_thinking_choice();
     }
     if !in_place {
         refresh_resource_paths(&mut app, shell, input).await?;

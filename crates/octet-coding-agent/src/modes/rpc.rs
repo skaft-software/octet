@@ -1382,6 +1382,7 @@ async fn handle_idle_command(
                 Err(error) => respond_error!(error),
             };
             app = apply_reconfig(app, Reconfig::Thinking(reasoning))?;
+            app.keep_thinking_choice();
             output.success(id.as_deref(), &kind, None)?;
         }
         "cycle_thinking_level" => {
@@ -1401,6 +1402,7 @@ async fn handle_idle_command(
                     app.subagents_available(),
                 )?;
                 app = apply_reconfig(app, Reconfig::Thinking(reasoning))?;
+                app.keep_thinking_choice();
                 output.success(id.as_deref(), &kind, Some(json!({"level": level.label()})))?;
             }
         }

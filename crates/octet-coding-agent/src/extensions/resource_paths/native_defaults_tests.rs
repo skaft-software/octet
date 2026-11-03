@@ -103,6 +103,13 @@ async fn publish(app: &mut App, root: &Path, paths: Value) -> Vec<String> {
     app.apply_extension_resource_paths(loaded, lease).unwrap().1
 }
 
+fn assert_pi_default_notice(diagnostics: &[String]) {
+    assert!(
+        matches!(diagnostics, [notice] if notice.starts_with("Using Pi's default ")),
+        "{diagnostics:?}"
+    );
+}
+
 fn assert_selection(app: &App, model: &Model, reasoning: ReasoningConfig) {
     assert_eq!(app.model.spec.id, model.spec.id);
     assert_eq!(app.agent.model().spec.id, model.spec.id);
@@ -125,7 +132,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
         }),
     )
     .await;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -144,7 +151,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
         }),
     )
     .await;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -175,7 +182,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
         }),
     )
     .await;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &baseline,
@@ -205,7 +212,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
         }),
     )
     .await;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -394,7 +401,7 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
         }),
     )
     .await;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_pi_default_notice(&diagnostics);
     assert_selection(&app, &codex, ReasoningConfig::Effort(ReasoningEffort::Max));
     assert_eq!(app.model.endpoint.id.0, "openai-codex");
     process.shutdown().await;
@@ -482,5 +489,38 @@ async fn in_session_choices_outrank_saved_and_pi_defaults() {
         &baseline,
         ReasoningConfig::Effort(ReasoningEffort::High),
     );
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kept_thinking_choice_survives_pi_defaults_and_reloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, baseline, _) = fixture(&root).await;
+    choose(
+        &mut app,
+        baseline.clone(),
+        ReasoningConfig::Effort(ReasoningEffort::High),
+    );
+    app.keep_thinking_choice();
+    for _ in 0..2 {
+        publish(&mut app, &root, json!({"default_thinking_level": "max"})).await;
+        assert_selection(
+            &app,
+            &baseline,
+            ReasoningConfig::Effort(ReasoningEffort::High),
+        );
+    }
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_pi_default_is_announced_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, _, _) = fixture(&root).await;
+    let first = publish(&mut app, &root, pi_defaults()).await;
+    assert_eq!(first, ["Using Pi's default preferred · max for this session"]);
+    assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
     process.shutdown().await;
 }

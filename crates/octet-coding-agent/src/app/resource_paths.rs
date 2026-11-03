@@ -265,6 +265,12 @@ impl App {
         Ok(notice)
     }
 
+    /// An in-session effort choice outranks saved and Pi defaults on every later reload.
+    pub(crate) fn keep_thinking_choice(&mut self) {
+        self.config.reasoning = Some(self.reasoning.clone());
+        self.config.reasoning_explicit = true;
+    }
+
     pub(crate) fn mark_resource_paths_reload(&mut self) {
         self.resource_paths.pending = Some(Reason::Reload);
         self.resource_paths.guard.clear();
