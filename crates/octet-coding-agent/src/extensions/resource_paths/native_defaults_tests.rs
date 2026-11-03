@@ -1,6 +1,6 @@
 //! Synthetic native catalog + local resource peer; no provider requests or credentials.
 use super::*;
-use crate::app::App;
+use crate::app::{App, Reconfig};
 use crate::tui::theme::TerminalBackground;
 use octet_ai::types::ReasoningOptions;
 use octet_ai::{
@@ -520,7 +520,31 @@ async fn applied_pi_default_is_announced_once() {
     let root = temp.path().canonicalize().unwrap();
     let (mut app, process, _, _) = fixture(&root).await;
     let first = publish(&mut app, &root, pi_defaults()).await;
-    assert_eq!(first, ["Using Pi's default preferred · max for this session"]);
+    assert_eq!(
+        first,
+        ["Using Pi's default preferred · max for this session"]
+    );
     assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_rpc_model_choice_outranks_pi_defaults_and_reloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (app, process, baseline, _) = fixture(&root).await;
+    // The RPC path keeps a user model choice authoritative exactly as the TUI
+    // path does: a later Pi default publish cannot take it back.
+    let mut app =
+        crate::app::apply_reconfig(app, Reconfig::Model(baseline.spec.id.clone())).unwrap();
+    app.keep_model_choice();
+    let first = publish(&mut app, &root, pi_defaults()).await;
+    assert_pi_default_notice(&first);
+    assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
+    assert_selection(
+        &app,
+        &baseline,
+        ReasoningConfig::Effort(ReasoningEffort::Max),
+    );
     process.shutdown().await;
 }

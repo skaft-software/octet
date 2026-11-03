@@ -7635,7 +7635,7 @@ where
         .await?
     };
     if explicit_model_change {
-        app.config.model_explicit = true;
+        app.keep_model_choice();
     }
     if explicit_reasoning_change {
         app.keep_thinking_choice();

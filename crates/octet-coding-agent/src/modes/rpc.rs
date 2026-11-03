@@ -1339,6 +1339,7 @@ async fn handle_idle_command(
             };
             let value = model_value(&model);
             app = apply_reconfig(app, Reconfig::Model(model.spec.id.clone()))?;
+            app.keep_model_choice();
             output.success(id.as_deref(), &kind, Some(value))?;
         }
         "cycle_model" => {
@@ -1357,6 +1358,7 @@ async fn handle_idle_command(
                     .unwrap_or_default();
                 let model = app.catalog.resolve(&ids[(index + 1) % ids.len()])?;
                 app = apply_reconfig(app, Reconfig::Model(model.spec.id.clone()))?;
+                app.keep_model_choice();
                 output.success(
                     id.as_deref(),
                     &kind,

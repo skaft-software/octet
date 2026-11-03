@@ -271,6 +271,11 @@ impl App {
         self.config.reasoning_explicit = true;
     }
 
+    /// An in-session model choice outranks saved and Pi defaults on every later reload.
+    pub(crate) fn keep_model_choice(&mut self) {
+        self.config.model_explicit = true;
+    }
+
     pub(crate) fn mark_resource_paths_reload(&mut self) {
         self.resource_paths.pending = Some(Reason::Reload);
         self.resource_paths.guard.clear();
