@@ -118,3 +118,21 @@ test('a live scope keeps resolving aliases for later dynamic imports from the cl
   const { later } = await import(pathToFileURL(entry).href);
   assert.equal(await later(), await import(pathToFileURL(aliases[CODING]).href));
 });
+
+test('a declined probe does not strip a live scope of the files they share', async t => {
+  const dir = project({
+    'util.js': `export const later = () => import('${CODING}');`,
+    'a.js': "import { later } from './util.js'; export default () => {}; export { later };",
+    'b.js': "import './util.js'; import 'cjsdep'; export default () => {};",
+  });
+  mkdirSync(join(dir, 'node_modules', 'cjsdep'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'cjsdep', 'package.json'), '{"name":"cjsdep","main":"index.js"}');
+  writeFileSync(join(dir, 'node_modules', 'cjsdep', 'index.js'), 'module.exports = 1;');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { native } = setup();
+  const a = join(dir, 'a.js'), b = join(dir, 'b.js');
+  assert.equal(await native.attempt(a, reviewedSourceHashes(a)), true);
+  assert.equal(await native.attempt(b, reviewedSourceHashes(b)), false);
+  const { later } = await import(pathToFileURL(a).href);
+  assert.equal(await later(), await import(pathToFileURL(aliases[CODING]).href));
+});

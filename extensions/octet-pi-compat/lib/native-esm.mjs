@@ -169,7 +169,11 @@ export class NativeEsm {
     if (reason) { tracePhase('adapter.native.ineligible', reason); return false; }
     this.install();
     const scope = { id: this.nextId++, state: 'probing' };
-    for (const [path, hash] of Object.entries(hashes)) this.files.set(pathToFileURL(path).href, { path, hash, scope });
+    for (const [path, hash] of Object.entries(hashes)) {
+      // A file shared with an earlier factory stays with that scope: a later probe that declines must not strip its alias resolution and digest check.
+      const url = pathToFileURL(path).href;
+      if (!this.active(url)) this.files.set(url, { path, hash, scope });
+    }
     try {
       await import(pathToFileURL(entry).href);
       scope.state = 'live';
