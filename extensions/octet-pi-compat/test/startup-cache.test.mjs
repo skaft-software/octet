@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, utimesSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,21 @@ test('the startup cache directory is owner-only and reused', () => {
   const mode = statSync(directory).mode & 0o777;
   assert.equal(mode, 0o700, `cache directory mode ${mode.toString(8)}`);
   assert.equal(startupCacheDirectory(), directory);
+});
+
+test('temporaries abandoned by killed processes are swept, fresh ones are left alone', () => {
+  const directory = startupCacheDirectory();
+  const stale = join(directory, 'sweep.json.99999.tmp'), fresh = join(directory, 'sweep.json.99998.tmp'), other = join(directory, 'other.json.99999.tmp');
+  for (const file of [stale, fresh, other]) writeFileSync(file, 'x');
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(stale, old, old);
+  utimesSync(other, old, old);
+  try {
+    assert.equal(writePersisted('sweep.json', { value: 1 }), true);
+    assert.equal(existsSync(stale), false);
+    assert.equal(existsSync(fresh), true);
+    assert.equal(existsSync(other), true); // another document's temporary is not this write's business
+  } finally { for (const file of [stale, fresh, other, join(directory, 'sweep.json')]) rmSync(file, { force: true }); }
 });
 
 test('a pre-existing group/world-writable directory is tightened, not trusted', () => {

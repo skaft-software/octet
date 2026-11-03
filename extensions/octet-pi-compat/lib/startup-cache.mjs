@@ -1,4 +1,4 @@
-import { accessSync, chmodSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import module from 'node:module';
@@ -79,6 +79,21 @@ export function jitiCacheOptions() {
   return directory ? { fsCache: join(directory, 'jiti') } : {};
 }
 
+// A process killed between the write and the rename leaves `<name>.<pid>.tmp`
+// behind, and because the name carries the pid nothing would ever reuse it.
+// Temporaries of this document older than a write could plausibly take go.
+const STALE_TEMPORARY_MS = 10 * 60 * 1000;
+function sweepStaleTemporaries(directory, name) {
+  try {
+    const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.tmp$`);
+    for (const entry of readdirSync(directory)) {
+      if (!pattern.test(entry)) continue;
+      const file = join(directory, entry);
+      try { if (Date.now() - statSync(file).mtimeMs > STALE_TEMPORARY_MS) unlinkSync(file); } catch { /* raced with its owner */ }
+    }
+  } catch { /* housekeeping only */ }
+}
+
 /// Reads one persisted JSON document from the startup cache directory.
 ///
 /// Persisted maps are optimizations: a missing, oversized, unreadable or
@@ -110,6 +125,7 @@ export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
       try { unlinkSync(temporary); } catch { /* nothing was written */ }
       throw error;
     }
+    sweepStaleTemporaries(directory, name);
     return true;
   } catch { return false; }
 }
