@@ -862,12 +862,10 @@ async fn native_pi_custom_editor_buffer_is_bounded_and_retirement_discards_it() 
             false
         ));
     }
-    assert!(
-        shell
-            .debug_error()
-            .as_deref()
-            .is_some_and(|error| error.contains("input queue is full"))
-    );
+    assert!(shell
+        .debug_error()
+        .as_deref()
+        .is_some_and(|error| error.contains("input queue is full")));
     command(&mut app, &mut shell, "retire-editor")
         .await
         .unwrap();
@@ -1098,11 +1096,9 @@ export default pi => {
         })
         .await;
         let frame = rendered(&mut shell).await;
-        assert!(
-            frame
-                .lines()
-                .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns))
-        );
+        assert!(frame
+            .lines()
+            .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns)));
     }
     command(&mut app, &mut shell, "custom-footer")
         .await

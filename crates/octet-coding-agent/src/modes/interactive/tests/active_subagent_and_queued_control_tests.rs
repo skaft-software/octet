@@ -327,18 +327,15 @@ async fn idle_subagents_opens_the_live_roster_and_routes_worker_commands() {
     }
     assert_eq!(commands[0]["params"]["arguments"], serde_json::json!([]));
     for action in ["inspect", "wait", "reattach", "stop"] {
-        assert!(
-            commands
-                .iter()
-                .any(|command| command["params"]["arguments"][0] == action)
-        );
+        assert!(commands
+            .iter()
+            .any(|command| command["params"]["arguments"][0] == action));
     }
     assert!(process.shutdown().await);
-    assert!(
-        app.executable_extensions
-            .tui_command_suggestions()
-            .is_empty()
-    );
+    assert!(app
+        .executable_extensions
+        .tui_command_suggestions()
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -475,11 +472,9 @@ async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests()
             1,
             "read-only status must not enqueue another toggle"
         );
-        assert!(
-            shell
-                .debug_snapshot()
-                .contains("queued for the next idle boundary")
-        );
+        assert!(shell
+            .debug_snapshot()
+            .contains("queued for the next idle boundary"));
         let PendingIdleAction::Fast(enabled) = pending.pop_front().unwrap() else {
             panic!("wrong action")
         };

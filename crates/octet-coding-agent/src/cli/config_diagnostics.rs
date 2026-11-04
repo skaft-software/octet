@@ -327,7 +327,7 @@ pub(super) fn read_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Cli, build_config_with_global_path};
+    use crate::cli::{build_config_with_global_path, Cli};
     use clap::Parser;
 
     #[test]

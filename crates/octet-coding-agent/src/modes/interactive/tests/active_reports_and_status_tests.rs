@@ -56,14 +56,12 @@ async fn active_pi_status_is_read_only_and_does_not_wait_for_idle() {
     assert!(!quit_requested);
     assert_eq!(shell.pending(), "keep this draft");
     assert!(shell.has_overlay());
-    assert!(
-        shell
-            .dump_rendered_frame()
-            .await
-            .unwrap()
-            .join("\n")
-            .contains("Pi compatibility: unknown in the active extension snapshot")
-    );
+    assert!(shell
+        .dump_rendered_frame()
+        .await
+        .unwrap()
+        .join("\n")
+        .contains("Pi compatibility: unknown in the active extension snapshot"));
 }
 
 #[tokio::test]
@@ -409,11 +407,9 @@ async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retai
         let mut shell = InteractiveShell::test_shell();
         let (queue, _) = run_active_command(&mut shell, command, test_run_inspection()).await;
         assert_eq!(queue.len(), 1);
-        assert!(
-            shell
-                .debug_snapshot()
-                .contains("command queued for the next idle boundary")
-        );
+        assert!(shell
+            .debug_snapshot()
+            .contains("command queued for the next idle boundary"));
         assert_eq!(shell.debug_error(), None);
     }
     let mut shell = InteractiveShell::test_shell();

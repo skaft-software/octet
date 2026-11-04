@@ -2,7 +2,7 @@
 //! reads/writes, or native terminal are invoked. These do not qualify live sign-in.
 
 use super::*;
-use crate::auth::codex::{DeviceLoginPhase, LoginFallback, LoginProgress, login_progress_channel};
+use crate::auth::codex::{login_progress_channel, DeviceLoginPhase, LoginFallback, LoginProgress};
 use crossterm::event::KeyEvent;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -91,12 +91,10 @@ async fn synthetic_cancel_close_and_eof_drop_auth_before_any_commit() {
         ];
         events.extend(cancel.map(Ok));
         let mut input = futures_util::stream::iter(events);
-        assert!(
-            await_codex_login(&mut shell, &mut input, progress, auth)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(await_codex_login(&mut shell, &mut input, progress, auth)
+            .await
+            .unwrap()
+            .is_none());
         assert!(release.send(()).is_err(), "the auth future was dropped");
         assert_eq!(commits.load(Ordering::SeqCst), 0);
         assert_eq!(shell.extension_editor_snapshot(), original);
@@ -218,16 +216,14 @@ async fn synthetic_completion_failure_and_input_error_restore_the_composer() {
     let mut shell = InteractiveShell::test_shell();
     let (_sender, progress) = login_progress_channel();
     let mut input = futures_util::stream::iter([Err(std::io::Error::other("inert input failure"))]);
-    assert!(
-        await_codex_login(
-            &mut shell,
-            &mut input,
-            progress,
-            std::future::pending::<anyhow::Result<()>>()
-        )
-        .await
-        .is_err()
-    );
+    assert!(await_codex_login(
+        &mut shell,
+        &mut input,
+        progress,
+        std::future::pending::<anyhow::Result<()>>()
+    )
+    .await
+    .is_err());
     assert!(!shell.has_panel());
     assert!(shell.close_requested());
 }

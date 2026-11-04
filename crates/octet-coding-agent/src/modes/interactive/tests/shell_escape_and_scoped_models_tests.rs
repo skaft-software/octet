@@ -166,23 +166,19 @@ fn scoped_models_mutations_materialize_toggle_reorder_and_persist() {
     );
     assert_eq!(app.model_cycle(), vec!["second", "first"]);
     // Unmatched targets and boundary moves are explicit errors.
-    assert!(
-        apply_scope_mutation(
-            &mut app,
-            &commands::ScopedModelsCommand::Enable("nope/*".into())
-        )
-        .is_err()
-    );
-    assert!(
-        apply_scope_mutation(
-            &mut app,
-            &commands::ScopedModelsCommand::Move {
-                model: "second".into(),
-                direction: commands::ScopeMove::Up,
-            }
-        )
-        .is_err()
-    );
+    assert!(apply_scope_mutation(
+        &mut app,
+        &commands::ScopedModelsCommand::Enable("nope/*".into())
+    )
+    .is_err());
+    assert!(apply_scope_mutation(
+        &mut app,
+        &commands::ScopedModelsCommand::Move {
+            model: "second".into(),
+            direction: commands::ScopeMove::Up,
+        }
+    )
+    .is_err());
 }
 
 /// 2d.1 / 2d.2 — the active-run path renders both reports immediately and
@@ -390,12 +386,10 @@ async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
     let (queue, quit) = run_active_command(&mut shell, Command::Copy, &inspection).await;
     assert!(queue.is_empty());
     assert!(!quit);
-    assert!(
-        shell
-            .debug_error()
-            .unwrap()
-            .contains("no assistant message")
-    );
+    assert!(shell
+        .debug_error()
+        .unwrap()
+        .contains("no assistant message"));
     assert_eq!(std::fs::read(&inspection.session_path).unwrap(), before);
 }
 
@@ -418,12 +412,10 @@ async fn model_picker_cancel_keeps_the_narrowed_launch_catalog() {
         .await
         .unwrap();
     let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-    assert!(
-        open_model_picker(&mut app, &mut shell, &mut input)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(open_model_picker(&mut app, &mut shell, &mut input)
+        .await
+        .unwrap()
+        .is_none());
     assert!(!shell.has_panel());
     assert!(!app.readiness.is_fleet());
     assert_eq!(app.catalog.models().count(), narrowed);
@@ -458,10 +450,9 @@ fn picker_catalog_rejects_an_obsolete_selection() {
         &crate::app::bootstrap::CatalogReadiness::Fleet,
     )
     .unwrap();
-    assert!(
-        !app.apply_picker_catalog(&ModelId("obsolete".into()), catalog, notes)
-            .unwrap()
-    );
+    assert!(!app
+        .apply_picker_catalog(&ModelId("obsolete".into()), catalog, notes)
+        .unwrap());
     assert!(!app.readiness.is_fleet());
     assert_eq!(app.catalog.models().count(), before);
 }

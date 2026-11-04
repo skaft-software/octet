@@ -319,10 +319,8 @@ mod tests {
         );
         let frame = shell.dump_rendered_frame().await.unwrap();
         assert!(frame.len() <= 24);
-        assert!(
-            sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
-                .contains("FAIR-RESOURCE-DRAFT")
-        );
+        assert!(sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
+            .contains("FAIR-RESOURCE-DRAFT"));
 
         let mut input =
             futures_util::stream::poll_fn(|_| -> Poll<Option<std::io::Result<Event>>> {
@@ -522,11 +520,10 @@ mod tests {
             Some(&vec!["ctrl+q".to_owned()]),
             "the live input owner must dispatch the contributed binding"
         );
-        assert!(
-            app.agent
-                .system_prompt()
-                .contains("SESSION-CONTEXT-SENTINEL")
-        );
+        assert!(app
+            .agent
+            .system_prompt()
+            .contains("SESSION-CONTEXT-SENTINEL"));
         // Withdrawal restores the user's own map and the baseline prompt.
         std::fs::write(root.join("reply.json"), "{}").unwrap();
         app.mark_resource_paths_reload();
@@ -539,11 +536,10 @@ mod tests {
             Some(&vec!["ctrl+q".to_owned()]),
             "a withdrawn session override must not survive"
         );
-        assert!(
-            !app.agent
-                .system_prompt()
-                .contains("SESSION-CONTEXT-SENTINEL")
-        );
+        assert!(!app
+            .agent
+            .system_prompt()
+            .contains("SESSION-CONTEXT-SENTINEL"));
         process.shutdown().await;
     }
 }

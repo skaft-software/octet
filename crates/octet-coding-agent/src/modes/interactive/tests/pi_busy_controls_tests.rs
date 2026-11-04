@@ -7,8 +7,8 @@ use super::*;
 async fn pi_busy_model_controls_queue_without_mutating_the_active_request() {
     use super::support::{scripted_model, text_turn};
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
     for (retained, retire) in [(false, false), (true, false), (false, true)] {
         let server = MockServer::start().await;
@@ -153,8 +153,8 @@ async fn pi_busy_qualified_thinking_applies_once_at_response_boundary() {
     use super::support::fast_response;
     use super::thinking_and_consent_controls_tests::reasoning_control_model;
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -255,14 +255,13 @@ export default pi => {
             "wire baseline is immutable"
         );
     }
-    assert!(
-        bodies[1]["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["type"] == "configuration_update"
-                && item["reasoning"]["effort"] == "high")
-    );
+    assert!(bodies[1]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |item| item["type"] == "configuration_update" && item["reasoning"]["effort"] == "high"
+        ));
     assert_eq!(
         app.agent
             .session()
@@ -285,8 +284,8 @@ export default pi => {
 async fn pi_busy_hook_keeps_slash_and_picker_controls_visible_and_theme_immediate() {
     use super::support::{scripted_model, text_turn, theme_picker_key};
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
     for picker in [false, true] {
         let server = MockServer::start().await;

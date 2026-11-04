@@ -14,38 +14,38 @@ use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
 #[cfg(windows)]
 use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]
-use octet_agent::extension_process::{BashProcessLaunch, wait_for_bash_process};
+use octet_agent::extension_process::{wait_for_bash_process, BashProcessLaunch};
 use octet_agent::extension_process::{
     ExtensionInputRequest, ExtensionSessionLifecycleError, ExtensionSessionLifecycleOperation,
     ExtensionSessionLifecycleRequest, MAX_EXTENSION_TERMINAL_INPUT_BYTES,
 };
 use octet_agent::{
-    AgentCompactionMode, AgentError, AgentEvent, EffectBroker, EffectIntent, EntryId, GoalDecision,
-    GoalStatus, GoalTurnSource, OutputChannel, Run, RunControl, Session, ToolEffect, ToolProgress,
-    ToolProgressSink, analyze_session_cache_stats,
+    analyze_session_cache_stats, AgentCompactionMode, AgentError, AgentEvent, EffectBroker,
+    EffectIntent, EntryId, GoalDecision, GoalStatus, GoalTurnSource, OutputChannel, Run,
+    RunControl, Session, ToolEffect, ToolProgress, ToolProgressSink,
 };
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
-    Bootstrap, SessionSelection, build_app_first_frame_first,
-    effective_compaction_threshold_fraction, estimate_text_tokens, open_launch_session,
-    rebuild_app_for_reload, resolve_launch_interactive, terminal_goal_session_id,
+    build_app_first_frame_first, effective_compaction_threshold_fraction, estimate_text_tokens,
+    open_launch_session, rebuild_app_for_reload, resolve_launch_interactive,
+    terminal_goal_session_id, Bootstrap, SessionSelection,
 };
 #[cfg(test)]
 use crate::app::bootstrap::{build_app_with_resource_consumer as build_app, rebuild_app};
 use crate::app::{
-    App, Reconfig, apply_reconfig, level_from_reasoning, reasoning_label,
-    requested_thinking_to_reasoning, supported_levels_with_subagents,
+    apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
+    supported_levels_with_subagents, App, Reconfig,
 };
 use crate::commands::{self, Command};
 #[cfg(test)]
 use crate::compaction::attempt_compaction;
-use crate::compaction::{CompactionOutcome, context_window, estimate_next_request_tokens};
+use crate::compaction::{context_window, estimate_next_request_tokens, CompactionOutcome};
 use crate::config::{CompactionMode, Config, ResumeSelector, SandboxPolicy, ThinkingLevel};
 use crate::modes::{HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::RunId;
-use crate::prompts::{RenderedPrompt, render_and_record};
+use crate::prompts::{render_and_record, RenderedPrompt};
 use crate::provider_setup::{
     CompletedSetup, ExistingProviderSummary, ProviderSetupError, ProviderSetupService,
     ProviderSetupState, SetupAuthentication, SetupAuthority, SetupCredentialSummary, SetupDraft,
@@ -55,17 +55,17 @@ use crate::resources::{compose_instructions, expand_skill_command};
 use crate::tui::composer::ComposedInput;
 use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
-    self, SubagentPickerSnapshot, confirmation_picker, extension_confirmation_picker,
-    extension_input_picker, extension_picker, message_picker, optional_model_picker,
-    pick_list_with_preview, provider_setup_picker, read_only_document,
-    read_only_document_live_styled, session_picker, subagent_picker, thinking_picker,
+    self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
+    extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
+    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
+    subagent_picker, thinking_picker, SubagentPickerSnapshot,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
 use crate::tui::theme::{
-    TerminalBackground, TerminalThemeChoice, background_from_terminal_rgb,
-    compiled_file_theme_name, is_reserved_theme_name, load_named_theme_for_background, load_theme,
-    load_theme_for_background, selectable_file_themes,
+    background_from_terminal_rgb, compiled_file_theme_name, is_reserved_theme_name,
+    load_named_theme_for_background, load_theme, load_theme_for_background, selectable_file_themes,
+    TerminalBackground, TerminalThemeChoice,
 };
 use crate::tui::view::{
     InteractiveShell, OrdinarySurfaceMetadata, OverlayInputResult, Panel, PanelAction, PanelResult,
@@ -81,9 +81,9 @@ mod session_tree_menu;
 mod settings_menu;
 
 use extension_menu::{
-    ExtensionMenuOutcome, authority_label, extension_options_menu, install_official_extensions,
+    authority_label, extension_options_menu, install_official_extensions,
     python_runtime_setup_available, set_extension_enabled, set_extension_host_authority,
-    setup_python_runtime,
+    setup_python_runtime, ExtensionMenuOutcome,
 };
 
 /// Ordered controls sent to the frozen Agent during an active run.

@@ -255,11 +255,9 @@ async fn modeless_pi_startup_footer_command_append_and_prompt_refusal() {
     .await
     .unwrap()
     .unwrap();
-    assert!(
-        rows(root.path())
-            .iter()
-            .any(|row| row["command"] == true && row["noModel"] == true)
-    );
+    assert!(rows(root.path())
+        .iter()
+        .any(|row| row["command"] == true && row["noModel"] == true));
     assert_eq!(shell.extension_editor_snapshot().text, "no-provider-draft");
     let durable = std::fs::read_to_string(session.path()).unwrap();
     assert!(durable.contains("no-provider-probe"), "{durable}");
@@ -380,13 +378,11 @@ async fn modeless_pi_resource_reload_withdraws_native_catalog() {
     .await
     .unwrap()
     .unwrap();
-    assert!(
-        state
-            .config
-            .prompt_paths
-            .iter()
-            .any(|path| path.ends_with("resources/prompts"))
-    );
+    assert!(state
+        .config
+        .prompt_paths
+        .iter()
+        .any(|path| path.ends_with("resources/prompts")));
     let entry_id = session
         .append(octet_agent::EntryValue::Config {
             model: None,

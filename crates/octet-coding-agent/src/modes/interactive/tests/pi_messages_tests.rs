@@ -5,11 +5,11 @@
 use super::pi_contract_support::{command, pi_app};
 use super::support::{scripted_model, text_turn};
 use super::*;
-use octet_agent::{UserInput, session::CustomMessage};
-use serde_json::{Value, json};
+use octet_agent::{session::CustomMessage, UserInput};
+use serde_json::{json, Value};
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
 };
 
 async fn app_with_provider(
@@ -414,15 +414,13 @@ async fn native_pi_messages_send_user_image_is_native_media_not_custom_or_text()
     let (_directory, mut app, _server, requests) = app_with_provider(&factory, false).await;
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
-    assert!(
-        wake_for_extension_messages(
-            &mut shell,
-            Some(&mut app.agent),
-            &mut app.executable_extensions
-        )
-        .await
-        .unwrap()
-    );
+    assert!(wake_for_extension_messages(
+        &mut shell,
+        Some(&mut app.agent),
+        &mut app.executable_extensions
+    )
+    .await
+    .unwrap());
     let input = shell.take_ready_follow_up(false).unwrap().into_user_input();
     drive(&mut app, &mut shell, input).await;
     assert_provider_image(&requests.lock().unwrap()[0]);
@@ -441,15 +439,13 @@ async fn native_pi_messages_invalid_image_never_commits_or_emits() {
     let (_directory, mut app, _server, requests) = app_with_provider(factory, false).await;
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
-    assert!(
-        wake_for_extension_messages(
-            &mut shell,
-            Some(&mut app.agent),
-            &mut app.executable_extensions
-        )
-        .await
-        .is_err()
-    );
+    assert!(wake_for_extension_messages(
+        &mut shell,
+        Some(&mut app.agent),
+        &mut app.executable_extensions
+    )
+    .await
+    .is_err());
     assert!(custom_entries(app.agent.session()).is_empty());
     assert!(requests.lock().unwrap().is_empty());
     assert_custom_lifecycle(&app).await;
@@ -478,15 +474,13 @@ export default pi => pi.registerCommand('probe', { handler: () => pi.sendMessage
     .await;
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
-    assert!(
-        wake_for_extension_messages(
-            &mut shell,
-            Some(&mut app.agent),
-            &mut app.executable_extensions
-        )
-        .await
-        .unwrap()
-    );
+    assert!(wake_for_extension_messages(
+        &mut shell,
+        Some(&mut app.agent),
+        &mut app.executable_extensions
+    )
+    .await
+    .unwrap());
     let input = shell
         .take_ready_follow_up(false)
         .expect("custom message must wake without editor input");
@@ -522,15 +516,13 @@ export default pi => {
 "#, false).await;
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
-    assert!(
-        !wake_for_extension_messages(
-            &mut shell,
-            Some(&mut app.agent),
-            &mut app.executable_extensions
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!wake_for_extension_messages(
+        &mut shell,
+        Some(&mut app.agent),
+        &mut app.executable_extensions
+    )
+    .await
+    .unwrap());
     assert!(
         requests.lock().unwrap().is_empty(),
         "context-only idle message must not call the provider"
@@ -612,11 +604,9 @@ export default pi => {{
                 .contains("INRUN_CUSTOM_CONTENT"),
             "{options}"
         );
-        assert!(
-            !captured
-                .iter()
-                .any(|request| request.to_string().contains("INRUN_SECRET"))
-        );
+        assert!(!captured
+            .iter()
+            .any(|request| request.to_string().contains("INRUN_SECRET")));
         if expected_at == 2 {
             assert!(!captured[1].to_string().contains("INRUN_CUSTOM_CONTENT"));
         }

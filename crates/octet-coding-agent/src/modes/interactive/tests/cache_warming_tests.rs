@@ -236,11 +236,9 @@ async fn idle_input_owner_survives_repeated_select_cancellation_and_accounts_ref
     );
     let reopened = Session::open(agent.session().path()).unwrap();
     assert_eq!(exact_cost(&reopened), exact_cost(agent.session()));
-    assert!(
-        !std::fs::read_to_string(reopened.path())
-            .unwrap()
-            .contains("PRIVATE WARM OUTPUT")
-    );
+    assert!(!std::fs::read_to_string(reopened.path())
+        .unwrap()
+        .contains("PRIVATE WARM OUTPUT"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -258,11 +256,9 @@ async fn idle_input_remains_responsive_during_a_pending_refresh_and_mode_off_set
     assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
     agent.set_cache_warming_mode(CacheWarmMode::Off).unwrap();
     assert!(agent.session().has_uncertain_usage());
-    assert!(
-        Session::open(agent.session().path())
-            .unwrap()
-            .has_uncertain_usage()
-    );
+    assert!(Session::open(agent.session().path())
+        .unwrap()
+        .has_uncertain_usage());
 }
 
 #[tokio::test]

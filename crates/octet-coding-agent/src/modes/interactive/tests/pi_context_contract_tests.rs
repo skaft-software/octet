@@ -121,12 +121,10 @@ async fn pi_system_prompt_capability_withdrawal_rebuild_refuses_without_cached_d
         .into_iter()
         .find(|summary| summary.name == "octet-pi-compat")
         .unwrap();
-    assert!(
-        admitted
-            .negotiated_features
-            .iter()
-            .any(|feature| feature == "system_prompt_read")
-    );
+    assert!(admitted
+        .negotiated_features
+        .iter()
+        .any(|feature| feature == "system_prompt_read"));
     let manifest = admitted.manifest_path;
     let granted = std::fs::read_to_string(&manifest).unwrap();
     assert!(granted.contains("system_prompt = true"));
@@ -145,12 +143,10 @@ async fn pi_system_prompt_capability_withdrawal_rebuild_refuses_without_cached_d
         .find(|summary| summary.name == "octet-pi-compat")
         .unwrap();
     assert!(refused.running);
-    assert!(
-        !refused
-            .negotiated_features
-            .iter()
-            .any(|feature| feature == "system_prompt_read")
-    );
+    assert!(!refused
+        .negotiated_features
+        .iter()
+        .any(|feature| feature == "system_prompt_read"));
     command(&mut app, &mut shell, "native-prompt")
         .await
         .unwrap();
@@ -159,12 +155,10 @@ async fn pi_system_prompt_capability_withdrawal_rebuild_refuses_without_cached_d
     assert_eq!(rows[0]["kind"], "prompt");
     assert_eq!(rows[1]["kind"], "refused");
     assert_eq!(rows[1]["code"], -32601);
-    assert!(
-        rows[1]["message"]
-            .as_str()
-            .unwrap()
-            .contains("system_prompt_read")
-    );
+    assert!(rows[1]["message"]
+        .as_str()
+        .unwrap()
+        .contains("system_prompt_read"));
     assert!(rows[1].get("text").is_none());
     assert!(app.agent.session().usage_records().is_empty());
     app.executable_extensions.shutdown().await;
@@ -244,13 +238,12 @@ export default pi => {
 "#,
     );
     let before = app.agent.session().entries().len();
-    assert!(
-        app.executable_extensions
-            .process_input("consume locally".into(), None, "interactive", None)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(app
+        .executable_extensions
+        .process_input("consume locally".into(), None, "interactive", None)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(app.agent.session().entries().len(), before);
     assert_eq!(
         std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),

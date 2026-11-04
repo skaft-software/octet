@@ -8,7 +8,7 @@ use octet_ai::{Media, Modality, ModelId};
 
 use super::Cli;
 use crate::codex_context::{
-    CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW, CodexContextOverride,
+    CodexContextOverride, CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
 };
 use crate::config::{Config, Mode, ResumeSelector};
 use crate::session_store::SessionStore;

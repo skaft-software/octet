@@ -85,13 +85,12 @@ async fn pi_custom_provider_registration_selection_replacement_and_stream_are_na
     assert_eq!(app.model.spec.api_name, "virtual-model");
     assert_eq!(app.agent.model().spec.id, app.model.spec.id);
     assert_eq!(app.agent.session().resource_owner_key(), owner);
-    assert!(
-        app.model
-            .spec
-            .capabilities
-            .input_modalities
-            .contains(Modality::Image)
-    );
+    assert!(app
+        .model
+        .spec
+        .capabilities
+        .input_modalities
+        .contains(Modality::Image));
     assert_eq!(app.model.spec.pricing.as_ref().unwrap().input.0, 1_000_000);
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -130,13 +129,11 @@ async fn pi_custom_provider_registration_selection_replacement_and_stream_are_na
     .await
     .expect("native provider stream admission timed out")
     .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(10), active.next())
-            .await
-            .expect("native provider start event timed out")
-            .unwrap()
-            .is_ok()
-    );
+    assert!(tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("native provider start event timed out")
+        .unwrap()
+        .is_ok());
     command(&mut app, &mut shell, "remove").await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_secs(10), active.next())
@@ -147,11 +144,10 @@ async fn pi_custom_provider_registration_selection_replacement_and_stream_are_na
         "removed native route cannot keep streaming"
     );
     app.synchronize_extension_provider_catalog();
-    assert!(
-        !app.catalog
-            .models()
-            .any(|model| model.api_name == "virtual-model")
-    );
+    assert!(!app
+        .catalog
+        .models()
+        .any(|model| model.api_name == "virtual-model"));
     eprintln!("Pi custom provider: removal cancelled stream");
     app.executable_extensions.shutdown().await;
     eprintln!("Pi custom provider: shutdown complete");
@@ -217,12 +213,11 @@ async fn pi_custom_provider_thinking_map_keeps_exact_choices_and_portable_dispat
             expected.clone(),
         ]
     );
-    assert!(
-        app.executable_extensions
-            .prepare_selected_provider_transport(&app.model)
-            .unwrap()
-            .is_some()
-    );
+    assert!(app
+        .executable_extensions
+        .prepare_selected_provider_transport(&app.model)
+        .unwrap()
+        .is_some());
     let mut request = pi_custom_provider_request();
     request.reasoning = expected;
     tokio::time::timeout(
@@ -321,11 +316,9 @@ async fn pi_model_facts_follow_the_real_host_and_invocation_scope() {
         for model in value["available"].as_array().unwrap() {
             assert!(value["all"].as_array().unwrap().contains(model));
         }
-        assert!(
-            !value["model"]["input"]
-                .to_string()
-                .contains("not-a-native-modality")
-        );
+        assert!(!value["model"]["input"]
+            .to_string()
+            .contains("not-a-native-modality"));
     }
     assert_eq!(values[0]["scoped"], serde_json::json!([]));
     assert_eq!(values[1]["scoped"].as_array().unwrap().len(), 1);
@@ -410,12 +403,10 @@ async fn pi_interactive_model_facts_precede_startup_and_reload() {
                 // Native On is not a portable Pi thinking level. Publishing
                 // facts early must not fabricate an empty scope for it.
                 assert_eq!(row["code"], -32601, "{row}");
-                assert!(
-                    row["error"]
-                        .as_str()
-                        .unwrap()
-                        .contains("unsupported_feature ctx.scopedModels")
-                );
+                assert!(row["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unsupported_feature ctx.scopedModels"));
                 assert!(row.get("scoped").is_none(), "{row}");
                 continue;
             }
@@ -459,7 +450,7 @@ export default pi => {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_idle_model_setters_preserve_the_live_command_and_binding() {
-    use octet_ai::{EndpointId, ModelId, ReasoningEffort, auth::Auth};
+    use octet_ai::{auth::Auth, EndpointId, ModelId, ReasoningEffort};
     // Catalog iteration is unordered. Cover native Responses updates and an
     // ordinary token-budget route explicitly: portable high persists as an
     // effort or an explicit budget, depending on the selected native model.
@@ -885,20 +876,18 @@ export default pi => {
     let client = app
         .client
         .with_provider_request_hooks(vec![Arc::new(CurrentHooks(observations.clone()))]);
-    assert!(
-        client
-            .complete_with_host_options(
-                &app.model,
-                pi_custom_provider_request(),
-                Default::default(),
-                octet_ai::HostRequestOptions {
-                    api_key: Some("native-fixture-secret".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .is_err()
-    );
+    assert!(client
+        .complete_with_host_options(
+            &app.model,
+            pi_custom_provider_request(),
+            Default::default(),
+            octet_ai::HostRequestOptions {
+                api_key: Some("native-fixture-secret".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err());
     assert!(observations.lock().unwrap().is_empty());
     let response = tokio::time::timeout(
         Duration::from_secs(10),
@@ -964,15 +953,13 @@ async fn pi_responses_custom_provider_accepts_equivalent_canonical_replay_but_no
     );
     assert_eq!(response.usage.total_tokens, 3);
     request.responses = Some(octet_ai::ResponsesOptions::full_replay(octet_ai::ResponsesInput::new(vec![octet_ai::ResponsesItem::new(serde_json::json!({"type":"reasoning","encrypted_content":"private-native-state","id":"opaque-item"})).unwrap()])));
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            app.client.complete(&app.model, request)
-        )
-        .await
-        .unwrap()
-        .is_err()
-    );
+    assert!(tokio::time::timeout(
+        Duration::from_secs(10),
+        app.client.complete(&app.model, request)
+    )
+    .await
+    .unwrap()
+    .is_err());
     app.executable_extensions.shutdown().await;
     let trace = std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap();
     assert_eq!(

@@ -11,7 +11,7 @@ use super::support::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resource_reload_activates_replacement_model_driver_before_startup_preflight() {
     use super::pi_contract_support::pi_ui_app;
-    use octet_ai::{EndpointId, ModelId, auth::Auth};
+    use octet_ai::{auth::Auth, EndpointId, ModelId};
 
     let factory = r#"
 import { appendFileSync } from 'node:fs';
@@ -61,12 +61,11 @@ export default pi => {
     .unwrap();
     assert_eq!(app.model.spec.id, spec.id);
     assert_eq!(app.agent.model().spec.id, spec.id);
-    assert!(
-        app.prompts
-            .descriptors()
-            .iter()
-            .any(|value| value.path == prompt)
-    );
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
 
     let (mut app, applied) = tokio::time::timeout(
         Duration::from_secs(20),
@@ -81,12 +80,11 @@ export default pi => {
     assert_eq!(app.agent.session().path(), session);
     assert_eq!(app.agent.session().resource_owner_key(), owner);
     assert!(app.agent.session().usage_records().is_empty());
-    assert!(
-        app.prompts
-            .descriptors()
-            .iter()
-            .any(|value| value.path == prompt)
-    );
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
     let visible = shell.debug_snapshot();
     assert!(!visible.contains("reload failed"), "{visible}");
     assert!(visible.contains("reload succeeded"), "{visible}");
@@ -140,44 +138,34 @@ fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
     }
     reload.checked_problems(ReloadComponent::Host, problem(), false);
     remember_rebuilt_extensions(&mut reload, &before, &after);
-    assert!(
-        !reload
-            .checked_problems(
-                ReloadComponent::Extension("replaced".into()),
-                problem(),
-                false
-            )
-            .is_empty()
-    );
+    assert!(!reload
+        .checked_problems(
+            ReloadComponent::Extension("replaced".into()),
+            problem(),
+            false
+        )
+        .is_empty());
     for name in ["retained", "stopped"] {
-        assert!(
-            reload
-                .checked_problems(ReloadComponent::Extension(name.into()), problem(), false)
-                .is_empty()
-        );
+        assert!(reload
+            .checked_problems(ReloadComponent::Extension(name.into()), problem(), false)
+            .is_empty());
     }
-    assert!(
-        reload
-            .checked_problems(ReloadComponent::Host, problem(), false)
-            .is_empty()
-    );
+    assert!(reload
+        .checked_problems(ReloadComponent::Host, problem(), false)
+        .is_empty());
 }
 
 #[test]
 fn automatic_reload_cannot_prompt_for_binary_or_worker_consent() {
     assert!(!HostPass::ResourcesOnly.may_prompt());
-    assert!(
-        !HostPass::Allowed {
-            redirect_confirmed: false
-        }
-        .may_prompt()
-    );
-    assert!(
-        HostPass::Allowed {
-            redirect_confirmed: true
-        }
-        .may_prompt()
-    );
+    assert!(!HostPass::Allowed {
+        redirect_confirmed: false
+    }
+    .may_prompt());
+    assert!(HostPass::Allowed {
+        redirect_confirmed: true
+    }
+    .may_prompt());
 }
 
 #[test]
@@ -293,11 +281,9 @@ async fn resource_reload_refusal_preserves_worker_owner_and_control() {
             assert_eq!(busy_subagent_workers(&app), 1);
             assert!(process.is_running());
             assert_eq!(process.health_snapshot().generation, generation);
-            assert!(
-                !std::fs::read_to_string(&wire)
-                    .unwrap_or_default()
-                    .contains("shutdown")
-            );
+            assert!(!std::fs::read_to_string(&wire)
+                .unwrap_or_default()
+                .contains("shutdown"));
             assert_eq!(
                 app.executable_extensions
                     .execute_command_without_confirmation("worker-control", Vec::new(),)
@@ -606,11 +592,9 @@ async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_succes
     assert!(pending_reexec.is_none());
     assert!(Arc::ptr_eq(&skills, &app.skills));
     assert!(process.is_running());
-    assert!(
-        !std::fs::read_to_string(wire)
-            .unwrap_or_default()
-            .contains("shutdown")
-    );
+    assert!(!std::fs::read_to_string(wire)
+        .unwrap_or_default()
+        .contains("shutdown"));
     let visible = shell.debug_snapshot();
     assert!(visible.contains("reload refused"), "{visible}");
     assert!(
@@ -731,11 +715,9 @@ async fn same_mode_idle_thinking_preserves_the_existing_terminal_grant_and_proce
         process.is_running(),
         "the same executable instance must survive"
     );
-    assert!(
-        !std::fs::read_to_string(&wire)
-            .unwrap_or_default()
-            .contains("shutdown")
-    );
+    assert!(!std::fs::read_to_string(&wire)
+        .unwrap_or_default()
+        .contains("shutdown"));
     app.executable_extensions
         .revoke_terminal_grant_for_shell(&mut shell, "test shutdown");
     app.executable_extensions.shutdown().await;

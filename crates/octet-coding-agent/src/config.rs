@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    CacheWarmMode, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES, EffectPolicy,
-    EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
+    DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 
 pub use crate::tui::terminal::ColorMode;
@@ -1023,11 +1023,9 @@ mod tests {
         }
         assert!(policy.explicit_names().is_none());
         assert!(!policy.enabled("powershell"));
-        assert!(
-            ToolPolicy::only(["powershell".to_owned()])
-                .unwrap()
-                .enabled("powershell")
-        );
+        assert!(ToolPolicy::only(["powershell".to_owned()])
+            .unwrap()
+            .enabled("powershell"));
         assert!(!policy.names().any(|name| name == "search"));
         assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
         // Removal from the built-in inventory does not reserve an extension

@@ -73,13 +73,11 @@ export default pi => {
     assert_eq!(traces.len(), 2, "both initial and reloaded owners must run");
     for trace in traces {
         assert_eq!(trace["selected"], serde_json::json!(["optional"]));
-        assert!(
-            trace["late"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|name| name == "lateTool")
-        );
+        assert!(trace["late"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "lateTool"));
     }
     let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
     assert_eq!(
@@ -307,7 +305,7 @@ impl octet_agent::EventObserver for CapturePiToolExecution {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_tool_context_outcomes_and_partial_details_media() {
     use super::support::{scripted_model, text_turn};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
@@ -455,11 +453,9 @@ export default pi => {
     assert_eq!(trace["unknown"]["toolCall"]["id"], "native-outer/4");
     assert_eq!(trace["success"]["toolCall"]["arguments"]["count"], 2);
     assert!(trace["success"]["result"]["structuredContent"].is_null());
-    assert!(
-        trace["omitted"]["result"]
-            .get("structuredContent")
-            .is_none()
-    );
+    assert!(trace["omitted"]["result"]
+        .get("structuredContent")
+        .is_none());
     let observed = observed.lock().unwrap();
     let partials = observed
         .iter()
@@ -489,11 +485,9 @@ export default pi => {
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(!requests[1].to_string().contains("leaf-private"));
-    assert!(
-        std::fs::read_to_string(app.agent.session().path())
-            .unwrap()
-            .contains("\"outerTool\"")
-    );
+    assert!(std::fs::read_to_string(app.agent.session().path())
+        .unwrap()
+        .contains("\"outerTool\""));
     let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
     assert_eq!(
         reopened.entries().len(),
@@ -572,14 +566,13 @@ export default pi => {
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();
     retained_snapshot(&mut app, &mut shell, directory.path(), "a").await;
-    assert!(
-        app.agent
-            .session()
-            .resolve_active_skills(&app.agent.session().head().unwrap())
-            .unwrap()
-            .active_skills
-            .is_empty()
-    );
+    assert!(app
+        .agent
+        .session()
+        .resolve_active_skills(&app.agent.session().head().unwrap())
+        .unwrap()
+        .active_skills
+        .is_empty());
     std::fs::write(directory.path().join("phase"), "b").unwrap();
     app.mark_resource_paths_reload();
     command(&mut app, &mut shell, "probe").await.unwrap();

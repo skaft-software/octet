@@ -26,7 +26,7 @@ use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches};
 use octet_agent::extension_process::{ExtensionFlag, ExtensionFlagType};
 
 use super::{
-    Cli, ExtensionFlagValues, build_config_with_global_path_and_diagnostics, global_config_path,
+    build_config_with_global_path_and_diagnostics, global_config_path, Cli, ExtensionFlagValues,
 };
 use crate::config::Config;
 

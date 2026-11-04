@@ -176,12 +176,10 @@ export default pi => pi.on('session_start', (_, ctx) => {
     );
     // Suppressing our own exact write must not hide a subsequent external edit.
     std::fs::write(&path, "theme = 'pi'\nshow_images = false\n").unwrap();
-    assert!(
-        reload
-            .observe(
-                now + Duration::from_secs(2),
-                &watcher.scan(&crate::reload::SystemMetadata, 32),
-            )
-            .anything_changed()
-    );
+    assert!(reload
+        .observe(
+            now + Duration::from_secs(2),
+            &watcher.scan(&crate::reload::SystemMetadata, 32),
+        )
+        .anything_changed());
 }

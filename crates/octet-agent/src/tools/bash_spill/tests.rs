@@ -3,7 +3,7 @@
 //! Separate from `bash_spill.rs` so the spill module stays a readable
 //! description of the spill file format and its ownership rules.
 use super::super::{
-    Capture, OutputStream, ToolProgressSink, read_bounded_with_spill_limit, rebalance_captures,
+    read_bounded_with_spill_limit, rebalance_captures, Capture, OutputStream, ToolProgressSink,
 };
 use super::*;
 use std::pin::Pin;

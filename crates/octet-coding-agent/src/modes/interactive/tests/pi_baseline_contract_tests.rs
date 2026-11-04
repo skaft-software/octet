@@ -5,7 +5,7 @@
 use super::pi_contract_support::{command, pi_app};
 use super::support::{scripted_model, seed_compaction_session};
 use super::*;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn private_entries(session: &Session, kind: &str) -> Vec<(EntryId, Value)> {
     session
@@ -309,16 +309,14 @@ export default pi => {
     assert_eq!(observed.len(), 1);
     assert_eq!(states[0].1, json!({"value": 17}));
     let data = &observed[0].1;
-    assert_eq!(data["state"]["id"], states[0].0.0);
+    assert_eq!(data["state"]["id"], states[0].0 .0);
     assert_eq!(data["state"]["data"], states[0].1);
     assert_eq!(data["state"], data["byId"]);
-    assert!(
-        data["branchIds"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(states[0].0.0))
-    );
-    assert_eq!(data["leaf"], states[0].0.0);
+    assert!(data["branchIds"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(states[0].0 .0)));
+    assert_eq!(data["leaf"], states[0].0 .0);
     assert_eq!(data["file"], reopened.path().to_string_lossy().as_ref());
     assert_eq!(
         data["session"],

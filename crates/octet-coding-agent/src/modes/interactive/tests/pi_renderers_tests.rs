@@ -10,7 +10,7 @@ use octet_ai::{
     ToolCallId, Usage,
 };
 use octet_tern::wire::{Kind, Node};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const CALL_ID: &str = "renderer-read-call";
 const READ_PATH: &str = "renderer-source.txt";
@@ -476,11 +476,9 @@ async fn native_pi_renderers_real_app_presentation_persistence_invalidation_resi
     assert_eq!(latest(&initial, "result")["toolCallId"], CALL_ID);
     assert_eq!(latest(&initial, "result")["options"]["isPartial"], false);
     assert_eq!(latest(&initial, "result")["result"]["isError"], false);
-    assert!(
-        latest(&initial, "result")["result"]["content"]
-            .to_string()
-            .contains("SOURCE_TOOL")
-    );
+    assert!(latest(&initial, "result")["result"]["content"]
+        .to_string()
+        .contains("SOURCE_TOOL"));
     assert_eq!(latest(&initial, "markdown")["text"], SOURCE_ASSISTANT);
     assert_eq!(
         latest(&initial, "markdown")["context"]["messageType"],
@@ -495,12 +493,10 @@ async fn native_pi_renderers_real_app_presentation_persistence_invalidation_resi
     for marker in PRESENTATIONS {
         assert!(!String::from_utf8_lossy(&durable).contains(marker));
     }
-    assert!(
-        initial
-            .iter()
-            .filter(|event| event["kind"] == "message")
-            .all(|event| event["message"]["display"] == true)
-    );
+    assert!(initial
+        .iter()
+        .filter(|event| event["kind"] == "message")
+        .all(|event| event["message"]["display"] == true));
 
     // Repainting either native frontend consumes snapshots, never renderer RPC.
     let count = trace(directory.path()).len();

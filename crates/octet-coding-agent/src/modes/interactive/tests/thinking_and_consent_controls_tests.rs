@@ -135,11 +135,9 @@ fn thinking_cycle_stays_instant_during_lifecycle_waits_including_ultra() {
             format!("{} (queued)", reasoning_label(expected))
         );
         assert_eq!(shell.pending(), "unsent draft");
-        assert!(
-            !shell
-                .debug_snapshot()
-                .contains("draft kept for the next prompt")
-        );
+        assert!(!shell
+            .debug_snapshot()
+            .contains("draft kept for the next prompt"));
         // A background status refresh must not rewind the cycle cursor.
         shell.set_thinking_cycle(
             "session:model".into(),
@@ -248,18 +246,14 @@ async fn deferred_thinking_revalidates_availability_at_the_safe_boundary() {
     assert_eq!(app.agent.session().head_ref(), head.as_ref());
     assert!(shell.take_deferred_thinking().is_none());
     assert_eq!(shell.selected_identity().1, reasoning_label(&app.reasoning));
-    assert!(
-        shell
-            .debug_error()
-            .unwrap()
-            .contains("selected thinking level is no longer available · prompt not sent")
-    );
+    assert!(shell
+        .debug_error()
+        .unwrap()
+        .contains("selected thinking level is no longer available · prompt not sent"));
     assert_eq!(shell.pending(), "must not send after a failed selection");
-    assert!(
-        shell
-            .take_thinking_submission(&thinking_selection_owner(&app), &original)
-            .is_none()
-    );
+    assert!(shell
+        .take_thinking_submission(&thinking_selection_owner(&app), &original)
+        .is_none());
     assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
@@ -1020,14 +1014,12 @@ async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
             bodies[1]["reasoning"]["effort"], "none",
             "wire baseline stays pinned"
         );
-        assert!(
-            bodies[1]["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["type"] == "configuration_update"
-                    && item["reasoning"]["effort"] == "high")
-        );
+        assert!(bodies[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "configuration_update"
+                && item["reasoning"]["effort"] == "high"));
     }
 }
 
@@ -1140,11 +1132,9 @@ async fn idle_thinking_rejection_preserves_session_and_startup_preference() {
         assert_eq!(app.agent.reasoning(), &reasoning);
         assert_eq!(app.agent.session().path(), session);
         assert_eq!(app.agent.delegation_team_directory(), Some(team.as_path()));
-        assert!(
-            std::fs::read_to_string(&preference)
-                .unwrap()
-                .contains(level.label())
-        );
+        assert!(std::fs::read_to_string(&preference)
+            .unwrap()
+            .contains(level.label()));
     }
 }
 
@@ -1521,24 +1511,20 @@ async fn ordinary_chat_idle_thinking_is_durable_and_controls_the_next_request() 
     assert_eq!(app.agent.reasoning(), &high);
     assert!(!app.model.responses_features().reasoning_effort_updates);
     let before = std::fs::read(&session).unwrap();
-    assert!(
-        select_idle_thinking(
-            &mut app,
-            ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
-        )
-        .is_err()
-    );
+    assert!(select_idle_thinking(
+        &mut app,
+        ReasoningConfig::Effort(octet_ai::ReasoningEffort::Medium)
+    )
+    .is_err());
     assert_eq!(std::fs::read(&session).unwrap(), before);
     let saved = Session::open_read_only(&session).unwrap();
     assert!(saved.entries().iter().rev().any(|entry| matches!(
         &entry.value, EntryValue::Config { reasoning: Some(level), .. } if level == "high"
     )));
-    assert!(
-        !saved
-            .entries()
-            .iter()
-            .any(|entry| matches!(&entry.value, EntryValue::ResponsesReasoning { .. }))
-    );
+    assert!(!saved
+        .entries()
+        .iter()
+        .any(|entry| matches!(&entry.value, EntryValue::ResponsesReasoning { .. })));
     drop(saved);
     // Exercise the independent resume reader, not just the in-memory producer.
     let (_resume_workspace, mut resumed) = crate::compaction::tests::app_for_estimate();
