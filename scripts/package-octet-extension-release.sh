@@ -95,6 +95,7 @@ python3 - \
     "$source_date_epoch" \
     "$tracked_manifest" \
     "$dependency_directory" <<'PY'
+import ast
 import gzip
 import json
 import os
@@ -199,6 +200,44 @@ files = [
     ))
 ]
 
+if package_id == "octet-voice":
+    # The standalone project owns a smaller, reviewed runtime allowlist than
+    # its full source/test snapshot. Read its literal constants without running
+    # extension or builder code; every selected file must also be tracked.
+    builder = source / "build-package.py"
+    if builder not in files or builder.is_symlink() or not builder.is_file():
+        raise SystemExit("voice release requires its tracked package builder")
+    tree = ast.parse(builder.read_text(encoding="utf-8"), filename=str(builder))
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in ("FILES", "SDK_FILES"):
+                if name in constants:
+                    raise SystemExit(f"duplicate voice package allowlist: {name}")
+                constants[name] = ast.literal_eval(node.value)
+    if set(constants) != {"FILES", "SDK_FILES"} or any(
+        not isinstance(values, tuple) or not all(isinstance(value, str) for value in values)
+        for values in constants.values()
+    ):
+        raise SystemExit("invalid voice package allowlist")
+    allowed = list(constants["FILES"]) + [
+        f"vendor/octet_extension/{name}" for name in constants["SDK_FILES"]
+    ]
+    if len(set(allowed)) != len(allowed) or any(
+        not name or pathlib.PurePosixPath(name).is_absolute()
+        or pathlib.PurePosixPath(name).as_posix() != name
+        or any(part in (".", "..") for part in pathlib.PurePosixPath(name).parts)
+        or "\\" in name for name in allowed
+    ):
+        raise SystemExit("invalid voice package allowlist path")
+    available = {path.relative_to(source).as_posix(): path for path in files}
+    if not set(allowed).issubset(available):
+        raise SystemExit("voice package allowlist contains missing or untracked files")
+    files = [available[name] for name in allowed]
+    # Match the standalone builder byte-for-byte, independently of host commit time.
+    epoch = 0
+
 if not files:
     raise SystemExit("extension source has no files")
 file_roots = {path: source for path in files}
@@ -298,7 +337,7 @@ with archive.open("wb") as raw:
                 info = tarfile.TarInfo(f"{package_id}/{relative.as_posix()}")
                 info.size = metadata.st_size
                 is_entrypoint = local_entrypoint is not None and relative.as_posix() == local_entrypoint.as_posix()
-                info.mode = 0o755 if metadata.st_mode & 0o111 or is_entrypoint else 0o644
+                info.mode = 0o755 if is_entrypoint or (package_id != "octet-voice" and metadata.st_mode & 0o111) else 0o644
                 info.mtime = epoch
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""

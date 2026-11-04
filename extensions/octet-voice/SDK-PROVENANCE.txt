@@ -1,0 +1,13 @@
+Vendored source: octet Python extension SDK, version 0.10.0.
+Upstream: https://github.com/skaft-software/octet/tree/47389ad1/sdk/python/octet_extension
+License: MIT; retained in SDK-LICENSE.
+
+This snapshot includes generic SDK changes for explicit provider
+credential/message-injection/remote-ui negotiation, static shortcuts, bounded
+reverse-request timeouts, explicit cancellation events, independently bounded
+observational UI events, and a fail-closed teardown notification lane. The SDK
+files match octet PR #639 head f51fe29aeac328ebf6047f4767dfeb5e575b5273; final
+release qualification must verify the actual host source. It is not an unchanged
+base-47389ad1 release. The complete reviewed source is in
+vendor/octet_extension; provider-free regression fixtures are in tests/sdk.
+No credentials, private configuration, binaries, or Python environment are vendored.

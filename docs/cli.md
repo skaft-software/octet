@@ -281,7 +281,7 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The six executable bundles are pinned exactly to the
+The seven executable bundles are pinned exactly to the
 running host: 0.10.0 bundles require `=0.10.0`. See the
 [0.10.0 release notes](releases/v0.10.0.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
@@ -295,7 +295,7 @@ octet extension remove NAME
 ```
 
 The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
-`octet-pi-compat`, `octet-subagents` and `octet-web-search`. See
+`octet-pi-compat`, `octet-subagents`, experimental `octet-voice` and `octet-web-search`. See
 [Pi compatibility](pi-compatibility.md) for adapter setup. Checksummed bundles are validated in staging
 before publication under `~/.octet/extensions/<id>`, and a local update must match
 the managed package ID. Linux/macOS updates use atomic directory exchange;

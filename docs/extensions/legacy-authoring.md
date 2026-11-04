@@ -10,7 +10,7 @@ wires or make every low-level service a supported coding-product feature.
 **Identity boundary:** octet 0.10.0 source uses only octet first-party names,
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
-The Python/TypeScript source SDK distributions and six bundles
+The Python/TypeScript source SDK distributions and seven bundles
 are version `0.10.0`; the independent Rust SDK stays `0.8.2` and examples keep
 their own versions. Native publication does not publish SDK registries; see
 [installation and availability](../installation.md).
@@ -799,8 +799,9 @@ requires_octet = "=0.10.0"
 `requires_octet` is optional for unpackaged local copies but enforced when
 present. Installed bundles require an exact match to the running octet version.
 The first-party catalog is `octet-codemode`,
-`octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, and `octet-web-search`.
-The six manifests declare API `0.4`; their exact host pins still apply.
+`octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`,
+experimental `octet-voice`, and `octet-web-search`.
+The seven manifests declare API `0.4`; their exact host pins still apply.
 
 For catalog installation:
 

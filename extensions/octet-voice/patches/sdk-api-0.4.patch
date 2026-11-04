@@ -1,0 +1,2143 @@
+diff --git a/sdk/python/README.md b/sdk/python/README.md
+index 0ab87376..e8095633 100644
+--- a/sdk/python/README.md
++++ b/sdk/python/README.md
+@@ -327,6 +327,107 @@ local; provider I/O remains host-owned. API `0.1`/`0.2`/`0.3` cannot register th
+ hook. See the [runnable local example](../../examples/extensions/cache-warming/README.md)
+ and [host contract](../../docs/extensions.md#cache-warming-decision-advice-api-04).
+
++## Static shortcuts and optional host services
++
++API `0.2`/`0.4` static shortcuts use the manifest, not runtime shortcut
++registration. Declare the full binding:
++
++```toml
++[contributes]
++shortcuts = [{ name = "voice-mute", key = "ctrl+shift+m", description = "Mute voice" }]
++```
++
++Register exactly one handler per declared name (no extra handlers):
++
++```python
++@ext.shortcut(name="voice-mute")
++def mute(context):
++    ext.cancellation.raise_if_cancelled()
++    return "Muted"
++```
++
++The signature is `@ext.shortcut(name=..., description=None)` with a synchronous
++`handler(context)` (or no-argument handler). Optional decorator `description`
++must exactly match the manifest. Initialization echoes the complete manifest
++bindings in order; missing, duplicate, malformed or mismatched declarations fail.
++`shortcut/execute` supplies `{name, context}`, with no arguments array. Results
++use the command shape: return text, `None`, or `{text, notifications, context}`.
++Ordinary request IDs, owner context and cooperative cancellation apply. This
++selects neither runtime `shortcuts` nor `lifecycle_events_v2`. API `0.1` rejects
++shortcut registration at initialization.
++
++`message_injection` and `provider_credentials` are supported only through explicit
++`supported_features` selection; they are not selected by the default SDK feature
++set. Include the required base features, for example:
++
++```python
++ext = Extension(api_version="0.4", supported_features=[
++    "request_cancellation", "content_parts", "message_injection", "provider_credentials",
++])
++
++# Inside an owner-scoped handler, after checking ext.negotiated_features:
++ext.request("session/send_user_message", {
++    "text": "Please inspect the failing test", "resource_owner": context["resource_owner"],
++}, operation_scoped=True, timeout=5.0)
++ext.request("provider/credentials", {
++    "provider": "openai", "model": "gpt-4o",
++    "resource_owner": context["resource_owner"],
++}, operation_scoped=True, timeout=5.0)
++```
++
++`ext.request(..., timeout=None)` retains the unbounded-wait default. A positive,
++finite timeout uses a monotonic deadline covering queue admission, writing and the
++reply wait. Expiry raises `TimeoutError` without retrying: an unwritten request is
++suppressed, while an already-started write is ambiguous and queues one ordered
++`$/cancelRequest`. If the bounded cancellation lane is full or fails, the SDK
++fails closed. Cancellation is not rollback; a timed-out operation may already have
++committed. Use finite waits for background callbacks so a blocked writer or missing
++host reply cannot strand a worker. An optional `cancellation_event=threading.Event()`
++adds caller-controlled cancellation with the same unwritten/started distinction;
++an already-set event raises `CancelledError` without sending. Parent cancellation
++and timeouts still apply; a response already received can win the race.
++
++Only offered features are selected. Credential access additionally requires the
++reviewed manifest `[capabilities].provider_credentials = true` and host admission;
++never log or persist credential replies. Raw `ext.request` does not enforce
++service-specific feature/parameter gates: the host remains authoritative.
++During a handler it automatically correlates `parent_request_id`. For a deferred
++callback, retain the original issued owner and numeric request ID, pass the owner
++in params and `parent_request_id=original_id` explicitly; never invent either.
++Owner retirement, cancellation and process replacement may refuse the call.
++See the [wire reference](../../docs/extensions/PROTOCOL-REFERENCE.md) for injection
++bounds, credential admission and retained-owner semantics.
++
++## Remote UI snapshots (API `0.4`)
++
++Opt into `"remote_ui"` explicitly in `supported_features` (not selected by default).
++Check negotiation before opening an owner-scoped surface with `ext.request("ui/open", ...)`.
++Publish cached styled line snapshots with `ext.publish_ui_frame(params)`; this
++helper refuses unnegotiated use. Painting never calls back into Python. The host
++validates owner, surface identity, increasing revision, geometry and checked SGR.
++
++`@ext.on_ui_event("ui/resize")` and `@ext.on_ui_event("ui/closed")` receive dict
++payloads through bounded worker lanes; `ui/key`, `ui/mouse`,
++`ui/editor-text` and `context/updated` are also supported. Ordinary observations
++share request admission. Critical `ui/closed` and `session/settled` observations
++instead share an independent, single-worker teardown lane with at most
++`max_pending_requests` outstanding handlers (running plus queued). If that lane
++fills, the SDK stops admission, cancels active requests, fails pending host waits,
++and invokes `@ext.on_shutdown` with `{"reason": "teardown_overflow"}` rather than
++silently losing retirement. Cleanup must release devices and stop publishers
++promptly; `run()` stops waiting for this hook after
++`shutdown_timeout + cancellation_grace`, so a stalled hook cannot strand the
++protocol loop. Resize handlers run in arrival order; a full resize admission lane
++or a failed resize handler also fails closed because the host may have discarded
++the old frame. Failure diagnostics are best-effort and cannot delay the shutdown
++hook when stderr is blocked. Teardown handlers may run concurrently with ordinary
++observations, so protect shared state and fence retired owners. Handlers are
++synchronous, feature-gated, and do not acquire an ambient request ID. Stop publishers on close;
++retain exact host-issued owner/request identities for deferred requests. Do not
++block a media/event loop on frame output or let frame timers write terminal bytes.
++See [remote UI](../../docs/extensions/remote-ui.md) for the complete mount, frame,
++focus, resize and retirement contract.
++
+ ## Bounded event bus
+
+ `octet_extension.event_bus` carries the bounded, extension-scoped bus contract:
+diff --git a/sdk/python/octet_extension/extension.py b/sdk/python/octet_extension/extension.py
+index 6f9e917c..badb7b16 100644
+--- a/sdk/python/octet_extension/extension.py
++++ b/sdk/python/octet_extension/extension.py
+@@ -7,6 +7,7 @@ import contextvars
+ import hashlib
+ import inspect
+ import json
++import math
+ import os
+ import queue
+ import threading
+@@ -69,7 +70,13 @@ API_V02_FEATURES = (
+     "secrets",
+     "compaction_strategy",
+     "cache_warming_decision",
++    "message_injection",
++    "provider_credentials",
++    "remote_ui",
+ )
++_EXPLICIT_FEATURES = frozenset({"message_injection", "provider_credentials", "remote_ui"})
++_TEARDOWN_METHODS = frozenset({"session/settled", "ui/closed"})
++_REMOTE_UI_EVENTS = frozenset({"ui/key", "ui/mouse", "ui/resize", "ui/closed", "ui/editor-text", "context/updated"})
+ LIFECYCLE_METHODS = (
+     "session/started",
+     "session/settled",
+@@ -317,6 +324,12 @@ class _Command:
+     handler: Handler
+
+
++@dataclass
++class _Shortcut:
++    description: Optional[str]
++    handler: Handler
++
++
+ @dataclass
+ class _PendingResponse:
+     event: threading.Event = field(default_factory=threading.Event)
+@@ -335,8 +348,32 @@ class _PendingResponse:
+ @dataclass
+ class _WriteItem:
+     message: Mapping[str, Any]
++    deadline: Optional[float] = None
++    cancellation_event: Optional[threading.Event] = None
++    cancellation: Optional[CancellationToken] = None
++    cancellation_not_before: Optional[float] = None
++    pending: Optional[_PendingResponse] = None
++    cancel_for: Optional["_WriteItem"] = None
+     done: threading.Event = field(default_factory=threading.Event)
++    lock: threading.Lock = field(default_factory=threading.Lock)
+     error: Optional[BaseException] = None
++    started: bool = False
++    abandoned: bool = False
++
++    def interruption(self) -> Optional[tuple[bool, str]]:
++        if (self.cancellation is not None and self.cancellation.cancelled
++                and (self.cancellation_not_before is None or time.monotonic() >= self.cancellation_not_before)):
++            return False, self.cancellation.reason or "parent_cancelled"
++        if self.cancellation_event is not None and self.cancellation_event.is_set():
++            return False, "cancelled"
++        if self.deadline is not None and time.monotonic() >= self.deadline:
++            return True, "timeout"
++        return None
++
++    def wait_interval(self) -> float:
++        if self.deadline is None:
++            return 0.05
++        return min(0.05, max(0.0, self.deadline - time.monotonic()))
+
+
+ @dataclass(frozen=True)
+@@ -365,15 +402,21 @@ def _protocol_stream(stream: Any) -> Any:
+
+
+ class _SerializedWriter:
+-    """One bounded queue and one stdout owner for complete JSON-RPC frames."""
++    """One bounded FIFO and one stdout owner for complete JSON-RPC frames."""
+
+     _STOP = object()
+
+-    def __init__(self, transport: JsonRpcTransport, capacity: int) -> None:
++    def __init__(self, transport: JsonRpcTransport, capacity: int,
++                 on_cancel_failure: Callable[[], None]) -> None:
+         if capacity <= 0:
+             raise ValueError("writer_queue_size must be greater than zero")
+         self._transport = transport
+-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=capacity)
++        self._on_cancel_failure = on_cancel_failure
++        # Reserve a bounded cancellation lane and one stop slot, while keeping
++        # all frames in a single FIFO. Ordinary sends retain their existing bound.
++        self._queue: queue.Queue[Any] = queue.Queue(maxsize=2 * capacity + 1)
++        self._ordinary_slots = threading.BoundedSemaphore(capacity)
++        self._cancel_slots = threading.BoundedSemaphore(capacity)
+         self._closed = threading.Event()
+         self._failure: Optional[BaseException] = None
+         self._thread = threading.Thread(
+@@ -387,52 +430,105 @@ class _SerializedWriter:
+
+     def send(self, message: Mapping[str, Any]) -> None:
+         item = _WriteItem(message)
+-        while True:
++        self.enqueue(item, lambda: False)
++        self.wait(item, lambda: False)
++
++    def enqueue(self, item: _WriteItem, stop: Callable[[], bool]) -> bool:
++        while not stop():
+             if self._closed.is_set():
+                 raise self._closed_error()
+-            try:
+-                self._queue.put(item, timeout=0.05)
+-                break
+-            except queue.Full:
+-                continue
+-        while not item.done.wait(0.05):
+-            if self._closed.is_set() and self._failure is not None:
++            if self._ordinary_slots.acquire(timeout=item.wait_interval()):
++                if stop() or self._closed.is_set():
++                    self._ordinary_slots.release()
++                    if self._closed.is_set() and not stop():
++                        raise self._closed_error()
++                    return False
++                self._queue.put_nowait(item)
++                return True
++        return False
++
++    def wait(self, item: _WriteItem, stop: Callable[[], bool]) -> None:
++        while not stop():
++            if item.done.wait(item.wait_interval()):
++                if item.error is not None:
++                    raise item.error
++                return
++            if self._closed.is_set():
+                 raise self._closed_error()
+-        if item.error is not None:
+-            raise item.error
++
++    def abandon(self, item: _WriteItem, reason: Optional[str] = None) -> bool:
++        """Suppress an unwritten request or queue one ordered cancellation.
++
++        Once the writer has claimed a frame its outcome is ambiguous; never
++        interrupt or retry that write. A separate bounded reservation means the
++        caller need not wait for stdout to make room for its cancellation.
++        """
++        with item.lock:
++            if not item.started:
++                item.abandoned = True
++                return True
++            if reason is None or item.error is not None:
++                return True
++            if self._closed.is_set() or not self._cancel_slots.acquire(blocking=False):
++                return False
++            cancellation = _WriteItem({
++                "jsonrpc": "2.0", "method": "$/cancelRequest",
++                "params": {"id": item.message["id"], "reason": reason},
++            }, cancel_for=item)
++            self._queue.put_nowait(cancellation)
++            return True
++
++    def abort(self) -> None:
++        # An in-progress transport write must finish (or fail) on its own.
++        # No later queued frame is written after that point.
++        self._closed.set()
+
+     def close(self) -> None:
+         if self._closed.is_set():
+             return
+-        while True:
+-            try:
+-                self._queue.put(self._STOP, timeout=0.05)
+-                break
+-            except queue.Full:
+-                if self._closed.is_set():
+-                    return
++        self._queue.put_nowait(self._STOP)
+         self._thread.join(timeout=2.0)
+         self._closed.set()
+
+     def _run(self) -> None:
+         try:
+-            while True:
+-                item = self._queue.get()
++            while not self._closed.is_set():
++                try:
++                    item = self._queue.get(timeout=0.05)
++                except queue.Empty:
++                    continue
+                 if item is self._STOP:
+                     return
+                 assert isinstance(item, _WriteItem)
++                (self._cancel_slots if item.cancel_for is not None else self._ordinary_slots).release()
++                with item.lock:
++                    if (self._closed.is_set() or item.abandoned or item.interruption() is not None
++                            or (item.pending is not None and item.pending.error is not None)
++                            or (item.cancel_for is not None and item.cancel_for.error is not None)):
++                        item.abandoned = True
++                        item.done.set()
++                        continue
++                    # Claiming the item is the write-start boundary. The caller
++                    # can now return, but only this thread may finish the frame.
++                    item.started = True
+                 try:
+                     self._transport.send(item.message)
+                 except ProtocolError as error:
+-                    # A locally invalid/oversized frame is rejected without
+-                    # sacrificing an otherwise healthy persistent stream.
++                    # A locally invalid/oversized frame does not damage stdout.
+                     item.error = error
+                     item.done.set()
++                    if item.cancel_for is not None:
++                        self._closed.set()
++                        self._on_cancel_failure()
++                        return
+                     continue
+                 except BaseException as error:
+                     item.error = error
+                     self._failure = error
+                     item.done.set()
++                    if item.cancel_for is not None:
++                        self._closed.set()
++                        self._on_cancel_failure()
+                     return
+                 item.done.set()
+         finally:
+@@ -443,6 +539,7 @@ class _SerializedWriter:
+                 except queue.Empty:
+                     break
+                 if isinstance(pending, _WriteItem):
++                    (self._cancel_slots if pending.cancel_for is not None else self._ordinary_slots).release()
+                     pending.error = self._closed_error()
+                     pending.done.set()
+
+@@ -495,27 +592,37 @@ class Extension:
+         self.writer_queue_size = writer_queue_size
+         self.shutdown_timeout = shutdown_timeout
+         self.cancellation_grace = cancellation_grace
+-        selected_features = API_V02_FEATURES if supported_features is None else supported_features
++        selected_features = (
++            tuple(feature for feature in API_V02_FEATURES if feature not in _EXPLICIT_FEATURES)
++            if supported_features is None else supported_features
++        )
+         if not all(isinstance(feature, str) and feature for feature in selected_features):
+             raise ValueError("supported_features must contain non-empty strings")
+         unknown_features = set(selected_features) - set(API_V02_FEATURES)
+         if unknown_features:
+             raise ValueError(f"unknown supported_features: {sorted(unknown_features)}")
++        if "remote_ui" in selected_features and self.api_version != "0.4":
++            raise ValueError("remote_ui requires extension API 0.4")
+         self._supported_features = tuple(dict.fromkeys(selected_features))
+
+         self._tools: dict[str, _Tool] = {}
+         self._commands: dict[str, _Command] = {}
++        self._shortcuts: dict[str, _Shortcut] = {}
+         self._hooks: dict[str, Handler] = {}
+         self._context_handler: Optional[Handler] = None
+         self._menu_handler: Optional[Handler] = None
+         self._status_handlers: dict[str, Handler] = {}
+         self._renderer_handlers: dict[str, Handler] = {}
+         self._lifecycle_handlers: dict[str, Handler] = {}
++        self._ui_handlers: dict[str, Handler] = {}
+         self._shutdown_handler: Optional[Handler] = None
+
+         self._transport: Optional[JsonRpcTransport] = None
+         self._writer: Optional[_SerializedWriter] = None
+         self._executor: Optional[ThreadPoolExecutor] = None
++        self._teardown_executor: Optional[ThreadPoolExecutor] = None
++        self._resize_tail: Optional[Future[Any]] = None
++        self._fail_closed_deadline: Optional[float] = None
+         self._initialized = False
+         self._running = False
+         self._closed = False
+@@ -539,6 +646,7 @@ class Extension:
+         self._presentation_revision: Optional[int] = None
+         self._presentation_lock = threading.Lock()
+         self._admission = threading.BoundedSemaphore(max_pending_requests)
++        self._teardown_admission = threading.BoundedSemaphore(max_pending_requests)
+         self._lock = threading.RLock()
+         self._future_condition = threading.Condition(self._lock)
+         self._shutdown_done = threading.Event()
+@@ -733,6 +841,31 @@ class Extension:
+
+         return decorate
+
++    def shortcut(
++        self,
++        *,
++        name: str,
++        description: Optional[str] = None,
++    ) -> Callable[[Handler], Handler]:
++        """Handle a static manifest shortcut as handler(context).
++
++        The manifest supplies the key and description; an optional description
++        here must match it exactly. Return the same values as a command handler.
++        """
++        self._validate_shortcut_name(name)
++        if description is not None and (
++            not isinstance(description, str) or not description.strip()
++        ):
++            raise ValueError("shortcut description must be non-empty or None")
++
++        def decorate(handler: Handler) -> Handler:
++            if name in self._shortcuts:
++                raise ValueError(f"duplicate shortcut: {name}")
++            self._shortcuts[name] = _Shortcut(description, handler)
++            return handler
++
++        return decorate
++
+     def hook(self, name: str) -> Callable[[Handler], Handler]:
+         self._validate_name("hook", name)
+         if name in ("compaction_strategy", "cache_warming_decision") and self.api_version != "0.4":
+@@ -831,6 +964,29 @@ class Extension:
+
+     lifecycle = on_lifecycle
+
++    def on_ui_event(self, method: str) -> Callable[[Handler], Handler]:
++        """Handle a negotiated remote_ui notification without acquiring terminal ownership.
++
++        Resize handlers run in arrival order. If admission is full or a resize
++        handler fails, the extension fails closed and invokes the shutdown hook.
++        """
++        if method not in _REMOTE_UI_EVENTS or self.api_version != "0.4":
++            raise ValueError("unknown remote UI notification or unsupported API")
++
++        def decorate(handler: Handler) -> Handler:
++            if method in self._ui_handlers:
++                raise ValueError(f"duplicate remote UI handler: {method}")
++            self._ui_handlers[method] = handler
++            return handler
++
++        return decorate
++
++    def publish_ui_frame(self, params: Mapping[str, Any]) -> None:
++        """Publish a complete owner-fenced remote UI frame; host validates geometry/styling."""
++        if self.api_version != "0.4" or "remote_ui" not in self._features:
++            raise ValueError("remote_ui was not negotiated")
++        self._send({"jsonrpc": "2.0", "method": "ui/frame", "params": dict(params)})
++
+     def on_shutdown(self, handler: Handler) -> Handler:
+         if self._shutdown_handler is not None:
+             raise ValueError("duplicate shutdown handler")
+@@ -961,8 +1117,16 @@ class Extension:
+         *,
+         parent_request_id: Any = _MISSING,
+         operation_scoped: bool = False,
++        timeout: Optional[float] = None,
++        cancellation_event: Optional[threading.Event] = None,
+     ) -> Any:
+-        """Send a request to the host while the reader keeps dispatching frames."""
++        """Send a host request with optional timeout and cooperative cancellation.
++
++        The deadline includes enqueueing and writing as well as the reply wait.
++        An unwritten expired request is suppressed; an already-started write is
++        ambiguous and queues one ordered cancellation without being retried. A
++        full or failed cancellation lane instead fails the extension closed.
++        """
+
+         return self._request(
+             method,
+@@ -971,6 +1135,8 @@ class Extension:
+             operation_scoped=operation_scoped,
+             correlate_parent=True,
+             cancel_with_parent=True,
++            timeout=timeout,
++            cancellation_event=cancellation_event,
+         )
+
+     def _request(
+@@ -982,12 +1148,24 @@ class Extension:
+         operation_scoped: bool,
+         correlate_parent: bool,
+         cancel_with_parent: bool,
++        timeout: Optional[float] = None,
++        cancellation_event: Optional[threading.Event] = None,
+     ) -> Any:
+         """Send one host request with explicit ownership semantics."""
+
++        if cancellation_event is not None and not isinstance(cancellation_event, threading.Event):
++            raise TypeError("cancellation_event must be a threading.Event or None")
++        if timeout is not None and (
++            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
++            or not math.isfinite(timeout) or timeout <= 0
++        ):
++            raise ValueError("request timeout must be a positive finite number or None")
++        deadline = None if timeout is None else time.monotonic() + timeout
+         if not isinstance(method, str) or not method:
+             raise ValueError("request method must be non-empty")
+         self._require_initialized()
++        if cancellation_event is not None and cancellation_event.is_set():
++            raise CancelledError("cancelled")
+         payload = dict(params) if params is not None else {}
+         if self.api_version in ("0.2", "0.4") and correlate_parent:
+             parent = self._resolve_parent(parent_request_id, required=operation_scoped)
+@@ -1003,32 +1181,54 @@ class Extension:
+             pending = _PendingResponse()
+             self._pending[key] = pending
+         try:
+-            self._send(
+-                {
+-                    "jsonrpc": "2.0",
+-                    "id": request_id,
+-                    "method": method,
+-                    "params": payload,
+-                }
+-            )
++            writer = self._writer
++            if writer is None or self._closed:
++                raise RpcError(-32000, "protocol transport is closed")
+             scope = _CURRENT_REQUEST.get() if cancel_with_parent else None
+-            cancellation_sent = False
+-            while not pending.event.wait(0.05):
++            parent_cancellation = scope.cancellation if scope is not None else None
++            # A cancelled bulk reader makes a best-effort release of its lease.
++            # Preserve that cleanup's existing one-poll opportunity to send, but
++            # never let an already-cancelled parent strand it behind stdout.
++            cleanup_grace = (time.monotonic() + 0.05 if method == "bulk/release"
++                             and parent_cancellation is not None and parent_cancellation.cancelled else None)
++            item = _WriteItem(
++                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": payload},
++                deadline=deadline, cancellation_event=cancellation_event,
++                cancellation=parent_cancellation, cancellation_not_before=cleanup_grace, pending=pending,
++            )
++
++            def stopped() -> bool:
++                return pending.event.is_set() or item.interruption() is not None
++
++            try:
++                if writer.enqueue(item, stopped):
++                    writer.wait(item, stopped)
++            except (BrokenPipeError, OSError) as error:
++                self._closed = True
++                raise RpcError(-32000, "protocol stream is closed") from error
++
++            while True:
++                # A reply already observed wins the cancellation race. Failure
++                # during shutdown must also suppress an as-yet-unwritten item.
++                if pending.event.is_set():
++                    if pending.error is not None:
++                        writer.abandon(item)
++                    break
++                interruption = item.interruption()
++                if interruption is not None:
++                    timed_out, reason = interruption
++                    if not writer.abandon(item, reason):
++                        # Never block the request on a full cancellation lane or
++                        # silently lose cancellation: stop the process instead.
++                        writer.abort()
++                        self._fail_closed("writer_overflow", "writer cancellation queue is full")
++                    if timed_out:
++                        raise TimeoutError(f"host request timed out: {method}")
++                    raise CancelledError(reason)
+                 if self._closed:
++                    writer.abandon(item)
+                     raise RpcError(-32000, "protocol transport is closed")
+-                if scope is not None and scope.cancellation.cancelled and not cancellation_sent:
+-                    cancellation_sent = True
+-                    self._send(
+-                        {
+-                            "jsonrpc": "2.0",
+-                            "method": "$/cancelRequest",
+-                            "params": {
+-                                "id": request_id,
+-                                "reason": scope.cancellation.reason or "parent_cancelled",
+-                            },
+-                        }
+-                    )
+-                    raise CancelledError(scope.cancellation.reason or "parent_cancelled")
++                pending.event.wait(item.wait_interval())
+             if pending.error is not None:
+                 raise pending.error
+             response = pending.response
+@@ -1790,6 +1990,8 @@ class Extension:
+
+         if self._running:
+             raise RuntimeError("extension is already running")
++        if self._writer is not None and self._writer._thread.is_alive():
++            raise RuntimeError("previous extension protocol writer has not stopped")
+         reader = stdin if stdin is not None else self.stdin
+         writer = stdout if stdout is not None else self.stdout
+         if reader is None:
+@@ -1806,7 +2008,10 @@ class Extension:
+             writer,
+             max_message_bytes=self.max_message_bytes,
+         )
+-        self._writer = _SerializedWriter(self._transport, self.writer_queue_size)
++        self._writer = _SerializedWriter(
++            self._transport, self.writer_queue_size,
++            lambda: self._fail_closed("writer_failure", "writer cancellation failed"),
++        )
+         self._writer.start()
+         inbound: queue.Queue[Any] = queue.Queue()
+         reader_thread = threading.Thread(
+@@ -1820,7 +2025,9 @@ class Extension:
+         eof_seen = False
+         try:
+             while True:
+-                if self._shutdown_done.is_set() or self._eof_done.is_set():
++                if (self._shutdown_done.is_set() or self._eof_done.is_set()
++                        or (self._fail_closed_deadline is not None
++                            and time.monotonic() >= self._fail_closed_deadline)):
+                     break
+                 try:
+                     item = inbound.get(timeout=0.05)
+@@ -1851,12 +2058,17 @@ class Extension:
+             self._fail_pending(RpcError(-32000, "extension stopped"))
+             if self._executor is not None:
+                 self._executor.shutdown(wait=False, cancel_futures=True)
++            if self._teardown_executor is not None:
++                self._teardown_executor.shutdown(wait=False, cancel_futures=True)
+             if self._writer is not None:
+                 self._writer.close()
+             self._running = False
+             self._closed = True
+             self._transport = None
+-            self._writer = None
++            # A stalled write can outlive run(). Retain it so a subsequent run
++            # cannot create a second writer concurrently on the same stream.
++            if self._writer is not None and not self._writer._thread.is_alive():
++                self._writer = None
+
+     def handle_message(self, message: Mapping[str, Any]) -> bool:
+         """Queueing is required for 0.2; use :meth:`run` for embedded tests."""
+@@ -1966,27 +2178,76 @@ class Extension:
+                 self._active.pop(key, None)
+             self._admission.release()
+             raise
+-        self._track_future(future, admitted=True)
++        self._track_future(future, admission=self._admission)
+
+     def _submit_notification(self, method: str, params: Any) -> None:
+         executor = self._executor
+         if executor is None:
+             return
+-        if method not in self._lifecycle_handlers:
++        if method not in self._lifecycle_handlers and method not in self._ui_handlers:
+             self.logger.warning("ignored unknown notification", method=method)
+             return
+-        if "lifecycle_events" not in self._features:
++        feature = "remote_ui" if method in self._ui_handlers else "lifecycle_events"
++        if feature not in self._features:
+             self.logger.warning("ignored unnegotiated lifecycle event", method=method)
+             return
+-        if not self._admission.acquire(blocking=False):
+-            self.logger.warning("dropped lifecycle event because request queue is full", method=method)
++        teardown = method in _TEARDOWN_METHODS
++        admission = self._teardown_admission if teardown else self._admission
++        if teardown:
++            executor = self._teardown_executor
++        if not admission.acquire(blocking=False):
++            if teardown:
++                # Losing an owner-retirement observation can leave live devices.
++                self._fail_closed("teardown_overflow", "teardown notification queue is full", method)
++            elif method == "ui/resize":
++                # The host discards the old frame and may send this geometry only
++                # once. Never keep a device active behind an invisible surface.
++                self._fail_closed("resize_overflow", "resize notification queue is full", method)
++            else:
++                self.logger.warning("dropped lifecycle event because request queue is full", method=method)
+             return
+         try:
+-            future = executor.submit(self._handle_lifecycle, method, params)
++            if method == "ui/resize":
++                # Ordinary workers may run concurrently. Chain resize handlers so
++                # an older geometry cannot overwrite a newer one after it runs.
++                future = executor.submit(self._handle_resize, params, self._resize_tail)
++                self._resize_tail = future
++            else:
++                future = executor.submit(self._handle_lifecycle, method, params)
+         except Exception:
+-            self._admission.release()
++            admission.release()
+             raise
+-        self._track_future(future, admitted=True)
++        self._track_future(future, admission=admission)
++
++    def _handle_resize(self, params: Any, previous: Optional[Future[Any]]) -> None:
++        if previous is not None:
++            previous.result()
++        if not self._draining:
++            self._handle_lifecycle("ui/resize", params)
++
++    def _fail_closed(self, reason: str, message: str, method: Optional[str] = None,
++                     *, error: Optional[str] = None) -> None:
++        with self._lock:
++            if self._draining:
++                return
++            self._draining = True
++            self._fail_closed_deadline = time.monotonic() + self.shutdown_timeout + self.cancellation_grace
++        self._cancel_all(reason)
++        self._fail_pending(RpcError(-32000, message))
++        self._start_shutdown(_MISSING, {"reason": reason})
++
++        def report() -> None:
++            # Stderr is an external stream too. A blocked diagnostic must not
++            # delay device shutdown or the fail-closed routing deadline.
++            try:
++                fields = {"method": method}
++                if error is not None:
++                    fields["error"] = error
++                self.logger.error(f"{message}; stopping extension", **fields)
++            except Exception:
++                pass
++
++        threading.Thread(target=report, name="octet-extension-failure-log", daemon=True).start()
+
+     def _handle_request(
+         self,
+@@ -2035,11 +2296,14 @@ class Extension:
+                 self._active.pop(self._id_key(request_id), None)
+
+     def _handle_lifecycle(self, method: str, params: Any) -> None:
+-        handler = self._lifecycle_handlers[method]
++        handler = self._ui_handlers.get(method) or self._lifecycle_handlers[method]
+         try:
+             self._invoke(handler, self._object_params(params, method))
+         except Exception as error:
+-            self.logger.error("lifecycle handler failed", event=method, error=str(error))
++            if method == "ui/resize":
++                self._fail_closed("resize_failure", "resize handler failed", method, error=str(error))
++            else:
++                self.logger.error("lifecycle handler failed", event=method, error=str(error))
+
+     def _dispatch(self, method: str, params: Any) -> Any:
+         if method == "resource/dispose" and self._resources is not None:
+@@ -2048,6 +2312,8 @@ class Extension:
+             return self._call_tool(params)
+         if method == "command/execute":
+             return self._execute_command(params)
++        if method == "shortcut/execute":
++            return self._execute_shortcut(params)
+         if method == "hook/run":
+             return self._run_hook(params)
+         if method == "context/collect":
+@@ -2149,6 +2415,10 @@ class Extension:
+             max_workers=self._negotiated_concurrency,
+             thread_name_prefix="octet-extension-handler",
+         )
++        self._teardown_executor = ThreadPoolExecutor(
++            max_workers=1,
++            thread_name_prefix="octet-extension-teardown",
++        )
+         result: dict[str, Any] = {
+             "api_version": self.api_version,
+             "tools": [self._tool_definition(tool) for tool in self._tools.values()],
+@@ -2161,6 +2431,8 @@ class Extension:
+                 for command in self._commands.values()
+             ],
+         }
++        if self.api_version in ("0.2", "0.4") and self._declared.get("shortcuts"):
++            result["shortcuts"] = [dict(shortcut) for shortcut in self._declared["shortcuts"]]
+         if protocol_response is not None:
+             result["protocol"] = protocol_response
+         return result
+@@ -2173,6 +2445,7 @@ class Extension:
+             raise RpcError(-32602, "cache_warming_decision requires API 0.4")
+         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
+         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
++        self._validate_shortcuts()
+         # A host that declares contributions must declare the menu it serves.
+         if (
+             self._menu_handler is not None
+@@ -2181,6 +2454,51 @@ class Extension:
+         ):
+             raise RpcError(-32602, "a menu handler requires contributes.menu = true")
+
++    @staticmethod
++    def _validate_shortcut_name(name: Any) -> None:
++        if (
++            not isinstance(name, str) or not name or len(name) > 64
++            or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
++            or any(not (char.isalnum() or char in "_-.") for char in name)
++        ):
++            raise ValueError("invalid shortcut name")
++
++    def _validate_shortcuts(self) -> None:
++        shortcuts = self._declared.get("shortcuts", [])
++        if self.api_version == "0.1" and (self._shortcuts or shortcuts):
++            raise RpcError(-32602, "shortcuts require API 0.2 or 0.4")
++        if not isinstance(shortcuts, list) or len(shortcuts) > 64:
++            raise RpcError(-32602, "initialize contributes.shortcuts must be an array of at most 64 definitions")
++        names = []
++        keys = set()
++        for shortcut in shortcuts:
++            if not isinstance(shortcut, Mapping) or set(shortcut) != {"name", "key", "description"}:
++                raise RpcError(-32602, "invalid manifest shortcut definition")
++            try:
++                self._validate_shortcut_name(shortcut["name"])
++            except ValueError as error:
++                raise RpcError(-32602, "invalid manifest shortcut name") from error
++            for field, limit in (("key", 128), ("description", 4096)):
++                value = shortcut[field]
++                if (
++                    not isinstance(value, str) or not value.strip()
++                    or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
++                    or len(value.encode("utf-8")) > limit
++                    or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
++                    or (field == "key" and value.strip() != value)
++                ):
++                    raise RpcError(-32602, f"invalid manifest shortcut {field}")
++            name = shortcut["name"]
++            key = shortcut["key"].lower()
++            if name in names or key in keys:
++                raise RpcError(-32602, "duplicate manifest shortcut name or key")
++            names.append(name)
++            keys.add(key)
++            registered = self._shortcuts.get(name)
++            if registered is not None and registered.description not in (None, shortcut["description"]):
++                raise RpcError(-32602, "registered shortcut description does not match manifest declaration")
++        self._require_exact_names("shortcuts", names, self._shortcuts)
++
+     def _declared_names(self, key: str) -> list[str]:
+         value = self._declared.get(key, _MISSING)
+         if value is _MISSING:
+@@ -2273,6 +2591,23 @@ class Extension:
+             raise RpcError(-32603, "internal error") from error
+         return self._command_result(value)
+
++    def _execute_shortcut(self, params: Any) -> dict[str, Any]:
++        if self.api_version not in ("0.2", "0.4"):
++            raise RpcError(-32601, "shortcuts require API 0.2 or 0.4")
++        request = self._object_params(params, "shortcut/execute")
++        name = request.get("name")
++        try:
++            self._validate_shortcut_name(name)
++        except ValueError as error:
++            raise RpcError(-32602, "invalid shortcut name") from error
++        if set(request) - {"name", "context"} or not isinstance(request.get("context", {}), Mapping):
++            raise RpcError(-32602, "invalid shortcut params")
++        shortcut = self._shortcuts.get(name)
++        if shortcut is None:
++            raise RpcError(-32601, f"unknown shortcut: {name}")
++        value = self._invoke(shortcut.handler, self._context_from(request))
++        return self._command_result(value)
++
+     def _run_hook(self, params: Any) -> dict[str, Any]:
+         request = self._object_params(params, "hook/run")
+         name = request.get("hook")
+@@ -2682,15 +3017,17 @@ class Extension:
+
+         def shutdown_flow() -> None:
+             try:
+-                if not self._wait_for_futures(timeout):
++                if request_id is not _MISSING and not self._wait_for_futures(timeout):
+                     self._cancel_all("shutdown")
+                     self._wait_for_futures(self.cancellation_grace)
+                 if self._shutdown_handler is not None:
+                     self._invoke(self._shutdown_handler, values, self._context_from(values))
+-                self._send_result(request_id, {})
++                if request_id is not _MISSING:
++                    self._send_result(request_id, {})
+             except Exception as error:
+                 self.logger.error("shutdown handler failed", error=str(error))
+-                self._send_error(request_id, RpcError(-32603, "shutdown failed"))
++                if request_id is not _MISSING:
++                    self._send_error(request_id, RpcError(-32603, "shutdown failed"))
+             finally:
+                 self._shutdown_done.set()
+
+@@ -2717,8 +3054,9 @@ class Extension:
+
+         threading.Thread(target=eof_flow, name="octet-extension-eof", daemon=True).start()
+
+-    def _track_future(self, future: Future[Any], *, admitted: bool = False) -> None:
+-        admission = self._admission
++    def _track_future(
++        self, future: Future[Any], *, admission: Optional[threading.BoundedSemaphore] = None,
++    ) -> None:
+         with self._future_condition:
+             self._futures.add(future)
+
+@@ -2726,7 +3064,7 @@ class Extension:
+             with self._future_condition:
+                 self._futures.discard(done)
+                 self._future_condition.notify_all()
+-            if admitted:
++            if admission is not None:
+                 admission.release()
+
+         future.add_done_callback(completed)
+@@ -2934,6 +3272,9 @@ class Extension:
+         self._pending.clear()
+         self._futures.clear()
+         self._admission = threading.BoundedSemaphore(self.max_pending_requests)
++        self._teardown_admission = threading.BoundedSemaphore(self.max_pending_requests)
++        self._resize_tail = None
++        self._fail_closed_deadline = None
+         self._shutdown_done.clear()
+         self._eof_done.clear()
+
+diff --git a/sdk/python/tests/test_voice_surfaces.py b/sdk/python/tests/test_voice_surfaces.py
+new file mode 100644
+index 00000000..4c2f5f71
+--- /dev/null
++++ b/sdk/python/tests/test_voice_surfaces.py
+@@ -0,0 +1,1236 @@
++"""Generic static shortcuts and explicitly selected reverse host services."""
++
++import copy
++import io
++import json
++import os
++import threading
++import time
++import unittest
++from unittest.mock import patch
++
++from octet_extension import CancelledError, Extension, RpcError
++from test_extension_v02 import RunningExtension, initialize_v02, rpc_request
++
++
++REQUIRED = ["request_cancellation", "content_parts"]
++SERVICES = ["message_injection", "provider_credentials"]
++SHORTCUT = {"name": "voice-mute", "key": "ctrl+shift+m", "description": "Mute voice"}
++CONTEXT = {"workspace": "/workspace", "host": {}, "resource_owner": {
++    "session_id": "host-issued-owner", "extension_instance_id": "host-instance",
++    "process_generation": 3,
++}}
++
++
++def initialize(version="0.4", *, shortcuts=None, optional=None):
++    message = initialize_v02(
++        shortcuts=[copy.deepcopy(SHORTCUT)] if shortcuts is None else shortcuts,
++        optional=[] if optional is None else optional,
++    )
++    message["params"]["api_version"] = version
++    if version == "0.1":
++        del message["params"]["protocol"]
++    else:
++        message["params"]["protocol"]["version"] = version
++    return message
++
++
++class VoiceSurfacesTests(unittest.TestCase):
++    def test_static_shortcut_echoes_manifest_and_uses_ordinary_request_context(self):
++        for version in ("0.2", "0.4"):
++            with self.subTest(version=version):
++                extension = Extension(api_version=version, stderr=io.StringIO())
++                observed = []
++                outputs = iter([None, "Muted", {"text": "Ready", "notifications": [
++                    {"level": "info", "message": "Muted"}], "context": []}])
++
++                @extension.shortcut(name="voice-mute", description="Mute voice")
++                def mute(context):
++                    observed.append((context, extension.request_id, extension.cancellation.request_id))
++                    extension.cancellation.raise_if_cancelled()
++                    return next(outputs)
++
++                host = RunningExtension(extension)
++                response = host.start(initialize(version))
++                try:
++                    self.assertEqual(response["result"]["shortcuts"], [SHORTCUT])
++                    self.assertEqual(response["result"]["commands"], [])
++                    self.assertEqual(set(response["result"]["protocol"]["features"]), set(REQUIRED))
++                    for request_id, text in enumerate(["", "Muted", "Ready"], start=2):
++                        host.reader.feed(rpc_request(request_id, "shortcut/execute", {
++                            "name": "voice-mute", "context": CONTEXT,
++                        }))
++                        result = host.writer.wait_for(lambda msg: msg.get("id") == request_id)["result"]
++                        self.assertEqual(result["text"], text)
++                        self.assertEqual(result["context"], [])
++                        self.assertEqual(len(result["notifications"]), int(request_id == 4))
++                    self.assertEqual(observed, [(CONTEXT, i, i) for i in range(2, 5)])
++                finally:
++                    host.shutdown()
++
++    def test_exact_shortcut_declarations_and_malformed_definitions_fail_initialize(self):
++        bad_definitions = [
++            [], [{**SHORTCUT, "name": "other"}], [SHORTCUT, SHORTCUT],
++            [SHORTCUT, {**SHORTCUT, "name": "other", "key": "CTRL+SHIFT+M"}],
++            ["voice-mute"], [{"name": "voice-mute"}],
++            [{**SHORTCUT, "extra": True}], [{**SHORTCUT, "name": 1}],
++            [{**SHORTCUT, "name": "bad name"}], [{**SHORTCUT, "key": ""}],
++            [{**SHORTCUT, "key": " ctrl+m"}], [{**SHORTCUT, "key": "k" * 129}],
++            [{**SHORTCUT, "description": ""}], [{**SHORTCUT, "description": "bad\ntext"}],
++            [{**SHORTCUT, "description": "x" * 4097}], {}, None,
++        ]
++        for definitions in bad_definitions:
++            with self.subTest(definitions=definitions):
++                extension = Extension(api_version="0.4", stderr=io.StringIO())
++                extension.shortcut(name="voice-mute")(lambda context: None)
++                request = initialize()
++                request["params"]["contributes"]["shortcuts"] = definitions
++                self.assert_initialize_error(extension, request)
++        # Omission cannot silently admit a registered shortcut.
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        extension.shortcut(name="voice-mute")(lambda context: None)
++        request = initialize()
++        del request["params"]["contributes"]["shortcuts"]
++        self.assert_initialize_error(extension, request)
++        # Neither an unhandled declaration nor a different description is admitted.
++        self.assert_initialize_error(Extension(api_version="0.4", stderr=io.StringIO()), initialize())
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        extension.shortcut(name="voice-mute", description="Different")(lambda context: None)
++        self.assert_initialize_error(extension, initialize())
++
++    def assert_initialize_error(self, extension, request):
++        host = RunningExtension(extension)
++        try:
++            response = host.start(request)
++            self.assertEqual(response["error"]["code"], -32602)
++            self.assertFalse(extension.initialized)
++        finally:
++            host.reader.close()
++            host.thread.join(2)
++            self.assertFalse(host.thread.is_alive())
++
++    def test_registration_validation_and_frozen_api_0_1(self):
++        extension = Extension(api_version="0.4")
++        for name in (None, "", "bad name", "1bad", "é", "a" * 65):
++            with self.subTest(name=name), self.assertRaises(ValueError):
++                extension.shortcut(name=name)
++        for description in ("", 3):
++            with self.assertRaises(ValueError):
++                extension.shortcut(name="voice-mute", description=description)
++        extension.shortcut(name="voice-mute")(lambda context: None)
++        with self.assertRaises(ValueError):
++            extension.shortcut(name="voice-mute")(lambda context: None)
++        legacy = Extension(api_version="0.1", stderr=io.StringIO())
++        legacy.shortcut(name="voice-mute")(lambda context: None)
++        self.assert_initialize_error(legacy, initialize("0.1", shortcuts=[]))
++        host = RunningExtension(Extension(api_version="0.1", stderr=io.StringIO()))
++        try:
++            response = host.start(initialize("0.1", shortcuts=[]))
++            self.assertEqual(response["result"], {"api_version": "0.1", "tools": [], "commands": []})
++        finally:
++            host.shutdown()
++
++    def test_bad_dispatch_never_invokes_handler(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        invoked = []
++        extension.shortcut(name="voice-mute")(lambda context: invoked.append(context))
++        host = RunningExtension(extension)
++        host.start(initialize())
++        try:
++            for request_id, (params, code) in enumerate([
++                ([], -32602), ({}, -32602), ({"name": None}, -32602),
++                ({"name": []}, -32602), ({"name": "bad name"}, -32602),
++                ({"name": "unknown"}, -32601),
++                ({"name": "voice-mute", "context": []}, -32602),
++                ({"name": "voice-mute", "arguments": []}, -32602),
++            ], start=2):
++                host.reader.feed(rpc_request(request_id, "shortcut/execute", params))
++                result = host.writer.wait_for(lambda msg: msg.get("id") == request_id)
++                self.assertEqual(result["error"]["code"], code)
++            self.assertEqual(invoked, [])
++        finally:
++            host.shutdown()
++
++    def test_features_are_explicit_and_only_selected_when_offered(self):
++        for supported, offered, expected in [
++            (None, SERVICES, []), (REQUIRED + SERVICES, [], []),
++            (REQUIRED + SERVICES, ["message_injection"], ["message_injection"]),
++            (REQUIRED + SERVICES, SERVICES + ["shortcuts", "lifecycle_events_v2"], SERVICES),
++        ]:
++            for version in ("0.2", "0.4"):
++                with self.subTest(supported=supported, offered=offered, version=version):
++                    extension = Extension(api_version=version, supported_features=supported, stderr=io.StringIO())
++                    host = RunningExtension(extension)
++                    try:
++                        response = host.start(initialize(version, shortcuts=[], optional=offered))
++                        self.assertEqual(set(response["result"]["protocol"]["features"]), set(REQUIRED + expected))
++                    finally:
++                        host.shutdown()
++
++    def test_raw_requests_carry_parent_and_exact_host_issued_owner(self):
++        extension = Extension(api_version="0.4", supported_features=REQUIRED + SERVICES, stderr=io.StringIO())
++        captured = []
++        retained = []
++
++        def responder(message):
++            if message.get("method") in ("session/send_user_message", "provider/credentials"):
++                captured.append(message)
++                result = {} if message["method"].startswith("session/") else {"credential": "private-test-value"}
++                return {"jsonrpc": "2.0", "id": message["id"], "result": result}
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            retained.append((extension.request_id, context["resource_owner"]))
++            self.assertEqual(extension.request("session/send_user_message", {
++                "text": "Transcribed speech", "resource_owner": context["resource_owner"],
++            }, operation_scoped=True), {})
++            result = extension.request("provider/credentials", {
++                "provider": "openai", "model": "whisper-1", "resource_owner": context["resource_owner"],
++            }, operation_scoped=True)
++            self.assertEqual(result, {"credential": "private-test-value"})
++            return "Ready"
++
++        host = RunningExtension(extension, responder=responder)
++        host.start(initialize(optional=SERVICES))
++        try:
++            host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++            response = host.writer.wait_for(lambda msg: msg.get("id") == 2)
++            self.assertEqual(response["result"]["text"], "Ready")
++            self.assertEqual(len(captured), 2)
++            for message in captured:
++                self.assertEqual(message["params"]["parent_request_id"], 2)
++                self.assertEqual(message["params"]["resource_owner"], CONTEXT["resource_owner"])
++            # Deferred callbacks explicitly return the original parent and owner.
++            parent, owner = retained[0]
++            outcomes = []
++            thread = threading.Thread(target=lambda: outcomes.append(extension.request(
++                "session/send_user_message", {"text": "Later speech", "resource_owner": owner},
++                parent_request_id=parent, operation_scoped=True,
++            )))
++            thread.start()
++            thread.join(2)
++            self.assertFalse(thread.is_alive())
++            self.assertEqual(outcomes, [{}])
++            self.assertEqual(captured[-1]["params"], {
++                "parent_request_id": 2, "resource_owner": owner, "text": "Later speech",
++            })
++            ids = [message["id"] for message in captured]
++            self.assertEqual(len(ids), len(set(ids)))
++            self.assertNotIn("private-test-value", str(response))
++        finally:
++            host.shutdown()
++
++    def test_request_timeout_cancels_once_without_retry_and_releases_worker(self):
++        extension = Extension(api_version="0.4", max_concurrent_requests=1, stderr=io.StringIO())
++        outcomes = []
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            try:
++                extension.request("session/send_user_message", {"text": "Speech"},
++                                  operation_scoped=True, timeout=0.03)
++            except TimeoutError:
++                outcomes.append("timeout")
++            return "Worker released"
++
++        host = RunningExtension(extension)
++        host.start(initialize(optional=["message_injection"]))
++        try:
++            host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++            response = host.writer.wait_for(lambda msg: msg.get("id") == 2)
++            self.assertEqual(response["result"]["text"], "Worker released")
++            self.assertEqual(outcomes, ["timeout"])
++            sent = host.writer.matching(lambda msg: msg.get("method") == "session/send_user_message")
++            self.assertEqual(len(sent), 1)
++            child_id = sent[0]["id"]
++            cancellations = host.writer.matching(lambda msg: msg.get("method") == "$/cancelRequest")
++            self.assertEqual(cancellations, [{"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {
++                "id": child_id, "reason": "timeout",
++            }}])
++            self.assertEqual(extension._pending, {})
++            # An ambiguous late success is not replayed and cannot revive the waiter.
++            host.reader.feed({"jsonrpc": "2.0", "id": child_id, "result": {}})
++            self.assertEqual(host.shutdown()["result"], {})
++        finally:
++            if host.thread.is_alive():
++                host.shutdown(request_id=901)
++
++    def test_request_deadlines_cover_stalled_write_queued_and_full_writer(self):
++        extension = Extension(api_version="0.4", writer_queue_size=1, stderr=io.StringIO())
++
++        def responder(message):
++            if message.get("method") == "test/recovered":
++                return {"jsonrpc": "2.0", "id": message["id"], "result": "ok"}
++
++        host = RunningExtension(extension, responder=responder)
++        host.start(initialize(shortcuts=[]))
++        started, release, queued = threading.Event(), threading.Event(), threading.Event()
++        original_write = host.writer.write
++        original_enqueue = extension._writer.enqueue
++        outcomes = {}
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/stalled":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        def observe_enqueue(item, stop):
++            accepted = original_enqueue(item, stop)
++            if item.message.get("method") == "test/queued" and accepted:
++                queued.set()
++            return accepted
++
++        def request(name, timeout):
++            try:
++                extension.request("test/" + name, timeout=timeout)
++            except TimeoutError:
++                outcomes[name] = "timeout"
++
++        first = threading.Thread(target=request, args=("stalled", 0.4))
++        second = threading.Thread(target=request, args=("queued", 0.15))
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write), \
++                    patch.object(extension._writer, "enqueue", side_effect=observe_enqueue):
++                first.start()
++                self.assertTrue(started.wait(1))
++                second.start()
++                self.assertTrue(queued.wait(1))
++                before = time.monotonic()
++                request("full", 0.08)
++                self.assertLess(time.monotonic() - before, 0.5)
++                second.join(1)
++                first.join(1)
++                self.assertFalse(first.is_alive())
++                self.assertFalse(second.is_alive())
++                self.assertEqual(outcomes, {"stalled": "timeout", "queued": "timeout", "full": "timeout"})
++                self.assertEqual(extension._pending, {})
++                # Nothing has been written yet; the started frame is ambiguous,
++                # while the two requests that never started must never execute.
++                self.assertEqual(host.writer.matching(lambda m: m.get("method", "").startswith("test/")), [])
++                release.set()
++                cancellation = host.writer.wait_for(lambda m: m.get("method") == "$/cancelRequest")
++                sent = host.writer.wait_for(lambda m: m.get("method") == "test/stalled")
++                self.assertEqual(cancellation["params"], {"id": sent["id"], "reason": "timeout"})
++                host.reader.feed({"jsonrpc": "2.0", "id": sent["id"], "result": "late"})
++                self.assertEqual(extension.request("test/recovered", timeout=1), "ok")
++                methods = [m.get("method") for m in host.writer.messages]
++                self.assertEqual(methods.count("test/stalled"), 1)
++                self.assertNotIn("test/queued", methods)
++                self.assertNotIn("test/full", methods)
++                self.assertEqual(methods.count("$/cancelRequest"), 1)
++                self.assertLess(methods.index("test/stalled"), methods.index("$/cancelRequest"))
++                self.assertFalse(host.writer.concurrent_write)
++        finally:
++            release.set()
++            first.join(1)
++            second.join(1)
++            host.shutdown()
++
++    def test_cancellation_keeps_fifo_order_behind_already_queued_frames(self):
++        extension = Extension(api_version="0.4", writer_queue_size=1, stderr=io.StringIO())
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        started, release, queued = threading.Event(), threading.Event(), threading.Event()
++        original_write, original_enqueue = host.writer.write, extension._writer.enqueue
++        outcomes = []
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/stalled":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        def observe_enqueue(item, stop):
++            accepted = original_enqueue(item, stop)
++            if item.message.get("method") == "test/earlier" and accepted:
++                queued.set()
++            return accepted
++
++        def request():
++            try:
++                extension.request("test/stalled", timeout=0.3)
++            except TimeoutError:
++                outcomes.append("timeout")
++
++        first = threading.Thread(target=request)
++        earlier = threading.Thread(target=lambda: extension._send({"jsonrpc": "2.0", "method": "test/earlier"}))
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write), \
++                    patch.object(extension._writer, "enqueue", side_effect=observe_enqueue):
++                first.start()
++                self.assertTrue(started.wait(1))
++                earlier.start()
++                self.assertTrue(queued.wait(1))
++                first.join(1)
++                self.assertFalse(first.is_alive())
++                self.assertEqual(outcomes, ["timeout"])
++                release.set()
++                host.writer.wait_for(lambda m: m.get("method") == "$/cancelRequest")
++                earlier.join(1)
++                self.assertFalse(earlier.is_alive())
++                methods = [m.get("method") for m in host.writer.messages]
++                self.assertLess(methods.index("test/stalled"), methods.index("test/earlier"))
++                self.assertLess(methods.index("test/earlier"), methods.index("$/cancelRequest"))
++                self.assertEqual(methods.count("$/cancelRequest"), 1)
++        finally:
++            release.set()
++            first.join(1)
++            earlier.join(1)
++            host.shutdown()
++
++    def test_writer_refuses_expired_queued_request_before_waiter_runs(self):
++        extension = Extension(api_version="0.4", writer_queue_size=1, stderr=io.StringIO())
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        started, release_write = threading.Event(), threading.Event()
++        queued, release_waiter = threading.Event(), threading.Event()
++        original_write = host.writer.write
++        original_wait = extension._writer.wait
++        outcomes = []
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/blocker":
++                started.set()
++                release_write.wait(5)
++            return original_write(value)
++
++        def delayed_wait(item, stop):
++            if item.message.get("method") == "test/expired":
++                queued.set()
++                release_waiter.wait(5)
++            return original_wait(item, stop)
++
++        blocker = threading.Thread(target=lambda: extension._send({"jsonrpc": "2.0", "method": "test/blocker"}))
++
++        def request():
++            try:
++                extension.request("test/expired", timeout=0.08)
++            except TimeoutError:
++                outcomes.append("timeout")
++
++        waiter = threading.Thread(target=request)
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write), \
++                    patch.object(extension._writer, "wait", side_effect=delayed_wait):
++                blocker.start()
++                self.assertTrue(started.wait(1))
++                waiter.start()
++                self.assertTrue(queued.wait(1))
++                # Hold the caller past the deadline; the writer itself must
++                # enforce it even before that caller can mark the item abandoned.
++                time.sleep(0.12)
++                release_write.set()
++                blocker.join(1)
++                self.assertFalse(blocker.is_alive())
++                host.writer.wait_for(lambda m: m.get("method") == "test/blocker")
++                release_waiter.set()
++                waiter.join(1)
++                self.assertFalse(waiter.is_alive())
++                self.assertEqual(outcomes, ["timeout"])
++                self.assertEqual(host.writer.matching(lambda m: m.get("method") in
++                    ("test/expired", "$/cancelRequest")), [])
++                self.assertEqual(extension._pending, {})
++        finally:
++            release_write.set()
++            release_waiter.set()
++            blocker.join(1)
++            waiter.join(1)
++            host.shutdown()
++
++    def test_cancellation_interrupts_started_and_queued_writes(self):
++        extension = Extension(api_version="0.4", writer_queue_size=1, stderr=io.StringIO())
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        started, release, queued = threading.Event(), threading.Event(), threading.Event()
++        first_cancel, second_cancel = threading.Event(), threading.Event()
++        original_write, original_enqueue = host.writer.write, extension._writer.enqueue
++        outcomes = []
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/started":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        def observe_enqueue(item, stop):
++            accepted = original_enqueue(item, stop)
++            if item.message.get("method") == "test/queued" and accepted:
++                queued.set()
++            return accepted
++
++        def request(name, event):
++            try:
++                extension.request("test/" + name, cancellation_event=event)
++            except CancelledError as error:
++                outcomes.append((name, error.data["reason"]))
++
++        first = threading.Thread(target=request, args=("started", first_cancel))
++        second = threading.Thread(target=request, args=("queued", second_cancel))
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write), \
++                    patch.object(extension._writer, "enqueue", side_effect=observe_enqueue):
++                first.start()
++                self.assertTrue(started.wait(1))
++                second.start()
++                self.assertTrue(queued.wait(1))
++                first_cancel.set()
++                second_cancel.set()
++                first.join(1)
++                second.join(1)
++                self.assertFalse(first.is_alive())
++                self.assertFalse(second.is_alive())
++                self.assertCountEqual(outcomes, [("started", "cancelled"), ("queued", "cancelled")])
++                release.set()
++                sent = host.writer.wait_for(lambda m: m.get("method") == "test/started")
++                cancel = host.writer.wait_for(lambda m: m.get("method") == "$/cancelRequest")
++                self.assertEqual(cancel["params"], {"id": sent["id"], "reason": "cancelled"})
++                self.assertEqual(host.writer.matching(lambda m: m.get("method") == "test/queued"), [])
++                self.assertEqual(len(host.writer.matching(lambda m: m.get("method") == "$/cancelRequest")), 1)
++        finally:
++            release.set()
++            first.join(1)
++            second.join(1)
++            host.shutdown()
++
++    def test_parent_cancellation_interrupts_started_write(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        started, release, interrupted = threading.Event(), threading.Event(), threading.Event()
++        outcomes = []
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            try:
++                extension.request("test/child")
++            except CancelledError as error:
++                outcomes.append(error.data["reason"])
++                interrupted.set()
++            return "done"
++
++        host = RunningExtension(extension)
++        host.start(initialize())
++        original_write = host.writer.write
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/child":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write):
++                host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++                self.assertTrue(started.wait(1))
++                host.reader.feed({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {
++                    "id": 2, "reason": "owner_retired"}})
++                self.assertTrue(interrupted.wait(1))
++                self.assertEqual(outcomes, ["owner_retired"])
++                release.set()
++                sent = host.writer.wait_for(lambda m: m.get("method") == "test/child")
++                cancel = host.writer.wait_for(lambda m: m.get("method") == "$/cancelRequest")
++                self.assertEqual(cancel["params"], {"id": sent["id"], "reason": "owner_retired"})
++                response = host.writer.wait_for(lambda m: m.get("id") == 2)
++                self.assertEqual(response["error"]["code"], -32800)
++                self.assertEqual(extension._pending, {})
++        finally:
++            release.set()
++            host.shutdown()
++
++    def test_cancelled_parent_bulk_cleanup_is_bounded_when_writer_stalls(self):
++        extension = Extension(api_version="0.4", writer_queue_size=2, stderr=io.StringIO())
++        ready, started, release, interrupted = (threading.Event() for _ in range(4))
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            ready.set()
++            extension.cancellation.wait(2)
++            try:
++                extension.request("bulk/release", {"id": "lease"}, operation_scoped=True)
++            except CancelledError:
++                interrupted.set()
++            return "done"
++
++        host = RunningExtension(extension)
++        host.start(initialize())
++        original_write = host.writer.write
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/blocker":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        blocker = threading.Thread(target=lambda: extension._send({"jsonrpc": "2.0", "method": "test/blocker"}))
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write):
++                host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++                self.assertTrue(ready.wait(1))
++                blocker.start()
++                self.assertTrue(started.wait(1))
++                host.reader.feed({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 2}})
++                self.assertTrue(interrupted.wait(0.5))
++                release.set()
++                response = host.writer.wait_for(lambda m: m.get("id") == 2)
++                self.assertEqual(response["error"]["code"], -32800)
++                self.assertEqual(host.writer.matching(lambda m: m.get("method") == "bulk/release"), [])
++                self.assertEqual(extension._pending, {})
++        finally:
++            release.set()
++            blocker.join(1)
++            host.shutdown()
++
++    def test_cancellation_reservation_overflow_fails_closed_without_blocking(self):
++        extension = Extension(api_version="0.4", writer_queue_size=1, shutdown_timeout=0.1,
++                              cancellation_grace=0.05, stderr=io.StringIO())
++        started, release, cleaned = threading.Event(), threading.Event(), threading.Event()
++        events = [threading.Event(), threading.Event()]
++        outcomes, shutdowns, blocker_errors = [], [], []
++
++        @extension.on_shutdown
++        def shutdown(params):
++            shutdowns.append(params)
++            cleaned.set()
++
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        original_write = host.writer.write
++
++        def gated_write(value):
++            if json.loads(value).get("method") == "test/blocker":
++                started.set()
++                release.wait(5)
++            return original_write(value)
++
++        def request(index):
++            try:
++                extension.request(f"test/wait-{index}", cancellation_event=events[index])
++            except CancelledError:
++                outcomes.append(index)
++
++        def block():
++            try:
++                extension._send({"jsonrpc": "2.0", "method": "test/blocker"})
++            except RpcError as error:
++                blocker_errors.append(error.message)
++
++        threads = [threading.Thread(target=request, args=(i,)) for i in range(2)]
++        blocker = threading.Thread(target=block)
++        try:
++            with patch.object(host.writer, "write", side_effect=gated_write):
++                for i, thread in enumerate(threads):
++                    thread.start()
++                    host.writer.wait_for(lambda m: m.get("method") == f"test/wait-{i}")
++                blocker.start()
++                self.assertTrue(started.wait(1))
++                events[0].set()
++                threads[0].join(1)
++                self.assertFalse(threads[0].is_alive())
++                events[1].set()
++                threads[1].join(1)
++                self.assertFalse(threads[1].is_alive())
++                self.assertTrue(cleaned.wait(1))
++                host.thread.join(1)
++                self.assertFalse(host.thread.is_alive())
++                self.assertCountEqual(outcomes, [0, 1])
++                self.assertEqual(shutdowns, [{"reason": "writer_overflow"}])
++                self.assertEqual(extension._pending, {})
++                # The old stdout owner is still in write(); starting another one
++                # must be refused until that ambiguous frame has finished.
++                with self.assertRaisesRegex(RuntimeError, "writer has not stopped"):
++                    extension.run(stdin=host.reader, stdout=host.writer)
++                old_writer = extension._writer
++                # Observe the caller's abort while the write is still blocked;
++                # otherwise completing the write first can legitimately win.
++                blocker.join(1)
++                self.assertFalse(blocker.is_alive())
++                self.assertEqual(len(blocker_errors), 1)
++                release.set()
++                old_writer._thread.join(1)
++                self.assertFalse(old_writer._thread.is_alive())
++                self.assertFalse(host.writer.concurrent_write)
++                host.reader.close()
++                # Once the old writer exits, a fresh process generation works.
++                recovered = RunningExtension(extension)
++                recovered.start(initialize(shortcuts=[]))
++                recovered.shutdown()
++        finally:
++            release.set()
++            for event in events:
++                event.set()
++            for thread in threads:
++                thread.join(1)
++            blocker.join(1)
++            host.reader.close()
++            host.thread.join(1)
++
++    def test_unsendable_cancellation_fails_closed(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        cleaned, event = threading.Event(), threading.Event()
++        shutdowns, outcomes = [], []
++
++        @extension.on_shutdown
++        def shutdown(params):
++            shutdowns.append(params)
++            cleaned.set()
++
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        # The tiny request fits, but the larger cancellation cannot be encoded
++        # within the transport's frame bound.
++        extension._transport.max_message_bytes = 64
++
++        def request():
++            try:
++                extension.request("x", cancellation_event=event)
++            except CancelledError:
++                outcomes.append("cancelled")
++
++        thread = threading.Thread(target=request)
++        try:
++            thread.start()
++            host.writer.wait_for(lambda m: m.get("method") == "x")
++            event.set()
++            thread.join(1)
++            self.assertFalse(thread.is_alive())
++            self.assertTrue(cleaned.wait(1))
++            host.thread.join(1)
++            self.assertFalse(host.thread.is_alive())
++            self.assertEqual(outcomes, ["cancelled"])
++            self.assertEqual(shutdowns, [{"reason": "writer_failure"}])
++            self.assertEqual(host.writer.matching(lambda m: m.get("method") == "$/cancelRequest"), [])
++            self.assertFalse(host.writer.concurrent_write)
++        finally:
++            event.set()
++            thread.join(1)
++            host.reader.close()
++            host.thread.join(1)
++
++    def test_request_timeout_validation_and_response_before_deadline(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++
++        def responder(message):
++            if message.get("method") == "provider/credentials":
++                return {"jsonrpc": "2.0", "id": message["id"], "result": {"value": "test"}}
++
++        host = RunningExtension(extension, responder=responder)
++        host.start(initialize(shortcuts=[]))
++        try:
++            for timeout in (True, False, 0, -1, float("inf"), float("nan"), "1"):
++                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
++                    extension.request("provider/credentials", timeout=timeout)
++            for timeout in (None, 1, 0.5):
++                self.assertEqual(extension.request("provider/credentials", {
++                    "provider": "test", "model": "test", "resource_owner": CONTEXT["resource_owner"],
++                }, parent_request_id=2, timeout=timeout), {"value": "test"})
++            self.assertEqual(host.writer.matching(lambda msg: msg.get("method") == "$/cancelRequest"), [])
++        finally:
++            host.shutdown()
++
++    def test_explicit_cancellation_event_validation_and_before_send(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        try:
++            for event in (True, False, 1, object(), threading.Lock()):
++                with self.subTest(event=event), self.assertRaises(TypeError):
++                    extension.request("provider/credentials", cancellation_event=event)
++            event = threading.Event()
++            event.set()
++            with self.assertRaises(CancelledError):
++                extension.request("provider/credentials", cancellation_event=event)
++            self.assertEqual(extension._pending, {})
++            self.assertEqual(host.writer.matching(lambda msg: msg.get("method") in (
++                "provider/credentials", "$/cancelRequest")), [])
++        finally:
++            host.shutdown()
++
++    def test_explicit_cancellation_in_flight_cancels_once_and_ignores_late_reply(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[]))
++        event = threading.Event()
++        outcomes = []
++
++        def request():
++            try:
++                extension.request("provider/credentials", cancellation_event=event, timeout=1)
++            except CancelledError as error:
++                outcomes.append(error.data)
++
++        thread = threading.Thread(target=request)
++        try:
++            thread.start()
++            sent = host.writer.wait_for(lambda msg: msg.get("method") == "provider/credentials")
++            event.set()
++            thread.join(1)
++            self.assertFalse(thread.is_alive())
++            self.assertEqual(outcomes, [{"reason": "cancelled"}])
++            cancellation = host.writer.wait_for(lambda msg: msg.get("method") == "$/cancelRequest")
++            self.assertEqual(cancellation["params"], {"id": sent["id"], "reason": "cancelled"})
++            self.assertEqual(len(host.writer.matching(lambda msg: msg.get("method") == "$/cancelRequest")), 1)
++            self.assertEqual(extension._pending, {})
++            host.reader.feed({"jsonrpc": "2.0", "id": sent["id"], "result": {"late": True}})
++        finally:
++            event.set()
++            thread.join(1)
++            host.shutdown()
++
++    def test_unset_explicit_cancellation_preserves_response_timeout_and_parent_cancellation(self):
++        for outcome in ("response", "timeout", "parent"):
++            with self.subTest(outcome=outcome):
++                extension = Extension(api_version="0.4", stderr=io.StringIO())
++                event = threading.Event()
++                observed = []
++
++                @extension.shortcut(name="voice-mute")
++                def mute(context):
++                    try:
++                        observed.append(extension.request("provider/credentials", cancellation_event=event,
++                                                          timeout=0.03 if outcome == "timeout" else 1))
++                    except (TimeoutError, CancelledError) as error:
++                        observed.append(type(error).__name__)
++                    return "done"
++
++                host = RunningExtension(extension)
++                host.start(initialize())
++                try:
++                    host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++                    sent = host.writer.wait_for(lambda msg: msg.get("method") == "provider/credentials")
++                    if outcome == "response":
++                        host.reader.feed({"jsonrpc": "2.0", "id": sent["id"], "result": {"ok": True}})
++                    elif outcome == "parent":
++                        host.reader.feed({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {
++                            "id": 2, "reason": "owner_retired",
++                        }})
++                    host.writer.wait_for(lambda msg: msg.get("id") == 2)
++                    expected = {"response": {"ok": True}, "timeout": "TimeoutError", "parent": "CancelledError"}
++                    self.assertEqual(observed, [expected[outcome]])
++                    if outcome != "response":
++                        cancellation = host.writer.wait_for(lambda msg: msg.get("method") == "$/cancelRequest")
++                        self.assertEqual(cancellation["params"], {"id": sent["id"], "reason":
++                            "timeout" if outcome == "timeout" else "owner_retired"})
++                finally:
++                    host.shutdown()
++
++    def test_teardown_notifications_bypass_saturated_requests_and_ui_observations(self):
++        for saturation in ("request", "ui"):
++            with self.subTest(saturation=saturation):
++                extension = Extension(api_version="0.4", max_concurrent_requests=1, max_pending_requests=1,
++                    supported_features=REQUIRED + ["remote_ui", "lifecycle_events"], stderr=io.StringIO())
++                started, release = threading.Event(), threading.Event()
++                observed = []
++                completed = {method: threading.Event() for method in ("session/settled", "ui/closed")}
++
++                def block(params):
++                    started.set()
++                    release.wait(2)
++                    return "done"
++
++                extension.shortcut(name="voice-mute")(block)
++                extension.on_ui_event("ui/resize")(block)
++
++                def teardown(params):
++                    # A reverse request from this lane must still receive its reply
++                    # while the ordinary worker is blocked and its admission is full.
++                    observed.append((params, extension.request("test/reply", timeout=1), extension.request_id))
++                    completed[params["event"]].set()
++
++                extension.on_lifecycle("session/settled")(teardown)
++                extension.on_ui_event("ui/closed")(teardown)
++
++                def responder(message):
++                    if message.get("method") == "test/reply":
++                        return {"jsonrpc": "2.0", "id": message["id"], "result": "routed"}
++
++                host = RunningExtension(extension, responder=responder)
++                host.start(initialize(optional=["remote_ui", "lifecycle_events"]))
++                try:
++                    if saturation == "request":
++                        host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++                    else:
++                        host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {}})
++                    self.assertTrue(started.wait(1))
++                    # Serialize critical observations with a reply barrier, since this
++                    # test deliberately gives the teardown lane only one admission slot.
++                    for method in ("session/settled", "ui/closed"):
++                        host.reader.feed({"jsonrpc": "2.0", "method": method, "params": {"event": method}})
++                        self.assertTrue(completed[method].wait(1))
++                        self.assertFalse(extension._wait_for_futures(0))  # Ordinary work is still blocked.
++                        # Wait for admission release, not just handler return.
++                        self.assertTrue(extension._teardown_admission.acquire(timeout=1))
++                        extension._teardown_admission.release()
++                    self.assertEqual(observed, [({"event": method}, "routed", None)
++                        for method in ("session/settled", "ui/closed")])
++                    self.assertNotIn("teardown notification queue is full", extension.logger.stream.getvalue())
++                finally:
++                    release.set()
++                    host.shutdown()
++
++    def test_teardown_overflow_fails_closed_runs_cleanup_and_releases_pending_requests(self):
++        extension = Extension(api_version="0.4", max_pending_requests=1, shutdown_timeout=0.1,
++            cancellation_grace=0.05, supported_features=REQUIRED + ["remote_ui", "lifecycle_events"],
++            stderr=io.StringIO())
++        started, release, cleaned = threading.Event(), threading.Event(), threading.Event()
++        ordinary_started = threading.Event()
++        outcomes = []
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            ordinary_started.set()
++            release.wait(2)
++            return "done"
++
++        @extension.on_lifecycle("session/settled")
++        def settled(params):
++            started.set()
++            release.wait(2)
++
++        extension.on_ui_event("ui/closed")(lambda params: self.fail("overflow must stop dispatch"))
++
++        @extension.on_shutdown
++        def shutdown(params):
++            outcomes.append(params)
++            cleaned.set()  # Stand-in for releasing the microphone.
++            release.set()
++
++        host = RunningExtension(extension)
++        host.start(initialize(optional=["remote_ui", "lifecycle_events"]))
++        pending = []
++
++        def request():
++            try:
++                extension.request("test/no-reply")
++            except RpcError as error:
++                pending.append(error.message)
++
++        thread = threading.Thread(target=request)
++        try:
++            thread.start()
++            host.writer.wait_for(lambda msg: msg.get("method") == "test/no-reply")
++            host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++            self.assertTrue(ordinary_started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "session/settled", "params": {}})
++            self.assertTrue(started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/closed", "params": {}})
++            self.assertTrue(cleaned.wait(1))
++            thread.join(1)
++            host.thread.join(1)
++            self.assertFalse(thread.is_alive())
++            self.assertFalse(host.thread.is_alive())
++            self.assertEqual(outcomes, [{"reason": "teardown_overflow"}])
++            self.assertEqual(len(pending), 1)
++            self.assertIn(pending[0], ("teardown notification queue is full", "extension stopped"))
++            self.assertFalse(extension.running)
++            self.assertEqual(extension._pending, {})
++        finally:
++            release.set()
++            host.reader.close()
++            thread.join(1)
++            host.thread.join(1)
++
++    def test_fail_closed_cleanup_does_not_wait_for_blocked_stderr(self):
++        for trigger in ("teardown_overflow", "resize_failure"):
++            with self.subTest(trigger=trigger):
++                extension = Extension(api_version="0.4", supported_features=REQUIRED + ["remote_ui"],
++                                      stderr=io.StringIO())
++                entered, release, cleaned = threading.Event(), threading.Event(), threading.Event()
++                original = extension.logger.error
++
++                def blocked(*args, **kwargs):
++                    entered.set()
++                    release.wait(2)
++                    original(*args, **kwargs)
++
++                extension.logger.error = blocked
++                extension.on_shutdown(lambda params: cleaned.set())
++                if trigger == "resize_failure":
++                    def resize(params):
++                        raise ValueError("fixture")
++                    extension.on_ui_event("ui/resize")(resize)
++                    action = lambda: extension._handle_lifecycle("ui/resize", {})
++                else:
++                    action = lambda: extension._fail_closed("teardown_overflow", "queue is full")
++                worker = threading.Thread(target=action, daemon=True)
++                worker.start()
++                try:
++                    self.assertTrue(entered.wait(1))
++                    self.assertTrue(cleaned.wait(1), "blocked logging delayed device cleanup")
++                    worker.join(1)
++                    self.assertFalse(worker.is_alive(), "blocked logging held fail-closed routing")
++                finally:
++                    release.set()
++                    worker.join(1)
++
++    def test_teardown_overflow_cannot_hang_run_on_stuck_shutdown_hook(self):
++        extension = Extension(api_version="0.4", max_pending_requests=1, shutdown_timeout=0.05,
++                              cancellation_grace=0.05, stderr=io.StringIO())
++        started, hook_started, release = threading.Event(), threading.Event(), threading.Event()
++
++        @extension.on_lifecycle("session/settled")
++        def settled(params):
++            started.set()
++            release.wait(2)
++
++        @extension.on_shutdown
++        def shutdown(params):
++            hook_started.set()
++            release.wait(2)
++
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[], optional=["lifecycle_events"]))
++        try:
++            host.reader.feed({"jsonrpc": "2.0", "method": "session/settled", "params": {}})
++            self.assertTrue(started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "session/settled", "params": {}})
++            self.assertTrue(hook_started.wait(1))
++            host.thread.join(1)
++            self.assertFalse(host.thread.is_alive())
++        finally:
++            release.set()
++            host.reader.close()
++            host.thread.join(1)
++
++    def test_remote_ui_uses_resolved_environment_api_version(self):
++        with patch.dict(os.environ, {"OCTET_EXTENSION_API_VERSION": "0.4"}):
++            extension = Extension(supported_features=REQUIRED + ["remote_ui"])
++        self.assertEqual(extension.api_version, "0.4")
++
++    def test_remote_ui_is_explicit_and_api_0_4_only(self):
++        for version in ("0.1", "0.2", "0.3"):
++            with self.subTest(version=version), self.assertRaises(ValueError):
++                Extension(api_version=version, supported_features=REQUIRED + ["remote_ui"])
++        for supported, offered, expected in [(None, ["remote_ui"], False),
++                (REQUIRED + ["remote_ui"], [], False),
++                (REQUIRED + ["remote_ui"], ["remote_ui"], True)]:
++            extension = Extension(api_version="0.4", supported_features=supported, stderr=io.StringIO())
++            host = RunningExtension(extension)
++            try:
++                response = host.start(initialize(shortcuts=[], optional=offered))
++                self.assertEqual("remote_ui" in response["result"]["protocol"]["features"], expected)
++                frame = {"surface_id": "voice", "resource_owner": CONTEXT["resource_owner"],
++                         "columns": 80, "rows": 24, "revision": 1, "lines": ["Voice"]}
++                if expected:
++                    extension.publish_ui_frame(frame)
++                    self.assertEqual(host.writer.wait_for(lambda msg: msg.get("method") == "ui/frame"),
++                        {"jsonrpc": "2.0", "method": "ui/frame", "params": frame})
++                else:
++                    with self.assertRaises(ValueError):
++                        extension.publish_ui_frame(frame)
++            finally:
++                host.shutdown()
++
++    def test_remote_ui_notifications_dispatch_only_when_negotiated(self):
++        methods = ("ui/key", "ui/mouse", "ui/resize", "ui/closed", "ui/editor-text", "context/updated")
++        for offered in ([], ["remote_ui"]):
++            extension = Extension(api_version="0.4", supported_features=REQUIRED + ["remote_ui"],
++                                  stderr=io.StringIO())
++            observed = []
++            ready = threading.Event()
++            for method in methods:
++                def handle(params, method=method):
++                    observed.append((method, params, threading.current_thread().name))
++                    if len(observed) == len(methods):
++                        ready.set()
++                extension.on_ui_event(method)(handle)
++            with self.assertRaises(ValueError):
++                extension.on_ui_event("ui/focus")
++            with self.assertRaises(ValueError):
++                extension.on_ui_event("ui/key")(lambda params: None)
++            host = RunningExtension(extension)
++            host.start(initialize(shortcuts=[], optional=offered))
++            try:
++                for method in methods:
++                    host.reader.feed({"jsonrpc": "2.0", "method": method,
++                                      "params": {"surface_id": "voice", "event": method}})
++                if offered:
++                    self.assertTrue(ready.wait(2))
++                    self.assertEqual({(method, params["event"]) for method, params, _ in observed},
++                                     {(method, method) for method in methods})
++                    self.assertTrue(all(name != host.thread.name for _, _, name in observed))
++                else:
++                    self.assertFalse(ready.wait(0.05))
++                    self.assertEqual(observed, [])
++            finally:
++                host.shutdown()
++        for version in ("0.1", "0.2"):
++            extension = Extension(api_version=version)
++            with self.assertRaises(ValueError):
++                extension.on_ui_event("ui/resize")
++            with self.assertRaises(ValueError):
++                extension.publish_ui_frame({})
++
++    def test_remote_ui_other_observations_still_share_bounded_dispatch(self):
++        extension = Extension(api_version="0.4", supported_features=REQUIRED + ["remote_ui"],
++                              max_concurrent_requests=1, max_pending_requests=1, stderr=io.StringIO())
++        started, release = threading.Event(), threading.Event()
++        events = []
++
++        @extension.on_ui_event("ui/key")
++        def key(params):
++            events.append(params)
++            started.set()
++            release.wait(2)
++
++        extension.shortcut(name="voice-mute")(lambda context: "done")
++        host = RunningExtension(extension)
++        host.start(initialize(optional=["remote_ui"]))
++        try:
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/key", "params": {"revision": 1}})
++            self.assertTrue(started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/key", "params": {"revision": 2}})
++            host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++            response = host.writer.wait_for(lambda msg: msg.get("id") == 2)
++            self.assertEqual(response["error"]["message"], "extension request queue is full")
++            self.assertEqual(events, [{"revision": 1}])
++            self.assertIn("dropped lifecycle event because request queue is full", extension.logger.stream.getvalue())
++        finally:
++            release.set()
++            host.shutdown()
++
++    def test_resize_handlers_preserve_arrival_order_with_multiple_workers(self):
++        extension = Extension(api_version="0.4", max_concurrent_requests=2, max_pending_requests=3,
++            supported_features=REQUIRED + ["remote_ui"], stderr=io.StringIO())
++        first_started, release, second_started = threading.Event(), threading.Event(), threading.Event()
++        observed = []
++
++        @extension.on_ui_event("ui/resize")
++        def resize(params):
++            if params["columns"] == 80:
++                first_started.set()
++                release.wait(2)
++            else:
++                second_started.set()
++            observed.append(params["columns"])
++
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[], optional=["remote_ui"]))
++        try:
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {"columns": 80, "rows": 24}})
++            self.assertTrue(first_started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {"columns": 40, "rows": 12}})
++            # Cancellation is handled on the reader lane, not the busy workers.
++            host.reader.feed(rpc_request(2, "$/cancelRequest", {"id": "unknown"}))
++            host.writer.wait_for(lambda m: m.get("id") == 2)
++            self.assertFalse(second_started.is_set())
++            release.set()
++            self.assertTrue(second_started.wait(1))
++            self.assertTrue(extension._wait_for_futures(1))
++            self.assertEqual(observed, [80, 40])
++        finally:
++            release.set()
++            host.shutdown()
++
++    def test_resize_handler_failure_fails_closed(self):
++        extension = Extension(api_version="0.4", supported_features=REQUIRED + ["remote_ui"], stderr=io.StringIO())
++        cleaned, outcomes = threading.Event(), []
++
++        @extension.on_ui_event("ui/resize")
++        def resize(params):
++            raise RuntimeError("render failed")
++
++        @extension.on_shutdown
++        def shutdown(params):
++            outcomes.append(params)
++            cleaned.set()
++
++        host = RunningExtension(extension)
++        host.start(initialize(shortcuts=[], optional=["remote_ui"]))
++        try:
++            host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {"columns": 40, "rows": 12}})
++            self.assertTrue(cleaned.wait(1))
++            host.thread.join(1)
++            self.assertFalse(host.thread.is_alive())
++            self.assertEqual(outcomes, [{"reason": "resize_failure"}])
++        finally:
++            host.reader.close()
++            host.thread.join(1)
++
++    def test_resize_overflow_fails_closed_and_releases_live_device(self):
++        for saturation in ("request", "resize"):
++            with self.subTest(saturation=saturation):
++                extension = Extension(api_version="0.4", max_concurrent_requests=1, max_pending_requests=1,
++                    shutdown_timeout=0.1, cancellation_grace=0.05,
++                    supported_features=REQUIRED + ["remote_ui"], stderr=io.StringIO())
++                started, release, cleaned = threading.Event(), threading.Event(), threading.Event()
++                events, shutdowns, pending_errors = [], [], []
++
++                def block(params):
++                    events.append(params)
++                    started.set()
++                    release.wait(2)
++                    return "done"
++
++                extension.shortcut(name="voice-mute")(block)
++                extension.on_ui_event("ui/resize")(block)
++
++                @extension.on_shutdown
++                def shutdown(params):
++                    shutdowns.append(params)
++                    cleaned.set()  # Stand-in for stopping the microphone.
++                    release.set()
++
++                host = RunningExtension(extension)
++                host.start(initialize(optional=["remote_ui"]))
++
++                def pending_request():
++                    try:
++                        extension.request("test/no-reply")
++                    except RpcError as error:
++                        pending_errors.append(error.message)
++
++                waiter = threading.Thread(target=pending_request)
++                try:
++                    waiter.start()
++                    host.writer.wait_for(lambda m: m.get("method") == "test/no-reply")
++                    if saturation == "request":
++                        host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++                    else:
++                        host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {"columns": 80, "rows": 24}})
++                    self.assertTrue(started.wait(1))
++                    host.reader.feed({"jsonrpc": "2.0", "method": "ui/resize", "params": {"columns": 40, "rows": 12}})
++                    self.assertTrue(cleaned.wait(1))
++                    waiter.join(1)
++                    host.thread.join(1)
++                    self.assertFalse(waiter.is_alive())
++                    self.assertFalse(host.thread.is_alive())
++                    self.assertEqual(shutdowns, [{"reason": "resize_overflow"}])
++                    self.assertEqual(len(pending_errors), 1)
++                    self.assertIn(pending_errors[0], ("resize notification queue is full", "extension stopped"))
++                    self.assertEqual(len(events), 1)
++                    self.assertEqual(extension._pending, {})
++                    self.assertFalse(extension.running)
++                    deadline = time.monotonic() + 1
++                    while ("resize notification queue is full" not in extension.logger.stream.getvalue()
++                           and time.monotonic() < deadline):
++                        time.sleep(0.001)
++                    self.assertIn("resize notification queue is full", extension.logger.stream.getvalue())
++                finally:
++                    release.set()
++                    host.reader.close()
++                    waiter.join(1)
++                    host.thread.join(1)
++
++    def test_shortcut_uses_cooperative_cancellation(self):
++        extension = Extension(api_version="0.4", stderr=io.StringIO())
++        started = threading.Event()
++
++        @extension.shortcut(name="voice-mute")
++        def mute(context):
++            started.set()
++            extension.cancellation.wait(2)
++            extension.cancellation.raise_if_cancelled()
++
++        host = RunningExtension(extension)
++        host.start(initialize())
++        try:
++            host.reader.feed(rpc_request(2, "shortcut/execute", {"name": "voice-mute", "context": CONTEXT}))
++            self.assertTrue(started.wait(1))
++            host.reader.feed({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": 2}})
++            response = host.writer.wait_for(lambda msg: msg.get("id") == 2)
++            self.assertEqual(response["error"]["code"], -32800)
++        finally:
++            host.shutdown()
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -300,6 +300,22 @@ jobs:
               stdout=subprocess.PIPE,
           ).stdout.splitlines()
           expected = {f"{extension}/{path.removeprefix(prefix)}" for path in tracked}
+          if extension == "octet-voice":
+              # The separate voice project's reviewed runtime allowlist excludes
+              # tests and release tooling from the full pinned source snapshot.
+              # Its independent builder must reproduce the canonical asset exactly.
+              with tempfile.TemporaryDirectory() as temporary:
+                  reference = pathlib.Path(temporary) / "reference.tar.gz"
+                  subprocess.run([
+                      sys.executable, f"{prefix}build-package.py",
+                      str(pathlib.Path(temporary) / "stage"), "--archive", str(reference),
+                  ], check=True)
+                  if pathlib.Path(archive).read_bytes() != reference.read_bytes():
+                      raise SystemExit("voice release differs from its standalone builder")
+                  with tarfile.open(reference, "r:gz") as reference_bundle:
+                      expected = {member.name for member in reference_bundle if member.isfile()}
+              if not expected.issubset({f"{extension}/{path.removeprefix(prefix)}" for path in tracked}):
+                  raise SystemExit("voice release contains untracked source")
           with tarfile.open(archive, "r:gz") as bundle:
               files = {member.name for member in bundle.getmembers() if member.isfile()}
               if any(not (member.isfile() or member.isdir()) for member in bundle.getmembers()):

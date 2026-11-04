@@ -1,0 +1,35 @@
+diff --git a/crates/octet-coding-agent/src/modes/interactive.rs b/crates/octet-coding-agent/src/modes/interactive.rs
+index 497104ea..6fe37af8 100644
+--- a/crates/octet-coding-agent/src/modes/interactive.rs
++++ b/crates/octet-coding-agent/src/modes/interactive.rs
+@@ -744,12 +744,9 @@ where
+                         },
+                     }
+                 }
+-                if let Some(shortcut) = executable_extensions.dispatch_shortcut_for_event(&event) {
+-                    shell.notice(format!(
+-                        "running extension shortcut {}: {}",
+-                        shortcut.extension, shortcut.description
+-                    ));
+-                    shell.render();
++                if executable_extensions.dispatch_shortcut_for_event(&event).is_some() {
++                    // Shortcuts report their actual result through background updates.
++                    // Routine controls must not create a transcript row on dispatch.
+                     continue;
+                 }
+                 // The clipboard gesture is resolved before translation: the
+@@ -4468,12 +4465,8 @@ where
+                         },
+                     }
+                 }
+-                if let Some(shortcut) = (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten() {
+-                    shell.notice(format!(
+-                        "running extension shortcut {}: {}",
+-                        shortcut.extension, shortcut.description
+-                    ));
+-                    shell.render();
++                if (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten().is_some() {
++                    // As at idle, only actual shortcut results belong in the transcript.
+                     continue;
+                 }
+                 // Keep polling input and the run while a native helper waits.

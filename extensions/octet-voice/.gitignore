@@ -1,0 +1,23 @@
+# Source repository only: never stage local auth, media, environments or dogfood state.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.octet/
+.config/
+voice.json
+*.wav
+*.pcm
+*.mp3
+*.ogg
+*.flac
+*.log
+*.tar.gz
+*.zip
+/dist/
+/build/
+/stage/
+.pytest_cache/

@@ -3,7 +3,7 @@
 The [version-pinned v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
 records actual channel availability, immutable assets, signatures and source
 qualification. The [release notes](releases/v0.10.0.md) describe octet's first
-Pi-compatible launch. Native binaries and the six optional extension bundles
+Pi-compatible launch. Native binaries and the seven optional extension bundles
 are separate downloads; installation never enables an extension.
 
 The planned npm channel is `@skaft/octet@0.10.0` (launcher plus four signed platform
@@ -28,14 +28,14 @@ channel evidence.
 | Product library | `octet_sdk` |
 | Python distribution / import | `octet-extension-sdk` / `octet_extension` |
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
-| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
+| Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-voice` (experimental), `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
+| Product, Python/TypeScript SDK source and seven bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
 
-Current extension authoring and the six bundle manifests target API
+Current extension authoring and the seven bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
@@ -57,12 +57,30 @@ The release workflows don't publish every source package automatically:
 | Channel | Release path | Publication boundary |
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
-| Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
+| Seven executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, experimental `octet-voice` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
 | npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
+
+The experimental [voice extension](https://github.com/skaft-software/octet-voice)
+is maintained in its own repository. Octet's release tooling consumes a tracked
+snapshot, pinned by full commit and tree in
+[`extensions/octet-voice-source.json`](https://github.com/skaft-software/octet/blob/v0.10.0/extensions/octet-voice-source.json).
+Before release, compare that pin with the standalone repository and the final
+host commit (where `VOICE_COMMIT` is the recorded commit and `VOICE_REPO` the
+reviewed standalone checkout):
+
+```sh
+test "$(git -C "$VOICE_REPO" rev-parse "$VOICE_COMMIT^{tree}")" = \
+     "$(git rev-parse HEAD:extensions/octet-voice)"
+python3 -m unittest discover -s scripts/tests -p test_voice_snapshot.py
+```
+
+The standalone and canonical builders must produce the same source-only voice
+archive; the release job checks this independently. A matching source tree or
+provider-free test does not qualify live audio, the final binary, or publication.
 
 Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
 canonical release commit. Its metadata generator requires that ref, and the
@@ -108,7 +126,7 @@ Select the run for the exact reviewed commit, require its gating checks to
 succeed, and compare `BUILD-INFO.json` with that commit and target. Unix artifacts
 contain the native archive plus `extension-bundles/`; Windows artifacts contain
 `octet.exe`, `octet-host.exe`, extracted `extensions/`, and the same bundle
-archives. The catalog selects all six extensions, including Pi. Check the run's exact
+archives. The catalog selects all seven extensions, including Pi and experimental voice. Check the run's exact
 source and results rather than treating artifact existence as qualification.
 Codemode ships a target-native executable, including `bin/codemode.exe` on
 Windows. Python adapters require Python, and optional drivers and integrations

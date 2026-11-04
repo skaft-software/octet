@@ -21,7 +21,8 @@ through 1.4.x today); the [API ledger](docs/pi-extension-api.md) shows what work
 and what doesn't yet. [Get started with your Pi setup](docs/pi-compatibility.md).
 Pi is Mario Zechner's coding agent; its licence and attribution are retained.
 
-MCP, web search, subagents, codemode, computer use and the
+MCP, web search, subagents, codemode, computer use, experimental
+[voice](https://github.com/skaft-software/octet-voice) and the
 [Pi adapter](extensions/octet-pi-compat/README.md) are optional first-party
 integrations. Enabling the Pi adapter runs your enabled Pi extensions with your
 OS permissions. Provider-credential disclosure requires a separate opt-in.
@@ -75,7 +76,7 @@ Continue with [getting started](docs/getting-started.md).
 | Directory | Contents |
 | --- | --- |
 | `crates/` | Model clients, agent runtime, terminal interface, and native host |
-| `extensions/` | Optional integrations: codemode, computer use, MCP, Pi compat, subagents, web search; snap-compact remains source-only |
+| `extensions/` | Optional integrations: codemode, computer use, MCP, Pi compat, subagents, experimental voice, web search; snap-compact remains source-only |
 | `sdk/` | Integration libraries and protocol types |
 | `examples/` | Extensions, skills, and prompt templates |
 | `docs/` | Guides, API reference, and architecture |

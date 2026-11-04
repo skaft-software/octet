@@ -113,6 +113,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        id: voice-python
+        with:
+          python-version: '3.14'
+          update-environment: false
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -123,6 +128,7 @@ jobs:
       - name: Test the shared Python SDK and every official extension adapter
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          VOICE_PYTHON: ${{ steps.voice-python.outputs.python-path }}
         run: |
           set -euo pipefail
           python3 --version
@@ -130,6 +136,16 @@ jobs:
           while IFS= read -r extension; do
             [[ -n "$extension" ]] || continue
             root="extensions/$extension"
+            if [[ "$extension" == octet-voice ]]; then
+              # Voice's standalone source uses a locked Python 3.14 environment
+              # and keeps extension tests at its root, with SDK tests separately.
+              "$VOICE_PYTHON" -m venv "$RUNNER_TEMP/octet-voice-test"
+              voice="$RUNNER_TEMP/octet-voice-test/bin/python"
+              "$voice" -m pip install --require-hashes -r "$root/requirements.lock"
+              (cd "$root" && PYTHONPATH=vendor "$voice" -Werror::ResourceWarning -m unittest discover -s . -q)
+              (cd "$root" && PYTHONPATH=vendor "$voice" -Werror::ResourceWarning -m unittest discover -s tests/sdk -q)
+              continue
+            fi
             if [[ -f "$root/package.json" && ! -d "$root/tests" ]]; then
               # Node adapters run their own suites in the test job, which
               # builds the native editor peer their editor tests require.

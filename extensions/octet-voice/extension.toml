@@ -1,0 +1,33 @@
+name = "octet-voice"
+version = "0.10.0"
+api_version = "0.4"
+requires_octet = "=0.10.0"
+description = "Experimental optional bidirectional realtime voice with coding-agent handoff"
+
+[entrypoint]
+# Native host Python-script launch works on all three platforms without a shell.
+command = "launcher.py"
+
+[capabilities]
+# Preferences/private interpreter outside the workspace; native audio devices;
+# audio/text sent only to the fixed OpenAI/Codex realtime endpoints.
+filesystem = "unrestricted"
+process = true
+network = true
+# Explicit reviewed disclosure of one native provider/model credential on start.
+# No credential files, ambient API keys, or refresh tokens are read by this bundle.
+provider_credentials = true
+
+[contributes]
+tools = []
+commands = ["voice"]
+hooks = ["before_prompt", "after_response"]
+notifications = true
+menu = true
+shortcuts = [
+  { name = "voice-caption-up", key = "ctrl+f6", description = "Scroll voice captions up" },
+  { name = "voice-caption-down", key = "ctrl+f7", description = "Scroll voice captions down" },
+  { name = "voice-toggle", key = "ctrl+f8", description = "Start/stop two-way voice" },
+  { name = "voice-mute", key = "ctrl+f9", description = "Mute/unmute voice microphone" },
+  { name = "voice-stop", key = "ctrl+f10", description = "Stop voice immediately" },
+]

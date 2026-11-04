@@ -949,6 +949,7 @@ mod tests {
                 "octet-mcp",
                 "octet-pi-compat",
                 "octet-subagents",
+                "octet-voice",
                 "octet-web-search",
             ]
         );

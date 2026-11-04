@@ -139,7 +139,7 @@ need Git for Windows or another Bash-compatible shell.
 ## Optional packages
 
 Executable extension bundles are pinned to the host version. The 0.10.0 catalog
-includes six optional bundles, including Pi. Older bundles need their matching
+includes seven optional bundles, including Pi and experimental voice. Older bundles need their matching
 host; do not reuse a 0.9.6 bundle with octet 0.10.0.
 
 ```sh
@@ -171,9 +171,10 @@ reference](cli.md#packages).
 | `octet-codemode` | [Pi's offline JavaScript tool composition](../extensions/octet-codemode/README.md), one Rust executable with the embedded QuickJS/WASM engine; no Node.js or Python is required. Explicitly enabled tools retain normal host policy and budgets. |
 | `octet-mcp` | An [MCP bridge](../extensions/octet-mcp/README.md). Local stdio works. Remote Streamable HTTP is blocked by default. |
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
+| `octet-voice` | [Experimental realtime voice](https://github.com/skaft-software/octet-voice). Install, dependency setup and enablement are explicit; live audio on macOS and Windows is not qualified. |
 | `octet-pi-compat` | [Pi 1.0.2 compatibility adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
-The six executable-bundle manifests declare API `0.4`, distribution
+The seven executable-bundle manifests declare API `0.4`, distribution
 version `0.10.0`, and require octet `=0.10.0`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
@@ -188,6 +189,8 @@ installed experimental copies are not automatically removed.
 Python-script adapters need Python >=3.11 with `venv` and `ensurepip`, or explicit
 private-runtime setup; this is not a prerequisite for every native Octet launch.
 Pi needs Node >=22.19.0; Codemode needs neither Python nor Node at runtime.
+Voice additionally needs a separately provisioned Python 3.14 environment and
+its locked dependencies; see its [setup instructions](https://github.com/skaft-software/octet-voice#install-and-setup).
 
 ## Container
 

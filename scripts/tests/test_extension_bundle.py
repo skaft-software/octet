@@ -139,6 +139,84 @@ class ExtensionBundleTests(unittest.TestCase):
             self.assertEqual(member.mode, 0o755)
 
 
+class VoiceBundleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "voice"
+        shutil.copytree(SCRIPT.parent.parent / "extensions/octet-voice", self.source)
+        self.output = self.root / "output"
+        self.archive = self.output / f"octet-voice-{VERSION}.tar.gz"
+
+    def package(self):
+        return subprocess.run(
+            ["bash", str(SCRIPT), "octet-voice", str(self.output), f"v{VERSION}", str(self.source)],
+            env={**os.environ, "SOURCE_DATE_EPOCH": "1700000000"},
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_matches_standalone_builder_and_excludes_tests_and_local_files(self):
+        (self.source / "local-secret").write_text("must not ship")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reference = self.root / "reference.tar.gz"
+        subprocess.run([sys.executable, str(self.source / "build-package.py"),
+                        str(self.root / "stage"), "--archive", str(reference)], check=True)
+        self.assertEqual(self.archive.read_bytes(), reference.read_bytes())
+        with tarfile.open(self.archive) as bundle:
+            names = bundle.getnames()
+            self.assertNotIn("octet-voice/local-secret", names)
+            self.assertNotIn("octet-voice/test_audio.py", names)
+            self.assertNotIn("octet-voice/build-package.py", names)
+            self.assertEqual(bundle.getmember("octet-voice/launcher.py").mode, 0o755)
+
+    def test_release_workflow_compares_the_standalone_archive(self):
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        repository = SCRIPT.parent.parent
+        workflow = (repository / ".github/workflows/release-serve.yml").read_text()
+        gate = textwrap.dedent(workflow.split(
+            'python3 - "$extension" "$archive" <<\'PY\'\n', 1,
+        )[1].split("          PY\n", 1)[0])
+
+        def verify():
+            return subprocess.run(
+                [sys.executable, "-", "octet-voice", str(self.archive)],
+                input=gate, cwd=repository, capture_output=True, text=True, timeout=30,
+            )
+
+        checked = verify()
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.archive.write_bytes(self.archive.read_bytes() + b"\0")
+        checked = verify()
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("differs from its standalone builder", checked.stderr)
+
+    def test_allowlist_is_read_without_executing_builder_and_missing_files_fail(self):
+        builder = self.source / "build-package.py"
+        marker = self.root / "executed"
+        builder.write_text(builder.read_text() + f"\nopen({str(marker)!r}, 'w').close()\n")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+        self.archive.unlink()
+        (self.source / "audio.py").unlink()
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing or untracked", result.stderr)
+        self.assertFalse(self.archive.exists())
+
+    def test_linked_allowlisted_file_is_refused(self):
+        path = self.source / "audio.py"
+        path.unlink()
+        path.symlink_to(self.root / "outside")
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("links or special files", result.stderr)
+        self.assertFalse(self.archive.exists())
+
+
 class WindowsEntrypointModeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
