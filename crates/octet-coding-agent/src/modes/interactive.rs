@@ -1348,7 +1348,7 @@ where
 
 fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
     if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
-        shell.cancel_thinking_submission("thinking change interrupted");
+        shell.cancel_thinking_submission("interrupted");
         shell.request_close();
         return true;
     }
@@ -1372,11 +1372,11 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => {
-            shell.cancel_thinking_submission("thinking change interrupted");
+            shell.cancel_thinking_submission("interrupted");
             return true;
         }
         InputAction::Closed => {
-            shell.cancel_thinking_submission("thinking change interrupted");
+            shell.cancel_thinking_submission("interrupted");
             shell.request_close();
             return true;
         }
@@ -1394,15 +1394,14 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::CompletePath => shell.complete_path(),
         InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
         InputAction::Queue(_) | InputAction::Steer(_) | InputAction::Submit(_) => {
-            if !shell.queue_thinking_submission() {
-                // Other operations have no pending submission owner. Commands
-                // and shell escapes are never admitted as delayed model input.
-                shell.notice("operation in progress · draft kept for the next prompt");
+            // An ordinary prompt is latched once and sent when the wait ends,
+            // so Enter never has to be repeated. Commands and shell escapes are
+            // never admitted as delayed model input; a repeat Enter stays silent.
+            if !shell.queue_thinking_submission() && !shell.thinking_submission_pending() {
+                shell.notice("busy · draft kept");
             }
         }
-        InputAction::Command(_) => {
-            shell.notice("operation in progress · draft kept for the next prompt")
-        }
+        InputAction::Command(_) => shell.notice("busy · draft kept"),
         InputAction::Close => shell.clear_error(),
         _ => return false,
     }
@@ -2715,9 +2714,9 @@ fn settle_active_thinking(
             &display,
         );
         shell.notice(if applied {
-            format!("thinking {label} applied at the host response boundary; not provider acknowledgement")
+            format!("thinking: {label}")
         } else {
-            format!("thinking {label} queued for the next idle boundary; active request unchanged")
+            format!("thinking: {label} · next turn")
         });
     }
 }
@@ -4083,7 +4082,7 @@ where
                                     &inspection.model.spec.id.0,
                                     &format!("{label} (queued)"),
                                 );
-                                shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                                shell.notice(format!("thinking: {label} · next turn"));
                             }
                         }
                         Err(error) if selected_reasoning == reasoning => {
@@ -4703,7 +4702,7 @@ where
                                         selected_reasoning = reasoning.clone();
                                         shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
                                             &format!("{} (queued)", reasoning_label(&reasoning)));
-                                        shell.notice("thinking change queued for the next idle boundary");
+                                        shell.notice(format!("thinking: {} · next turn", reasoning_label(&reasoning)));
                                     } else {
                                         shell.error("command queue is full; thinking unchanged".into());
                                     }
@@ -4917,7 +4916,7 @@ where
                                 if model_controls::acknowledge_response_boundary(pending_actions, &reasoning) {
                                     executable_extensions.refresh_host_state(&session, &inspection.model, &reasoning, &inspection.sessions);
                                     shell.set_pending_controls(model_controls::queue_labels(pending_actions));
-                                    shell.notice(format!("thinking {} applied at the host response boundary; not provider acknowledgement", reasoning_label(&reasoning)));
+                                    shell.notice(format!("thinking: {}", reasoning_label(&reasoning)));
                                 }
                             }
                         }
@@ -7409,6 +7408,8 @@ fn select_idle_thinking(app: &mut App, reasoning: ReasoningConfig) -> anyhow::Re
             .select_model_at_idle(app.model.clone(), reasoning, label)?;
     }
     app.reasoning = app.agent.reasoning().clone();
+    // A chosen effort must outrank Pi's default on every later /reload.
+    app.keep_thinking_choice();
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -8748,21 +8749,13 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::ActiveThinkingSelection(reasoning)
             | PendingIdleAction::ChangeThinking(reasoning) => {
-                let target = reasoning.clone();
                 app = select_thinking(app, shell, input, reasoning, None, reload).await?;
-                if app.reasoning == target {
-                    shell.notice("thinking change applied at the idle boundary");
-                }
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
                 match requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
                 {
                     Ok(reasoning) => {
-                        let target = reasoning.clone();
                         app = select_thinking(app, shell, input, reasoning, None, reload).await?;
-                        if app.reasoning == target {
-                            shell.notice("thinking change applied at the idle boundary");
-                        }
                     }
                     Err(error) => {
                         shell.error(format!("thinking unchanged: {error}"));

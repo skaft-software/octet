@@ -1033,7 +1033,7 @@ fn active_thinking_reserves_capacity_and_settles_once_without_claiming_delivery(
     assert_eq!(queue.len(), MAX_PENDING_IDLE_ACTIONS);
     assert_eq!(queue.back(), Some(&PendingIdleAction::ChangeThinking(high)));
     let before = shell.debug_snapshot();
-    assert!(before.contains("active request unchanged"), "{before}");
+    assert!(before.contains("next turn"), "{before}");
     settle_active_thinking(&mut shell, &inspection, &mut queue);
     assert_eq!(
         shell.debug_snapshot(),

@@ -864,7 +864,7 @@ impl ExtensionProcess {
             .request_tool(
                 definition,
                 params,
-                self.inner.config.request_timeout,
+                self.inner.config.tool_call_timeout,
                 resource_owner,
                 None,
                 None,
@@ -896,7 +896,7 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
+        let mut params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
             let params = api_v03::ToolCallParams {
                 name: definition.name.clone(),
                 arguments,
@@ -914,13 +914,32 @@ impl ExtensionProcess {
             })
         }
         .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        // A routed tool body appends under the grant of the operation's own
+        // driver lease (the one `before_tool_call` already bound), never
+        // grant-less: the host's leaf fences stay exactly as for hooks. Without
+        // the causal driver (parallel waves, probes) the request is unchanged.
+        let _linked_views = if session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+            match (progress.session_driver(), resource_owner.as_ref()) {
+                (Some(route), Some(owner)) => {
+                    let linked = route.prepare(self, &owner.session_id).await.map_err(|_| {
+                        ExtensionRuntimeError::Protocol(
+                            "tool session causal driver unavailable".into(),
+                        )
+                    })?;
+                    linked.attach_to_tool_call(&connection, resource_owner.as_ref(), &mut params)?
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let _artifact_lease = connection.acquire_artifact_lease();
         let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
         connection
             .request_tool(
                 definition,
                 params,
-                self.inner.config.request_timeout,
+                self.inner.config.tool_call_timeout,
                 resource_owner,
                 Some(cancellation),
                 Some(progress),

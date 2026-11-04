@@ -261,6 +261,9 @@ pub const DEFAULT_EXTENSION_MESSAGE_BYTES: usize = 1024 * 1024;
 
 pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+// A tool may wait on a person answering a dialog; Esc still cancels the call.
+pub(super) const DEFAULT_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) const CONFIRMATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);

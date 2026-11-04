@@ -231,8 +231,10 @@ native workspace trust keep their original host gate.
   `getResolvedBindings` and Pi coding-agent's `getEffectiveConfig`; the latter
   two return the native host's complete effective snapshot, including overrides
   and reloads. Pi's remaining instance methods are
-  explicit gaps on this injected facade: `getDefinition`, `getConflicts` and
-  `getUserBindings` need definitions/override provenance not supplied by the host;
+  explicit gaps on this injected facade: `getDefinition` and `getConflicts`
+  need definitions/override provenance not supplied by the host, and
+  `getUserBindings` reads as an absent optional member (extensions probe it with
+  `getUserBindings?.()`; throwing there took the host down on pi-mcp-adapter's `/mcp`);
   `setUserBindings` and `reload` would contradict host ownership and are not
   supported. This does not restrict extensions constructing their own standalone
   `KeybindingsManager` from the pinned TUI package.

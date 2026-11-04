@@ -162,6 +162,11 @@ export function modelRegistry(getHost, runtime = {}) {
         ...(result.baseUrl === undefined ? {} : { baseUrl: result.baseUrl }),
         ...(result.env === undefined ? {} : { env: result.env }) };
     },
+    // Pi 1.4's classifier API (a credentialed provider request) is outside the pinned Pi 1.0.2 surface and octet's
+    // host contract. Feature probes (pi-mcp-adapter checks it on every `mcp search`) must read it as absent, the
+    // "no classifier models" case, rather than throw; semantic search then reports itself unavailable.
+    classify: undefined,
+    findOfType: undefined,
   };
   return strict(registry, 'ctx.modelRegistry');
 }

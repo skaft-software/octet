@@ -81,6 +81,19 @@ def do_hook(m):
   assert len(p['context']['host']['session_entries'])==len(p['context']['host']['session_branch'])
  count+=1; cid='append:%d'%count; pending[cid]=('hook',m)
  send({'jsonrpc':'2.0','id':cid,'method':'session/append_entry','params':{'parent_request_id':m['id'],'entry_type':'driver-checkpoint','data':{'hook':p['hook'],'name':payload.get('name'),'count':count},'session_leaf':{k:p['session_leaf'][k] for k in ['grant_id','activation_epoch','operation_id']}}})
+def do_tool_append(m):
+ # A tool body appends under the grant the host forwarded on its own tool/call.
+ # Without one (the pre-fix host) it can only send the grant-less shape, which
+ # the host must keep refusing while the operation's leaf is bound.
+ global count
+ p=m['params']; grant=p.get('session_leaf'); d=p.get('session_snapshot')
+ if grant is not None:
+  doc=read_document(m['id'],d)
+  assert doc['head']==grant['expected_head'],(doc['head'],grant)
+ count+=1; cid='append:%d'%count; pending[cid]=('toolbody',m)
+ params={'parent_request_id':m['id'],'entry_type':'tool-body-checkpoint','data':{'tool':p['name'],'granted':grant is not None}}
+ if grant is not None: params['session_leaf']={k:grant[k] for k in ['grant_id','activation_epoch','operation_id']}
+ send({'jsonrpc':'2.0','id':cid,'method':'session/append_entry','params':params})
 def handle(m):
  method=m.get('method')
  if method is None:
@@ -94,6 +107,7 @@ def handle(m):
    return
   kind,original=pending.pop(m['id'])
   if kind=='hook': reply(original,{'disposition':{'action':'continue'}})
+  elif kind=='toolbody': reply(original,{'content':[{'type':'text','text':'appended'}],'is_error':False})
   else: reply(original,{'content':[{'type':'text','text':'nested complete'}],'is_error':False})
  elif method=='session/snapshot/prepare':
   d=m['params']['snapshot']; delay=prepare_delay()
@@ -104,6 +118,7 @@ def handle(m):
   reply(m,{'accepted':True,'transfer_id':d['transfer_id'],'view_revision':d['view_revision'],'head':d['head'],'sha256':d['sha256']})
  elif method=='hook/run': do_hook(m)
  elif method=='tool/call':
+  if m['params']['name']=='append': return do_tool_append(m)
   # A published owner view may ride along on ordinary requests; do not consume it.
   cid='nested:%d'%m['id']; pending[cid]=('tool',m)
   send({'jsonrpc':'2.0','id':cid,'method':'composition/call','params':{'parent_request_id':m['id'],'name':'tiny','arguments':{}}})
@@ -121,7 +136,9 @@ def run():
    # which is before the host cuts the generation over.
    autocomplete=knob('autocomplete')!=''
    if autocomplete: features.append('autocomplete')
-   reply(m,{'api_version':'0.4','tools':[{'name':'compose','description':'Compose','parameters':{'type':'object'},'composition':{'mode':'on','inline_budget':3000}}],'commands':[],
+   tools=[{'name':'compose','description':'Compose','parameters':{'type':'object'},'composition':{'mode':'on','inline_budget':3000}}]
+   if knob('append-tool')!='': tools.append({'name':'append','description':'Append','parameters':{'type':'object'}})
+   reply(m,{'api_version':'0.4','tools':tools,'commands':[],
     'protocol':{'version':'0.4','features':features,'limits':{'max_concurrent_requests':4}}})
    if autocomplete:
     send({'jsonrpc':'2.0','id':'register-1','method':'ui/autocomplete/register','params':{'revision':1}})

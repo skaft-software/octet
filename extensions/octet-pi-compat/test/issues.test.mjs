@@ -32,6 +32,17 @@ function harness(t, extensions = ['/reviewed/first.ts', '/reviewed/second.ts']) 
   return { runtime, frames, diagnostics, store };
 }
 
+test('late work that lost its finished parent request is logged, not shown', t => {
+  const { runtime, frames, diagnostics } = harness(t);
+  for (const message of ['parent settled', 'active numeric parent_request_id required for synchronous append']) {
+    runtime.issues.backgroundError(new Error(message));
+  }
+  runtime.issues.backgroundError(new Error('real failure'));
+  const shown = frames.filter(frame => frame.method === 'notification' && frame.params.title === 'Pi compatibility error');
+  assert.deepEqual(shown.map(frame => frame.params.message), ['real failure (details: /extensions)']);
+  assert.ok(diagnostics.some(line => line.includes('parent settled')), 'the cause stays in the log');
+});
+
 test('startup groups skipped factories and inert renderers into one actionable Extension issues notice', async t => {
   const entries = fixtures(t, {
     render: `export default pi => {

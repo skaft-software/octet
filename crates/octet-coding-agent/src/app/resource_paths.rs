@@ -175,7 +175,7 @@ impl App {
         &mut self,
         requested_model: Option<&octet_agent::extension_process::ExtensionDefaultModel>,
         requested_thinking: Option<&str>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<()> {
         let baseline = self
             .resource_paths
             .selection
@@ -192,16 +192,21 @@ impl App {
             && self.resource_paths.thinking_default_active;
         let id = if let Some(selection) = model_preference {
             self.resolve_contributed_model(&selection.provider, &selection.model)
-                .with_context(|| format!(
-                    "requested Pi default model {}/{} is unavailable; configure this provider/model and its credentials, or choose an available --model",
-                    selection.provider, selection.model
-                ))?
+                .with_context(|| {
+                    format!(
+                        "Pi default model {}/{} is unavailable",
+                        selection.provider, selection.model
+                    )
+                })?
         } else if withdraw_model {
             baseline.0.clone()
         } else {
             self.model.spec.id.clone()
         };
-        let model = self.catalog.resolve(&id)?;
+        let model = self
+            .catalog
+            .resolve(&id)
+            .context("Pi defaults not applied")?;
         let changed_model = id != self.model.spec.id;
         let subagents = self.executable_extensions.has_agent_session_service();
         // The user's own effort follows a model they did not pick; Pi's only fills a gap.
@@ -223,9 +228,14 @@ impl App {
                 )?
             }
         } else if let Some(level) = thinking_preference {
-            // The protocol has already required exact Pi spellings. Native
-            // admission rejects unsupported levels instead of lowering max.
-            requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
+            // Pi clamps its own default to the model silently; only an explicit
+            // user choice is refused when unsupported.
+            let supported = supported_levels_with_subagents(&model, subagents);
+            requested_thinking_to_reasoning(
+                clamp_thinking_level(ThinkingLevel::parse(level)?, &supported),
+                &model,
+                subagents,
+            )?
         } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
         {
             if id == baseline.0 {
@@ -239,30 +249,20 @@ impl App {
             // Theme/path-only reloads must not reset a live reasoning choice.
             self.reasoning.clone()
         };
-        let mut notice = None;
         if changed_model || reasoning != self.reasoning {
-            self.agent.select_model_at_idle(
-                model.clone(),
-                reasoning.clone(),
-                reasoning_label(&reasoning),
-            )?;
-            if model_preference.is_some() || thinking_preference.is_some() {
-                notice = Some(format!(
-                    "Using Pi's default {} · {} for this session",
-                    model
-                        .spec
-                        .display_name
-                        .as_deref()
-                        .unwrap_or(&model.spec.api_name),
+            self.agent
+                .select_model_at_idle(
+                    model.clone(),
+                    reasoning.clone(),
                     reasoning_label(&reasoning),
-                ));
-            }
+                )
+                .context("Pi defaults not applied")?;
             self.model = model;
             self.reasoning = reasoning;
         }
         self.resource_paths.model_default_active = model_preference.is_some();
         self.resource_paths.thinking_default_active = thinking_preference.is_some();
-        Ok(notice)
+        Ok(())
     }
 
     /// An in-session effort choice outranks saved and Pi defaults on every later reload.
@@ -342,9 +342,9 @@ impl App {
             loaded.default_model.as_ref(),
             loaded.default_thinking_level.as_deref(),
         ) {
-            Ok(notice) => diagnostics.extend(notice),
+            Ok(()) => {}
             Err(error) => diagnostics.push(
-                format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
+                format!("warning: {error}")
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .take(4096)

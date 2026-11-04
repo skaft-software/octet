@@ -243,6 +243,40 @@ impl SessionDriver {
 }
 
 impl LinkedSessionInvocation {
+    /// Present this operation's single-use grant on the `tool/call` that runs
+    /// under the same causal driver. `before_tool_call` already ran under this
+    /// lease, so the connection has a bound leaf and the host refuses any
+    /// append that does not carry exactly its grant. Same authority checks as
+    /// `run_hook`, plus the connection the request is about to use: a grant
+    /// minted for another process generation is never forwarded. The returned
+    /// guard keeps the prepared history staged until the request settles.
+    pub(in crate::extension_process) fn attach_to_tool_call(
+        &self,
+        connection: &Arc<ProcessConnection>,
+        owner: Option<&ExtensionResourceOwner>,
+        params: &mut serde_json::Value,
+    ) -> Result<Option<transport::Staged>, ExtensionRuntimeError> {
+        if !Arc::ptr_eq(&self.connection, connection)
+            || owner != Some(&self.bound.snapshot.owner)
+            || !lock_std_mutex(&self.connection.session_leaf.bound)
+                .get(&self.bound.snapshot.owner)
+                .is_some_and(|bound| Arc::ptr_eq(bound, &self.bound))
+        {
+            return Err(ExtensionRuntimeError::Protocol(
+                "linked session tool authority unavailable".into(),
+            ));
+        }
+        let current = lock_std_mutex(&self.bound.current_grant)
+            .clone()
+            .ok_or_else(|| {
+                ExtensionRuntimeError::Protocol("linked session grant unavailable".into())
+            })?;
+        params["session_leaf"] = serde_json::to_value(current).map_err(|_| {
+            ExtensionRuntimeError::Protocol("linked session grant unavailable".into())
+        })?;
+        self.snapshot.attach(&self.connection, params)
+    }
+
     pub(crate) async fn run_hook(
         self,
         hook: ExtensionHook,

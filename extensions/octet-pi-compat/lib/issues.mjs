@@ -209,6 +209,9 @@ export class ExtensionIssues {
     console.error(`[pi-compat] ${full}`);
     const summary = display(full.split('\n', 1)[0].replace(/(?:file:\/\/)?\/(?:[^\s/'"]+\/)+/g, ''), 160);
     const runtime = this.runtime;
+    // Late work that lost its already-finished parent request is a lifecycle
+    // race with nothing for the user to do; the log above keeps the cause.
+    if (/^(?:parent settled|active numeric parent_request_id required)/.test(summary)) return;
     if (this.background.has(summary) || this.background.size >= 32 || runtime.stopping || runtime.transport.closed) return;
     this.background.add(summary);
     runtime.transport.notify('notification', { level: 'error', title: 'Pi compatibility error', message: `${summary} (details: /extensions)` })

@@ -398,6 +398,30 @@ pub fn supported_levels_with_subagents(
         .collect()
 }
 
+/// Pi keeps a configured default the model cannot honour by moving it to the
+/// nearest supported level above it, else the nearest below, never an error.
+pub(crate) fn clamp_thinking_level(
+    level: ThinkingLevel,
+    supported: &[ThinkingLevel],
+) -> ThinkingLevel {
+    if supported.contains(&level) {
+        return level;
+    }
+    let rank = thinking_level_order(level);
+    supported
+        .iter()
+        .copied()
+        .filter(|candidate| thinking_level_order(*candidate) >= rank)
+        .min_by_key(|candidate| thinking_level_order(*candidate))
+        .or_else(|| {
+            supported
+                .iter()
+                .copied()
+                .max_by_key(|candidate| thinking_level_order(*candidate))
+        })
+        .unwrap_or(level)
+}
+
 /// Explicit interactive choices must not silently normalize an unsupported effort.
 /// Startup/configuration normalization intentionally retains its separate policy.
 pub fn requested_thinking_to_reasoning(
@@ -962,6 +986,19 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pi_default_thinking_clamps_up_first_then_down() {
+        use ThinkingLevel::*;
+        let supported = [Off, Low, High];
+        assert_eq!(clamp_thinking_level(Max, &supported), High);
+        assert_eq!(clamp_thinking_level(Medium, &supported), High);
+        assert_eq!(clamp_thinking_level(Minimal, &supported), Low);
+        assert_eq!(clamp_thinking_level(Low, &supported), Low);
+        assert_eq!(clamp_thinking_level(Medium, &[Off]), Off);
+        assert_eq!(clamp_thinking_level(Off, &[On]), On);
+        assert_eq!(clamp_thinking_level(Medium, &[]), Medium);
+    }
+
     use octet_ai::OpenAiChatReasoningMode;
     use std::sync::Arc;
 

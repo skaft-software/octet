@@ -90,6 +90,16 @@ impl std::fmt::Display for PromptWaitCancelled {
 
 impl std::error::Error for PromptWaitCancelled {}
 
+/// An aborted request, whether the host cancelled it or the extension answered
+/// with JSON-RPC `-32800`, is a stop and never a failed handler to skip.
+fn is_cancellation(error: &octet_agent::extension_process::ExtensionRuntimeError) -> bool {
+    use octet_agent::extension_process::ExtensionRuntimeError as Error;
+    matches!(
+        error,
+        Error::Cancelled { .. } | Error::Remote { code: -32800, .. }
+    )
+}
+
 impl ExecutableExtensions {
     /// Run ordered early input handlers. `None` means handled: do not persist
     /// a prompt or start a provider request. Images omitted by a transform stay.
@@ -136,6 +146,17 @@ impl ExecutableExtensions {
             {
                 continue;
             }
+            let extension_name = process.descriptor().manifest.name.clone();
+            if !process.is_running() {
+                let mut notes = Vec::new();
+                self.degrade_prompt_extension(
+                    &extension_name,
+                    "is not running, its input hook was skipped",
+                    &mut notes,
+                );
+                self.held_messages.append(&mut notes);
+                continue;
+            }
             let mut waited = Vec::new();
             let started = std::time::Instant::now();
             let idle = self
@@ -163,7 +184,7 @@ impl ExecutableExtensions {
             }
             let execution = extension_execution_context(&process, self.resource_owner.as_deref());
             let mut served = Vec::new();
-            let output = self
+            let outcome = self
                 .await_prompt_work(
                     tokio::time::timeout(
                         PROMPT_RPC_DEADLINE,
@@ -178,30 +199,63 @@ impl ExecutableExtensions {
                     frontend.as_deref_mut(),
                 )
                 .await
-                .ok_or(PromptWaitCancelled)?
-                .map_err(|_| anyhow::anyhow!("extension input hook timed out"))??;
+                .ok_or(PromptWaitCancelled)?;
             self.held_messages.append(&mut served);
+            // A failing or stalled input handler is reported and skipped, like
+            // Pi's emitInput. Only an explicit refusal still stops the input.
+            let output = match outcome {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
+                failed => {
+                    let detail = match failed {
+                        Ok(Err(error)) => format!("input hook failed: {error:#}"),
+                        _ => format!("input hook exceeded {PROMPT_RPC_DEADLINE:?}"),
+                    };
+                    let mut notes = Vec::new();
+                    self.degrade_prompt_extension(&extension_name, &detail, &mut notes);
+                    self.held_messages.append(&mut notes);
+                    continue;
+                }
+            };
             anyhow::ensure!(
                 output.disposition == ExtensionHookDisposition::Continue,
                 "extension input hook refused input"
             );
-            let result = output
+            let result = match output
                 .input_event
                 .map(serde_json::from_value::<InputEventResult>)
-                .transpose()?;
-            match result.unwrap_or(InputEventResult::Continue) {
+                .transpose()
+            {
+                Ok(result) => result.unwrap_or(InputEventResult::Continue),
+                Err(error) => {
+                    let mut notes = Vec::new();
+                    self.degrade_prompt_extension(
+                        &extension_name,
+                        &format!("returned an invalid input result: {error}"),
+                        &mut notes,
+                    );
+                    self.held_messages.append(&mut notes);
+                    continue;
+                }
+            };
+            match result {
                 InputEventResult::Continue => {}
                 InputEventResult::Handled => return Ok(None),
                 InputEventResult::Transform { text, images } => {
-                    anyhow::ensure!(
-                        text.len() <= 262144 && !text.contains('\0'),
-                        "transformed input exceeds bounds"
-                    );
-                    if let Some(images) = images {
-                        anyhow::ensure!(
-                            images.len() <= 256,
-                            "transformed input image count exceeds bounds"
+                    let within_bounds = text.len() <= 262144
+                        && !text.contains('\0')
+                        && images.as_ref().is_none_or(|images| images.len() <= 256);
+                    if !within_bounds {
+                        let mut notes = Vec::new();
+                        self.degrade_prompt_extension(
+                            &extension_name,
+                            "returned input outside the allowed bounds",
+                            &mut notes,
                         );
+                        self.held_messages.append(&mut notes);
+                        continue;
+                    }
+                    if let Some(images) = images {
                         input.images = Some(images);
                     }
                     input.text = text;
@@ -703,6 +757,25 @@ impl ExecutableExtensions {
         }
     }
 
+    /// A prompt, input or before_agent_start step of one extension failed, timed
+    /// out or found its process gone. Pi reports such a handler failure and keeps
+    /// going, so the prompt proceeds without this extension's contribution. The
+    /// cause stays in the bounded diagnostics; the user sees one short notice per
+    /// extension. Tool-call guards do not come through here: they stay fail-closed.
+    fn degrade_prompt_extension(
+        &mut self,
+        name: &str,
+        detail: &str,
+        notifications: &mut Vec<String>,
+    ) {
+        self.diagnostics.push(format!(
+            "warning: extension {name:?} {detail}; continuing without it for this prompt"
+        ));
+        if self.degraded_prompt_extensions.insert(name.to_owned()) {
+            notifications.push(format!("{name} failed · continuing without it"));
+        }
+    }
+
     /// Keep reverse host requests live while a prompt contributor is awaiting
     /// its response. This drain never borrows a shell: an interactive consumer
     /// queues those requests for its next shell pump, and a host without one
@@ -773,15 +846,26 @@ impl ExecutableExtensions {
         // bounded event consumer can answer requests made by these hooks.
         for process in self.processes.clone() {
             let execution = extension_execution_context(&process, self.resource_owner.as_deref());
-            // A session start still in flight owns the extension's ordered hook
-            // queue; wait for it instead of failing the prompt against a deadline
-            // that would include that wait.
-            if process
+            let extension_name = process.descriptor().manifest.name.clone();
+            let contributes = process
                 .contributions()
                 .hooks
                 .contains(&ExtensionHook::BeforePrompt)
-                || process.contributions().context
-            {
+                || process.contributions().context;
+            // A dead extension process cannot answer: do not spend a deadline on
+            // it, and do not refuse the prompt because of it.
+            if contributes && !process.is_running() {
+                self.degrade_prompt_extension(
+                    &extension_name,
+                    "is not running, its prompt work was skipped",
+                    &mut notifications,
+                );
+                continue;
+            }
+            // A session start still in flight owns the extension's ordered hook
+            // queue; wait for it instead of failing the prompt against a deadline
+            // that would include that wait.
+            if contributes {
                 let started = std::time::Instant::now();
                 if self
                     .await_prompt_work(
@@ -807,7 +891,7 @@ impl ExecutableExtensions {
                 .hooks
                 .contains(&ExtensionHook::BeforePrompt)
             {
-                let output = self.await_prompt_work(
+                let outcome = self.await_prompt_work(
                     tokio::time::timeout(
                         PROMPT_RPC_DEADLINE,
                         process.run_hook(
@@ -824,39 +908,54 @@ impl ExecutableExtensions {
                     frontend.as_deref_mut(),
                 )
                 .await
-                .ok_or(PromptWaitCancelled)?
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "extension {:?} before_prompt hook exceeded {:?}",
-                        process.descriptor().manifest.name,
-                        PROMPT_RPC_DEADLINE,
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "extension {:?} before_prompt hook failed",
-                        process.descriptor().manifest.name
-                    )
-                })?;
+                .ok_or(PromptWaitCancelled)?;
+                // Pi's emitBeforeAgentStart reports a failing handler and the
+                // turn continues; a dead, stalled or malformed extension is
+                // skipped for this prompt instead of refusing it.
+                let output = match outcome {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
+                    failed => {
+                        let detail = match failed {
+                            Ok(Err(error)) => format!("before_prompt hook failed: {error:#}"),
+                            _ => format!("before_prompt hook exceeded {PROMPT_RPC_DEADLINE:?}"),
+                        };
+                        self.degrade_prompt_extension(&extension_name, &detail, &mut notifications);
+                        continue;
+                    }
+                };
                 if let ExtensionHookDisposition::Deny { reason } = output.disposition {
                     anyhow::bail!(
                         "extension {:?} denied the prompt: {reason}",
                         process.descriptor().manifest.name
                     );
                 }
-                if let Some(system) = output.system_prompt {
-                    anyhow::ensure!(process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1),
-                        "extension returned an unnegotiated before_prompt system replacement");
-                    anyhow::ensure!(
-                        system.len() <= 256 * 1024 && !system.contains('\0'),
-                        "extension before_prompt system replacement exceeds bounds"
+                let admitted = (|| -> anyhow::Result<()> {
+                    if let Some(system) = &output.system_prompt {
+                        anyhow::ensure!(process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1),
+                            "extension returned an unnegotiated before_prompt system replacement");
+                        anyhow::ensure!(
+                            system.len() <= 256 * 1024 && !system.contains('\0'),
+                            "extension before_prompt system replacement exceeds bounds"
+                        );
+                    }
+                    for message in &output.custom_messages {
+                        message.validate()?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = admitted {
+                    self.degrade_prompt_extension(
+                        &extension_name,
+                        &format!("returned an unusable before_prompt result: {error:#}"),
+                        &mut notifications,
                     );
+                    continue;
+                }
+                if let Some(system) = output.system_prompt {
                     effective_system = system;
                 }
-                for message in output.custom_messages {
-                    message.validate()?;
-                    custom_messages.push(message);
-                }
+                custom_messages.extend(output.custom_messages);
                 let mut dropped = 0usize;
                 let mut last_error = None;
                 for contribution in output.context {
@@ -877,7 +976,7 @@ impl ExecutableExtensions {
                 }));
             }
             if process.contributions().context {
-                let collected = self
+                let outcome = self
                     .await_prompt_work(
                         tokio::time::timeout(
                             PROMPT_RPC_DEADLINE,
@@ -887,20 +986,19 @@ impl ExecutableExtensions {
                         frontend.as_deref_mut(),
                     )
                     .await
-                    .ok_or(PromptWaitCancelled)?
-                    .map_err(|_| {
-                        anyhow::anyhow!(
-                            "extension {:?} context collection exceeded {:?}",
-                            process.descriptor().manifest.name,
-                            PROMPT_RPC_DEADLINE,
-                        )
-                    })?
-                    .with_context(|| {
-                        format!(
-                            "extension {:?} context collection failed",
-                            process.descriptor().manifest.name
-                        )
-                    })?;
+                    .ok_or(PromptWaitCancelled)?;
+                let collected = match outcome {
+                    Ok(Ok(collected)) => collected,
+                    Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
+                    failed => {
+                        let detail = match failed {
+                            Ok(Err(error)) => format!("context collection failed: {error:#}"),
+                            _ => format!("context collection exceeded {PROMPT_RPC_DEADLINE:?}"),
+                        };
+                        self.degrade_prompt_extension(&extension_name, &detail, &mut notifications);
+                        continue;
+                    }
+                };
                 let mut dropped = 0usize;
                 let mut last_error = None;
                 for contribution in collected {

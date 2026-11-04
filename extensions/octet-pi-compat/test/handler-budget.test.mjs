@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { launch, root, owner, noPiAgent } from './helper.mjs';
@@ -42,6 +44,41 @@ test('a detached handler is reported once per event, naming its factory, then sk
   assert.equal(composed.result?.system_prompt, 'base\nhealthy', JSON.stringify(composed));
   assert.ok(Date.now() - begun < 400, `a busy handler is skipped, not waited on again (${Date.now() - begun} ms)`);
   await assert.rejects(peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? ''), 800));
+  await peer.close();
+});
+
+const slowStartup = join(root, 'test/fixtures/slow-startup-quit.ts');
+const end = (peer, reason) => peer.request('hook/run', { hook: 'session_end', payload: { binding: owner, reason }, context: peer.context() });
+const logged = log => { try { return readFileSync(log, 'utf8').trim().split('\n'); } catch { return []; } };
+async function untilLogged(log, line) {
+  for (let waited = 0; waited < 3000 && !logged(log).includes(line); waited += 20) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(logged(log).includes(line), `${line} was never logged`);
+}
+
+test('a quit during a slow session_start runs the shutdown handlers at once and starts nothing more', async t => {
+  const log = join(mkdtempSync(join(tmpdir(), 'startup-quit-')), 'log');
+  const peer = launch(t, [slowStartup], { env: { STARTUP_QUIT_LOG: log } }); await peer.init(features);
+  const starting = start(peer).response;
+  await untilLogged(log, 'slow-begin');
+  const begun = Date.now();
+  const quit = await end(peer, 'quit').response;
+  assert.ok(quit.result, JSON.stringify(quit));
+  assert.ok(Date.now() - begun < 700, `shutdown did not wait for the slow session_start (${Date.now() - begun} ms)`);
+  assert.deepEqual(logged(log), ['slow-begin', 'shutdown quit'], 'the quit handler ran before the startup handler finished');
+  await starting;
+  await new Promise(resolve => setTimeout(resolve, 1700));
+  assert.ok(!logged(log).includes('next-start'), 'no later session_start handler starts after the quit');
+  await peer.close();
+});
+
+test('a reload during a slow session_start still waits for it, in order', async t => {
+  const log = join(mkdtempSync(join(tmpdir(), 'startup-quit-')), 'log');
+  const peer = launch(t, [slowStartup], { env: { STARTUP_QUIT_LOG: log } }); await peer.init(features);
+  const starting = start(peer).response;
+  await untilLogged(log, 'slow-begin');
+  const reloading = end(peer, 'reload').response;
+  await Promise.all([starting, reloading]);
+  assert.deepEqual(logged(log), ['slow-begin', 'slow-end', 'next-start', 'shutdown reload']);
   await peer.close();
 });
 
@@ -130,7 +167,7 @@ test('many stalled hook handlers share one deadline and do not start after it', 
   try {
     const reports = [];
     const runtime = { config: { extensions: [] }, issues: { slow: (event, items) => reports.push({ event, items }) } };
-    const store = { pending: new Set(), errors: [] };
+    const store = { pending: new Set(), errors: [], controller: new AbortController() };
     const budget = new HookBudget(runtime, store, 'input');
     const begun = Date.now();
     let invoked = 0;
@@ -156,7 +193,7 @@ test('many stalled hook handlers share one deadline and do not start after it', 
 
 test('a healthy late handler can use the shared reserve without extending the deadline', async () => {
   const runtime = { config: { extensions: [] }, issues: { slow() {} } };
-  const store = { pending: new Set(), errors: [] };
+  const store = { pending: new Set(), errors: [], controller: new AbortController() };
   const budget = new HookBudget(runtime, store, 'input');
   budget.perHandler = 100; budget.total = 160;
   const stalled = await budget.run({ label: 'stalled' }, { ...store }, () => new Promise(() => {}));

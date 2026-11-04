@@ -447,6 +447,9 @@ pub struct ExecutableExtensions {
     /// Notices drained while a prompt waited on an extension, returned by the
     /// next drain so they still reach the transcript.
     held_messages: Vec<String>,
+    /// Extensions whose prompt/input hooks failed. The user is told once per
+    /// extension; every later prompt just continues without the failed work.
+    degraded_prompt_extensions: std::collections::BTreeSet<String>,
     confirmation_denials: VecDeque<PendingConfirmationDenial>,
     confirmation_tasks: Vec<JoinHandle<()>>,
     input_cancellations: VecDeque<PendingInputCancellation>,
@@ -551,6 +554,7 @@ impl Default for ExecutableExtensions {
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
             held_messages: Vec::new(),
+            degraded_prompt_extensions: std::collections::BTreeSet::new(),
             confirmation_denials: VecDeque::new(),
             confirmation_tasks: Vec::new(),
             input_cancellations: VecDeque::new(),

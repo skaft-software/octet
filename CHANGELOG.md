@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- The Pi adapter no longer shows `parent settled` or `active numeric
+  parent_request_id required` notices. They mean an extension's late work lost
+  its finished request, which the user cannot act on; the cause stays in the log.
+- Pi extension tools that write session entries (pi-web-access `web_search`,
+  rpiv-todo `todo`) no longer fail with `missing field session_leaf`. The host
+  forwards the operation's own single-use session grant on `tool/call` and the
+  adapter presents it; the numeric-parent, owner, generation, single-use and
+  bound checks on every append are unchanged, and a request without a causal
+  driver (parallel waves) still carries no grant.
+- Pi `mcp search` (pi-mcp-adapter) no longer fails with
+  `unsupported_feature ctx.modelRegistry.classify`. The adapter feature-detects
+  Pi's classifier API on every search; `ctx.modelRegistry.classify` and
+  `findOfType` now read as absent (octet has no classifier-model contract), so
+  word search works and semantic search reports itself unavailable. No credential
+  path changes.
+- A prompt entered while octet is busy (compaction, hooks, a thinking change) is
+  queued once and sent when the wait ends, so Enter no longer has to be repeated.
+  Commands and shell escapes are still never queued as model input. Busy and
+  thinking notices are one short line each.
+- Extension tool calls may wait up to 10 minutes for a person to answer a dialog
+  (it was 30 seconds, which cut `ask_user` dialogs short); Esc still cancels.
+- Pi `/mcp` (pi-mcp-adapter) no longer takes the extension host down. The keybinding
+  facades handed to custom UI factories and returned by `getKeybindings()` threw
+  `unsupported_feature keybindings.getUserBindings` on the adapter's optional
+  `getUserBindings?.()` probe; the rejection was unhandled and the host exited.
+  The member now reads as absent (the host still supplies no override provenance;
+  other unsupported members still refuse).
+- A quit stops waiting for a slow Pi `session_start` handler so shutdown handlers
+  run at once; reload, new, resume and fork still wait their turn.
+- A Pi `defaultThinkingLevel` the model does not offer is now clamped to the
+  nearest supported level (up first, then down, as Pi does) with no startup or
+  `/reload` notice; applied Pi defaults no longer print a red `reload failed:`
+  line, and a thinking level chosen in the session is kept across `/reload`.
 - Pi mirror loading rechecks reviewed sources at each ordered factory import and
   after a failed native-ESM probe before fallback. A changed source is refused;
   this review check is not an operating-system sandbox.

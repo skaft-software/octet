@@ -35,6 +35,7 @@ const MIN_WAIT_MS = 250;
 const USER_WAIT_EVENTS = new Set(['tool_call']);
 const USER_WAIT_CAP_MS = 20000;
 const TIMED_OUT = Symbol('handler budget exceeded');
+const PREEMPTED = Symbol('hook preempted by quit');
 
 // The suite shortens every budget; the variable never reaches a bridge started
 // by the host, which passes an allow-listed environment only.
@@ -175,21 +176,38 @@ export class HookBudget {
         if (late.error && entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error);
       }
     });
+    // A quit aborts the hook still starting up: stop waiting so shutdown handlers run at
+    // once, and let the handler finish in the background. Nothing is reported, the
+    // process is going away.
+    const { signal } = store.controller;
+    let release;
+    const preempted = new Promise(resolve => {
+      release = () => { if (store.preempted) resolve(PREEMPTED); };
+      if (signal.aborted) release(); else signal.addEventListener('abort', release, { once: true });
+    });
     let outcome;
-    for (;;) {
-      const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
-      if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
-        outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT)]);
+    try {
+      for (;;) {
+        const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
+        if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
+          outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT), preempted]);
+          if (outcome !== TIMED_OUT) break;
+          continue;
+        }
+        if (left <= 0) { outcome = TIMED_OUT; break; }
+        const timer = nativeTimer(left);
+        try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT), preempted]); }
+        finally { timer.cancel(); }
         if (outcome !== TIMED_OUT) break;
-        continue;
       }
-      if (left <= 0) { outcome = TIMED_OUT; break; }
-      const timer = nativeTimer(left);
-      try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
-      finally { timer.cancel(); }
-      if (outcome !== TIMED_OUT) break;
-    }
+    } finally { signal.removeEventListener('abort', release); }
     this.excluded += userWait?.spent() ?? 0;
+    if (outcome === PREEMPTED) {
+      child.detached = true;
+      for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
+      this.trace(entry, performance.now() - started, 'preempted');
+      return { ran: false, busy: false };
+    }
     if (outcome === TIMED_OUT) {
       // Work the handler already queued on this hook must not hold the hook's
       // own flush, and anything it queues later is observed but never joined.

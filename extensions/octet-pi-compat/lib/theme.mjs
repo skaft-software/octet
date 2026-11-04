@@ -231,5 +231,9 @@ export function hostKeybindings(snapshot) {
     getKeys(action) { return [...keysFor(action)]; },
     getResolvedBindings() { return plainJSON(snapshot(), 'host keybindings'); },
     getEffectiveConfig() { return plainJSON(snapshot(), 'host keybindings'); },
+    // Optional in Pi's own manager contract (extensions call `getUserBindings?.()`; pi-mcp-adapter's panel does
+    // while constructing /mcp). The host supplies no override provenance, so the member reads as absent instead
+    // of throwing: a feature probe must not fail the host. Calling it unconditionally is still a TypeError.
+    getUserBindings: undefined,
   }, 'keybindings');
 }

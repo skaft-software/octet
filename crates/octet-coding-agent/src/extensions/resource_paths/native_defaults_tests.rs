@@ -103,11 +103,8 @@ async fn publish(app: &mut App, root: &Path, paths: Value) -> Vec<String> {
     app.apply_extension_resource_paths(loaded, lease).unwrap().1
 }
 
-fn assert_pi_default_notice(diagnostics: &[String]) {
-    assert!(
-        matches!(diagnostics, [notice] if notice.starts_with("Using Pi's default ")),
-        "{diagnostics:?}"
-    );
+fn assert_no_pi_default_notice(diagnostics: &[String]) {
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 fn assert_selection(app: &App, model: &Model, reasoning: ReasoningConfig) {
@@ -132,7 +129,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
         }),
     )
     .await;
-    assert_pi_default_notice(&diagnostics);
+    assert_no_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -151,7 +148,7 @@ async fn max_is_preserved_same_model_reasoning_changes_and_withdrawal_restores_l
         }),
     )
     .await;
-    assert_pi_default_notice(&diagnostics);
+    assert_no_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -182,7 +179,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
         }),
     )
     .await;
-    assert_pi_default_notice(&diagnostics);
+    assert_no_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &baseline,
@@ -212,7 +209,7 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
         }),
     )
     .await;
-    assert_pi_default_notice(&diagnostics);
+    assert_no_pi_default_notice(&diagnostics);
     assert_selection(
         &app,
         &preferred,
@@ -243,33 +240,11 @@ async fn explicit_model_and_reasoning_independently_override_resource_defaults()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_thinking_and_missing_model_leave_route_and_effort_together() {
+async fn missing_pi_default_model_leaves_route_and_effort_together() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let (mut app, process, baseline, _) = fixture(&root).await;
-    let _unsupported = register_model(&mut app, "no-thinking", "synthetic-no-thinking", &[]);
     let head = app.agent.session().head_ref().cloned();
-    let diagnostics = publish(
-        &mut app,
-        &root,
-        json!({
-            "default_model": {"provider": "synthetic", "model": "no-thinking"},
-            "default_thinking_level": "max"
-        }),
-    )
-    .await;
-    assert!(
-        diagnostics
-            .iter()
-            .any(|line| line.contains("max") && line.contains("not supported")),
-        "{diagnostics:?}"
-    );
-    assert_selection(
-        &app,
-        &baseline,
-        ReasoningConfig::Effort(ReasoningEffort::Low),
-    );
-    assert_eq!(app.agent.session().head_ref(), head.as_ref());
     let diagnostics = publish(
         &mut app,
         &root,
@@ -283,7 +258,8 @@ async fn unsupported_thinking_and_missing_model_leave_route_and_effort_together(
         .iter()
         .find(|line| line.contains("not-configured/requested-model"))
         .expect("missing request must be diagnosed");
-    assert!(diagnostic.contains("configure") && diagnostic.contains("--model"));
+    assert!(diagnostic.contains("is unavailable"), "{diagnostic}");
+    assert!(diagnostic.split_whitespace().count() <= 8, "{diagnostic}");
     assert!(diagnostic.chars().count() <= 4096);
     assert!(!diagnostic.chars().any(char::is_control));
     assert_selection(
@@ -401,7 +377,7 @@ async fn openai_codex_alias_resolves_only_the_declared_endpoint_not_openai() {
         }),
     )
     .await;
-    assert_pi_default_notice(&diagnostics);
+    assert_no_pi_default_notice(&diagnostics);
     assert_selection(&app, &codex, ReasoningConfig::Effort(ReasoningEffort::Max));
     assert_eq!(app.model.endpoint.id.0, "openai-codex");
     process.shutdown().await;
@@ -515,16 +491,50 @@ async fn kept_thinking_choice_survives_pi_defaults_and_reloads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn applied_pi_default_is_announced_once() {
+async fn applied_pi_default_is_never_announced() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, _, preferred) = fixture(&root).await;
+    assert_no_pi_default_notice(&publish(&mut app, &root, pi_defaults()).await);
+    assert_selection(
+        &app,
+        &preferred,
+        ReasoningConfig::Effort(ReasoningEffort::Max),
+    );
+    assert_no_pi_default_notice(&publish(&mut app, &root, pi_defaults()).await);
+    process.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_default_thinking_the_model_lacks_clamps_silently() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let (mut app, process, _, _) = fixture(&root).await;
-    let first = publish(&mut app, &root, pi_defaults()).await;
-    assert_eq!(
-        first,
-        ["Using Pi's default preferred · max for this session"]
+    let limited = register_model(
+        &mut app,
+        "limited",
+        "synthetic-limited",
+        &["off", "low", "high"],
     );
-    assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
+    let plain = register_model(&mut app, "plain", "synthetic-plain", &[]);
+    let high = ReasoningConfig::Effort(ReasoningEffort::High);
+    for (name, model, level, expected) in [
+        ("limited", &limited, "max", high.clone()),
+        ("plain", &plain, "medium", ReasoningConfig::Off),
+        ("limited", &limited, "medium", high),
+    ] {
+        let diagnostics = publish(
+            &mut app,
+            &root,
+            json!({
+                "default_model": {"provider": "synthetic", "model": name},
+                "default_thinking_level": level
+            }),
+        )
+        .await;
+        assert_no_pi_default_notice(&diagnostics);
+        assert_selection(&app, model, expected);
+    }
     process.shutdown().await;
 }
 
@@ -539,7 +549,7 @@ async fn an_rpc_model_choice_outranks_pi_defaults_and_reloads() {
         crate::app::apply_reconfig(app, Reconfig::Model(baseline.spec.id.clone())).unwrap();
     app.keep_model_choice();
     let first = publish(&mut app, &root, pi_defaults()).await;
-    assert_pi_default_notice(&first);
+    assert_no_pi_default_notice(&first);
     assert!(publish(&mut app, &root, pi_defaults()).await.is_empty());
     assert_selection(
         &app,

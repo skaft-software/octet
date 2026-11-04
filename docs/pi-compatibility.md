@@ -188,8 +188,9 @@ Scoped/versioned npm references resolve only to an existing
 matching installed identity. Supported bounded exact/glob selectors and resource
 empty lists retain their selection semantics; unsupported patterns are diagnosed
 rather than broadened. Explicit invocation model/thinking choices win over these
-session-only defaults; unavailable defaults warn without silently lowering effort
-or changing half the model/thinking pair. Deliberate boundaries: Pi `models.json`
+session-only defaults; an unavailable default model warns once and changes
+nothing, while a default thinking level the model lacks clamps silently to the
+nearest supported level, as in Pi. Deliberate boundaries: Pi `models.json`
 HTTP providers and managed git packages remain unsupported, and `auth.json`,
 sessions and trust state are never read. Mirror mode refuses a
 factory that needs a hook outside the advertised set instead of silently

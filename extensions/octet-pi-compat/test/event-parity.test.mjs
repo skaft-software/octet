@@ -129,6 +129,7 @@ test('session_shutdown projects actual Pi reasons and target file while retainin
   f.runtime.metadata = () => ({ hooks: ['session_end'] });
   f.runtime.bind = params => { assert.equal(params.payload.binding, binding); };
   f.runtime.queued = (_store, work) => work();
+  f.runtime.preemptStartup = () => {};
   f.runtime.runEvent = async (type, event) => {
     if (type === 'session_shutdown') events.push(JSON.parse(JSON.stringify(event)));
     return { action: 'continue' };

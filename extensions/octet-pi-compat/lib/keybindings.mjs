@@ -17,6 +17,7 @@ export async function installHostKeybindings(runtime) {
     getKeys: action => keys.getKeys(action),
     getResolvedBindings: () => plainJSON(snapshot(), 'host keybindings'),
     getEffectiveConfig: () => plainJSON(snapshot(), 'host keybindings'),
+    getUserBindings: undefined, // optional probe member, absent like the custom-UI facade (see hostKeybindings)
   }, 'host keybindings');
   setKeybindings(manager);
   // jiti's admitted component graph and native ESM must see the same dispatcher.

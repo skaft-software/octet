@@ -680,7 +680,7 @@ export class Runtime {
     // session binding is not a host foreground lifecycle transition.
     let grant;
     if (params.session_leaf !== undefined) {
-      if (store.method !== 'hook/run') invalid('session_leaf requires hook/run');
+      if (!['hook/run', 'tool/call'].includes(store.method)) invalid('session_leaf requires hook/run or tool/call');
       grant = leafGrant(params.session_leaf, owner);
       if (Object.hasOwn(context.host || {}, 'session_leaf_id') && context.host.session_leaf_id !== grant.expected_head) invalid('session_leaf snapshot head');
     }
@@ -891,6 +891,17 @@ export class Runtime {
       ...(changed.has('isError') ? { is_error: event.isError } : {}),
     };
   }
+  // Pi shuts down without waiting for the extensions' startup hooks. A quit stops waiting for
+  // the session_start still running (its handler carries on detached) so the quit's own
+  // handlers run now, still in order; reload and the other replacements wait their turn.
+  preemptStartup(params, store) {
+    if (['reload', 'new', 'resume', 'fork'].includes(params.payload?.reason)) return;
+    for (const other of this.active.values()) {
+      if (other === store || other.hook !== 'session_start' || other.state !== store.state) continue;
+      other.preempted = true;
+      other.controller.abort(cancelled());
+    }
+  }
   queued(store, work, { holdOnCancel = false } = {}) {
     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
     const running = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return Promise.resolve().then(work); });
@@ -963,6 +974,7 @@ export class Runtime {
     if (message.method === 'tool/prepare_arguments') return prepareRegisteredArguments(this, p, store);
     if (message.method === 'tool/call') return withToolHost(this, store, async () => executeRegisteredTool(this, p, store,
       await createToolContext(this, p, store, createContext(this, store)), this.toolExecution(p.name)));
+    if (message.method === 'hook/run' && p.hook === 'session_end') this.preemptStartup(p, store);
     if (message.method === 'hook/run') return this.queued(store, async () => {
       const events = Object.keys(hookEvents).filter(e => e !== 'input' && hookEvents[e] === p.hook);
       if (!this.metadata().hooks.includes(p.hook)) invalid(`unknown hook ${p.hook}`);
