@@ -9718,9 +9718,7 @@ where
     } else {
         #[cfg(unix)]
         group_guard.supervise_bash_descendants(
-            command_timeout
-                .unwrap_or(Duration::MAX)
-                .saturating_sub(command_started.elapsed()),
+            command_timeout.map(|timeout| timeout.saturating_sub(command_started.elapsed())),
             Default::default(),
         );
     }

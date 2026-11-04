@@ -180,6 +180,12 @@ The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+
 expands it. A theme that sets `thinking_expanded = true` starts every thinking
 trace open, and `[layout] show_reasoning = false` still hides thinking entirely.
 
+Expanded reasoning prose uses a balanced neutral gray on known light/dark
+profiles. When the background is unknown, it keeps the terminal's default
+foreground without dimming instead of guessing a universal gray. Explicit
+`[roles.thinking]` colors and attributes, including imported Pi styles, still
+win. This fallback is not a contrast guarantee for arbitrary terminal palettes.
+
 ```toml
 [colors]
 quiet_tool_summaries = true

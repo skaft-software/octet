@@ -134,25 +134,15 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group() 
             "{stderr}\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
-        assert_eq!(stderr.matches("[Extension issues]").count(), 1, "{stderr}");
-        let rows = stderr.lines().collect::<Vec<_>>();
-        let header = rows
-            .iter()
-            .position(|line| line.contains("[Extension issues]"))
-            .unwrap();
-        assert!(rows[header].ends_with("[Extension issues]:"), "{stderr}");
-        for (offset, name) in [(1, "first.mjs"), (4, "second.mjs")] {
-            assert!(rows[header + offset].starts_with("    "), "{stderr}");
-            assert!(rows[header + offset].ends_with(name), "{stderr}");
-            assert!(
-                rows[header + offset + 1].contains("failed while loading"),
-                "{stderr}"
-            );
-            assert!(
-                rows[header + offset + 2].starts_with("      Next:"),
-                "{stderr}"
-            );
-        }
+        assert_eq!(stderr.trim(), "[Pi extensions Error] First, Second: skipped: failed while loading. Check dependencies and settings, or disable.");
+        assert!(
+            !stderr.contains("first.mjs"),
+            "no factory paths in public notices"
+        );
+        assert!(
+            !stderr.contains("second.mjs"),
+            "no factory paths in public notices"
+        );
         assert!(!stderr.contains("<U+000A>"), "{stderr}");
         assert!(!stderr.contains(PRIVATE), "{stderr}");
         assert!(!String::from_utf8_lossy(&output.stdout).contains(PRIVATE));

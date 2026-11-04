@@ -15,22 +15,28 @@ function appendHeaders(target, source) {
     target[name] = value;
   }
 }
+// Match DNS labels, never a provider name embedded in a URL path or another host.
+const hostMatches = (hostname, domain) => hostname === domain || hostname.endsWith(`.${domain}`);
 export function customOpenAiChatProfile(model) {
   if (model.api !== 'openai-completions') return undefined;
-  const provider = model.provider, baseUrl = model.baseUrl, compat = model.compat ?? {};
-  const zai = provider === 'zai' || provider === 'zai-coding-cn' || baseUrl.includes('api.z.ai') || baseUrl.includes('open.bigmodel.cn');
-  const together = provider === 'together' || baseUrl.includes('api.together.ai') || baseUrl.includes('api.together.xyz');
-  const moonshot = provider === 'moonshotai' || provider === 'moonshotai-cn' || baseUrl.includes('api.moonshot.');
-  const openRouter = provider === 'openrouter' || baseUrl.includes('openrouter.ai');
-  const workers = provider === 'cloudflare-workers-ai' || baseUrl.includes('api.cloudflare.com');
-  const gateway = provider === 'cloudflare-ai-gateway' || baseUrl.includes('gateway.ai.cloudflare.com');
-  const nvidia = provider === 'nvidia' || baseUrl.includes('integrate.api.nvidia.com');
-  const antLing = provider === 'ant-ling' || baseUrl.includes('api.ant-ling.com');
-  const cerebras = provider === 'cerebras' || baseUrl.includes('cerebras.ai');
-  const deepseek = provider === 'deepseek' || baseUrl.toLowerCase().includes('deepseek.com');
-  const nonStandard = nvidia || cerebras || provider === 'xai' || baseUrl.includes('api.x.ai') || together || baseUrl.includes('chutes.ai') || deepseek || zai || moonshot || provider === 'opencode' || baseUrl.includes('opencode.ai') || workers || gateway || antLing;
+  const provider = model.provider, compat = model.compat ?? {};
+  // Custom streams may omit an endpoint. Parse once; O(U) for U URL characters.
+  const hostname = URL.parse(model.baseUrl)?.hostname ?? '';
+  const isHost = domain => hostMatches(hostname, domain);
+  const zai = provider === 'zai' || provider === 'zai-coding-cn' || isHost('api.z.ai') || isHost('open.bigmodel.cn');
+  const together = provider === 'together' || isHost('api.together.ai') || isHost('api.together.xyz');
+  const moonshot = provider === 'moonshotai' || provider === 'moonshotai-cn' || isHost('api.moonshot.ai') || isHost('api.moonshot.cn');
+  const openRouter = provider === 'openrouter' || isHost('openrouter.ai');
+  const workers = provider === 'cloudflare-workers-ai' || isHost('api.cloudflare.com');
+  const gateway = provider === 'cloudflare-ai-gateway' || isHost('gateway.ai.cloudflare.com');
+  const nvidia = provider === 'nvidia' || isHost('integrate.api.nvidia.com');
+  const antLing = provider === 'ant-ling' || isHost('api.ant-ling.com');
+  const cerebras = provider === 'cerebras' || isHost('cerebras.ai');
+  const deepseek = provider === 'deepseek' || isHost('deepseek.com');
+  const chutes = isHost('chutes.ai');
+  const nonStandard = nvidia || cerebras || provider === 'xai' || isHost('api.x.ai') || together || chutes || deepseek || zai || moonshot || provider === 'opencode' || isHost('opencode.ai') || workers || gateway || antLing;
   const developerRole = compat.supportsDeveloperRole ?? ((openRouter && (model.id.startsWith('anthropic/') || model.id.startsWith('openai/'))) || (!nonStandard && !openRouter));
-  const maxTokensField = compat.maxTokensField ?? ((baseUrl.includes('chutes.ai') || deepseek || moonshot || gateway || together || nvidia || antLing || zai) ? 'max_tokens' : 'max_completion_tokens');
+  const maxTokensField = compat.maxTokensField ?? ((chutes || deepseek || moonshot || gateway || together || nvidia || antLing || zai) ? 'max_tokens' : 'max_completion_tokens');
   const strictMode = compat.supportsStrictMode ?? false;
   if (typeof developerRole !== 'boolean' || typeof strictMode !== 'boolean' || !['max_tokens', 'max_completion_tokens'].includes(maxTokensField)) invalid('custom OpenAI Chat compatibility');
   return { supports_developer_role: developerRole, use_max_tokens: maxTokensField === 'max_tokens', supports_strict_mode: strictMode };
@@ -45,7 +51,7 @@ export function prepareCustomProviderHttp(job, model, options) {
     headers.Authorization = `Bearer ${options.apiKey}`;
   }
   appendHeaders(headers, headerObject(model.headers, 'custom model headers'));
-  const openRouter = model.provider === 'openrouter' || model.baseUrl.includes('openrouter.ai');
+  const openRouter = model.provider === 'openrouter' || hostMatches(URL.parse(model.baseUrl)?.hostname ?? '', 'openrouter.ai');
   const format = model.compat?.sessionAffinityFormat ?? (openRouter ? 'openrouter' : 'openai');
   const completions = model.api === 'openai-completions';
   if (options.sessionId && (!completions || (model.compat?.sendSessionAffinityHeaders ?? openRouter))) {

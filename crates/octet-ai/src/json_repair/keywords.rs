@@ -81,7 +81,7 @@ fn ecma_pattern(pattern: &str) -> Result<String, String> {
                     output.push('\\');
                     output.push(escaped);
                     output.push(chars.next().unwrap());
-                    while let Some(part) = chars.next() {
+                    for part in chars.by_ref() {
                         output.push(part);
                         if part == '}' {
                             break;
@@ -523,15 +523,14 @@ fn resolve<'a>(
         .copied()
         .unwrap_or(root);
     let (resource, fragment) = reference.split_once('#').unwrap_or((reference, ""));
-    let target = if resource.is_empty() {
-        lexical
-    } else if lexical.get("$id").and_then(Value::as_str) == Some(resource) {
-        lexical
-    } else if let Some(found) = find_anchor(root, resource, budget)? {
-        found
-    } else {
-        return Ok(None);
-    };
+    let target =
+        if resource.is_empty() || lexical.get("$id").and_then(Value::as_str) == Some(resource) {
+            lexical
+        } else if let Some(found) = find_anchor(root, resource, budget)? {
+            found
+        } else {
+            return Ok(None);
+        };
     if fragment.is_empty() {
         return Ok(Some(target));
     }

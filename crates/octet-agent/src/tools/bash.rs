@@ -462,12 +462,10 @@ impl BashTool {
                 // The direct child and capture pipes are finished, but a
                 // background descendant may have deliberately redirected both
                 // streams and remained in the same process group. Transfer the
-                // group to the centralized reaper for the rest of this tool's
-                // original deadline instead of silently unregistering it.
+                // group to the centralized reaper, preserving the optional
+                // execution deadline instead of silently unregistering it.
                 guard.supervise_bash_descendants(
-                    effective_timeout
-                        .unwrap_or(Duration::MAX)
-                        .saturating_sub(start.elapsed()),
+                    effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed())),
                     ctx.cancellation.clone(),
                 );
                 let duration = start.elapsed();
@@ -1087,9 +1085,7 @@ impl BashTool {
                     ToolError::new(format!("error io\nfailed to wait for command: {error}"))
                 })?;
                 guard.supervise_bash_descendants(
-                    effective_timeout
-                        .unwrap_or(Duration::MAX)
-                        .saturating_sub(start.elapsed()),
+                    effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed())),
                     ctx.cancellation.clone(),
                 );
                 let duration = start.elapsed();

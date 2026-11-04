@@ -158,6 +158,12 @@ Commands have **no timeout by default**. Set `bash_timeout_secs` in
 configured ceiling, either still imposes its own deadline. Cancellation and
 process cleanup remain active when no deadline is set.
 
+On Unix, background descendants with redirected output stay supervised after
+the shell exits, until they finish, the run is cancelled, a configured deadline
+expires, or the host shuts down. An absent deadline does not kill them at shell
+exit. Descendants that keep stdout or stderr open can still keep a call waiting;
+redirect both streams for background work and set an explicit timeout when needed.
+
 `max_output_bytes` bounds capture independently of timeouts. Expanding a panel
 in the TUI can't restore output that was discarded at capture.
 

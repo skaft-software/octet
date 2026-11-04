@@ -33,6 +33,22 @@ test('custom fetch stays inert until admitted opening and pulls bounded owned by
   closeCustomProviderHttp(job);
 });
 
+test('OpenRouter session affinity uses the endpoint hostname or explicit provider identity', () => {
+  for (const [provider, baseUrl, expected] of [
+    ['custom', 'https://openrouter.ai/api/v1', true],
+    ['custom', 'https://API.OPENROUTER.AI/v1', true],
+    ['openrouter', 'https://custom.invalid/v1', true],
+    ['custom', 'https://openrouter.ai.invalid/v1', false],
+    ['custom', 'https://not-openrouter.ai/v1', false],
+    ['custom', 'https://custom.invalid/openrouter.ai/v1', false],
+  ]) {
+    const job = { controller: new AbortController() };
+    prepareCustomProviderHttp(job, { ...model, provider, baseUrl }, { sessionId: 'fixture-session', fetch() { assert.fail('preparation must not send HTTP'); } });
+    assert.equal(job.customHttp.headers['x-session-id'], expected ? 'fixture-session' : undefined, baseUrl);
+    closeCustomProviderHttp(job);
+  }
+});
+
 test('custom bridge rejects changed endpoint/model and host auth before fetch', async () => {
   let calls = 0;
   for (const changed of [

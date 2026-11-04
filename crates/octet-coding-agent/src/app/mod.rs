@@ -594,7 +594,7 @@ fn same_model_facts(current: &Model, active: &Model) -> bool {
 
 pub(crate) enum PreparedAppSubmission {
     Ordinary(octet_agent::UserInput),
-    Host(octet_agent::PreparedHostPrompt),
+    Host(Box<octet_agent::PreparedHostPrompt>),
 }
 
 impl PreparedAppSubmission {
@@ -604,7 +604,7 @@ impl PreparedAppSubmission {
         mode: octet_agent::PreparedPromptMode,
     ) -> Result<octet_agent::Run<'_>, octet_agent::AgentError> {
         match self {
-            Self::Host(prepared) => agent.prompt_prepared(prepared, mode).await,
+            Self::Host(prepared) => agent.prompt_prepared(*prepared, mode).await,
             Self::Ordinary(input) => match mode {
                 octet_agent::PreparedPromptMode::Normal => agent.prompt(input).await,
                 octet_agent::PreparedPromptMode::ResponsesPrewarm => {
@@ -639,7 +639,7 @@ impl App {
             .prepare_selected_provider_transport(self.agent.model())?;
         let prepared = match transport {
             Some(fetch) => {
-                PreparedAppSubmission::Host(self.agent.prepare_host_prompt(input, fetch))
+                PreparedAppSubmission::Host(Box::new(self.agent.prepare_host_prompt(input, fetch)))
             }
             None => PreparedAppSubmission::Ordinary(input),
         };

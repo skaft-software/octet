@@ -488,6 +488,9 @@ extensions/octet-codemode/README.md
 extensions/octet-codemode/bench/results.json
 extensions/octet-pi-compat/README.md
 extensions/octet-pi-compat/LICENSE.pi
+extensions/octet-pi-compat/SCHEMAS-AND-EXPOSURE.md
+extensions/octet-pi-compat/SETTINGS.md
+extensions/octet-pi-compat/shims/pi-1.0.2/README.md
 extensions/octet-pi-compat/test/pi-v1.0.2/README.md
 scripts/bench-startup-resume.py
 extensions/octet-codemode/THIRD_PARTY_NOTICES.md
@@ -519,6 +522,7 @@ scripts/bench-systems.py
 third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 third_party/licenses/PI-MIT.txt
 third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
+third_party/licenses/TYPEBOX-MIT.txt
 OCTET_DOCUMENTATION_EXTRAS
 }
 

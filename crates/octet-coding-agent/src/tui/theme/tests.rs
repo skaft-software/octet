@@ -72,6 +72,57 @@ fn contrast(left: Rgb, right: Rgb) -> f64 {
 }
 
 #[test]
+fn unknown_background_reasoning_preserves_terminal_foreground() {
+    for color in [
+        ColorDepth::None,
+        ColorDepth::Ansi16,
+        ColorDepth::Ansi256,
+        ColorDepth::TrueColor,
+    ] {
+        let theme = default_theme_for(
+            TerminalBackground::Unknown,
+            TerminalCapabilities::test(true, true, color),
+        );
+        let thinking = theme.semantic_style("thinking");
+        assert_eq!(thinking.foreground, Color::Default, "{color:?}");
+        assert!(!thinking.attributes.dim);
+        let renderer = theme.reasoning_renderer();
+        for role in REASONING_PROSE_ROLES {
+            assert_eq!(renderer.theme().style(*role).foreground, Color::Default);
+        }
+    }
+}
+
+#[test]
+fn reasoning_foreground_retains_known_profiles_and_explicit_overrides() {
+    let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+        let theme = default_theme_for(background, capabilities);
+        let color = parse_hex_color(&balance_foreground("#777777", background)).unwrap();
+        assert_eq!(
+            theme.semantic_style("thinking").foreground,
+            Color::Rgb(color.red, color.green, color.blue)
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reasoning.toml");
+    std::fs::write(&path, "[roles.thinking]\nforeground = '#123456'\n").unwrap();
+    let theme = load_theme_path_for(&path, capabilities, TerminalBackground::Unknown).unwrap();
+    assert_eq!(
+        theme.semantic_style("thinking").foreground,
+        Color::Rgb(0x12, 0x34, 0x56)
+    );
+    assert_eq!(
+        theme
+            .reasoning_renderer()
+            .theme()
+            .style(TextRole::Text)
+            .foreground,
+        Color::Rgb(0x12, 0x34, 0x56)
+    );
+}
+
+#[test]
 fn shimmer_mode_accepts_only_the_documented_values() {
     assert_eq!(ShimmerMode::parse("classic"), Some(ShimmerMode::Classic));
     assert_eq!(

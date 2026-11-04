@@ -74,18 +74,17 @@ impl HostProviderRequestHooks {
     }
 }
 
+type NativeRequestOpener = dyn FnOnce(
+        Request,
+        Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
+        Option<std::sync::Arc<dyn crate::HostHttpSender>>,
+        Option<crate::CustomOpenAiChatProfile>,
+    ) -> futures_util::future::BoxFuture<'static, Result<ResponseStream, AiError>>
+    + Send;
+
 #[allow(missing_docs)]
 pub struct NativeRequestContinuation {
-    pub(crate) open: Box<
-        dyn FnOnce(
-                Request,
-                Vec<std::sync::Arc<dyn crate::ProviderRequestHook>>,
-                Option<std::sync::Arc<dyn crate::HostHttpSender>>,
-                Option<crate::CustomOpenAiChatProfile>,
-            )
-                -> futures_util::future::BoxFuture<'static, Result<ResponseStream, AiError>>
-            + Send,
-    >,
+    pub(crate) open: Box<NativeRequestOpener>,
 }
 
 impl NativeRequestContinuation {

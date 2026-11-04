@@ -1,7 +1,10 @@
 //! Defaults for transcript-specific roles; file styles overlay these defaults.
 use std::collections::BTreeMap;
 
-use super::{balance_foreground, parse_hex_color, Color, OctetTheme, RoleStyleSpec, TextStyle};
+use super::{
+    balance_foreground, parse_hex_color, Color, OctetTheme, RoleStyleSpec, TerminalBackground,
+    TextStyle,
+};
 
 #[derive(Clone, Copy)]
 pub(super) enum TranscriptRole {
@@ -22,6 +25,8 @@ impl TranscriptRole {
 
     pub(super) fn default_style(self, theme: &OctetTheme) -> TextStyle {
         match self {
+            // No fixed gray guarantees contrast against an unobserved canvas.
+            Self::Thinking if theme.background == TerminalBackground::Unknown => TextStyle::plain(),
             Self::Thinking => {
                 let foreground = balance_foreground("#777777", theme.background);
                 let color = parse_hex_color(&foreground)

@@ -183,7 +183,7 @@ test('legitimate session retirement still refuses stale context updates and comm
   const ended = await peer.request('hook/run', { hook: 'session_end', payload: { binding: owner }, context: ownerContext(owner) }).response;
   assert.ok(ended.result, JSON.stringify(ended));
   peer.notify('context/updated', { resource_owner: owner, host: { session_name: 'stale' } });
-  await peer.wait(issue('not_foreground_owner context/updated'));
+  await peer.wait(issue('not_foreground_owner context/updated (details: /extensions)'));
   const stale = await peer.request('command/execute', { name: 'inspect-owner', arguments: [], context: ownerContext(owner) }).response;
   assert.equal(stale.error?.code, -32002);
   assert.match(stale.error.message, /settled owner/);

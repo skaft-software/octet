@@ -445,7 +445,7 @@ mod tests {
         assert!(pump.finish(&owner).is_none());
         assert_eq!(pump.lanes.get(&owner), Some(&1));
         assert!(pump.finish(&owner).is_none());
-        assert!(pump.lanes.get(&owner).is_none());
+        assert!(!pump.lanes.contains_key(&owner));
     }
 
     #[test]
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(pump.lanes.get(&owner), Some(&1));
         assert!(pump.queued.is_empty());
         assert!(pump.finish(&owner).is_none());
-        assert!(pump.lanes.get(&owner).is_none());
+        assert!(!pump.lanes.contains_key(&owner));
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         assert!(pump.finish(&owner).is_none());
         assert_eq!(pump.lanes.get(&owner), Some(&1));
         assert!(pump.finish(&owner).is_none());
-        assert!(pump.lanes.get(&owner).is_none());
+        assert!(!pump.lanes.contains_key(&owner));
     }
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(pump.lanes.get(&second), Some(&2));
 
         assert!(pump.finish(&first).is_none());
-        assert!(pump.lanes.get(&first).is_none());
+        assert!(!pump.lanes.contains_key(&first));
         assert_eq!(pump.lanes.get(&second), Some(&2));
     }
 }

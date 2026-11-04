@@ -5,25 +5,30 @@ import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
 import { canonicalToPi, piToCanonical } from './provider-context.mjs';
 import { createAssistantMessageEventStream, calculateCost } from './ai-public-helpers.mjs';
 import { clampThinkingLevel } from '../shims/pi-1.0.2/ai/models.mjs';
-import { localFunction } from '../shims/local-pi.mjs';
+import { normalizeContext, getCurrentSystemMessage } from '../shims/pi-1.0.2/ai/transcript.mjs';
+import { getSystemMessageText } from '../shims/pi-1.0.2/ai/text.mjs';
+import { performance } from 'node:perf_hooks';
+import { traceEnabled, tracePhase } from './startup-trace.mjs';
 import { customOpenAiChatProfile, prepareCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 
 const scopeKey = Symbol.for('octet.pi.nativeProvider.scope');
 const scope = globalThis[scopeKey] ??= new AsyncLocalStorage();
 export const withNativeProvider = (runtime, job, work) => scope.run({ runtime, job }, work);
-// Unfold a provider context exactly as the installed Pi would: normalize any
+// Unfold a provider context with the pinned pure Pi helpers: normalize any
 // Context fields into its transcript, then replay every system message into the
 // one prompt and tool set the request carries. The host request has fields for
 // those, so this is the same request Pi's own provider builds.
-const piTranscript = name => localFunction('ai', 'utils/transcript.js', name);
-const piNormalizeContext = piTranscript('normalizeContext'), piCurrentSystem = piTranscript('getCurrentSystemMessage');
-const piSystemText = localFunction('ai', 'utils/text.js', 'getSystemMessageText');
+// O(M + T + B) time/space for messages, tool deltas and system text bytes;
+// no installed package resolution or provider runtime imports.
 function fromTranscript(context) {
   if (!context || typeof context !== 'object' || !Array.isArray(context.messages)) return context;
-  const { messages } = piNormalizeContext(context);
-  const head = piCurrentSystem(messages);
-  const text = head ? piSystemText(head) : '';
-  return { ...(text ? { systemPrompt: text } : {}), messages: messages.filter(message => message.role !== 'system'), ...(head?.toolsAdded?.length ? { tools: head.toolsAdded } : {}) };
+  const preparedAt = traceEnabled ? performance.now() : 0;
+  const { messages } = normalizeContext(context);
+  const head = getCurrentSystemMessage(messages);
+  const text = head ? getSystemMessageText(head) : '';
+  const result = { ...(text ? { systemPrompt: text } : {}), messages: messages.filter(message => message.role !== 'system'), ...(head?.toolsAdded?.length ? { tools: head.toolsAdded } : {}) };
+  if (traceEnabled) tracePhase('pi-compat.provider.unfold', `took_us=${Math.round((performance.now() - preparedAt) * 1000)} messages=${messages.length}`);
+  return result;
 }
 export function nativeProviderDelegate(model, context, options = {}) {
   context = fromTranscript(context);

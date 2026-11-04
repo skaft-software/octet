@@ -78,7 +78,7 @@ test('managed npm and git packages retain their installed baseDir for commands a
       const factory=join(pkg,'factory.ts'), skill=join(pkg,'skills','available','SKILL.md'), prompt=join(pkg,'prompts','available.md');
       put(factory,'throw new Error("discovery must not execute factories");');
       put(skill,'---\nname: available\ndescription: Available\n---\nBody'); put(prompt,'Prompt');
-      const setup=discoverPiSetup({agentDir:agent,cwd:work});
+      const setup=discoverPiSetup({agentDir:agent,cwd:work,env:{HOME:root}});
       assert.deepEqual(setup.diagnostics,[]);
       assert.ok(setup.extensions.includes(factory)); assert.ok(setup.skillsPaths.includes(skill)); assert.ok(setup.promptsPaths.includes(prompt));
       for (const path of [factory,skill,prompt]) assert.deepEqual(setup.sourceInfos[path],{path,source,scope:'user',origin:'package',baseDir:pkg});
@@ -96,7 +96,7 @@ test('existing Pi discovery retains package, automatic and explicit sourceInfo s
     const skill=join(pkg,'skills','available','SKILL.md'); put(skill,'---\nname: available\ndescription: Available\n---\nBody');
     const automatic=join(agent,'prompts','automatic.md'); put(automatic,'Prompt');
     const explicit=join(agent,'custom.md'); put(explicit,'Explicit'); mkdirSync(work);
-    const setup=discoverPiSetup({agentDir:agent,cwd:work});
+    const setup=discoverPiSetup({agentDir:agent,cwd:work,env:{HOME:root}});
     assert.deepEqual(setup.sourceInfos[skill],{path:skill,source:pkg,scope:'user',origin:'package',baseDir:pkg});
     assert.deepEqual(setup.sourceInfos[automatic],{path:automatic,source:'auto',scope:'user',origin:'top-level',baseDir:agent});
     assert.deepEqual(setup.sourceInfos[explicit],{path:explicit,source:'local',scope:'user',origin:'top-level'});

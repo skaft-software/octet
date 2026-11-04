@@ -10,6 +10,45 @@
 # private docs/rc/0.8.2/UI-FIX.md
 # private docs/rc/0.8.2/VERIFICATION.md
 # private docs/rc/0.8.2/verification-results.json
+# Per-run Pi work notes and unreviewed patch backups are not public reference docs.
+# These exclusions do not remove the records from Git or source archives.
+# private docs/maintainers/pi-extensions-eval-handoff.md
+# private docs/maintainers/pi-usability-brief.md
+# private docs/maintainers/pi-usability-wip/D-commits/0001-Pi-compat-compact-grouped-path-free-extension-diagno.patch
+# private docs/maintainers/pi-usability-wip/D-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/F-commits/0001-pi-eval-add-frame-by-frame-flicker-checker-and-times.patch
+# private docs/maintainers/pi-usability-wip/F-commits/0002-pi-eval-footer-repro-driver-flicker-mask-parametrise.patch
+# private docs/maintainers/pi-usability-wip/F-commits/0003-pi-compat-mirror-the-user-agent-dir-when-cwd-is-the-.patch
+# private docs/maintainers/pi-usability-wip/F-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0001-docs-usability-performance-pass-brief-and-workstream.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0002-docs-20-second-frame-by-frame-screen-stability-accep.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0003-eval-fixture-mirroring-the-maintainer-s-real-Pi-1.4..patch
+# private docs/maintainers/pi-usability-wip/J-commits/0004-eval-jank-recorder-frame-level-PTY-capture-of-octet-.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0005-eval-extension-API-traffic-capture-for-Pi-preload-an.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0006-eval-log-event-delivery-before-the-handler-settles.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0007-eval-jank-fixture-octet-model-declares-reasoning.patch
+# private docs/maintainers/pi-usability-wip/J-commits/0008-eval-jank-trace-path-is-rewritten-on-every-run.patch
+# private docs/maintainers/pi-usability-wip/J-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/M-commits/0001-WIP-saved-octet-defaults-outrank-Pi-defaults-unverif.patch
+# private docs/maintainers/pi-usability-wip/M-commits/0002-Pi-defaults-fill-only-gaps-notice-once-keep-RPC-thin.patch
+# private docs/maintainers/pi-usability-wip/M-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/P-commits/0001-fix-pi-compat-isolate-before_agent_start-handlers-th.patch
+# private docs/maintainers/pi-usability-wip/P-commits/0002-fix-pi-compat-do-not-charge-a-tool-guard-for-the-tim.patch
+# private docs/maintainers/pi-usability-wip/P-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0001-pi-compat-start-the-transform-warm-up-child-from-a-d.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0002-pi-compat-keep-shared-closure-files-with-their-live-.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0003-pi-compat-fingerprint-every-package.json-up-to-the-d.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0004-octet-pi-compat-remove-temporary-file-when-a-persist.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0005-octet-pi-compat-realpath-module-alias-targets-use-pa.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0006-octet-pi-compat-refuse-foreign-owned-startup-cache-d.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0007-octet-pi-compat-keep-files-that-assign-module.export.patch
+# private docs/maintainers/pi-usability-wip/R-commits/0008-octet-pi-compat-sweep-persisted-cache-temporaries-ab.patch
+# private docs/maintainers/pi-usability-wip/R-uncommitted.patch
+# private docs/maintainers/pi-usability-wip/README.md
+# private docs/maintainers/pi-usability-wip/S-commits/0001-eval-warm-full-UI-and-exit-timing-harness-Pi-vs-octe.patch
+# private docs/maintainers/pi-usability-wip/S-commits/0002-fix-pi-compat-a-quit-stops-waiting-for-a-slow-sessio.patch
+# private docs/maintainers/pi-usability-wip/S-uncommitted.patch
+# private docs/maintainers/pi-v0.10-perf-handoff.md
 text CHANGELOG.md
 text CONTRIBUTING.md
 text LICENSE
@@ -330,6 +369,9 @@ text examples/themes/octet-default.toml
 text extensions/octet-codemode/README.md
 text extensions/octet-codemode/bench/results.json
 text extensions/octet-pi-compat/README.md
+text extensions/octet-pi-compat/SCHEMAS-AND-EXPOSURE.md
+text extensions/octet-pi-compat/SETTINGS.md
+text extensions/octet-pi-compat/shims/pi-1.0.2/README.md
 text extensions/octet-pi-compat/test/pi-v1.0.2/README.md
 text scripts/bench-startup-resume.py
 text extensions/octet-codemode/THIRD_PARTY_NOTICES.md
@@ -384,6 +426,7 @@ text sdk/typescript/tsconfig.json
 text third_party/licenses/GROK-MERMAID-APACHE-2.0.txt
 text third_party/licenses/PI-MIT.txt
 text third_party/licenses/TERMINAL-BENCH-APACHE-2.0.txt
+text third_party/licenses/TYPEBOX-MIT.txt
 text docs/migrations/README.md
 text docs/migrations/external-products.json
 
@@ -576,3 +619,17 @@ text sdk/typescript/tests/fixtures/typed-author.mjs
 text sdk/typescript/tests/process_breadth.mjs
 text sdk/typescript/tests/process_typed.mjs
 text extensions/octet-pi-compat/LICENSE.pi
+
+# Retained Pi design, historical benchmark evidence, and theme reference.
+text docs/benchmarks/pi-extensions-2026-11-02/README.md
+text docs/benchmarks/pi-extensions-2026-11-02/baseline/_state.json
+text docs/benchmarks/pi-extensions-2026-11-02/baseline/results.jsonl
+text docs/benchmarks/pi-extensions-2026-11-02/v1/_state.json
+text docs/benchmarks/pi-extensions-2026-11-02/v1/results.jsonl
+text docs/benchmarks/pi-extensions-2026-11-02/v2/_state.json
+text docs/benchmarks/pi-extensions-2026-11-02/v2/results.jsonl
+text docs/benchmarks/pi-extensions-2026-11-02/v3/_state.json
+text docs/benchmarks/pi-extensions-2026-11-02/v3/results.jsonl
+text docs/design/pi-native-esm.md
+text docs/design/pi-single-import.md
+text examples/themes/pi-profile.toml

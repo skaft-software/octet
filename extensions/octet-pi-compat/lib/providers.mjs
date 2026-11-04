@@ -8,10 +8,11 @@ import { nativeProviderDelegate, withNativeProvider, ingestNativeProviderEvent, 
 import { providerState, snapshotCustomProvider, abortProviderEntry, startCustomProviderRefresh, resolveCustomProviderAuth, hasCustomProvider, customProviderModels, getCustomProviderApiKey, getCustomProviderAuth } from './custom-provider.mjs';
 import { openCustomProviderHttp, pullCustomProviderHttp, closeCustomProviderHttp } from './custom-provider-http.mjs';
 import { isDeepStrictEqual } from 'node:util';
-import { localFunction, localModule } from '../shims/local-pi.mjs';
+import { normalizeContext } from '../shims/pi-1.0.2/ai/transcript.mjs';
+import { performance } from 'node:perf_hooks';
+import { traceEnabled, tracePhase } from './startup-trace.mjs';
 import { readPiSettings } from './pi-setup.mjs';
 import { getSupportedThinkingLevels } from '../shims/pi-1.0.2/ai/models.mjs';
-const piNormalizeContext = localFunction('ai', 'utils/transcript.js', 'normalizeContext');
 import { createHash } from 'node:crypto';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -373,9 +374,23 @@ function requestContext(request, runtime) {
     return { name: tool.name, description: tool.description, parameters: tool.parameters };
   });
   // Pi's agent hands providers a transcript context (the system prompt and tools
-  // ride in a leading system message). Build it with the installed Pi's own
-  // normalizeContext so a package's stream sees exactly what Pi would pass it.
-  return piNormalizeContext({ systemPrompt: request.system ?? undefined, messages: canonicalToPi(request.messages), ...(tools.length ? { tools } : {}) });
+  // ride in a leading system message). Use the pinned pure helper, not an
+  // installed runtime. Projection is O(B + M + T) time/space for payload bytes,
+  // messages and tools; normalization adds only O(M) message references.
+  return normalizeContext({ systemPrompt: request.system ?? undefined, messages: canonicalToPi(request.messages), ...(tools.length ? { tools } : {}) });
+}
+// Pure parser from Pi 1.0.2 core/http-dispatcher.ts (MIT; ../LICENSE.pi).
+// O(S) time/space for a string of S characters, O(1) for a numeric value.
+// Do not import its dispatcher/undici graph to parse a setting.
+function parseHttpIdleTimeoutMs(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.toLowerCase() === 'disabled') return 0;
+    if (trimmed.length === 0) return undefined;
+    return parseHttpIdleTimeoutMs(Number(trimmed));
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
 }
 // The transport options Pi's own buildRequestOptions adds from the user's Pi
 // settings (timeout, retries, websocket connect timeout), read the way Pi does.
@@ -385,13 +400,9 @@ function piRequestOptions(runtime, store) {
     settings = Object.hasOwn(store?.state?.host ?? {}, 'settings') ? store.state.host.settings
       : readPiSettings({ agentDir: runtime.config.pi_agent_dir, cwd: store?.state?.workspace, projectTrusted: store?.state?.host?.project_trusted === true }).settings;
   } catch {}
-  const dispatcher = localModule('coding-agent', 'core/http-dispatcher.js');
-  let idle;
-  try { idle = dispatcher.parseHttpIdleTimeoutMs(settings?.httpIdleTimeoutMs); } catch {}
-  idle ??= dispatcher.DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+  const idle = parseHttpIdleTimeoutMs(settings?.httpIdleTimeoutMs) ?? 300000;
   const provider = settings?.retry?.provider ?? {};
-  let websocket;
-  try { websocket = dispatcher.parseHttpIdleTimeoutMs(settings?.websocketConnectTimeoutMs); } catch {}
+  const websocket = parseHttpIdleTimeoutMs(settings?.websocketConnectTimeoutMs);
   return { timeoutMs: provider.timeoutMs ?? (idle === 0 ? 2147483647 : idle), websocketConnectTimeoutMs: websocket,
     maxRetries: provider.maxRetries, maxRetryDelayMs: provider.maxRetryDelayMs ?? 60000 };
 }
@@ -439,6 +450,7 @@ export async function prepareProviderStream(runtime, params, store) {
     if (params.request_hooks !== true) invalid('provider request hooks');
     runtime.require('provider_request_hooks_v1');
   }
+  const preparedAt = traceEnabled ? performance.now() : 0;
   const context = requestContext(params.request, runtime), controller = new AbortController();
   // Pi's agent passes no maxTokens to provider streams; the model's own limit
   // applies inside the package's code exactly as under Pi.
@@ -450,6 +462,7 @@ export async function prepareProviderStream(runtime, params, store) {
   if (reasoning?.type === 'effort' && levels.has(reasoning.value)) options.reasoning = reasoning.value;
   else if (reasoning?.type !== 'off') unsupported('provider reasoning', 'only portable effort controls are supported');
   state.jobs.set(params.stream_id, { id: params.stream_id, request: params.request, entry, model, context, options, controller, store, sequence: 0 });
+  if (traceEnabled) tracePhase('pi-compat.provider.prepare', `took_us=${Math.round((performance.now() - preparedAt) * 1000)} messages=${params.request.messages.length} tools=${params.request.tools?.length ?? 0}`);
   return { stream_id: params.stream_id, accepted: true };
 }
 export function cancelProviderStream(runtime, id, owner) {

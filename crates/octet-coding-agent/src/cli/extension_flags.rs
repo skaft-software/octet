@@ -436,6 +436,8 @@ fn parse_static_with(command: Option<Command>, args: Vec<OsString>) -> Cli {
     }
 }
 
+type ParsedExtensionFlags = (Cli, ExtensionFlagValues, BTreeSet<(String, String)>);
+
 /// Parse the normal runtime command after adding trusted manifest-declared
 /// flags. Discovery reads only bounded manifests and never launches extensions.
 ///
@@ -445,7 +447,7 @@ pub(crate) fn parse_with_extension_flags(
     args: Vec<OsString>,
     cwd: &Path,
     command: Option<Command>,
-) -> anyhow::Result<(Cli, ExtensionFlagValues, BTreeSet<(String, String)>)> {
+) -> anyhow::Result<ParsedExtensionFlags> {
     let declarations = bootstrap_extension_config(&args, cwd)
         .map(|config| crate::extensions::selected_extension_flag_declarations(&config))
         .unwrap_or_default();
@@ -456,7 +458,7 @@ pub(crate) fn parse_with_extension_flags(
 pub(super) fn parse_declared_extension_flags(
     args: Vec<OsString>,
     declarations: Vec<(String, ExtensionFlag)>,
-) -> anyhow::Result<(Cli, ExtensionFlagValues, BTreeSet<(String, String)>)> {
+) -> anyhow::Result<ParsedExtensionFlags> {
     parse_declared_extension_flags_with(args, declarations, None)
 }
 
@@ -464,7 +466,7 @@ fn parse_declared_extension_flags_with(
     args: Vec<OsString>,
     declarations: Vec<(String, ExtensionFlag)>,
     command: Option<Command>,
-) -> anyhow::Result<(Cli, ExtensionFlagValues, BTreeSet<(String, String)>)> {
+) -> anyhow::Result<ParsedExtensionFlags> {
     // Manifest discovery and its trust checks still run before this boundary.
     // Without declarations, there is nothing to register or scan around: use
     // the existing static parser without rebuilding its command for collision

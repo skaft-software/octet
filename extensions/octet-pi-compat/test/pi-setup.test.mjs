@@ -337,9 +337,10 @@ test('pi setup: a factory whose setup never settles is left out of the mirror, n
   assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(stalled)]);
   const peer = launch(t, [], { config: join(output, 'bridge.json'), env, cwd: root, metadata });
   await peer.init(['resource_paths_v1', 'session_entries']);
-  const issue = await peer.wait(frame => frame.method === 'notification' && /stalled\.mjs/.test(frame.params?.message ?? ''));
-  assert.match(issue.params.message, /setup did not finish within/);
-  assert.match(issue.params.message, /left out of the mirror/);
+  const issue = await peer.wait(frame => frame.method === 'notification' && /^Stalled:/.test(frame.params?.message ?? ''));
+  assert.equal(issue.params.message, 'Stalled: left out: setup did not finish within 0.3 s. Update or disable; octet tries again at the next start.');
+  assert.ok(!issue.params.message.includes(root));
+  assert.ok(!issue.params.message.includes('stalled.mjs'));
   await peer.close();
 });
 

@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- Reasoning prose preserves the terminal foreground when its background is
+  unknown, rather than guessing a gray that loses contrast on common palettes.
+  Known light/dark profiles and explicit theme colors remain unchanged.
+- Release documentation inventory includes the retained Pi design, historical
+  benchmark evidence, theme profile, linked adapter guides and TypeBox license,
+  while excluding per-run maintainer notes and unreviewed patch backups from
+  installed documentation. Git records remain unchanged.
+- Pi custom-provider streams and inherited native delegation use bundled pure
+  context helpers and request-option parsing, without accidentally requiring an
+  installed Pi runtime. Explicit installed-Pi helpers retain their version gates.
+- Pi custom-provider compatibility defaults and OpenRouter session-affinity
+  headers match parsed endpoint hostnames, not provider names embedded in URL
+  paths or lookalike hosts. Explicit provider IDs and compatibility overrides
+  still take precedence; credential and endpoint authority are unchanged.
+- Native Pi notification tests follow the concise grouped notice format while
+  continuing to reject private exception text and factory paths.
+
+- Unix bash background descendants with redirected output remain supervised when
+  no execution deadline is configured, instead of being killed at shell exit by
+  an overflowing deadline calculation. Cancellation and host cleanup still apply.
+
 - Incremental assistant rendering rebuilds the block when neighboring surface
   geometry changes, rather than reusing rows with stale spacing.
 - Provider-credential responses are fenced against host-owner retirement during

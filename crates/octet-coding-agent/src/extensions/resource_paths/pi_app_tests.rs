@@ -934,12 +934,12 @@ async fn configured_pi_callback_start_error_preserves_discovery_and_reload_witho
         issues[0].level,
         octet_agent::extension_process::ExtensionNotificationLevel::Warning
     );
-    assert!(issues[0]
-        .message
-        .contains(root.join("factories/first.mjs").to_str().unwrap()));
-    assert!(issues[0]
-        .message
-        .contains("session_start callback failed and was skipped"));
+    assert_eq!(issues[0].message,
+        "First: session_start hook failed and was skipped. Update or disable if this keeps happening.");
+    assert!(
+        !issues[0].message.contains(root.to_str().unwrap()),
+        "no factory paths in public notices"
+    );
     assert!(!issues[0].message.contains("private start failure details"));
     let rows = trace(&root);
     assert_eq!(

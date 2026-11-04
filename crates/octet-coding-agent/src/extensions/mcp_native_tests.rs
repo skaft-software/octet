@@ -526,7 +526,10 @@ async fn pi_mcp_native_app_register_replace_call_remove_and_owner_cleanup() {
             _ => None,
         })
         .collect();
-    assert_eq!(failures, ["MCP servers: connection_unavailable"]);
+    assert_eq!(
+        failures,
+        ["MCP servers: connection_unavailable (details: /extensions)"]
+    );
     assert_eq!(
         resident
             .tool_definitions()
@@ -627,7 +630,7 @@ async fn pi_mcp_native_missing_resident_never_starts_or_persists_a_server() {
     assert!(
         failures
             .iter()
-            .all(|message| message == "MCP servers: connection_unavailable"),
+            .all(|message| message == "MCP servers: connection_unavailable (details: /extensions)"),
         "only sanitized connection diagnostics may escape: {failures:?}"
     );
     assert!(

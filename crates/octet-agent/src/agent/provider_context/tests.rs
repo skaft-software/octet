@@ -347,7 +347,7 @@ async fn extension_hook_failure_keeps_canonical_request_and_reports_once_per_ext
     let mut first_notices = Vec::new();
     let first = super::project_provider_context(
         canonical.clone(),
-        &[hook.clone()],
+        std::slice::from_ref(&hook),
         &context,
         &model(),
         &AbortFlag::default(),

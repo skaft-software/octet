@@ -239,13 +239,12 @@ fn pi_tool_snapshot_filtered_builtin_same_arc_dynamic_republish_is_native() {
             |_, _| {},
         )
         .unwrap();
-    assert!(host
+    assert!(!host
         .dynamic_tools
         .read()
         .unwrap()
         .overridden_tools
-        .get("read")
-        .is_none());
+        .contains_key("read"));
     assert!(Arc::ptr_eq(&original, &read_tool(&host)));
     let snapshot = host.pi_tool_snapshot();
     assert_eq!(

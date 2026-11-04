@@ -179,8 +179,7 @@ pub(super) fn dispatch_setup(
                                     .and_then(|mirror| mirror.leaf_id());
                                 if current.as_ref() == Some(&head) {
                                     if let Some(leased) = rebind_parent(
-                                        &pending,
-                                        &issued,
+                                        (&pending, &issued),
                                         &mailbox,
                                         &children,
                                         &admitted,
@@ -238,8 +237,7 @@ pub(super) fn dispatch_setup(
 }
 
 fn rebind_parent(
-    pending: &PendingRequests,
-    issued: &IssuedResourceOwners,
+    bindings: (&PendingRequests, &IssuedResourceOwners),
     mailbox: &Arc<session_leaf::SessionLeafMailbox>,
     children: &ChildRequests,
     admitted: &AdmittedExtensionRequest,
@@ -247,8 +245,8 @@ fn rebind_parent(
     process: (&AtomicBool, &AtomicBool),
     lease: Option<usize>,
 ) -> Result<Option<Option<serde_json::Value>>, String> {
-    let mut pending = lock_std_mutex(pending);
-    let mut issued = lock_std_mutex(issued);
+    let mut pending = lock_std_mutex(bindings.0);
+    let mut issued = lock_std_mutex(bindings.1);
     let children = lock_std_mutex(children);
     let child = children
         .get(&admitted.request_id)
@@ -358,8 +356,7 @@ pub(super) fn queue_replacement(
                             loop {
                                 let changed = session_leaf::transport::publication_changed(&mirror);
                                 if let Some(leased) = rebind_parent(
-                                    &pending,
-                                    &issued,
+                                    (&pending, &issued),
                                     &mirror,
                                     &children,
                                     &admitted,

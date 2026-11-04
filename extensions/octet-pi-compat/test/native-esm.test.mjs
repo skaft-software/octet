@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,7 +13,8 @@ const aliases = { ...typeboxAliases(), ...emulatedPiAliases() };
 const CODING = '@earendil-works/pi-coding-agent';
 
 function project(files, { type = 'module' } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'octet-native-'));
+  // Review hashes use canonical paths; macOS /var and /tmp are symlinks.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'octet-native-')));
   writeFileSync(join(dir, 'package.json'), JSON.stringify(type ? { type } : {}));
   for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
   return dir;

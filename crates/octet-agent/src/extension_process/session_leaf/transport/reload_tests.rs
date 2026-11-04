@@ -18,7 +18,7 @@ fn reload_history_rebind_charges_new_generation_without_copying_authority() {
     let mut session = Session::create(temp.path().join("session.jsonl")).unwrap();
     append_message(&mut session, "AUTHENTIC_RELOAD_HISTORY");
     let owner = ExtensionResourceOwner {
-        session_id: session.resource_owner_key().into(),
+        session_id: session.resource_owner_key(),
         extension_instance_id: "reload-history".into(),
         process_generation: 1,
     };
@@ -130,7 +130,7 @@ fn reload_history_rebind_preserves_unavailability_and_refuses_new_generation_quo
     let mut session = Session::create(temp.path().join("session.jsonl")).unwrap();
     append_message(&mut session, "AUTHENTIC_RELOAD_HISTORY");
     let owner = ExtensionResourceOwner {
-        session_id: session.resource_owner_key().into(),
+        session_id: session.resource_owner_key(),
         extension_instance_id: "reload-history".into(),
         process_generation: 1,
     };

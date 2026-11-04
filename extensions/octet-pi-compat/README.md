@@ -656,8 +656,18 @@ before the terminal response; final usage/cost remain native-owned. This is not
 permission to run installed Pi HTTP/auth runtimes, perform nested inference, or
 claim OAuth-dependent package behavior without an original-package journey.
 
+Custom stream preparation and inherited native delegation use the bundled pure Pi
+transcript helpers and timeout parser, without importing an installed Pi runtime.
+An extension that explicitly invokes a managed-local Pi helper still needs a
+supported installation; its version and authority checks are unchanged.
+`OCTET_STARTUP_TRACE=1` also reports data-free provider preparation/unfold timings
+and message/tool counts. These diagnostics are not benchmark qualification.
+
 Custom OpenAI HTTP delegation accepts Pi base URLs with or without a trailing
 path slash; only the private native endpoint projection adds the missing slash.
+URL-derived Chat defaults and OpenRouter affinity headers use parsed, case-insensitive
+hostnames with DNS-label boundaries, not substring matches in paths or unrelated
+hosts. Explicit provider IDs and compatibility overrides retain precedence.
 Native URL validation, unauthenticated routing and process-owned key isolation
 remain unchanged.
 

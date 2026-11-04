@@ -7,6 +7,11 @@ use octet_ai::{
 };
 use std::sync::atomic::AtomicUsize;
 
+#[test]
+fn inference_steps_do_not_inline_large_requests_or_responses() {
+    assert!(std::mem::size_of::<InferenceStep>() <= 3 * std::mem::size_of::<usize>());
+}
+
 #[derive(Clone)]
 enum Behavior {
     Finish,

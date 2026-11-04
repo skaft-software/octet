@@ -22,6 +22,7 @@ use octet_ai::{Model, ModelId, Protocol, StopReason, ToolDef};
 use tokio::sync::Notify;
 
 type ToolPolicy = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+type ModelAndCallableTools = (u64, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>);
 
 /// Implemented by any extension the agent loads.
 ///
@@ -1856,10 +1857,7 @@ impl ExtensionHost {
         }
     }
 
-    pub(crate) fn model_and_callable_tool_snapshot(
-        &self,
-        owner: &str,
-    ) -> (u64, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>) {
+    pub(crate) fn model_and_callable_tool_snapshot(&self, owner: &str) -> ModelAndCallableTools {
         loop {
             let (revision, model) = self.model_tool_snapshot(owner);
             let mut dynamic = self

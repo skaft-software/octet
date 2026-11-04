@@ -244,9 +244,18 @@ async fn successful_command_without_descendants_releases_its_registry_entry() {
 
 #[tokio::test]
 async fn detached_setsid_descendant_remains_supervised_after_leader_exit() {
+    check_detached_descendant_supervision(Some(Duration::from_secs(2))).await;
+}
+
+#[tokio::test]
+async fn detached_setsid_descendant_without_deadline_remains_supervised_until_cancelled() {
+    check_detached_descendant_supervision(None).await;
+}
+
+async fn check_detached_descendant_supervision(timeout: Option<Duration>) {
     let f = fixture();
     let mut sandbox = f.sandbox.clone();
-    sandbox.bash_timeout = Some(Duration::from_secs(2));
+    sandbox.bash_timeout = timeout;
     let cancellation = crate::tool::CancellationToken::default();
     let ctx = ToolContext {
         active_skills: &[],

@@ -27,6 +27,17 @@ test('bounded role and token defaults follow pinned provider and URL detection w
   assert.deepEqual(customOpenAiChatProfile({ ...model, baseUrl: 'https://openrouter.ai/api/v1', id: 'other/model' }), profile(false));
 });
 
+test('URL-derived Chat defaults match DNS labels, not paths or lookalike hosts', () => {
+  for (const host of ['api.z.ai', 'open.bigmodel.cn', 'api.together.ai', 'api.together.xyz', 'api.moonshot.cn', 'api.moonshot.ai', 'openrouter.ai', 'api.cloudflare.com', 'gateway.ai.cloudflare.com', 'integrate.api.nvidia.com', 'api.ant-ling.com', 'cerebras.ai', 'deepseek.com', 'api.x.ai', 'chutes.ai', 'opencode.ai']) {
+    for (const baseUrl of [`https://${host}.invalid/v1`, `https://not-${host}/v1`, `https://custom.invalid/${host}/v1`, `https://custom.invalid/v1?endpoint=${host}`, `https://custom.invalid/v1#${host}`]) {
+      assert.deepEqual(customOpenAiChatProfile({ ...model, baseUrl }), profile(), baseUrl);
+    }
+  }
+  assert.deepEqual(customOpenAiChatProfile({ ...model, baseUrl: 'https://REGION.DEEPSEEK.COM/v1' }), profile(false, true));
+  assert.deepEqual(customOpenAiChatProfile({ ...model, baseUrl: 'https://API.MOONSHOT.AI/v1' }), profile(false, true));
+  assert.deepEqual(customOpenAiChatProfile({ ...model, baseUrl: '' }), profile());
+});
+
 test('custom profile validates only its three honored fields without replacing other compatibility data', () => {
   for (const compat of [{ supportsDeveloperRole: 'false' }, { supportsDeveloperRole: 0 }, { supportsStrictMode: 'true' }, { supportsStrictMode: {} }, { maxTokensField: 'arbitrary_cap' }]) assert.throws(() => customOpenAiChatProfile({ ...model, compat }), /invalid_request custom OpenAI Chat compatibility/);
   const compat = { supportsDeveloperRole: false, maxTokensField: 'max_tokens', supportsStrictMode: false, sendSessionAffinityHeaders: true, sessionAffinityFormat: 'openai-nosession', thinkingFormat: 'openai' };

@@ -22,6 +22,11 @@ impl Agent {
 }
 
 type InferenceFuture = Pin<Box<dyn Future<Output = Result<octet_ai::Response, ()>> + Send>>;
+type PreparedInference = (
+    Model,
+    Request,
+    Option<Arc<dyn octet_ai::HostStreamTransport>>,
+);
 
 pub(super) struct InferenceScope {
     pub(super) service: Arc<dyn ToolInferenceService>,
@@ -126,8 +131,8 @@ pub(super) struct InferenceLimits {
 pub(super) struct InferenceStep(InferenceStepKind);
 
 enum InferenceStepKind {
-    Admit(InferenceJob),
-    Finished(Result<octet_ai::Response, ()>),
+    Admit(Box<InferenceJob>),
+    Finished(Result<Box<octet_ai::Response>, ()>),
     Cancelled,
     TimedOut,
 }
@@ -181,7 +186,7 @@ impl InferenceDriver {
     pub(super) async fn next_step(&mut self) -> InferenceStep {
         let Some(flight) = self.active.as_mut() else {
             return match self.receiver.recv().await {
-                Some(job) => InferenceStep(InferenceStepKind::Admit(job)),
+                Some(job) => InferenceStep(InferenceStepKind::Admit(Box::new(job))),
                 None => std::future::pending().await,
             };
         };
@@ -198,7 +203,7 @@ impl InferenceDriver {
         }
         tokio::select! {
             biased;
-            result = &mut flight.future => InferenceStep(InferenceStepKind::Finished(result)),
+            result = &mut flight.future => InferenceStep(InferenceStepKind::Finished(result.map(Box::new))),
             _ = self.parent.cancelled() => InferenceStep(InferenceStepKind::Cancelled),
             _ = self.stop.cancelled() => InferenceStep(InferenceStepKind::Cancelled),
             _ = flight.cancellation.cancelled() => InferenceStep(InferenceStepKind::Cancelled),
@@ -218,11 +223,11 @@ impl InferenceDriver {
         }
         match step.0 {
             InferenceStepKind::Admit(job) => {
-                self.admit(job, session)?;
+                self.admit(*job, session)?;
                 Ok(None)
             }
             InferenceStepKind::Finished(Ok(response)) => {
-                self.finish_known(response, session).map(Some)
+                self.finish_known(*response, session).map(Some)
             }
             InferenceStepKind::Finished(Err(())) => self
                 .finish_unknown(session, "tool inference failed")
@@ -346,14 +351,7 @@ impl InferenceDriver {
         &self,
         job: &InferenceJob,
         session: &Session,
-    ) -> Result<
-        (
-            Model,
-            Request,
-            Option<Arc<dyn octet_ai::HostStreamTransport>>,
-        ),
-        ToolError,
-    > {
+    ) -> Result<PreparedInference, ToolError> {
         if self.active.is_some()
             || self.stop.is_cancelled()
             || self.parent.is_cancelled()

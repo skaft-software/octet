@@ -1313,7 +1313,8 @@ impl OctetTheme {
 
     /// Build the renderer used for model reasoning. Every semantic role keeps
     /// its own colour while prose receives the configured thinking style.
-    /// With no override it stays muted and upright as in the compiled default.
+    /// With no override it stays upright, using the terminal foreground when
+    /// the background is unknown and a muted gray on known profiles.
     pub fn reasoning_renderer(&self) -> RichRenderer {
         let mut theme = self.inner.clone();
         let thinking = self.semantic_style("thinking");

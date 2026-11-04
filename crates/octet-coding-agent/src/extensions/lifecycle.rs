@@ -181,7 +181,7 @@ impl ExecutableExtensions {
         }
 
         crate::output::checked_diagnostics(
-            crate::output::DiagnosticComponent::Resource("extensions".into()),
+            crate::output::DiagnosticComponent::Resource("extensions"),
             diagnostics.clone(),
             true,
         );
@@ -882,9 +882,7 @@ impl ExecutableExtensions {
                     self.diagnostics
                         .push(format!("error: extension {name:?} launch failed: {error}"));
                     start_failures.insert(name.clone(), clip_lifecycle_reason(&error, 4 * 1024));
-                    progress
-                        .notices
-                        .push(startup_failure_notice(&name, &error));
+                    progress.notices.push(startup_failure_notice(&name, &error));
                 }
             }
         }
@@ -912,9 +910,7 @@ impl ExecutableExtensions {
                         "warning: extension {name:?} was turned off: {error}"
                     ));
                     start_failures.insert(name.clone(), format!("turned off: {error}"));
-                    progress
-                        .notices
-                        .push(startup_failure_notice(&name, &error));
+                    progress.notices.push(startup_failure_notice(&name, &error));
                     turned_off.insert(name);
                 }
             }

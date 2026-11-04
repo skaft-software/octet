@@ -606,7 +606,7 @@ impl ProcessSnapshot {
 
 #[cfg(unix)]
 pub(super) struct DetachedBashSupervision {
-    pub(super) deadline: Instant,
+    pub(super) deadline: Option<Instant>,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -973,8 +973,13 @@ impl ProcessGroupGuard {
     /// Transfers a successfully reaped direct `bash` child to the centralized
     /// descendant supervisor. The registry entry remains live until the group
     /// disappears naturally, the run is cancelled, the original execution
-    /// deadline expires, or host shutdown begins.
-    pub fn supervise_bash_descendants(self, lifetime: Duration, cancellation: CancellationToken) {
+    /// deadline expires, or host shutdown begins. `None` preserves supervision
+    /// without imposing a deadline; it must not be encoded as `Duration::MAX`.
+    pub fn supervise_bash_descendants(
+        self,
+        lifetime: Option<Duration>,
+        cancellation: CancellationToken,
+    ) {
         #[cfg(unix)]
         {
             let process_group_id = self.process_group_id.load(Ordering::Acquire);
@@ -1007,17 +1012,22 @@ impl ProcessGroupGuard {
                 self.disarm();
                 return;
             }
-            if lifetime.is_zero()
+            if lifetime.is_some_and(|lifetime| lifetime.is_zero())
                 || cancellation.is_cancelled()
                 || HOST_SHUTDOWN_REQUESTED.load(Ordering::Acquire)
             {
                 self.terminate_now();
                 return;
             }
-            let now = Instant::now();
-            let Some(deadline) = now.checked_add(lifetime) else {
-                self.terminate_now();
-                return;
+            let deadline = match lifetime {
+                Some(lifetime) => {
+                    let Some(deadline) = Instant::now().checked_add(lifetime) else {
+                        self.terminate_now();
+                        return;
+                    };
+                    Some(deadline)
+                }
+                None => None,
             };
             let Some(reaper) = LazyLock::force(&PROCESS_REAPER) else {
                 self.terminate_now();
@@ -1754,7 +1764,8 @@ pub(super) fn registered_targets(
 }
 
 #[cfg(unix)]
-pub(super) fn detached_bash_process_groups() -> Vec<(i32, u64, Instant, CancellationToken)> {
+pub(super) fn detached_bash_process_groups() -> Vec<(i32, u64, Option<Instant>, CancellationToken)>
+{
     lock_std_mutex(&REGISTERED_PROCESS_GROUPS)
         .iter()
         .filter_map(|(process_group_id, registered)| {
@@ -1882,7 +1893,9 @@ pub(super) fn process_reaper_loop() {
             detached_bash_process_groups()
         {
             let alive = registered_process_is_alive(process_group_id, registration_id);
-            let terminate = host_shutdown || cancellation.is_cancelled() || now >= deadline;
+            let terminate = host_shutdown
+                || cancellation.is_cancelled()
+                || deadline.is_some_and(|deadline| now >= deadline);
             if !alive {
                 unregister_process_group(process_group_id as u64, registration_id);
                 continue;
@@ -1895,7 +1908,9 @@ pub(super) fn process_reaper_loop() {
                 );
                 continue;
             }
-            next_poll = next_poll.min(deadline.saturating_duration_since(now));
+            if let Some(deadline) = deadline {
+                next_poll = next_poll.min(deadline.saturating_duration_since(now));
+            }
         }
         if next_poll.is_zero() {
             std::thread::yield_now();

@@ -41,7 +41,16 @@ def failed(kind, value, stack):
 
 
 sys.excepthook = failed
-allowed_environment = {"PATH", "HOME", "TMPDIR", "LANG", "LC_CTYPE", "PYTHONDONTWRITEBYTECODE", "OCTET_EXTENSION_API_VERSION", "OCTET_EXTENSION_NAME", "OCTET_EXTENSION_DIR", "OCTET_EXTENSION_MANIFEST", "OCTET_WORKSPACE", "OCTET_EXTENSION_SCRATCH"}
+# Match the host's non-secret sanitized_subprocess_environment allowlist plus
+# the Python/extension launch metadata. All other ambient names remain forbidden.
+allowed_environment = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
+    "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "NO_COLOR",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "OCTET_PACKAGE_DIR",
+    "PYTHONDONTWRITEBYTECODE", "OCTET_EXTENSION_API_VERSION", "OCTET_EXTENSION_NAME",
+    "OCTET_EXTENSION_DIR", "OCTET_EXTENSION_MANIFEST", "OCTET_WORKSPACE",
+    "OCTET_EXTENSION_SCRATCH",
+}
 trace({"environment_names": sorted(os.environ)})
 trace({"environment": {name: os.environ[name] for name in allowed_environment if name in os.environ}})
 platform_environment = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()

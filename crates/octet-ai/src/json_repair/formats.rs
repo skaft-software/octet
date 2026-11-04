@@ -115,7 +115,10 @@ fn date(value: &str) -> bool {
         && month <= 12
         && day > 0
         && day
-            <= if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            <= if month == 2
+                && year.is_multiple_of(4)
+                && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+            {
                 29
             } else {
                 days[month]

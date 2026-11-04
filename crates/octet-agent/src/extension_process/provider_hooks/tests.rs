@@ -350,10 +350,11 @@ async fn hook_dispatch_refuses_unnegotiated_malformed_foreign_and_terminal_jobs(
         (2, "0.4", vec!["provider_proxy_v1"]),
         (3, "0.4", vec![FEATURE]),
     ] {
-        let mut protocol = write_std_lock(&state.protocol);
-        protocol.version = version.into();
-        protocol.features = features.into_iter().map(str::to_owned).collect();
-        drop(protocol);
+        {
+            let mut protocol = write_std_lock(&state.protocol);
+            protocol.version = version.into();
+            protocol.features = features.into_iter().map(str::to_owned).collect();
+        }
         send(&state, id, "provider/hooks/payload", fixture.payload());
         assert_error(&reply(&mut frames).await, id, -32011);
     }
@@ -433,16 +434,17 @@ async fn hook_dispatch_refuses_unnegotiated_malformed_foreign_and_terminal_jobs(
     let response = reply(&mut frames).await;
     assert_eq!(response["result"]["accepted"], true);
     assert!(job.completed());
-    let observations = lock_std_mutex(&fixture.probe.observations);
-    assert_eq!(
-        observations
-            .iter()
-            .map(|(_, phase)| *phase)
-            .collect::<Vec<_>>(),
-        ["payload", "headers", "response"]
-    );
-    assert!(observations.iter().all(|(id, _)| *id == observations[0].0));
-    drop(observations);
+    {
+        let observations = lock_std_mutex(&fixture.probe.observations);
+        assert_eq!(
+            observations
+                .iter()
+                .map(|(_, phase)| *phase)
+                .collect::<Vec<_>>(),
+            ["payload", "headers", "response"]
+        );
+        assert!(observations.iter().all(|(id, _)| *id == observations[0].0));
+    }
     mark_terminal(&fixture, &state).await;
     send(&state, 14, "provider/hooks/payload", fixture.payload());
     assert_error(&reply(&mut frames).await, 14, -32002);
@@ -477,13 +479,14 @@ async fn malformed_phases_poison_their_job_without_invoking_hooks() {
         assert_error(&reply(&mut frames).await, 1, -32002);
         send(&state, 2, "provider/hooks/payload", fixture.payload());
         assert_error(&reply(&mut frames).await, 2, -32002);
-        let streams = lock_std_mutex(&fixture.connection.provider_streams);
-        assert!(!streams[&fixture.stream_id]
-            .request_hooks
-            .as_ref()
-            .unwrap()
-            .completed());
-        drop(streams);
+        {
+            let streams = lock_std_mutex(&fixture.connection.provider_streams);
+            assert!(!streams[&fixture.stream_id]
+                .request_hooks
+                .as_ref()
+                .unwrap()
+                .completed());
+        }
         assert!(fixture.probe.phases().is_empty());
         fixture.finish().await;
     }
