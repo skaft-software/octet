@@ -66,6 +66,8 @@ pub struct TerminalCapabilities {
     /// Cursor-rewritten animation is allowed. octet's elapsed clock does not
     /// depend on this flag for comprehension.
     pub animation: bool,
+    /// A direct Rex pane, whose Kitty graphics query was verified separately.
+    pub rex: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +76,8 @@ struct CapabilityProbe {
     stdout_tty: bool,
     term: Option<String>,
     term_program: Option<String>,
+    rex: bool,
+    multiplexed: bool,
     colorterm: Option<String>,
     locale: Option<String>,
     no_color: bool,
@@ -173,6 +177,12 @@ impl TerminalCapabilities {
                 term_program: std::env::var("TERM_PROGRAM")
                     .ok()
                     .filter(|value| !value.is_empty()),
+                rex: std::env::var_os("REX_SESSION").is_some_and(|value| !value.is_empty())
+                    && std::env::var_os("REX_BLOCK").is_some_and(|value| !value.is_empty()),
+                multiplexed: ["TMUX", "STY"]
+                    .iter()
+                    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+                    || std::env::var_os("CMUX_SOCKET_PATH").is_some(),
                 colorterm: std::env::var("COLORTERM")
                     .ok()
                     .filter(|value| !value.is_empty()),
@@ -190,6 +200,14 @@ impl TerminalCapabilities {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
+        let rex_direct = probe.rex
+            && probe
+                .term_program
+                .as_deref()
+                .is_some_and(|program| program.eq_ignore_ascii_case("rex"))
+            && !probe.multiplexed
+            && !term.starts_with("tmux")
+            && !term.starts_with("screen");
         let truecolor_announced = probe.colorterm.as_deref().is_some_and(|value| {
             value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
         });
@@ -286,11 +304,14 @@ impl TerminalCapabilities {
             interactive,
             unicode,
             color,
-            italics: interactive && (rich_terminal || apple_terminal) && color != ColorDepth::None,
+            italics: interactive
+                && (rich_terminal || apple_terminal || rex_direct)
+                && color != ColorDepth::None,
             hyperlinks: interactive && rich_terminal,
             // A colourless terminal still gets the complete static splash;
             // cursor animation would only redraw identical bytes at 60 fps.
             animation: interactive && !probe.explicit_plain && color != ColorDepth::None,
+            rex: rex_direct && interactive,
         }
     }
 
@@ -303,6 +324,7 @@ impl TerminalCapabilities {
             italics: interactive && color == ColorDepth::TrueColor,
             hyperlinks: interactive && color == ColorDepth::TrueColor,
             animation: interactive && color != ColorDepth::None,
+            rex: false,
         }
     }
 }
@@ -340,7 +362,9 @@ pub(super) fn sexy_terminal_capabilities(
     // protocols. octet's own interactive/plain decision above remains the
     // authority for every other frontend capability.
     let image_hints = SexyTerminalCapabilities::detect();
-    rendered.kitty_graphics = image_hints.kitty_graphics;
+    // Rex reports xterm-256color on hosts without its terminfo installed, but
+    // its Kitty graphics query replies OK. Name-based image detection misses it.
+    rendered.kitty_graphics = image_hints.kitty_graphics || capabilities.rex;
     rendered.iterm2_images = image_hints.iterm2_images;
     rendered.cell_pixel_size = image_hints.cell_pixel_size;
 

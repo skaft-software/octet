@@ -575,7 +575,10 @@ impl HeldApi {
                     socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
                     continue;
                 }
-                let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 socket.write_all(headers.as_bytes()).await.unwrap();
                 if attempt != 0 {
                     socket.write_all(body.as_bytes()).await.unwrap();

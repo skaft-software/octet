@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -17,6 +17,7 @@ use crate::config::{
 };
 use crate::extension_package::ExtensionCommand;
 use crate::migrate::MigrationCommand;
+use crate::resource_resolver::ResourceResolver;
 use crate::session_commands::SessionCommand;
 
 pub(crate) mod catalog_publish;
@@ -784,6 +785,175 @@ impl ConfigLayer {
         self.merge(project);
         self.trusted_extensions = trusted_extensions;
         self.models = scoped_models;
+    }
+}
+
+const PI_SETTINGS_BYTES: usize = 64 * 1024;
+const CODEMODE_EXTENSION: &str = "octet-codemode";
+
+fn pi_agent_dir() -> Option<PathBuf> {
+    for name in ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            if value.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(value);
+            return Some(if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().ok()?.join(path)
+            });
+        }
+    }
+    dirs::home_dir().map(|home| home.join(".pi/agent"))
+}
+
+fn read_pi_settings(path: &Path) -> Option<serde_json::Value> {
+    let bytes = octet_agent::secure_fs::read_regular_file_bounded(path, PI_SETTINGS_BYTES).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.is_object().then_some(value)
+}
+
+fn pi_default_tools(
+    global: Option<&serde_json::Value>,
+    project: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let base = global
+        .and_then(|settings| settings.get("defaultTools"))
+        .and_then(serde_json::Value::as_array);
+    let overrides = project
+        .and_then(|settings| settings.get("defaultTools"))
+        .and_then(serde_json::Value::as_array);
+    let mut entries = base
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let Some(overrides) = overrides else {
+        return entries;
+    };
+    let append = base.is_some()
+        && overrides.iter().all(|value| {
+            value
+                .as_str()
+                .is_some_and(|entry| entry.starts_with('+') || entry.starts_with('-'))
+        });
+    if !append {
+        entries.clear();
+    }
+    entries.extend(
+        overrides
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned),
+    );
+    entries
+}
+
+/// Apply Pi codemode preferences to an existing, host-admitted native bundle.
+/// Activation is session-only; settings never install code or create trust grants.
+pub(crate) fn apply_pi_codemode_settings(
+    config: &mut Config,
+    explicit_flags: &BTreeSet<(String, String)>,
+) {
+    let global =
+        pi_agent_dir().and_then(|agent_dir| read_pi_settings(&agent_dir.join("settings.json")));
+    let project = config
+        .workspace_trusted
+        .then(|| read_pi_settings(&config.workspace.join(".pi/settings.json")))
+        .flatten();
+    let project_trusted = config.workspace_trusted;
+    let resolver = ResourceResolver::new(config.workspace.clone(), project_trusted);
+    apply_pi_codemode_values(
+        config,
+        global,
+        project,
+        project_trusted,
+        explicit_flags,
+        &resolver,
+    );
+}
+
+fn apply_pi_codemode_values(
+    config: &mut Config,
+    global: Option<serde_json::Value>,
+    project: Option<serde_json::Value>,
+    project_trusted: bool,
+    explicit_flags: &BTreeSet<(String, String)>,
+    resolver: &ResourceResolver,
+) {
+    let project = project.filter(|_| project_trusted);
+    let active = pi_default_tools(global.as_ref(), project.as_ref())
+        .iter()
+        .fold(false, |active, entry| match entry.as_str() {
+            "codemode" | "+codemode" => true,
+            "-codemode" => false,
+            _ => active,
+        });
+    if !active {
+        return;
+    }
+
+    let mut candidate = config.clone();
+    if !candidate
+        .enabled_extensions
+        .iter()
+        .any(|name| name == CODEMODE_EXTENSION)
+    {
+        candidate
+            .enabled_extensions
+            .push(CODEMODE_EXTENSION.to_owned());
+    }
+    // Codemode declares CLI flags. Reuse their descriptor admission so source
+    // precedence, exact grants, workspace trust and process gates stay identical.
+    if !crate::extensions::selected_extension_flag_declarations_with_resolver(&candidate, resolver)
+        .iter()
+        .any(|(name, _)| name == CODEMODE_EXTENSION)
+    {
+        return;
+    }
+    config.enabled_extensions = candidate.enabled_extensions;
+    // Pi preferences, not saved native activation, now participate in next launch.
+    config.extension_activation_overridden = true;
+
+    let mut mode = None;
+    let mut inline_budget = None;
+    for settings in [global.as_ref(), project.as_ref()].into_iter().flatten() {
+        if let Some(codemode) = settings
+            .get("codemode")
+            .and_then(serde_json::Value::as_object)
+        {
+            if let Some(value) = codemode.get("mode").and_then(serde_json::Value::as_str) {
+                if ["on", "only"].contains(&value) {
+                    mode = Some(value.to_owned());
+                }
+            }
+            if let Some(value) = codemode
+                .get("inlineBudget")
+                .and_then(serde_json::Value::as_u64)
+            {
+                if value <= 16000 {
+                    inline_budget = Some(value);
+                }
+            }
+        }
+    }
+    let flags = config
+        .extension_flag_values
+        .entry(CODEMODE_EXTENSION.to_owned())
+        .or_default();
+    // Extension CLI parsing includes manifest defaults. Preserve CLI values by
+    // provenance, including explicit values that happen to equal those defaults.
+    if !explicit_flags.contains(&(CODEMODE_EXTENSION.into(), "codemode-mode".into())) {
+        if let Some(value) = mode {
+            flags.insert("codemode-mode".into(), serde_json::Value::String(value));
+        }
+    }
+    if !explicit_flags.contains(&(CODEMODE_EXTENSION.into(), "codemode-inline-budget".into())) {
+        if let Some(value) = inline_budget {
+            flags.insert("codemode-inline-budget".into(), serde_json::json!(value));
+        }
     }
 }
 
@@ -1875,7 +2045,7 @@ fn build_config_with_global_path_and_diagnostics(
         sandbox.shell_path = Some(value);
     }
     if let Some(value) = values.bash_timeout_secs {
-        sandbox.bash_timeout_secs = value;
+        sandbox.bash_timeout_secs = Some(value);
     }
     if let Some(value) = values.max_output_bytes {
         sandbox.max_output_bytes = value;
@@ -1913,7 +2083,7 @@ fn build_config_with_global_path_and_diagnostics(
         sandbox.policy_provenance.shell_path = PolicyValueSource::Cli;
     }
     if let Some(value) = cli.bash_timeout_secs {
-        sandbox.bash_timeout_secs = value;
+        sandbox.bash_timeout_secs = Some(value);
         sandbox.policy_provenance.bash_timeout = PolicyValueSource::Cli;
     }
     if let Some(value) = cli.max_output_bytes {
@@ -1936,7 +2106,9 @@ fn build_config_with_global_path_and_diagnostics(
         sandbox.allow_external_paths = false;
         sandbox.policy_provenance.workspace_confinement = effect_policy_source;
     }
-    sandbox.bash_timeout_secs = sandbox.bash_timeout_secs.clamp(1, 3_600);
+    sandbox.bash_timeout_secs = sandbox
+        .bash_timeout_secs
+        .map(|value| value.clamp(1, 2_147_483));
     sandbox.max_output_bytes = sandbox.max_output_bytes.clamp(1_024, 1024 * 1024);
 
     let mut tools = match cli.tools {

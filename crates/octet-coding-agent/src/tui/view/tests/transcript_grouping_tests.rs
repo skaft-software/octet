@@ -1009,3 +1009,60 @@ fn a_reload_outcome_is_one_dot_note_and_startup_success_is_silent() {
         "reload failed: skill 0 bad · skill 1 bad (+4 more)"
     );
 }
+
+#[test]
+fn notice_during_a_run_is_separated_from_the_finished_bash_output() {
+    use octet_agent::ToolOutput;
+    let mut shell = InteractiveShell::test_shell();
+    let run_id = shell.begin_run("local");
+    let id = ToolCallId("bash-before-notice".into());
+    let output_lines = (1..=40)
+        .map(|line| format!("result line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "python3 - <<'PY'\nprint(1)\nPY"}),
+        },
+    );
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolFinished {
+            id: id.clone(),
+            result: Ok(ToolOutput::new(format!(
+                "exit=0 duration=0.1s\nstdout: 40 lines\n{output_lines}\ntruncated_stdout=false"
+            ))),
+            duration: Duration::from_millis(10),
+        },
+    );
+    shell.notice("interactive terminal mode saved as fullscreen");
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::ToolStarted {
+            id: ToolCallId("bash-after-notice".into()),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "echo next"}),
+        },
+    );
+    for width in [80, 120] {
+        let rows = shell
+            .state
+            .borrow()
+            .rendered_transcript(width)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>();
+        let at = rows
+            .iter()
+            .position(|row| row.contains("interactive terminal mode saved"))
+            .unwrap_or_else(|| panic!("missing notice: {rows:#?}"));
+        assert!(
+            at > 0 && rows[at - 1].trim().is_empty(),
+            "{width}: the notice must not sit directly under tool output: {:#?}",
+            &rows[at.saturating_sub(4)..(at + 3).min(rows.len())]
+        );
+    }
+}

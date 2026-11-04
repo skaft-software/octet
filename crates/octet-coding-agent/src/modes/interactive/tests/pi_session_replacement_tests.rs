@@ -633,7 +633,7 @@ async fn pi_before_fork_cancels_before_entry_lookup() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup() {
-    use super::support::{scripted_model, text_turn, HeldApi};
+    use super::support::{HeldApi, scripted_model, text_turn};
     let factory = SETUP_SESSION
         .replace("const result = await ctx.newSession", "const replacement = ctx.newSession")
         .replace("trace({ step: 'after-options', result });", "trace({ step: 'requested-options', id: before }); const result = await replacement; trace({ step: 'after-options', result });");
@@ -798,7 +798,9 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
     );
     assert_eq!(entries_naming(&new_path, "setup-complete").len(), 1);
     assert_eq!(std::fs::read(&old_path).unwrap(), settled_bytes);
-    assert!(!serde_json::to_string(app.agent.session().entries())
-        .unwrap()
-        .contains("finish in the original session"));
+    assert!(
+        !serde_json::to_string(app.agent.session().entries())
+            .unwrap()
+            .contains("finish in the original session")
+    );
 }

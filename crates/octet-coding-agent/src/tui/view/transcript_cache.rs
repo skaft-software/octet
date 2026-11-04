@@ -349,7 +349,9 @@ impl ShellState {
                         self.show_tool_details(&self.transcript[index]),
                     )
                     .filter(|update| {
-                        !self.extension_transcript.ever_active && update.stable_rows <= old_length
+                        !self.extension_transcript.ever_active
+                            && update.stable_rows <= old_length
+                            && update.geometry == cache.block_geometries[index]
                     }) {
                         let replacement_start = start.saturating_add(update.stable_rows);
                         first_changed = first_changed.min(replacement_start);
@@ -438,6 +440,234 @@ mod tests {
     use super::*;
     use crate::tui::view::InteractiveShell;
     use sexy_tui_rs::strip_terminal_sequences;
+
+    #[test]
+    fn assistant_suffix_update_falls_back_when_neighbor_geometry_changes() {
+        use super::super::AssistantBlock;
+
+        const WIDTH: u16 = 80;
+        let shell = InteractiveShell::test_shell();
+        {
+            let mut state = shell.state.borrow_mut();
+            state.push_block(TranscriptBlock::Reasoning(Box::new(
+                AssistantBlock::streaming_reasoning("thinking"),
+            )));
+            state.push_block(TranscriptBlock::Assistant(Box::new(
+                AssistantBlock::streaming("# Stable heading\n\nmutable"),
+            )));
+            let _ = state.rendered_transcript(WIDTH);
+            let old_assistant_geometry = state.transcript_cache.borrow().block_geometries[1];
+
+            // A neighboring reasoning block can settle while the assistant
+            // suffix is streaming. Its event-spacing seam changes, so the
+            // assistant's cached frame geometry is no longer a safe prefix.
+            let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[0] else {
+                unreachable!()
+            };
+            reasoning.finish_reasoning();
+            state.touch_block(0);
+            let TranscriptBlock::Assistant(assistant) = &mut state.transcript[1] else {
+                unreachable!()
+            };
+            assistant.append(" tail");
+            state.touch_block(1);
+            let actual = state.rendered_transcript(WIDTH).clone();
+
+            let expected_reasoning = render_block_planned_with_rainbow(
+                None,
+                &state.transcript[0],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let expected_assistant = render_block_planned_with_rainbow(
+                Some(&state.transcript[0]),
+                &state.transcript[1],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let cache = state.transcript_cache.borrow();
+            let reasoning_start = cache.block_starts[0];
+            let assistant_start = cache.block_starts[1];
+            assert_eq!(
+                &actual[reasoning_start..assistant_start],
+                expected_reasoning.lines,
+                "settled neighbor rows must be fully rerendered"
+            );
+            let assistant_end = assistant_start + cache.block_lengths[1];
+            assert_eq!(
+                &actual[assistant_start..assistant_end],
+                expected_assistant.lines,
+                "the streaming block must use the settled neighbor's seam geometry"
+            );
+            assert_ne!(old_assistant_geometry, expected_assistant.geometry);
+            assert_eq!(cache.block_geometries[1], expected_assistant.geometry);
+        }
+    }
+
+    #[test]
+    fn tool_assistant_cache_rows_match_full_render_before_and_after_next_tool() {
+        use super::super::{AssistantBlock, ToolPanel};
+        use crate::presentation::summarize_tool;
+
+        const WIDTH: u16 = 80;
+        let shell = InteractiveShell::test_shell();
+        let first_args = serde_json::json!({"path": "src/main.rs"});
+        let next_args = serde_json::json!({"command": "echo done"});
+        let first_tool = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            octet_ai::ToolCallId("read-before-prose".into()),
+            "read".into(),
+            first_args.to_string(),
+            summarize_tool("read", &first_args),
+            "fixture source".into(),
+            true,
+            false,
+            None,
+            None,
+        )));
+        {
+            let mut state = shell.state.borrow_mut();
+            state.push_block(first_tool);
+            state.push_block(TranscriptBlock::Assistant(Box::new(
+                AssistantBlock::streaming("# Stable heading\n\nstreamed prose"),
+            )));
+            let actual = state.rendered_transcript(WIDTH).clone();
+            let expected = render_block_planned_with_rainbow(
+                Some(&state.transcript[0]),
+                &state.transcript[1],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let cache = state.transcript_cache.borrow();
+            let start = cache.block_starts[1];
+            let end = start + cache.block_lengths[1];
+            assert_eq!(
+                &actual[start..end],
+                expected.lines,
+                "the streaming prose seam after a tool must match a full render"
+            );
+            assert_eq!(cache.block_geometries[1], expected.geometry);
+        }
+
+        let before_delta = shell.state.borrow().rendered_transcript(WIDTH).clone();
+        {
+            let mut state = shell.state.borrow_mut();
+            let TranscriptBlock::Assistant(assistant) = &mut state.transcript[1] else {
+                unreachable!()
+            };
+            assistant.append(" tail");
+            state.touch_block(1);
+            let actual = state.rendered_transcript(WIDTH).clone();
+            let expected = render_block_planned_with_rainbow(
+                Some(&state.transcript[0]),
+                &state.transcript[1],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let cache = state.transcript_cache.borrow();
+            let start = cache.block_starts[1];
+            let end = start + cache.block_lengths[1];
+            assert_eq!(&actual[start..end], expected.lines);
+            assert!(
+                cache.last_update_start > start,
+                "stable streamed rows should be retained"
+            );
+            assert_eq!(
+                &actual[..cache.last_update_start],
+                &before_delta[..cache.last_update_start],
+                "the cached prefix before the streamed suffix must remain unchanged"
+            );
+        }
+
+        {
+            let mut state = shell.state.borrow_mut();
+            let TranscriptBlock::Assistant(assistant) = &mut state.transcript[1] else {
+                unreachable!()
+            };
+            assistant.finish();
+            state.touch_block(1);
+            state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                octet_ai::ToolCallId("next-tool".into()),
+                "bash".into(),
+                next_args.to_string(),
+                summarize_tool("bash", &next_args),
+                "done".into(),
+                true,
+                false,
+                None,
+                None,
+            ))));
+            let actual = state.rendered_transcript(WIDTH).clone();
+            let assistant_expected = render_block_planned_with_rainbow(
+                Some(&state.transcript[0]),
+                &state.transcript[1],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let tool_expected = render_block_planned_with_rainbow(
+                Some(&state.transcript[1]),
+                &state.transcript[2],
+                &state.theme,
+                &state.theme.rich_renderer(),
+                &state.theme.reasoning_renderer(),
+                WIDTH,
+                false,
+                0,
+                0,
+                0,
+                false,
+            );
+            let cache = state.transcript_cache.borrow();
+            let assistant_start = cache.block_starts[1];
+            let assistant_end = assistant_start + cache.block_lengths[1];
+            assert_eq!(
+                &actual[assistant_start..assistant_end],
+                assistant_expected.lines,
+                "the finalized assistant block must retain its full-render transition"
+            );
+            let tool_start = cache.block_starts[2];
+            let tool_end = tool_start + cache.block_lengths[2];
+            assert_eq!(
+                &actual[tool_start..tool_end],
+                tool_expected.lines,
+                "the subsequent tool must render against the assistant neighbor"
+            );
+        }
+    }
 
     #[test]
     fn expanded_reasoning_updates_only_the_tail_and_reexpands_cleanly() {

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use octet_agent::{
-    CacheWarmMode, EffectPolicy, EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
-    DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES,
+    CacheWarmMode, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_MAX_OUTPUT_BYTES, EffectPolicy,
+    EffectiveToolPolicy, SandboxConfig, ToolPolicyProvenance,
 };
 
 pub use crate::tui::terminal::ColorMode;
@@ -182,7 +182,7 @@ pub struct SandboxPolicy {
     pub allow_shell: bool,
     pub allow_remote_read: bool,
     pub shell_path: Option<PathBuf>,
-    pub bash_timeout_secs: u64,
+    pub bash_timeout_secs: Option<u64>,
     pub max_output_bytes: usize,
     /// Source labels for the secret-safe effective policy diagnostic.
     pub policy_provenance: ToolPolicyProvenance,
@@ -202,7 +202,7 @@ impl Default for SandboxPolicy {
             // and process defaults and require an explicit opt-in.
             allow_remote_read: false,
             shell_path: None,
-            bash_timeout_secs: 120,
+            bash_timeout_secs: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             policy_provenance: ToolPolicyProvenance::default(),
         }
@@ -410,7 +410,7 @@ impl SandboxPolicy {
         sandbox.allow_shell = self.allow_shell;
         sandbox.allow_remote_read = self.allow_remote_read;
         sandbox.shell_path = self.shell_path.clone();
-        sandbox.bash_timeout = Duration::from_secs(self.bash_timeout_secs);
+        sandbox.bash_timeout = self.bash_timeout_secs.map(Duration::from_secs);
         sandbox.max_output_bytes = self.max_output_bytes;
         sandbox.policy_provenance = self.policy_provenance;
         sandbox
@@ -1023,9 +1023,11 @@ mod tests {
         }
         assert!(policy.explicit_names().is_none());
         assert!(!policy.enabled("powershell"));
-        assert!(ToolPolicy::only(["powershell".to_owned()])
-            .unwrap()
-            .enabled("powershell"));
+        assert!(
+            ToolPolicy::only(["powershell".to_owned()])
+                .unwrap()
+                .enabled("powershell")
+        );
         assert!(!policy.names().any(|name| name == "search"));
         assert!(!SUPPORTED_TOOL_NAMES.contains(&"search"));
         // Removal from the built-in inventory does not reserve an extension

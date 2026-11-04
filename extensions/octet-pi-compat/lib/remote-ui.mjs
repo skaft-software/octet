@@ -5,6 +5,7 @@ import { theme, hostKeybindings } from './theme.mjs';
 import { commandArgumentRequest, getAutocompleteProvider } from './completions.mjs';
 import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
+import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
 const MAX_CAPTURE_READMISSIONS = 8;
@@ -209,12 +210,24 @@ export class RemoteTUI {
         if (intent === undefined) unsupported('tui.terminal.write', 'only reviewed mouse-capture intent is admitted; Rust owns all output');
         surface.runtime.scope.run(surface.store, () => surface.runtime.mouseIntent(intent));
       },
+      // Key-protocol flags third-party hint code reads (pi-tui-kit's componentKeyAvailable). The adapter never
+      // negotiates Kitty or modifyOtherKeys with a terminal (the host normalizes keys), so they report the
+      // adapter's own state: the module-wide Kitty flag, which nothing here sets, and false.
+      get kittyProtocolActive() { return isKittyProtocolActive(); },
+      get modifyOtherKeysActive() { return false; },
       start() { unsupported('tui.terminal.start', 'Rust owns terminal input'); },
       stop() { unsupported('tui.terminal.stop', 'Rust owns terminal lifetime'); },
     }, 'tui.terminal');
+    // Pi's optional debug callback: absent means no host debug key, and reading it must not refuse.
+    this.onDebug = undefined;
     this.facade = strict(this, 'tui');
     editorSurfaces.set(this.facade, surface);
   }
+  // Pi 1.4.0 `TUI.mode` is 'regular' (main-screen scrollback) or 'fullscreen' (alt screen that owns the
+  // transcript and reserves `tui.altScreen.*` keys). octet's Rust frontend owns scrollback and the terminal and
+  // has no Pi alt-screen actions, so extension components always run as 'regular'; extensions that reserve
+  // alt-screen keys when fullscreen (pi-tui-kit) therefore reserve none.
+  get mode() { return 'regular'; }
   requestRender() { this.surface.requestRender(); }
   addChild(value) { this.children.push(component(value)); this.requestRender(); }
   removeChild(value) { const at = this.children.indexOf(value); if (at >= 0) this.children.splice(at, 1); if (this.focus === value) this.setFocus(null); this.requestRender(); }

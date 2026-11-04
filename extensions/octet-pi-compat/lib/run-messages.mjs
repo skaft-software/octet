@@ -17,10 +17,16 @@ function append(run, message) {
   const bytes = size(message); check(run, bytes);
   run.bytes += bytes; run.messages.push(copy(message));
 }
+// Pi extensions probe discriminators such as .type and .customType on mixed
+// session history. Unknown properties are absent in Pi, while missing actual
+// AssistantMessage fields remain unavailable facts rather than invented values.
+const ASSISTANT_FACTS = new Set(['role', 'content', 'api', 'provider', 'model', 'responseModel', 'responseId',
+  'providerThinkingLevel', 'thinkingLevel', 'diagnostics', 'usage', 'stopReason', 'deferred', 'errorMessage',
+  'rawStopReason', 'endTurn', 'timestamp']);
 export function assistantObservation(message) {
   if (message.role !== 'assistant') return message;
   if (Object.hasOwn(message, 'usage')) message.usage = strict(message.usage, 'assistant usage');
-  return strict(message, 'assistant message');
+  return strict(message, 'assistant message', ASSISTANT_FACTS);
 }
 async function emit(runtime, store, type, fields = {}) {
   // Later deltas or callbacks must not mutate an earlier observation/history.

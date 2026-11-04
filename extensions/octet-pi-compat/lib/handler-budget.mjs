@@ -19,11 +19,12 @@ import { tracePhase, traceEnabled } from './startup-trace.mjs';
 // a guard that cannot answer in time blocks the call, never lets it through.
 //
 // The callback-wait totals leave time before the host's own deadlines for
-// before_prompt and resources_discover (5 s). They do not bound queueing,
-// transport, synchronous JS or a later flush of tracked host operations.
+// before_prompt, provider_context and resources_discover (5 s). They do not
+// bound queueing, transport, synchronous JS or a later flush of tracked host
+// operations. Both provider-context phases share the same total wait budget.
 
-const PER_HANDLER_MS = { before_agent_start: 2000, input: 2000, resources_discover: 4000, tool_call: 10000 };
-const TOTAL_MS = { before_agent_start: 4000, input: 4000, resources_discover: 4000, tool_call: 10000 };
+const PER_HANDLER_MS = { before_agent_start: 2000, input: 2000, context: 2000, context_with_system: 2000, resources_discover: 4000, tool_call: 10000 };
+const TOTAL_MS = { before_agent_start: 4000, input: 4000, context: 4000, context_with_system: 4000, resources_discover: 4000, tool_call: 10000 };
 const DEFAULT_PER_HANDLER_MS = 5000;
 const DEFAULT_TOTAL_MS = 15000;
 const MIN_WAIT_MS = 250;
@@ -128,10 +129,10 @@ export class UserWait {
 }
 
 export class HookBudget {
-  constructor(runtime, store, event) {
+  constructor(runtime, store, event, started = performance.now()) {
     this.runtime = runtime; this.store = store; this.event = event;
     ({ perHandler: this.perHandler, total: this.total } = budgetFor(event));
-    this.started = performance.now();
+    this.started = started;
     this.detached = new Map(); // factory path -> milliseconds actually waited
     this.excluded = 0; // milliseconds the hook's handlers spent awaiting the user
   }
@@ -161,6 +162,9 @@ export class HookBudget {
     const waited = this.wait();
     if (waited === 0) {
       this.trace(entry, 0, 'skipped-budget');
+      if (entry.factory !== undefined && ['context', 'context_with_system'].includes(this.event)) {
+        this.runtime.reportCallbackError(this.event, entry.factory, new Error('context budget exhausted'), this.store.state);
+      }
       return { ran: false, busy: false };
     }
     const { store } = this;
@@ -173,7 +177,7 @@ export class HookBudget {
       entry.busy = false;
       if (child.detached) {
         this.trace(entry, performance.now() - started, late.error ? 'late-failed' : 'late-settled');
-        if (late.error && entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error);
+        if (late.error && entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error, store.state);
       }
     });
     // A quit aborts the hook still starting up: stop waiting so shutdown handlers run at
@@ -233,6 +237,6 @@ export class HookBudget {
 
   // One report per factory and event, the first time a handler is left running.
   finish() {
-    if (this.detached.size) this.runtime.issues.slow(this.event, [...this.detached]);
+    if (this.detached.size) this.runtime.issues.slow(this.event, [...this.detached], this.store.state);
   }
 }

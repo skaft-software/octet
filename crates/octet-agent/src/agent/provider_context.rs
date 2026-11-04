@@ -3,12 +3,16 @@ use super::*;
 
 #[cfg(test)]
 mod tests;
-use crate::extension::{ProviderContextHook, ProviderContextProjectionContext};
+use crate::extension::{
+    ProviderContextHook, ProviderContextHookError, ProviderContextProjectionContext,
+};
 
 // Matches the existing encoded payload-hook ceiling. Count serialization
 // without allocating a second body, stopping as soon as the ceiling is crossed.
 const MAX_CONTEXT_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const CONTEXT_HOOK_DEADLINE: Duration = Duration::from_secs(5);
+// Beyond this cap, still warn rather than silently hiding a failure.
+const MAX_CONTEXT_FAILURE_NOTICES: usize = 1024;
 
 pub(super) struct ProviderContextPreparation<'a> {
     pub(super) hooks: &'a [Arc<dyn ProviderContextHook>],
@@ -184,6 +188,30 @@ fn validate_identities(
     Ok(())
 }
 
+fn note_context_failure(
+    hook: &dyn ProviderContextHook,
+    session: &mut Session,
+    notices: &mut Vec<String>,
+) {
+    let should_notice = match hook.failure_notice_id() {
+        Some(extension) => {
+            let seen = &mut session.context_failure_notices;
+            if seen.contains(extension) {
+                false
+            } else {
+                if seen.len() < MAX_CONTEXT_FAILURE_NOTICES {
+                    seen.insert(extension.to_owned());
+                }
+                true
+            }
+        }
+        None => true,
+    };
+    if should_notice {
+        notices.push("Extension context hook failed or timed out; its changes were skipped. Disable the extension if this keeps happening.".to_owned());
+    }
+}
+
 pub(super) async fn project_provider_context(
     mut request: Request,
     hooks: &[Arc<dyn ProviderContextHook>],
@@ -191,13 +219,35 @@ pub(super) async fn project_provider_context(
     model: &Model,
     abort: &AbortFlag,
     session: &mut Session,
+    notices: &mut Vec<String>,
 ) -> Result<Request, AgentError> {
     validate_size(&request)?;
     let canonical = request.clone();
-    let deadline = tokio::time::Instant::now() + model.endpoint.timeout.min(CONTEXT_HOOK_DEADLINE);
+    // Keep only currently registered instances; dropping/reopening the Session
+    // releases/resets the ledger. Never persist extension IDs in the transcript.
+    session.context_failure_notices.retain(|id| {
+        hooks
+            .iter()
+            .any(|hook| hook.failure_notice_id() == Some(id.as_str()))
+    });
+    let budget = model.endpoint.timeout.min(CONTEXT_HOOK_DEADLINE);
+    // Extension hooks share one finite budget. Authority guards must still run
+    // and fail closed after an extension consumes that budget, so each trusted
+    // guard receives its own bounded deadline.
+    let extension_deadline = tokio::time::Instant::now() + budget;
     for hook in hooks {
         if abort.is_set() {
             return Err(AgentError::Cancelled);
+        }
+        let recoverable = hook.continues_on_failure();
+        let deadline = if recoverable {
+            extension_deadline
+        } else {
+            tokio::time::Instant::now() + budget
+        };
+        if recoverable && tokio::time::Instant::now() >= deadline {
+            note_context_failure(hook.as_ref(), session, notices);
+            continue;
         }
         let mut service = hook.begin_session_wait(session, context).map_err(|error| {
             // Activation implementations historically return String. Expose
@@ -220,7 +270,11 @@ pub(super) async fn project_provider_context(
                 .and_then(|service| service.projection_future(&request, context))
             {
                 Some(future) => future,
-                None => hook.project_context(&request, context),
+                None => Box::pin(async {
+                    hook.project_context(&request, context)
+                        .await
+                        .map_err(ProviderContextHookError::Failed)
+                }),
             };
             tokio::pin!(future);
             loop {
@@ -231,13 +285,21 @@ pub(super) async fn project_provider_context(
                 tokio::select! {
                     biased;
                     _ = abort.wait() => return Err(AgentError::Cancelled),
-                    _ = tokio::time::sleep_until(deadline) => return Err(refused("hook deadline exceeded")),
+                    // A ready remote -32800 must win a same-poll deadline;
+                    // successful results are still checked against the deadline below.
+                    result = &mut future => break result,
+                    _ = tokio::time::sleep_until(deadline) => break Err(ProviderContextHookError::Failed("context hook deadline exceeded".into())),
                     _ = ready => {
+                        // Polling the hook above may itself queue an append and
+                        // cancel the run in the same select iteration. Check
+                        // again before granting synchronous persistence.
+                        if abort.is_set() {
+                            return Err(AgentError::Cancelled);
+                        }
                         service.as_mut().expect("only an active service becomes ready")
                             .consume_next(session, context)
                             .map_err(|_| refused("session append service failed"))?;
                     },
-                    result = &mut future => break result,
                 }
             }
         };
@@ -245,7 +307,22 @@ pub(super) async fn project_provider_context(
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }
-        let projection = projection.map_err(|_| refused("hook failed"))?;
+        let projection = match projection {
+            Ok(_) if recoverable && tokio::time::Instant::now() >= deadline => {
+                note_context_failure(hook.as_ref(), session, notices);
+                continue;
+            }
+            Ok(projection) => projection,
+            Err(ProviderContextHookError::Cancelled) => return Err(AgentError::Cancelled),
+            Err(ProviderContextHookError::Refused) => {
+                return Err(refused("hook refused preparation"))
+            }
+            Err(ProviderContextHookError::Failed(_)) if recoverable => {
+                note_context_failure(hook.as_ref(), session, notices);
+                continue;
+            }
+            Err(ProviderContextHookError::Failed(_)) => return Err(refused("hook failed")),
+        };
         if let Some(projection) = projection {
             request.messages = projection.messages;
             request.system = projection.system;
@@ -291,12 +368,15 @@ pub(super) async fn project_provider_context(
         validate_identities(&canonical, &request, model)?;
         octet_ai::validate_provider_request(model, &request)
             .map_err(|_| refused("invalid canonical provider context"))?;
+        if abort.is_set() {
+            return Err(AgentError::Cancelled);
+        }
+        if !recoverable && tokio::time::Instant::now() >= deadline {
+            return Err(refused("hook deadline exceeded"));
+        }
     }
     if abort.is_set() {
         return Err(AgentError::Cancelled);
-    }
-    if tokio::time::Instant::now() >= deadline {
-        return Err(refused("hook deadline exceeded"));
     }
     Ok(request)
 }

@@ -617,9 +617,11 @@ async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
     assert_eq!(ended, HostRunOutcome::Aborted);
     assert_eq!(shell.pending(), "refused steering");
     assert!(!shell.debug_snapshot().contains("Steering:"));
-    assert!(!delivered_user_text(&agent)
-        .iter()
-        .any(|text| text.contains("refused steering")),);
+    assert!(
+        !delivered_user_text(&agent)
+            .iter()
+            .any(|text| text.contains("refused steering")),
+    );
 }
 
 #[tokio::test]
@@ -1267,9 +1269,11 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
         .unwrap();
         assert_eq!(outcome, HostRunOutcome::Completed);
         drop(run);
-        assert!(!delivered_user_text(&agent)
-            .iter()
-            .any(|text| text.contains("/theme") || text.contains("/settings")));
+        assert!(
+            !delivered_user_text(&agent)
+                .iter()
+                .any(|text| text.contains("/theme") || text.contains("/settings"))
+        );
     }
 }
 
@@ -1324,10 +1328,12 @@ async fn ctrl_s_follow_up_keeps_attachment_recall_and_full_queue_keeps_draft() {
     .await;
     assert_eq!(outcome, HostRunOutcome::Aborted);
     assert_eq!(shell.queued_follow_up_len(), MAX_PENDING_IDLE_ACTIONS);
-    assert!(shell
-        .debug_error()
-        .unwrap()
-        .contains("follow-up queue is full"));
+    assert!(
+        shell
+            .debug_error()
+            .unwrap()
+            .contains("follow-up queue is full")
+    );
 }
 
 // -----------------------------------------------------------------------

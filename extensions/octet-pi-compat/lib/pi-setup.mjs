@@ -21,6 +21,14 @@ const MAX_RESOURCE_ENTRIES = 256;
 export const SOURCE_EXTENSIONS = new Set(['.ts', '.mts', '.cts', '.tsx', '.js', '.mjs', '.cjs', '.jsx']);
 const CONTEXT_FILES = ['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'];
 const RESOURCE_KINDS = ['extensions', 'skills', 'prompts', 'themes'];
+// Pi packages octet deliberately does not load: a product decision, not a load
+// failure. `match` is compared exactly with the npm package name (the `npm:`
+// source, or the `name` in a resolved package.json), never as a substring.
+// `line` is the one short line printed for a skipped package.
+export const UNSUPPORTED_PACKAGES = Object.freeze([
+  Object.freeze({ match: 'pi-subagents', line: 'pi-subagents: replaced by octet-subagents' }),
+  Object.freeze({ match: '@narumitw/pi-goal', line: 'pi-goal: octet uses its built-in /goal' }),
+]);
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const posix = value => value.split(sep).join('/');
 const override = value => /^[!+-]/.test(value);
@@ -347,6 +355,20 @@ function packageEntries(settings, base, scope, ctx) {
   });
 }
 
+// Match an unsupported package by its npm name (`npm:name[@version]`) or, for
+// local and git sources, by the name in its resolved package.json. Probing is
+// quiet: the ordinary package pass reports any real problem with the same files.
+function unsupportedPackage(entry, ctx) {
+  const npm = parseNpm(entry.source.trim());
+  let name = npm?.name;
+  if (!npm) {
+    const quiet = { ...ctx, diagnostics: [] };
+    if (!safeStat(entry.info.root, quiet, 'package source')?.isDirectory()) return undefined;
+    name = readJson(join(entry.info.root, 'package.json'), 'package.json', quiet, MAX_THEME_BYTES)?.name;
+  }
+  return typeof name === 'string' ? UNSUPPORTED_PACKAGES.find(item => item.match === name) : undefined;
+}
+
 function add(map, path, enabled, rank = 4, metadata) { if (!map.has(path)) map.set(path, { enabled, rank, sourceInfo: { path, ...metadata } }); }
 
 function packageResources(entries, maps, ctx) {
@@ -362,6 +384,13 @@ function packageResources(entries, maps, ctx) {
     } else if (entry.scope === 'project') deduped[index] = entry;
   }
   for (const entry of deduped) {
+    const unsupported = unsupportedPackage(entry, ctx);
+    if (unsupported) {
+      // Skipped before any install or manifest check: no resources, no
+      // diagnostics. The caller prints one line per package per discovery.
+      ctx.unsupported.set(unsupported.match, unsupported);
+      continue;
+    }
     const filter = plainObject(entry.pkg) ? entry.pkg : undefined;
     const delta = filter?.autoload === false;
     const base = entry.scope === 'project' && delta ? deduped.find(other => other.scope === 'user' && other.info.identity === entry.info.identity) ?? entry : entry;
@@ -476,11 +505,11 @@ export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
   const resolvedAgentDir = agentDirectory(agentDir, env);
   const projectRoot = resolve(cwd, '.pi');
-  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, agentDir: resolvedAgentDir, projectTrusted: projectTrusted === true };
+  const ctx = { diagnostics: [], unsupported: new Map(), scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, agentDir: resolvedAgentDir, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
   const projectSettings = ctx.projectTrusted ? settingsObject(join(projectRoot, 'settings.json'), 'project settings.json', ctx) : {};
   const settings = mergeSettings(globalSettings ?? {}, projectSettings ?? {});
-  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, resourceLimitsExceeded: [], diagnostics: ctx.diagnostics };
+  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, resourceLimitsExceeded: [], diagnostics: ctx.diagnostics, unsupportedPackages: [] };
   const text = value => typeof value === 'string' && value.trim() ? value.trim() : undefined;
   setup.defaultTheme = text(settings.theme);
   setup.defaultThinkingLevel = text(settings.defaultThinkingLevel);
@@ -491,6 +520,7 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     ...packageEntries(globalSettings ?? {}, resolvedAgentDir, 'user', ctx),
   ];
   packageResources(packages, maps, ctx);
+  setup.unsupportedPackages = [...ctx.unsupported.values()];
   // Pi's first declaration wins for the same path (including disabled paths).
   // Return Pi's precedence order: project explicit/auto, user explicit/auto,
   // then packages. Native discovery still owns name collisions and admission.

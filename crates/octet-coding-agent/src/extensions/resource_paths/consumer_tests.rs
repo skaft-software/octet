@@ -287,12 +287,132 @@ fn render(
     )
 }
 
+struct RecoverableContextFailure(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl octet_agent::ProviderContextHook for RecoverableContextFailure {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &octet_agent::ProviderContextProjectionContext,
+    ) -> Result<Option<octet_agent::ProviderContextProjection>, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err("recoverable extension callback".into())
+    }
+}
+
+#[tokio::test]
+async fn real_unpublished_resource_guard_still_blocks_after_extension_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let client = octet_ai::AiClient::new();
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(Capture(captures.clone())),
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut host = octet_agent::ExtensionHost::new();
+    host.provider_context_hook(RecoverableContextFailure(calls.clone()));
+    host.provider_context_hook(ResourceProviderGuard::default());
+    let mut agent = Agent::new(AgentConfig {
+        client,
+        model,
+        session: Session::create(temp.path().join("guard.jsonl")).unwrap(),
+        extensions: host,
+        system: "system".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning: octet_ai::ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    assert!(matches!(
+        agent.complete("hello").await,
+        Err(octet_agent::AgentError::ProviderContextPreparation(_))
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(captures.lock().unwrap().is_empty());
+}
+
+struct RecoverableContextStall(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl octet_agent::ProviderContextHook for RecoverableContextStall {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &octet_agent::ProviderContextProjectionContext,
+    ) -> Result<Option<octet_agent::ProviderContextProjection>, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn published_resource_guard_allows_provider_after_extension_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let client = octet_ai::AiClient::new();
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(Capture(captures.clone())),
+    );
+    let session = Session::create(temp.path().join("published-guard.jsonl")).unwrap();
+    let mut resources = ExecutableExtensions::default();
+    resources.resource_owner = Some(session.resource_owner_key());
+    let guard = ResourceProviderGuard::default();
+    guard.publish(resources.resource_lease().unwrap());
+    assert!(guard.current());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut host = octet_agent::ExtensionHost::new();
+    host.provider_context_hook(RecoverableContextStall(calls.clone()));
+    host.provider_context_hook(guard);
+    let mut agent = Agent::new(AgentConfig {
+        client,
+        model,
+        session,
+        extensions: host,
+        system: "system".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning: octet_ai::ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    assert_eq!(agent.complete("hello").await.unwrap().text, "answer");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(captures.lock().unwrap().len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manually_admitted_process_app_first_request_reload_and_empty_replace_resources() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let (mut app, process, captures) = fixture(&root).await;
-    assert!(complete(&mut app).await.is_err());
+    // The real ResourceProviderGuard has no published lease yet. This is a
+    // host-owned refusal, not a recoverable extension callback failure.
+    assert!(matches!(
+        *complete(&mut app).await.unwrap_err(),
+        octet_agent::AgentError::ProviderContextPreparation(_)
+    ));
     assert!(captures.lock().unwrap().is_empty());
     let original = app.original_resource_config();
     app.refresh_resource_paths_headless().await.unwrap();

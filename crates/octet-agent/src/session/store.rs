@@ -88,6 +88,7 @@ impl Session {
             next_tool_inference_attempt: 0,
             tool_inference_attempts: BTreeMap::new(),
             entry_labels: BTreeMap::new(),
+            context_failure_notices: BTreeSet::new(),
         })
     }
 
@@ -725,6 +726,7 @@ impl Session {
             next_tool_inference_attempt,
             tool_inference_attempts,
             entry_labels,
+            context_failure_notices: BTreeSet::new(),
         })
     }
 

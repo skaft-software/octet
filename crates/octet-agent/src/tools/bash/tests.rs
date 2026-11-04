@@ -23,7 +23,7 @@ fn fixture() -> Fixture {
     let mut sandbox = SandboxConfig::new(&workspace);
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
-    sandbox.bash_timeout = Duration::from_secs(10);
+    sandbox.bash_timeout = Some(Duration::from_secs(10));
     Fixture {
         _dir: dir,
         workspace,
@@ -246,7 +246,7 @@ async fn successful_command_without_descendants_releases_its_registry_entry() {
 async fn detached_setsid_descendant_remains_supervised_after_leader_exit() {
     let f = fixture();
     let mut sandbox = f.sandbox.clone();
-    sandbox.bash_timeout = Duration::from_secs(2);
+    sandbox.bash_timeout = Some(Duration::from_secs(2));
     let cancellation = crate::tool::CancellationToken::default();
     let ctx = ToolContext {
         active_skills: &[],
@@ -688,10 +688,41 @@ async fn output_is_bounded_with_head_tail_truncation() {
 }
 
 #[tokio::test]
+async fn command_completes_without_a_configured_timeout() {
+    let mut f = fixture();
+    f.sandbox.bash_timeout = None;
+    let output = BashTool
+        .execute(json!({"command": "printf no-deadline"}), &f.ctx())
+        .await
+        .unwrap();
+    assert!(output.text.starts_with("exit=0"), "{}", output.text);
+    assert!(output.text.contains("no-deadline"), "{}", output.text);
+}
+
+#[tokio::test]
+async fn per_call_timeouts_work_without_a_configured_ceiling() {
+    let mut f = fixture();
+    f.sandbox.bash_timeout = None;
+    for arguments in [
+        json!({"command": "sleep 30", "timeout": 0.1}),
+        json!({"command": "sleep 30", "timeout_ms": 100}),
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            BashTool.execute(arguments, &f.ctx()),
+        )
+        .await
+        .expect("an explicit per-call deadline must still bound the command")
+        .unwrap_err();
+        assert!(error.message.contains("error timeout"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn timeout_kills_the_child() {
     let f = fixture();
     let mut sandbox = f.sandbox.clone();
-    sandbox.bash_timeout = Duration::from_millis(200);
+    sandbox.bash_timeout = Some(Duration::from_millis(200));
     let ctx = ToolContext {
         active_skills: &[],
         registered_tools: &[],
@@ -725,7 +756,7 @@ async fn timeout_kills_the_child() {
 async fn per_call_timeout_overrides_sandbox() {
     let f = fixture();
     let mut sandbox = f.sandbox.clone();
-    sandbox.bash_timeout = Duration::from_secs(30);
+    sandbox.bash_timeout = Some(Duration::from_secs(30));
     let ctx = ToolContext {
         active_skills: &[],
         registered_tools: &[],
@@ -752,7 +783,7 @@ async fn per_call_timeout_overrides_sandbox() {
 async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
     let f = fixture();
     let mut sandbox = f.sandbox.clone();
-    sandbox.bash_timeout = Duration::from_millis(100);
+    sandbox.bash_timeout = Some(Duration::from_millis(100));
     let ctx = ToolContext {
         active_skills: &[],
         registered_tools: &[],
@@ -793,7 +824,8 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
 
 #[tokio::test]
 async fn cancellation_kills_the_child_process_tree() {
-    let f = fixture();
+    let mut f = fixture();
+    f.sandbox.bash_timeout = None;
     let marker = format!("986{}", std::process::id());
     let args = json!({
         "command": format!("sleep {marker} & wait")

@@ -59,10 +59,12 @@ fn macos_and_windows_read_through_one_declared_helper() {
     assert_eq!(helpers(Platform::MacOs, env(&[]))[0].program, "pbpaste");
     let windows = helpers(Platform::Windows, env(&[]));
     assert_eq!(windows[0].program, "powershell");
-    assert!(windows[0]
-        .args
-        .iter()
-        .any(|arg| arg.contains("Get-Clipboard")));
+    assert!(
+        windows[0]
+            .args
+            .iter()
+            .any(|arg| arg.contains("Get-Clipboard"))
+    );
     assert!(!windows[0].args.iter().any(|arg| arg.contains("clip\"")));
 }
 

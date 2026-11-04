@@ -100,9 +100,10 @@ async fn native_pi_argument_completions_appear_on_typing_and_select_without_exec
         shell.translate_input(Some(tab), false),
         InputAction::CompletePath
     ));
-    assert!(app
-        .executable_extensions
-        .accept_editor_autocomplete(&mut shell));
+    assert!(
+        app.executable_extensions
+            .accept_editor_autocomplete(&mut shell)
+    );
     assert_eq!(shell.pending(), "/cmd 文");
     app.executable_extensions.shutdown().await;
 }
@@ -289,9 +290,10 @@ async fn native_pi_registry_completion_cannot_survive_native_clear_or_mount_reti
         );
         assert_eq!(shell.extension_editor_snapshot(), saved);
         assert!(!shell.extension_autocomplete_displayed());
-        assert!(!app
-            .executable_extensions
-            .accept_editor_autocomplete(&mut shell));
+        assert!(
+            !app.executable_extensions
+                .accept_editor_autocomplete(&mut shell)
+        );
         assert!(!frame(&mut shell).await.contains("CHOICE-ALPHA"));
         app.executable_extensions.shutdown().await;
     }

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Incremental assistant rendering rebuilds the block when neighboring surface
+  geometry changes, rather than reusing rows with stale spacing.
+- Provider-credential responses are fenced against host-owner retirement during
+  asynchronous resolution and writer admission. This grants no new credential
+  capability and does not enable generic Pi inference.
+
 - The Pi adapter no longer shows `parent settled` or `active numeric
   parent_request_id required` notices. They mean an extension's late work lost
   its finished request, which the user cannot act on; the cause stays in the log.
@@ -64,14 +70,38 @@
 
 ### Changed
 
+- Bash has no default deadline. Explicit per-call timeouts and configured
+  ceilings still apply; cancellation retains process-tree cleanup.
+- Native TOML themes can opt into a Pi presentation profile and explicitly
+  override transcript styles, tool-state fills, horizontal padding and activity
+  shimmer. Existing adapter snapshots retain legacy presentation defaults.
 - Pi startup reuses source fingerprints and module resolutions and can import
   eligible reviewed ESM factories natively. Ordered registration and jiti
   fallback remain; the resolution cache repopulates after the format change.
 
 ### Known limitations
 
-- Pi extensions require a configured model. **Continue without a provider**
-  starts a read-only native session without the Pi adapter.
+- **Continue without a provider** can load normally enabled, admitted
+  extensions. Prompts and model-dependent operations stay unavailable until a
+  model is configured and octet restarts.
+- In codemode scripts, `tools.bash` resolves to octet's result (`stdout`,
+  `stderr`, `exit_code`, …) and rejects on a non-zero exit. Pi resolves to
+  `{output, truncated, exit_code, wall_time_seconds}`.
+- Pi packages that start their own child agent session, such as `/btw`, don't
+  work yet.
+- `pi-subagents`, `@narumitw/pi-goal` and Pi codemode are replaced by octet's
+  subagents, `/goal` and codemode and are not loaded; see
+  `docs/pi-compatibility.md#pi-packages-octet-replaces`.
+- Pi's startup `[Skills]` and `[Prompts]` listing isn't printed.
+- With a Pi custom editor active, Enter in `!` bash mode may not submit.
+
+### Added
+
+- Pi `settings.json` `"defaultTools": ["+codemode"]` turns on an installed,
+  host-admitted octet-codemode bundle for that session only, with
+  `codemode.mode` presentation defaults. Explicit CLI flags win; project
+  settings count only in a trusted workspace; nothing is installed, granted or
+  persisted.
 
 ## [0.10.0]
 

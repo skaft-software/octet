@@ -639,6 +639,75 @@ fn custom_model_label_removes_provider_repository_and_quantization_noise() {
 }
 
 #[test]
+fn custom_model_picker_shows_wire_id_endpoint_and_friendly_name_without_changing_selection() {
+    let source = ModelCatalog::builtin().unwrap();
+    let mut model = source.models().next().unwrap().clone();
+    let mut catalog = ModelCatalog::default();
+    let endpoint = source.resolve(&model.id).unwrap().endpoint.clone();
+    catalog.register_endpoint((*endpoint).clone()).unwrap();
+    model.id = ModelId("custom/GPT-5.6 Luna".into());
+    model.api_name = "gpt-5.6-luna".into();
+    model.display_name = Some("GPT-5.6 Luna".into());
+    let selected_id = model.id.clone();
+    let endpoint_id = model.endpoint.0.clone();
+    catalog.register_model(model).unwrap();
+
+    let presentation = model_picker_presentation(&catalog);
+    assert_eq!(presentation.ids, [selected_id]);
+    assert_eq!(
+        presentation.labels,
+        [format!("gpt-5.6-luna [{endpoint_id}]")]
+    );
+    assert!(presentation.descriptions[0]
+        .as_deref()
+        .unwrap()
+        .ends_with("  Model Name: GPT-5.6 Luna"));
+    assert_eq!(presentation.details[0].name, "GPT-5.6 Luna");
+}
+
+#[tokio::test]
+async fn custom_model_picker_filters_by_friendly_name_and_wire_id_at_narrow_widths() {
+    let source = ModelCatalog::builtin().unwrap();
+    let mut model = source.models().next().unwrap().clone();
+    let mut catalog = ModelCatalog::default();
+    let endpoint = source.resolve(&model.id).unwrap().endpoint.clone();
+    catalog.register_endpoint((*endpoint).clone()).unwrap();
+    model.id = ModelId("custom/GPT-5.6 Luna".into());
+    model.api_name = "gpt-5.6-luna".into();
+    model.display_name = Some("GPT-5.6 Luna".into());
+    let expected = model.id.clone();
+    let mut other = model.clone();
+    other.id = ModelId("custom/Other".into());
+    other.api_name = "aaa-other".into();
+    other.display_name = Some("Other".into());
+    catalog.register_model(other).unwrap();
+    catalog.register_model(model).unwrap();
+
+    for width in [40, 80] {
+        for query in ["GPT-5.6 Luna", "gpt-5.6-luna"] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            let keys = query.chars().map(|ch| {
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                )))
+            });
+            let mut input = futures_util::stream::iter(keys.chain(std::iter::once(Ok(
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ))));
+            assert_eq!(
+                pick_model_choice(&mut shell, &mut input, &catalog)
+                    .await
+                    .unwrap(),
+                Some(expected.clone()),
+                "query {query:?} at width {width}"
+            );
+        }
+    }
+}
+
+#[test]
 fn model_picker_groups_and_sorts_models_with_stable_metadata_columns() {
     let catalog = ModelCatalog::builtin().unwrap();
     let presentation = model_picker_presentation(&catalog);

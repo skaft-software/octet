@@ -201,8 +201,8 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
 }
 
 /// A filled cushion row is part of its own card. Host event spacing stays a
-/// separate, unpainted row on both sides of it; only unpainted cushions (a band
-/// with padding but no fill) merge with that spacing.
+/// separate, unpainted row on both sides of it; unpainted cushions can share
+/// their blank row with host spacing.
 #[test]
 fn filled_neighbor_cushions_never_merge_with_host_event_spacing() {
     let theme = test_theme_from_source(
@@ -465,6 +465,38 @@ fn every_filled_prompt_card_keeps_its_own_top_and_bottom_padding_rows() {
 }
 
 #[test]
+fn goal_set_notice_is_separated_from_a_filled_user_band() {
+    for (name, theme) in themes() {
+        let prompt = prompt_with("/goal set objective");
+        let notice = TranscriptBlock::Notice("goal set · Active goal: objective".into());
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&prompt, &notice], &theme, width);
+            // The prompt also contains "goal set", and the notice can wrap.
+            // Measure around the entire notice, not the prompt or its first row.
+            let first = visible_position(&rows, "goal set ·").expect("goal notice");
+            let last = rows
+                .iter()
+                .rposition(|row| strip_terminal_sequences(row).contains("objective"))
+                .expect("notice body ending");
+            let before = rows[..first]
+                .iter()
+                .rev()
+                .take_while(|row| neutral_blank_row(row))
+                .count();
+            let after = rows[last + 1..]
+                .iter()
+                .take_while(|row| neutral_blank_row(row))
+                .count();
+            assert_eq!(
+                (before, after),
+                (1, 1),
+                "{name}/{width}: the notice needs its own breathing rows around the complete body: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
     for (name, theme) in painted_card_themes() {
         let prompt = prompt_with("Ready for work");
@@ -478,8 +510,50 @@ fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
             );
             let at = visible_position(&rows, "Working").expect("working row");
             assert!(
+                neutral_blank_row(&rows[at - 1]),
+                "{name}/{width}: a host-owned breathing row must precede the event: {rows:?}"
+            );
+            assert!(
                 at >= 2 && painted_row(&rows[at - 2]),
-                "{name}/{width}: the card's bottom padding row must sit above the gap: {rows:?}"
+                "{name}/{width}: the filled card cushion must remain above its gap: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn notice_after_completed_bash_output_keeps_a_breathing_row() {
+    let args = serde_json::json!({"command": "python3 - <<'PY'\nprint('x')\nPY"});
+    let output = (0..40)
+        .map(|index| format!("output line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tool = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        octet_ai::ToolCallId("notice-after-bash".into()),
+        "bash".into(),
+        args.to_string(),
+        summarize_tool("bash", &args),
+        output,
+        true,
+        false,
+        None,
+        None,
+    )));
+    let notice = TranscriptBlock::Notice("interactive terminal mode saved as fullscreen".into());
+    let mut all = themes();
+    all.push((
+        "pi-profile".into(),
+        test_theme_from_source(include_str!(
+            "../../../../../../examples/themes/pi-profile.toml"
+        )),
+    ));
+    for (name, theme) in all {
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&tool, &notice], &theme, width);
+            let (before, _) = neutral_runs(&rows, "interactive terminal mode");
+            assert_eq!(
+                before, 1,
+                "{name}/{width}: a notice after tool output needs one breathing row: {rows:?}"
             );
         }
     }

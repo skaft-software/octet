@@ -1717,6 +1717,20 @@ impl ProcessConnection {
             .await
     }
 
+    /// Answers a process request only if the host-issued resource owner is
+    /// still live at writer admission. The owner lock is held through enqueue,
+    /// making retirement and disclosure linearly ordered.
+    pub(super) async fn send_child_response_for_owner<T: Serialize + ?Sized>(
+        &self,
+        id: ExtensionRequestId,
+        result: &T,
+        owner: &ExtensionResourceOwner,
+    ) -> Result<(), ExtensionRuntimeError> {
+        self.send_child_envelope_admitted_for_owner(id, ChildEnvelope::Success(result), Some(owner))
+            .await
+            .map(|_| ())
+    }
+
     /// Answers one process-originated request with a typed contract failure.
     pub(super) async fn send_child_error_response(
         &self,
@@ -1733,6 +1747,16 @@ impl ProcessConnection {
         &self,
         id: ExtensionRequestId,
         envelope: ChildEnvelope<'_, T>,
+    ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
+        self.send_child_envelope_admitted_for_owner(id, envelope, None)
+            .await
+    }
+
+    async fn send_child_envelope_admitted_for_owner<T: Serialize + ?Sized>(
+        &self,
+        id: ExtensionRequestId,
+        envelope: ChildEnvelope<'_, T>,
+        owner_fence: Option<&ExtensionResourceOwner>,
     ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
         let response = match envelope {
             ChildEnvelope::Success(result) => serde_json::to_value(ChildSuccessResponse {
@@ -1837,7 +1861,24 @@ impl ProcessConnection {
                         completion: Some(completed),
                         bus_delivery: None,
                     };
-                    if let Some((shortcut_id, owner)) = shortcut_registration {
+                    if let Some(owner) = owner_fence {
+                        // This mutex is also taken by retire_resource_owner.
+                        // Keep it until the writer permit is committed so a
+                        // retirement cannot slip between validation and send.
+                        let issued = lock_std_mutex(&self.issued_resource_owners);
+                        if self.closed.load(Ordering::Acquire)
+                            || self.draining.load(Ordering::Acquire)
+                            || owner.process_generation != self.generation
+                            || !issued.contains(owner)
+                        {
+                            return Err(resource_error(
+                                "resource owner retired before response publication",
+                            ));
+                        }
+                        claim.mark_admitted();
+                        permit.send(frame);
+                        drop(issued);
+                    } else if let Some((shortcut_id, owner)) = shortcut_registration {
                         let pending = lock_std_mutex(&self.pending);
                         let issued = lock_std_mutex(&self.issued_resource_owners);
                         let mut children = lock_std_mutex(&self.child_requests);

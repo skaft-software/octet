@@ -6,7 +6,7 @@ use super::support::{fast_response, scripted_model, text_turn};
 use super::*;
 use base64::Engine as _;
 use crossterm::event::KeyEvent;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -401,10 +401,12 @@ export default pi => {
         assert_ne!(result["is_error"], true);
     }
     assert_eq!(acceptance.trace.len(), 2);
-    assert!(acceptance
-        .trace
-        .iter()
-        .all(|e| e["input"]["path"] == "changed.txt"));
+    assert!(
+        acceptance
+            .trace
+            .iter()
+            .all(|e| e["input"]["path"] == "changed.txt")
+    );
     assert!(decision(&acceptance).allowed);
 }
 
@@ -429,9 +431,11 @@ async fn native_pi_tool_hooks_mutation_is_authorized_not_original_arguments() {
         Some(octet_agent::ToolPolicyDenialCode::EffectHostReadDenied)
     );
     assert_eq!(results(&denied)[0]["is_error"], true);
-    assert!(!denied.requests[1]
-        .to_string()
-        .contains("OUTSIDE_MUST_NOT_BE_READ"));
+    assert!(
+        !denied.requests[1]
+            .to_string()
+            .contains("OUTSIDE_MUST_NOT_BE_READ")
+    );
     assert!(!denied.durable.contains("OUTSIDE_MUST_NOT_BE_READ"));
     let allowed = exercise(
         "export default pi => pi.on('tool_call', e => { e.input.path = 'changed.txt'; });",
@@ -442,9 +446,11 @@ async fn native_pi_tool_hooks_mutation_is_authorized_not_original_arguments() {
     // Original out-of-workspace args are not a parallel candidate: this proves
     // the sequential dispatch also mutates before its real confinement gate.
     assert!(decision(&allowed).allowed);
-    assert!(results(&allowed)[0]
-        .to_string()
-        .contains("CHANGED_PRIVATE_CONTENT"));
+    assert!(
+        results(&allowed)[0]
+            .to_string()
+            .contains("CHANGED_PRIVATE_CONTENT")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -511,9 +517,11 @@ export default pi => {
     .await;
     assert!(!decision(&acceptance).allowed);
     assert_eq!(results(&acceptance)[0]["is_error"], true);
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("PI_BLOCK_REASON"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("PI_BLOCK_REASON")
+    );
     assert!(acceptance.trace.is_empty());
     assert!(!acceptance.durable.contains("ORIGINAL_PRIVATE_CONTENT"));
 }
@@ -538,13 +546,17 @@ export default pi => {
     .await;
     assert_eq!(acceptance.trace.len(), 1);
     assert_eq!(acceptance.trace[0]["sawRealRead"], true);
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("REDACTED_ONE_TWO"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("REDACTED_ONE_TWO")
+    );
     assert!(acceptance.durable.contains("REDACTED_ONE_TWO"));
-    assert!(!acceptance.requests[1]
-        .to_string()
-        .contains("ORIGINAL_PRIVATE_CONTENT"));
+    assert!(
+        !acceptance.requests[1]
+            .to_string()
+            .contains("ORIGINAL_PRIVATE_CONTENT")
+    );
     assert!(!acceptance.durable.contains("ORIGINAL_PRIVATE_CONTENT"));
     assert!(acceptance.durable.contains("redacted"));
 }
@@ -569,9 +581,11 @@ export default pi => pi.on('tool_result', e => {
     assert!(!decision(&acceptance).allowed);
     assert_eq!(decision(&acceptance).authorization, None);
     assert_eq!(results(&acceptance)[0]["is_error"], true);
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("SAFE_DENIAL_REPLACEMENT"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("SAFE_DENIAL_REPLACEMENT")
+    );
     assert!(!acceptance.durable.contains("OUTSIDE_MUST_NOT_BE_READ"));
     for entry in acceptance.app.agent.session().entries() {
         if let EntryValue::Message(octet_ai::Message::User(message)) = &entry.value {
@@ -602,9 +616,11 @@ export default pi => {
   pi.on('tool_call', e => { e.input.n = 'mutated'; });
 };"#, vec![("echo", json!({"n":1}))], false, Execution::Trusted).await;
     assert!(decision(&acceptance).allowed);
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("string:mutated"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("string:mutated")
+    );
     assert_ne!(results(&acceptance)[0]["is_error"], true);
 }
 
@@ -649,12 +665,14 @@ async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblin
         let error = result.as_ref().unwrap_err();
         assert!(error.output().unwrap().terminates_run());
         assert!(error.output().unwrap().is_error());
-        assert!(error
-            .output()
-            .unwrap()
-            .metadata()
-            .and_then(|metadata| metadata.get("pi_details"))
-            .is_none());
+        assert!(
+            error
+                .output()
+                .unwrap()
+                .metadata()
+                .and_then(|metadata| metadata.get("pi_details"))
+                .is_none()
+        );
     }
     assert!(
         acceptance.trace.is_empty(),
@@ -669,9 +687,11 @@ async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblin
 async fn native_pi_tool_hooks_one_termination_hint_does_not_discard_sibling() {
     let acceptance = exercise("export default pi => pi.on('tool_call', e => e.toolCallId === 'call-0' ? {block:true, terminate:true, reason:'ONE_TERMINATION'} : undefined);", vec![("read",json!({"path":"original.txt"})), ("read",json!({"path":"changed.txt"}))], false).await;
     assert_eq!(results(&acceptance).len(), 2);
-    assert!(results(&acceptance)[1]
-        .to_string()
-        .contains("CHANGED_PRIVATE_CONTENT"));
+    assert!(
+        results(&acceptance)[1]
+            .to_string()
+            .contains("CHANGED_PRIVATE_CONTENT")
+    );
     assert!(acceptance.durable.contains("ONE_TERMINATION"));
 }
 
@@ -688,13 +708,15 @@ export default pi => {
     let usage = finished(&acceptance)[0].as_ref().unwrap().usage().unwrap();
     assert_eq!(usage.input_tokens, 9);
     assert_eq!(usage.total_tokens, 15);
-    assert!(acceptance
-        .app
-        .agent
-        .session()
-        .usage_records()
-        .iter()
-        .any(|record| record.usage == *usage));
+    assert!(
+        acceptance
+            .app
+            .agent
+            .session()
+            .usage_records()
+            .iter()
+            .any(|record| record.usage == *usage)
+    );
     assert!(acceptance.durable.contains("pi_usage"));
     assert!(!acceptance.requests[1].to_string().contains("pi_usage"));
     assert!(!acceptance.requests[1].to_string().contains("totalTokens"));
@@ -741,9 +763,11 @@ export default pi => {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_tool_hooks_invalid_image_does_not_replace_real_result() {
     let acceptance = exercise("export default pi => pi.on('tool_result', () => ({content:[{type:'image',mimeType:'image/png',data:Buffer.from('not an image').toString('base64')}]}));", vec![("read",json!({"path":"original.txt"}))], false).await;
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("ORIGINAL_PRIVATE_CONTENT"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("ORIGINAL_PRIVATE_CONTENT")
+    );
     assert_eq!(finished(&acceptance)[0].as_ref().unwrap().media().len(), 0);
 }
 
@@ -777,9 +801,11 @@ async fn native_pi_tool_hooks_recovery_uses_mutated_arguments_and_replaced_resul
         acceptance.trace,
         vec![json!({"input":{"path":"changed.txt"}, "sawChanged":true})]
     );
-    assert!(results(&acceptance)[0]
-        .to_string()
-        .contains("FINAL_REDACTION"));
+    assert!(
+        results(&acceptance)[0]
+            .to_string()
+            .contains("FINAL_REDACTION")
+    );
     assert!(acceptance.durable.contains("FINAL_REDACTION"));
     assert!(!acceptance.durable.contains("CHANGED_PRIVATE_CONTENT"));
 }
@@ -798,14 +824,18 @@ async fn native_pi_tool_hooks_background_uses_mutated_arguments_and_replaced_res
         vec![json!({"input":{"path":"changed.txt"}, "sawChanged":true})]
     );
     assert!(decision(&acceptance).allowed);
-    assert!(acceptance.requests.last().unwrap()["input"]
-        .to_string()
-        .contains("FINAL_REDACTION"));
-    assert!(!acceptance
-        .requests
-        .last()
-        .unwrap()
-        .to_string()
-        .contains("CHANGED_PRIVATE_CONTENT"));
+    assert!(
+        acceptance.requests.last().unwrap()["input"]
+            .to_string()
+            .contains("FINAL_REDACTION")
+    );
+    assert!(
+        !acceptance
+            .requests
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("CHANGED_PRIVATE_CONTENT")
+    );
     assert!(!acceptance.durable.contains("CHANGED_PRIVATE_CONTENT"));
 }

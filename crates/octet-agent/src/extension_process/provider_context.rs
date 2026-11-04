@@ -2,8 +2,8 @@
 use super::session_leaf::SessionLeafProcessLease;
 use super::*;
 use crate::extension::{
-    ProviderContextHook, ProviderContextProjection, ProviderContextProjectionContext,
-    ProviderContextSessionWait,
+    ProviderContextHook, ProviderContextHookError, ProviderContextProjection,
+    ProviderContextProjectionContext, ProviderContextSessionWait,
 };
 use crate::session::Session;
 use crate::session_leaf::{SessionLeafBinding, SessionLeafConsumer};
@@ -64,8 +64,12 @@ impl ProviderContextSessionWait for ProcessContextWait {
     ) -> Option<
         std::pin::Pin<
             Box<
-                dyn std::future::Future<Output = Result<Option<ProviderContextProjection>, String>>
-                    + Send
+                dyn std::future::Future<
+                        Output = Result<
+                            Option<ProviderContextProjection>,
+                            ProviderContextHookError,
+                        >,
+                    > + Send
                     + 'static,
             >,
         >,
@@ -85,17 +89,29 @@ impl ProviderContextSessionWait for ProcessContextWait {
         execution.host.session_id = Some(context.session_id.clone());
         let future = lease.run_hook(ExtensionHook::ProviderContext, payload, execution);
         Some(Box::pin(async move {
-            let output = future
-                .await
-                .map_err(|_| "process context hook failed".to_owned())?;
+            let output = future.await.map_err(|error| match error {
+                ExtensionRuntimeError::Remote { code: -32800, .. }
+                | ExtensionRuntimeError::Cancelled { .. } => ProviderContextHookError::Cancelled,
+                // Validation and host-owner refusals are not handler failures.
+                ExtensionRuntimeError::Remote {
+                    code: -32601 | -32602 | -32002,
+                    ..
+                } => ProviderContextHookError::Refused,
+                ExtensionRuntimeError::Remote { .. }
+                | ExtensionRuntimeError::Timeout { .. }
+                | ExtensionRuntimeError::Closed(_) => {
+                    ProviderContextHookError::Failed("process context hook failed".into())
+                }
+                _ => ProviderContextHookError::Refused,
+            })?;
             if output.disposition != ExtensionHookDisposition::Continue {
-                return Err("process context hook refused preparation".into());
+                return Err(ProviderContextHookError::Refused);
             }
             output
                 .provider_context
                 .map(serde_json::from_value)
                 .transpose()
-                .map_err(|_| "invalid canonical process context projection".into())
+                .map_err(|_| ProviderContextHookError::Refused)
         }))
     }
 
@@ -132,6 +148,14 @@ impl ProviderContextSessionWait for ProcessContextWait {
 
 #[async_trait::async_trait]
 impl ProviderContextHook for ExtensionProcess {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+
+    fn failure_notice_id(&self) -> Option<&str> {
+        Some(&self.inner.instance_id)
+    }
+
     fn begin_session_wait(
         &self,
         session: &Session,

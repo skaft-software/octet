@@ -259,3 +259,74 @@ async fn an_unreviewed_manifest_never_reaches_the_credential_path() {
     };
     assert!(refused.to_string().contains("unknown feature"), "{refused}");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_resolution_does_not_reply_after_foreground_owner_retirement() {
+    let temp = tempfile::tempdir().unwrap();
+    let (catalog, current) = credential_catalog();
+    credential_fixture(temp.path(), "test", "test-model");
+    let process = ExtensionProcess::start(
+        DiscoveredExtension {
+            manifest: credential_manifest(true),
+            manifest_path: temp.path().join(EXTENSION_MANIFEST_FILENAME),
+            source: ExtensionSource::Explicit,
+            activation: octet_agent::extension_process::ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        },
+        ExtensionRuntimeConfig::new(temp.path()),
+    )
+    .await
+    .unwrap();
+    let mut extensions = ExecutableExtensions::default();
+    extensions.resource_owner = Some("foreground-owner".into());
+    extensions.receivers.push(process.subscribe());
+    extensions.processes.push(process.clone());
+    extensions.refresh_pi_model_catalog(&catalog, None, &current);
+
+    // Real command admission issues the foreground token on this process.
+    let mut confirmations = RecordingConfirmationHandler::default();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        extensions.execute_command_with_confirmation("credentials", Vec::new(), &mut confirmations),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output.as_deref(), Some("credentials resolved"));
+    let owner = process
+        .current_context_for_resource_owner("foreground-owner")
+        .resource_owner
+        .unwrap();
+    assert!(process.resource_owner_is_live(&owner));
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    let resolution_process = process.clone();
+    let resolution_owner = owner.clone();
+    let pending = tokio::spawn(async move {
+        let resolution = async move {
+            started_tx.send(()).unwrap();
+            resume_rx.await.unwrap()
+        };
+        super::super::event_drain::provider_credential_result_for_live_owner(
+            &resolution_process,
+            &resolution_owner,
+            resolution_owner.process_generation,
+            resolution,
+        )
+        .await
+    });
+    started_rx.await.unwrap();
+
+    extensions.resource_owner = Some("replacement-owner".into());
+    process.retire_resource_owner("foreground-owner");
+    assert!(!process.resource_owner_is_live(&owner));
+    resume_tx
+        .send(serde_json::json!({"ok": true, "apiKey": FIXTURE_SECRET, "headers": {}}))
+        .unwrap();
+    assert!(pending.await.unwrap().is_none());
+    assert!(process.shutdown().await);
+}

@@ -46,10 +46,13 @@ export function facade(object, label, symbols) {
 // An octet-built *data* object (an observed message, a native receipt, stream
 // options). Here an absent member is a fact the host could not supply, and
 // reading it must fail explicitly instead of looking like a real Pi value.
-export function strict(object, label) {
+// When facts is supplied, only members of the Pi shape are such facts; other
+// absent properties are ordinary JavaScript probes and read as undefined.
+export function strict(object, label, facts) {
   return new Proxy(object, { get(target, key, receiver) {
     if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
     if (typeof key === 'symbol' || key === 'then' || key === 'toJSON') return undefined;
+    if (facts && !facts.has(key)) return undefined;
     return unsupported(`${label}.${key}`);
   } });
 }

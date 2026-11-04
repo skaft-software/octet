@@ -119,15 +119,23 @@ async fn run() -> anyhow::Result<()> {
     octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
     let bench = args.len() <= 1 && std::env::var_os(STARTUP_BENCH_ENV).is_some();
-    let (mut cli, extension_flag_values, parsed_cwd) = match cli::parse_static_invocation(&args) {
-        cli::StaticInvocation::Parsed(cli) => (*cli, Default::default(), None),
-        cli::StaticInvocation::Runtime(command) => {
-            let cwd = std::env::current_dir()?;
-            let (cli, extension_flag_values) =
-                cli::parse_with_extension_flags(args, &cwd, command.map(|command| *command))?;
-            (cli, extension_flag_values, Some(cwd))
-        }
-    };
+    let (mut cli, extension_flag_values, explicit_extension_flags, parsed_cwd) =
+        match cli::parse_static_invocation(&args) {
+            cli::StaticInvocation::Parsed(cli) => {
+                (*cli, Default::default(), Default::default(), None)
+            }
+            cli::StaticInvocation::Runtime(command) => {
+                let cwd = std::env::current_dir()?;
+                let (cli, extension_flag_values, explicit_extension_flags) =
+                    cli::parse_with_extension_flags(args, &cwd, command.map(|command| *command))?;
+                (
+                    cli,
+                    extension_flag_values,
+                    explicit_extension_flags,
+                    Some(cwd),
+                )
+            }
+        };
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
     parity.validate()?;
@@ -187,6 +195,7 @@ async fn run() -> anyhow::Result<()> {
     let mut config = cli::build_config(cli, &cwd)?;
     app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
+    cli::apply_pi_codemode_settings(&mut config, &explicit_extension_flags);
     if let Some(search) = parity.list_models.as_deref() {
         return cli::parity::list_models(&config, search);
     }

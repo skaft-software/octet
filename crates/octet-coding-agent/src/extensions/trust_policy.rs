@@ -211,13 +211,20 @@ pub(crate) fn selected_extension_flag_declarations(
     config: &Config,
 ) -> Vec<(String, ExtensionFlag)> {
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
+    selected_extension_flag_declarations_with_resolver(config, &resolver)
+}
+
+pub(crate) fn selected_extension_flag_declarations_with_resolver(
+    config: &Config,
+    resolver: &ResourceResolver,
+) -> Vec<(String, ExtensionFlag)> {
     let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
     let mut diagnostics = Vec::new();
     let (policy, _) = extension_policy(config, &mut diagnostics);
     let mut by_name = BTreeMap::<String, DiscoveredExtension>::new();
     for resource in snapshot.resources() {
         let Some(descriptor) =
-            load_extension_descriptor(&resolver, resource, &policy, &mut diagnostics)
+            load_extension_descriptor(resolver, resource, &policy, &mut diagnostics)
         else {
             continue;
         };

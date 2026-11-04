@@ -277,39 +277,56 @@ export class Runtime {
     const independentCheckpoint = retained && surface?.store === store && surface.placement === 'editor'
       && surface.opened && surface.editor && !surface.editor.retired
       && checkpoint?.surface_id === surface.id && checkpoint.mount_id === surface.mountId;
-    // Only an actual fenced editor checkpoint outlives a still-live origin's
-    // normal settlement (including accepted writes draining a voluntary close).
-    // Other calls keep their live parent. Wire origin/owner and abort signal stay.
+    // Only an actual fenced editor checkpoint or ui/open/ui/close of a
+    // detached command outlives normal parent settlement. Detached fullscreen
+    // commands return after opening their first surface, but may open a
+    // replacement surface (for example after a loading screen) before the
+    // response is written. Keep the origin and abort signal so explicit
+    // cancellation still retires that UI; omit only the settlement parent.
+    const detachedUi = store.detached && (method === 'ui/open' || method === 'ui/close');
     return this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
-    }, { parent: live && !independentCheckpoint ? store.id : undefined,
+    }, { parent: live && !detachedUi && !independentCheckpoint ? store.id : undefined,
       signal: requestOptions.signal ?? store.controller.signal,
       ...(requestOptions.onUpdate === undefined ? {} : { onUpdate: requestOptions.onUpdate }),
       timeout: method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
   }
   appendEntry(type, data, store = this.scope.getStore()) {
     this.require('session_entries');
+    // A timed-out context handler may resume while a later handler still owns
+    // the hook's leaf. It must not consume that later handler's authority.
+    if (store?.providerContext && store.detached) throw rpcError(-32002, 'detached context handler cannot append');
     const clean = entryPayload(type, data);
+    // Synchronous host refusals are not ordinary callback exceptions. Retain a
+    // redacted fail-closed outcome even if the extension catches the exception.
+    const appendFailure = error => {
+      if (!store.providerContext) return error;
+      const failure = error?.code === -32800 ? error : rpcError(-32002, 'session append failed');
+      store.errors.push(failure);
+      return failure;
+    };
     if (this.stopping) throw rpcError(-32002, 'host is draining');
     this.assertSessionOwner(store); store.controller.signal.throwIfAborted();
     if (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live || this.active.get(store.id)?.controller !== store.controller) throw rpcError(-32002, 'active numeric parent_request_id required for synchronous append');
     const grant = store.leaf?.grant;
     const routed = Boolean(this.sessionTransport && (grant || this.features.has('session_append_receipts_v1')));
+    if (store.leaf && !grant) throw appendFailure(rpcError(-32002, 'session_leaf authority exhausted or revoked'));
     if (!grant && !routed && !['command/execute', 'shortcut/execute', 'tool/call'].includes(store.method)) unsupported('synchronous hook append', 'actual host session_leaf grant required');
-    if (store.leaf && !grant) throw rpcError(-32002, 'session_leaf authority exhausted or revoked');
     // Consume locally before submission, including ambiguous transport failure.
     // Only an authenticated known successor may authorize another append.
     if (store.leaf) store.leaf.grant = null;
-    const result = this.transport.requestSync('session/append_entry', {
+    let result;
+    try { result = this.transport.requestSync('session/append_entry', {
       parent_request_id: store.id, resource_owner: store.state.owner, entry_type: type, data: clean,
       ...(grant ? { session_leaf: { grant_id: grant.grant_id, activation_epoch: grant.activation_epoch, operation_id: grant.operation_id } } : {}),
-    }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) });
+    }, { parent: store.id, signal: store.controller.signal, onCancel: () => store.controller.abort(cancelled()) }); }
+    catch (error) { throw appendFailure(error); }
     let committed;
     try { committed = appendReply(result, grant, store.state.owner, routed);
       if (routed) this.sessionTransport.append(store, result, grant, committed.successor); }
     catch (error) {
       const ambiguous = rpcError(-32002, `session append outcome unknown: invalid commit reply (${error.message})`);
-      this.transport.fail(ambiguous); throw ambiguous;
+      this.transport.fail(ambiguous); throw appendFailure(ambiguous);
     }
     if (store.leaf) store.leaf.grant = committed.successor;
     if (routed) return undefined;
@@ -341,7 +358,7 @@ export class Runtime {
     if (store.errors.length) throw store.errors[0];
   }
   backgroundError(error) { this.issues.backgroundError(error); }
-  reportCallbackError(event, factory, error) { this.issues.callback(event, factory, error); }
+  reportCallbackError(event, factory, error, state) { this.issues.callback(event, factory, error, state); }
   reportObservationError(event) { this.issues.observation(event); }
   async load() {
     if (this.loaded) return;
@@ -354,6 +371,7 @@ export class Runtime {
       if (!this.config.registrations || !this.config.entrypoint_sources) invalid('mirror static registrations require review; configure again');
       const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
+      for (const skipped of setup.unsupportedPackages) this.diagnostic(skipped.line);
       this.commandSourceInfos = setup.sourceInfos;
       extensions = setup.extensions.map(entry => realpathSync(entry));
       // Factories the owner explicitly excluded at review stay unloaded; an
@@ -761,7 +779,7 @@ export class Runtime {
     cancelProviderStream(this, undefined, state);
     this.transcript.retire(state);
     this.sessionTransport?.retire(state);
-    state.alive = false; this.terminalInput.retire(state); retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
+    state.alive = false; state.contextFailureNotices?.clear(); this.terminalInput.retire(state); retireMcpSession(state); retireAutocomplete(state); retireCompactions(this, state); retireChildSessions(this, state); this.timers.owner(state); this.bus.ownerEnded(state); state.branchListeners.clear();
     // Session-scoped hooks are cancelled on their own owner retirement, never
     // another hook's private binding. Replacement commands retain their parent.
     for (const store of this.active.values()) if (store.state === state && (store.resourceDiscovery || store.providerContext || store.method === 'hook/run' && !['session_start', 'session_end'].includes(store.hook))) store.controller.abort(cancelled());

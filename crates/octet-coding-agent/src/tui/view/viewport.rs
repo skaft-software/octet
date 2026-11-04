@@ -609,12 +609,17 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
                 state.new_output_count
             )
         };
+        let arrow = if state.theme.unicode() { "↑" } else { "^" };
+        let padding = " ".repeat(usize::from(
+            state.theme.layout().block_padding_x.unwrap_or(0),
+        ));
+        let hint = format!(
+            "{arrow} {scroll} rows back{new_output} · Jump to latest · PageDown returns to live"
+        );
         lines.push(fit_line(
-            &state.theme.fg(
-                "muted",
-                &format!(
-                    "↑ {scroll} rows back{new_output} · Jump to latest · PageDown returns to live"
-                ),
+            &format!(
+                "{padding}{}",
+                state.theme.apply_semantic_role("scroll_hint", &hint)
             ),
             width,
         ));

@@ -15,7 +15,7 @@
 
 use crate::cli::QueueKind;
 use crate::commands::SettingsCommand;
-use crate::config::{queue_delivery_mode_label, ThinkingLevel, TuiMode};
+use crate::config::{ThinkingLevel, TuiMode, queue_delivery_mode_label};
 use crate::tui::view::{OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, Panel, PanelAction};
 use octet_agent::QueueDeliveryMode;
 use octet_ai::ModelId;
@@ -440,7 +440,7 @@ mod tests {
             (1, SettingsCommand::DefaultModel(Some("custom/beta".into()))),
         );
         assert_eq!(shell.pending(), "unsent draft");
-        assert_eq!(choices[1].1 .0, "custom/beta");
+        assert_eq!(choices[1].1.0, "custom/beta");
     }
 
     #[test]

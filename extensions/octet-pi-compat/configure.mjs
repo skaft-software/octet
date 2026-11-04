@@ -392,6 +392,7 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   if (cached && !reused && !transientRefusal) cached.write({ routed, registrations: result.capturedRegistrations });
   if (reused) log('  Reused the captured catalog: the Pi setup and its factories are unchanged');
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
+  for (const skipped of setup.unsupportedPackages) log(`  ${skipped.line}`);
   for (const item of mirrorExcluded) log(`  excluded      ${label(item.entry)}: ${item.reason.slice(0, 160)}`);
   log(`  Mirrored Pi setup at ${agentDir}: ${setup.extensions.length} extensions, ${setup.skillsPaths.length} skill paths, ${setup.promptsPaths.length} prompt paths, ${setup.themesPaths.length} theme paths`);
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);

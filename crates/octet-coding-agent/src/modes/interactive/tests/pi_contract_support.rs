@@ -115,11 +115,13 @@ fn write_direct_pi_fixture(
     );
     let frame: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
     let metadata = &frame["result"];
-    assert!(!metadata["hooks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|hook| hook == "resources_discover"));
+    assert!(
+        !metadata["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hook| hook == "resources_discover")
+    );
     assert!(metadata["shortcuts"].as_array().unwrap().is_empty());
     assert!(metadata["flags"].as_array().unwrap().is_empty());
     let names = |field: &str| -> Vec<&str> {

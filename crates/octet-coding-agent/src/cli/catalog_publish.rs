@@ -241,14 +241,14 @@ fn install_immutable(destination: &Path, bytes: &[u8]) -> anyhow::Result<()> {
             return refuse(
                 PublishGate::ImmutablePath,
                 format!("destination already exists: {}", destination.display()),
-            )
+            );
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return refuse(
                 PublishGate::ImmutablePath,
                 format!("cannot inspect {}: {error}", destination.display()),
-            )
+            );
         }
     }
     let parent = destination

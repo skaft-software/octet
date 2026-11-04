@@ -112,6 +112,22 @@ fn scripted(
     tokio_stream::wrappers::ReceiverStream::new(receiver)
 }
 
+/// Keep the terminal writer alive so EOF cannot race an outstanding editor
+/// checkpoint while a burst is being replayed through the native input loop.
+fn held_raw_input(
+    shell: &InteractiveShell,
+    bytes: &[u8],
+) -> (EventStream, std::os::unix::net::UnixStream) {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+    let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    reader.set_nonblocking(true).unwrap();
+    writer.write_all(bytes).unwrap();
+    let input = EventStream::from_terminal_file(std::fs::File::from(OwnedFd::from(reader)))
+        .with_interceptors(shell.terminal_input_interceptors());
+    (input, writer)
+}
+
 /// Wait for each real checkpoint, not an arbitrary typing delay.
 async fn type_into_slot(app: &mut App, shell: &mut InteractiveShell, text: &str) {
     for character in text.chars() {
@@ -274,6 +290,177 @@ async fn native_pi_custom_editor_admits_commands_and_text_through_the_slot() {
         "the shared command kept its owner"
     );
     app.executable_extensions.shutdown().await;
+}
+
+/// Exercise a mounted native-backed editor with a raw terminal text/Enter
+/// burst, the idle input loop, real command dispatcher and durable context
+/// policy. The shell assembles the output marker so it cannot be mistaken for
+/// text merely copied from the command itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_enter_executes_bash_escapes() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    for (text, marker, excluded) in [
+        ("!printf %s%s slot- included", "slot-included", false),
+        ("!!printf %s%s slot- excluded", "slot-excluded", true),
+    ] {
+        let bytes = format!("{text}\r");
+        let (mut input, _writer) = held_raw_input(&shell, bytes.as_bytes());
+        let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await;
+        let Idle::Submit(composed) = idle else {
+            panic!("Enter failed to admit the custom editor's shell escape");
+        };
+        assert_eq!(composed.display_text, text);
+        let escape = commands::BashEscape::parse(&composed.display_text).unwrap();
+        assert_eq!(escape.excluded, excluded);
+        assert!(shell.pending().is_empty());
+        let (_, mut reload, _) = super::support::test_reload();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            run_idle_command(
+                app,
+                &mut shell,
+                &mut input,
+                Command::Bash(escape),
+                &mut None,
+                None,
+                &mut reload,
+            ),
+        )
+        .await
+        .expect("admitted shell escape did not finish")
+        .unwrap();
+        let IdleCommandOutcome::Continue(next) = result else {
+            panic!("shell escape unexpectedly exited the interactive loop");
+        };
+        app = *next;
+        // Reopen the journal rather than inspecting only the live session cache.
+        let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+        assert_eq!(reopened.head(), app.agent.session().head());
+        let context = serde_json::to_string(&reopened.context().unwrap()).unwrap();
+        if excluded {
+            assert!(context.contains("slot-included"), "{context}");
+            assert!(
+                !context.contains(marker),
+                "excluded output leaked: {context}"
+            );
+            assert!(
+                !context.contains(text.trim_start_matches('!')),
+                "excluded command leaked: {context}"
+            );
+            let head = reopened.head().unwrap();
+            let display = reopened
+                .entry(&head)
+                .and_then(|entry| entry.metadata.as_ref())
+                .and_then(|metadata| metadata.display_text.as_deref())
+                .expect("excluded command needs a durable presentation record");
+            assert!(
+                display.contains(marker),
+                "missing actual shell output: {display}"
+            );
+            assert!(display.contains("exit 0"), "{display}");
+            assert!(
+                display.contains("[excluded from model context]"),
+                "{display}"
+            );
+        } else {
+            assert!(
+                context.contains(marker),
+                "missing actual shell output: {context}"
+            );
+            assert!(context.contains("exit 0"), "{context}");
+        }
+        assert!(shell.extension_editor_owns_composer());
+    }
+    app.executable_extensions.shutdown().await;
+}
+
+/// The custom editor must not turn shell admission into a process-policy bypass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_bash_enter_obeys_no_process_policy() {
+    let (directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    app.config.sandbox.allow_process = false;
+    assert_eq!(app.config.workspace.as_path(), directory.path());
+    let before = app.agent.session().head();
+    let sentinel = directory.path().join("should-not-run.sentinel");
+    assert!(!sentinel.exists());
+    let text = "!printf should-not-run > should-not-run.sentinel";
+    type_into_slot(&mut app, &mut shell, text).await;
+    let (mut input, _writer) = held_raw_input(&shell, b"\r");
+    let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+        .await
+        .next_idle(&mut input)
+        .await;
+    let Idle::Submit(composed) = idle else {
+        panic!("Enter failed to admit the custom editor's shell escape");
+    };
+    assert_eq!(composed.display_text, text);
+    let escape = commands::BashEscape::parse(&composed.display_text).unwrap();
+    let (_, mut reload, _) = super::support::test_reload();
+    let result = tokio::time::timeout(
+        Duration::from_secs(8),
+        run_idle_command(
+            app,
+            &mut shell,
+            &mut input,
+            Command::Bash(escape),
+            &mut None,
+            None,
+            &mut reload,
+        ),
+    )
+    .await
+    .expect("denied shell escape did not finish")
+    .unwrap();
+    let IdleCommandOutcome::Continue(next) = result else {
+        panic!("refused shell escape unexpectedly exited the interactive loop");
+    };
+    let mut app = *next;
+    assert!(!sentinel.exists(), "denied shell escape created a file");
+    assert_eq!(app.agent.session().head(), before);
+    assert_eq!(
+        Session::open_read_only(app.agent.session().path())
+            .unwrap()
+            .head(),
+        before
+    );
+    assert!(shell
+        .debug_error()
+        .as_deref()
+        .is_some_and(|error| error.contains("shell commands are disabled")));
+    assert!(shell.extension_editor_owns_composer());
+    app.executable_extensions.shutdown().await;
+}
+
+/// A burst Enter is fenced behind the last editor checkpoint for shell escapes
+/// too; it must never admit a partial or empty command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_burst_enter_admits_complete_bash_escape() {
+    for text in ["!printf included", "!!printf excluded"] {
+        let (_directory, mut app, mut shell) = live_slot_app().await;
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("NATIVE-SLOT-EDITOR")
+        })
+        .await;
+        let bytes = format!("{text}\r");
+        let (mut input, _writer) = held_raw_input(&shell, bytes.as_bytes());
+        let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await;
+        assert!(matches!(idle, Idle::Submit(ref composed) if composed.display_text == text));
+        app.executable_extensions.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -675,10 +862,12 @@ async fn native_pi_custom_editor_buffer_is_bounded_and_retirement_discards_it() 
             false
         ));
     }
-    assert!(shell
-        .debug_error()
-        .as_deref()
-        .is_some_and(|error| error.contains("input queue is full")));
+    assert!(
+        shell
+            .debug_error()
+            .as_deref()
+            .is_some_and(|error| error.contains("input queue is full"))
+    );
     command(&mut app, &mut shell, "retire-editor")
         .await
         .unwrap();
@@ -909,9 +1098,11 @@ export default pi => {
         })
         .await;
         let frame = rendered(&mut shell).await;
-        assert!(frame
-            .lines()
-            .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns)));
+        assert!(
+            frame
+                .lines()
+                .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(columns))
+        );
     }
     command(&mut app, &mut shell, "custom-footer")
         .await

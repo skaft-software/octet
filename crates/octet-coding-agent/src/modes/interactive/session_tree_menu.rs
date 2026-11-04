@@ -336,7 +336,8 @@ where
         prompt: "Import this file and switch to a new private session?".into(),
         detail: Some(format!(
             "Source: {}\nDestination directory: {}\nA new session path and identity will be created. The source and current session are preserved. Unsupported semantics are refused.",
-            source.display(), app.sessions.dir().display()
+            source.display(),
+            app.sessions.dir().display()
         )),
         destructive: false,
         default: false,

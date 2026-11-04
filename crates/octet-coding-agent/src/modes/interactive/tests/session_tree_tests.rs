@@ -1,5 +1,5 @@
 //! Same-session navigation owns dialogs and provider cancellation only at idle.
-use super::super::session_tree_menu::{apply_navigation, choose_navigation, TreeNavigationChoice};
+use super::super::session_tree_menu::{TreeNavigationChoice, apply_navigation, choose_navigation};
 use super::support::*;
 use super::*;
 use crossterm::event::KeyEvent;
@@ -84,10 +84,12 @@ async fn custom_summary_cancel_returns_through_dialogs_without_prefilling_compos
         key(KeyCode::Esc), // tree -> original draft
     ]);
     let mut input = futures_util::stream::iter(events);
-    assert!(choose_navigation(&session, &mut shell, &mut input)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        choose_navigation(&session, &mut shell, &mut input)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(session.head(), Some(head));
     assert_eq!(shell.extension_editor_snapshot(), before);
     assert!(!shell.debug_snapshot().contains("private summary focus"));
@@ -136,18 +138,20 @@ async fn current_head_selection_is_a_noop_without_summary_dialog() {
     let mut shell = InteractiveShell::test_shell();
     shell.prefill_editor("draft".into());
     let mut input = futures_util::stream::iter([key(KeyCode::Enter)]);
-    assert!(choose_navigation(&session, &mut shell, &mut input)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        choose_navigation(&session, &mut shell, &mut input)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(session.head(), Some(head));
     assert_eq!(shell.pending(), "draft");
     assert!(shell.debug_snapshot().contains("Already at this point"));
 }
 
 #[tokio::test]
-async fn no_summary_navigates_same_file_and_revisits_branches_while_preserving_draft_and_cache_policy(
-) {
+async fn no_summary_navigates_same_file_and_revisits_branches_while_preserving_draft_and_cache_policy()
+ {
     let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
     let (root, abandoned, target, _) = branch_fixture(app.agent.session_mut());
     let path = app.agent.session().path().to_owned();
@@ -248,9 +252,11 @@ async fn real_default_and_custom_summaries_commit_once_in_the_same_session() {
         assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(app.agent.session().usage_records().len(), 1);
         if let Some(instructions) = instructions {
-            assert!(bodies
-                .iter()
-                .any(|body| body.to_string().contains(instructions)));
+            assert!(
+                bodies
+                    .iter()
+                    .any(|body| body.to_string().contains(instructions))
+            );
         }
     }
 }

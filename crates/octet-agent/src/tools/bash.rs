@@ -68,12 +68,14 @@ struct BashArgs {
     cwd: Option<String>,
     /// Optional timeout in milliseconds.
     timeout_ms: Option<u64>,
+    /// Pi-compatible optional timeout in seconds.
+    timeout: Option<f64>,
 }
 
 /// The built-in `bash` tool.
 ///
 /// Executes the complete command through a Bash-compatible shell with bounded
-/// stdout/stderr capture and a timeout.
+/// stdout/stderr capture. An optional timeout may be supplied per call.
 /// The child's entire process tree is killed on timeout or cancellation. On
 /// Windows, the child is assigned to a private Job Object before it resumes.
 /// Spill paths are temporary: this tool owns at most 64 MiB / 32 files,
@@ -106,8 +108,9 @@ impl Tool for BashTool {
             constrained_sampling: None,
             name: "bash".to_string(),
             description: "Run a command through the configured Bash-compatible shell. \
-                          Omit cwd to run at the workspace root. Output reports the exit \
-                          status and bounded stdout/stderr. Complete streams end with \
+                          Omit cwd to run at the workspace root. Optional timeout is in seconds; \
+                          no default timeout is imposed. Output reports the exit status and \
+                          bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
                           were omitted. Truncated output may include a private full_output_path, \
                           or partial_output_path containing only a prefix if the 16 MiB per-stream \
@@ -128,7 +131,13 @@ impl Tool for BashTool {
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Optional timeout in milliseconds."
+                        "description": "Optional octet timeout in milliseconds."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2147483,
+                        "description": "Optional timeout in seconds. No default timeout."
                     }
                 },
                 "required": ["command"],
@@ -182,7 +191,7 @@ impl Tool for BashTool {
             .ok_or_else(|| ToolError::new("invalid arguments: expected an object"))?;
         if object
             .keys()
-            .any(|key| !matches!(key.as_str(), "command" | "cwd" | "timeout_ms"))
+            .any(|key| !matches!(key.as_str(), "command" | "cwd" | "timeout_ms" | "timeout"))
         {
             return Err(ToolError::new("invalid arguments: unknown field"));
         }
@@ -212,6 +221,24 @@ impl Tool for BashTool {
                 .ok_or_else(|| ToolError::new("invalid arguments: `cwd` must be a string"))?;
             validate_effect_path(cwd, ctx.sandbox.allow_external_paths)?;
         }
+        if object.contains_key("timeout_ms") && object.contains_key("timeout") {
+            return Err(ToolError::new(
+                "invalid arguments: provide only one of `timeout` or `timeout_ms`",
+            ));
+        }
+        if let Some(value) = object.get("timeout") {
+            let seconds = value.as_f64();
+            if seconds.is_none_or(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+                return Err(ToolError::new(
+                    "Invalid timeout: must be a finite number of seconds",
+                ));
+            }
+            if seconds.is_some_and(|seconds| seconds > 2_147_483.0) {
+                return Err(ToolError::new(
+                    "Invalid timeout: must be less than or equal to 2147483 seconds",
+                ));
+            }
+        }
         if object
             .get("timeout_ms")
             .is_some_and(|value| value.as_u64().is_none_or(|timeout| timeout == 0))
@@ -230,7 +257,9 @@ impl Tool for BashTool {
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)")
+        Some(
+            "Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)",
+        )
     }
 
     async fn execute(
@@ -279,10 +308,14 @@ impl BashTool {
         let shell = resolve_shell(ctx.sandbox.shell_path.as_deref()).path;
         let mut command = tokio::process::Command::new(&shell);
 
-        // Honour the per-call timeout when present, bounded by sandbox max.
-        let effective_timeout = match args.timeout_ms {
-            Some(ms) => Duration::from_millis(ms).min(ctx.sandbox.bash_timeout),
-            None => ctx.sandbox.bash_timeout,
+        let requested_timeout = args
+            .timeout
+            .map(Duration::from_secs_f64)
+            .or_else(|| args.timeout_ms.map(Duration::from_millis));
+        let effective_timeout = match (requested_timeout, ctx.sandbox.bash_timeout) {
+            (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
+            (Some(requested), None) => Some(requested),
+            (None, ceiling) => ceiling,
         };
 
         let workdir: PathBuf = match args.cwd.as_ref() {
@@ -376,7 +409,11 @@ impl BashTool {
         };
         tokio::pin!(work);
 
-        match tokio::time::timeout(effective_timeout, &mut work).await {
+        let outcome = match effective_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, &mut work).await,
+            None => Ok(work.as_mut().await),
+        };
+        match outcome {
             Err(_elapsed) => {
                 guard.terminate_now();
                 // Preserve final output when ordinary descendants close the
@@ -387,7 +424,9 @@ impl BashTool {
                 let drained = tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await;
                 let mut message = format!(
                     "error timeout\ncommand exceeded the {:.0}s execution limit and was killed",
-                    effective_timeout.as_secs_f64()
+                    effective_timeout
+                        .expect("timeout branch has a deadline")
+                        .as_secs_f64()
                 );
                 match drained {
                     Ok((out, err, status)) => {
@@ -426,7 +465,9 @@ impl BashTool {
                 // group to the centralized reaper for the rest of this tool's
                 // original deadline instead of silently unregistering it.
                 guard.supervise_bash_descendants(
-                    effective_timeout.saturating_sub(start.elapsed()),
+                    effective_timeout
+                        .unwrap_or(Duration::MAX)
+                        .saturating_sub(start.elapsed()),
                     ctx.cancellation.clone(),
                 );
                 let duration = start.elapsed();
@@ -903,10 +944,14 @@ impl BashTool {
         };
         let mut command = tokio::process::Command::new(&shell);
 
-        // Honour the per-call timeout when present, bounded by sandbox max.
-        let effective_timeout = match args.timeout_ms {
-            Some(ms) => Duration::from_millis(ms).min(ctx.sandbox.bash_timeout),
-            None => ctx.sandbox.bash_timeout,
+        let requested_timeout = args
+            .timeout
+            .map(Duration::from_secs_f64)
+            .or_else(|| args.timeout_ms.map(Duration::from_millis));
+        let effective_timeout = match (requested_timeout, ctx.sandbox.bash_timeout) {
+            (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
+            (Some(requested), None) => Some(requested),
+            (None, ceiling) => ceiling,
         };
 
         let workdir: PathBuf = match args.cwd.as_ref() {
@@ -998,13 +1043,19 @@ impl BashTool {
         };
         tokio::pin!(work);
 
-        match tokio::time::timeout(effective_timeout, &mut work).await {
+        let outcome = match effective_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, &mut work).await,
+            None => Ok(work.as_mut().await),
+        };
+        match outcome {
             Err(_elapsed) => {
                 guard.terminate_now();
                 let drained = tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await;
                 let mut message = format!(
                     "error timeout\ncommand exceeded the {:.0}s execution limit and was killed",
-                    effective_timeout.as_secs_f64()
+                    effective_timeout
+                        .expect("timeout branch has a deadline")
+                        .as_secs_f64()
                 );
                 match drained {
                     Ok((out, err, status)) => {
@@ -1036,7 +1087,9 @@ impl BashTool {
                     ToolError::new(format!("error io\nfailed to wait for command: {error}"))
                 })?;
                 guard.supervise_bash_descendants(
-                    effective_timeout.saturating_sub(start.elapsed()),
+                    effective_timeout
+                        .unwrap_or(Duration::MAX)
+                        .saturating_sub(start.elapsed()),
                     ctx.cancellation.clone(),
                 );
                 let duration = start.elapsed();

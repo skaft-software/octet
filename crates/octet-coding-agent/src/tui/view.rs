@@ -2800,6 +2800,7 @@ impl ShellState {
             ) || current_workers.contains(&activity.id)
         });
         let is_active = subagent_activity_is_active(&view);
+        let repeated_failure = self.subagent_activity.as_ref() == Some(&view);
         // A finished session roster is inspectable, not a fresh event. Only
         // a previously active row may settle (or a fresh failed spawn with no
         // worker to have emitted an earlier running snapshot).
@@ -2822,6 +2823,7 @@ impl ShellState {
             }
         } else if is_active
             || (!was_active
+                && !repeated_failure
                 && summary.total() > 0
                 && current_workers.is_empty()
                 && self
@@ -3586,7 +3588,7 @@ impl ShellState {
     /// on the label makes `Working` and `Thinking` one continuous sweep, while
     /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        !self.theme.is_pi_theme() && reasoning.is_shimmering_activity()
+        self.theme.activity_shimmer_enabled() && reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -3876,7 +3878,7 @@ fn render_user_prompt(
     theme: &OctetTheme,
     width: u16,
 ) -> Vec<String> {
-    if theme.is_pi_theme() {
+    if !theme.surface_for_width("user", width).prompt_marker {
         let document = parse_markdown(&sanitize_for_terminal(text));
         let lines = renderer
             .render(&document, width)

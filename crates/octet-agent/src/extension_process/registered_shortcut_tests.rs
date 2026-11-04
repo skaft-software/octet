@@ -128,6 +128,50 @@ async fn refused(process: &ExtensionProcess, name: &str, context: ExtensionExecu
 }
 
 #[tokio::test]
+async fn owner_fenced_host_response_refuses_secret_after_owner_retirement() {
+    let (_temp, process, session, mut events) = fixture().await;
+    let context = process.current_context_for_resource_owner(session.resource_owner_key());
+    let owner = context.resource_owner.clone().unwrap();
+    let call = prime(&process, &session, "retired-owner");
+    let (id, generation) = registration(&mut events).await;
+
+    // Fill the writer, then poll the response until it is blocked on writer
+    // admission. Retirement occurs while publication is paused, not before
+    // the response path starts.
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let mut permits = Vec::new();
+    while let Ok(permit) = connection.writer.try_reserve() {
+        permits.push(permit);
+    }
+    assert_eq!(permits.len(), connection.writer.max_capacity());
+    let response = process.respond_to_extension_request_for_owner(
+        id,
+        generation,
+        &owner,
+        json!({"apiKey": "must-not-be-published"}),
+    );
+    tokio::pin!(response);
+    use std::future::Future as _;
+    let poll = std::future::poll_fn(|cx| std::task::Poll::Ready(response.as_mut().poll(cx))).await;
+    assert!(
+        poll.is_pending(),
+        "response must be paused at writer admission"
+    );
+
+    process.retire_resource_owner(&owner.session_id);
+    drop(permits);
+    let error = response.await.expect_err("retired owner cannot publish");
+    assert!(
+        error
+            .to_string()
+            .contains("resource owner retired before response publication"),
+        "{error}"
+    );
+    process.shutdown().await;
+    assert!(call.await.unwrap().is_err());
+}
+
+#[tokio::test]
 async fn registered_shortcut_requires_ack_and_current_owner_then_appends_durably() {
     let (_temp, process, mut session, mut events) = fixture().await;
     let context = process.current_context_for_resource_owner(session.resource_owner_key());

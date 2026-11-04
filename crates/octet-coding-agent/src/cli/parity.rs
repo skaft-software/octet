@@ -8,7 +8,7 @@ use octet_ai::{Media, Modality, ModelId};
 
 use super::Cli;
 use crate::codex_context::{
-    CodexContextOverride, CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
+    CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW, CodexContextOverride,
 };
 use crate::config::{Config, Mode, ResumeSelector};
 use crate::session_store::SessionStore;
@@ -229,7 +229,11 @@ impl ParityOptions {
             match &config.resume {
                 ResumeSelector::New => {
                     let path = store.new_path(&crate::modes::timestamp());
-                    let id = path.file_stem().expect("allocated session filename").to_string_lossy().into_owned();
+                    let id = path
+                        .file_stem()
+                        .expect("allocated session filename")
+                        .to_string_lossy()
+                        .into_owned();
                     Session::create(path)?;
                     id
                 }
@@ -573,7 +577,9 @@ pub(crate) fn prepare_input(cli: &mut Cli, cwd: &Path) -> anyhow::Result<Invocat
     }
     let interactive = !cli.print && !json;
     if interactive && (!input.media.is_empty() || !input.remaining.is_empty()) {
-        anyhow::bail!("initial images and sequential prompts require --print or --mode json; interactive startup needs a typed input queue hook");
+        anyhow::bail!(
+            "initial images and sequential prompts require --print or --mode json; interactive startup needs a typed input queue hook"
+        );
     }
     Ok(input)
 }

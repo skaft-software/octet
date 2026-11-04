@@ -292,9 +292,11 @@ async fn compact_custom_instructions_fail_closed_for_native_and_oversize() {
         Some("preserve evidence"),
     )
     .await;
-    assert!(shell
-        .debug_snapshot()
-        .contains("custom instructions require local compaction mode"));
+    assert!(
+        shell
+            .debug_snapshot()
+            .contains("custom instructions require local compaction mode")
+    );
     let oversized = "x".repeat(16 * 1024 + 1);
     compact_interactively(&mut app, &mut shell, &mut input, true, Some(&oversized)).await;
     assert!(shell.debug_error().unwrap().contains("at most 16 KiB"));

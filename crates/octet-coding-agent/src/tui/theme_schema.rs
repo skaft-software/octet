@@ -21,6 +21,7 @@ pub struct ThemeMetadata {
     pub author: String,
     pub version: String,
     pub terminal: String,
+    pub profile: String,
     /// Rebalance configured RGB foregrounds/surfaces for the detected terminal
     /// profile. This is opt-in so third-party themes retain exact color values.
     pub adaptive: bool,
@@ -34,6 +35,7 @@ impl Default for ThemeMetadata {
             author: String::new(),
             version: "1".to_owned(),
             terminal: "light-dark".to_owned(),
+            profile: "octet".to_owned(),
             adaptive: false,
         }
     }
@@ -58,6 +60,8 @@ pub struct ThemeLayout {
     /// Paint static user-message backgrounds with the default theme's vertical breathing rows.
     pub prompt_padding: bool,
     pub transcript_inset: u16,
+    pub block_padding_x: Option<u16>,
+    pub tool_body_indent: u16,
     pub composer_padding: u16,
     pub narrow_breakpoint: u16,
     pub narrow_show_header: bool,
@@ -81,6 +85,8 @@ impl Default for ThemeLayout {
             show_panel_borders: true,
             prompt_padding: false,
             transcript_inset: 2,
+            block_padding_x: None,
+            tool_body_indent: 2,
             composer_padding: 1,
             narrow_breakpoint: 64,
             narrow_show_header: false,
@@ -186,7 +192,9 @@ pub struct ThemeSurface {
     pub chrome: ThemeSurfaceChrome,
     pub heading: ThemeSurfaceHeading,
     pub label: Option<String>,
-    pub padding: u16,
+    pub padding: Option<u16>,
+    pub marker_gutter: Option<bool>,
+    pub prompt_marker: Option<bool>,
     pub width: ThemeSurfaceWidth,
     pub align: ThemeSurfaceAlign,
     pub max_width: Option<u16>,
@@ -202,19 +210,24 @@ pub struct ResolvedThemeSurface<'a> {
     pub heading: ThemeSurfaceHeading,
     pub label: Option<&'a str>,
     pub padding: u16,
+    pub marker_gutter: Option<bool>,
+    pub prompt_marker: bool,
     pub width: ThemeSurfaceWidth,
     pub align: ThemeSurfaceAlign,
     pub max_width: Option<u16>,
 }
 
 impl ThemeSurface {
-    pub fn resolve(&self, narrow: bool) -> ResolvedThemeSurface<'_> {
+    pub fn resolve(&self, narrow: bool, block_padding_x: Option<u16>) -> ResolvedThemeSurface<'_> {
+        let padding = self.padding.or(block_padding_x).unwrap_or(0);
         if !narrow {
             return ResolvedThemeSurface {
                 chrome: self.chrome,
                 heading: self.heading,
                 label: self.label.as_deref(),
-                padding: self.padding,
+                padding,
+                marker_gutter: self.marker_gutter,
+                prompt_marker: self.prompt_marker.unwrap_or(true),
                 width: self.width,
                 align: self.align,
                 max_width: self.max_width,
@@ -237,7 +250,15 @@ impl ThemeSurface {
             chrome,
             heading,
             label: self.narrow_label.as_deref().or(self.label.as_deref()),
-            padding: self.narrow_padding.unwrap_or(self.padding.min(1)),
+            padding: self.narrow_padding.unwrap_or_else(|| {
+                if self.padding.is_some() {
+                    padding.min(1)
+                } else {
+                    padding
+                }
+            }),
+            marker_gutter: self.marker_gutter,
+            prompt_marker: self.prompt_marker.unwrap_or(true),
             width: self.width,
             align: self.align,
             max_width: self.max_width,
@@ -267,6 +288,7 @@ pub(super) struct ParsedTheme {
     pub ascii_glyphs: BTreeMap<String, String>,
     pub surfaces: BTreeMap<String, ThemeSurface>,
     pub layout: ThemeLayout,
+    pub legacy_pi_presentation: bool,
 }
 
 pub(super) fn parse_theme(
@@ -301,6 +323,31 @@ pub(super) fn parse_theme(
         }
     }
 
+    // Resolve the selected variant before choosing a profile. The file (including
+    // its selected variant) always wins over the embedded profile recursively.
+    let selected_metadata = parse_metadata(effective.get("metadata"), source_name)?;
+    // Before profiles existed, adapter TOML with this role opted into Pi's
+    // transcript presentation. Preserve that interpretation without silently
+    // upgrading its old explicit layout to the new profile.
+    let has_profile = effective
+        .get("metadata")
+        .and_then(Value::as_table)
+        .is_some_and(|metadata| metadata.contains_key("profile"));
+    let legacy_pi_presentation = !has_profile
+        && effective
+            .get("roles")
+            .and_then(Value::as_table)
+            .is_some_and(|roles| roles.contains_key("extension.pi.accent"));
+    if selected_metadata.profile == "pi" {
+        let Value::Table(mut profile) =
+            toml::from_str(include_str!("../../../../examples/themes/pi-profile.toml"))
+                .expect("embedded Pi profile is valid TOML")
+        else {
+            unreachable!("embedded Pi profile is a table");
+        };
+        merge_tables(&mut profile, &effective);
+        effective = profile;
+    }
     reject_control_strings(&Value::Table(effective.clone()), source_name)?;
     let metadata = parse_metadata(effective.get("metadata"), source_name)?;
     let tokens = parse_tokens(&effective, source_name)?;
@@ -323,6 +370,7 @@ pub(super) fn parse_theme(
         ascii_glyphs,
         surfaces,
         layout,
+        legacy_pi_presentation,
     })
 }
 
@@ -375,6 +423,7 @@ fn parse_metadata(value: Option<&Value>, source_name: &str) -> anyhow::Result<Th
             "author" => metadata.author = string(value, source_name, "metadata.author")?,
             "version" => metadata.version = scalar(value, source_name, "metadata.version")?,
             "terminal" => metadata.terminal = string(value, source_name, "metadata.terminal")?,
+            "profile" => metadata.profile = string(value, source_name, "metadata.profile")?,
             "adaptive" => metadata.adaptive = boolean(value, source_name, "metadata.adaptive")?,
             other => bail!("theme {source_name} has unknown metadata field {other:?}"),
         }
@@ -387,6 +436,9 @@ fn parse_metadata(value: Option<&Value>, source_name: &str) -> anyhow::Result<Th
         "light-dark" | "dark" | "light" | "any"
     ) {
         bail!("theme {source_name} metadata.terminal must be light-dark, dark, light, or any");
+    }
+    if !matches!(metadata.profile.as_str(), "octet" | "pi") {
+        bail!("theme {source_name} metadata.profile must be octet or pi");
     }
     Ok(metadata)
 }
@@ -569,8 +621,14 @@ fn parse_glyphs(
         }
         if matches!(
             name.as_str(),
-            "top_left" | "top_right" | "bottom_left" | "bottom_right" | "horizontal" | "vertical"
-        ) && width != 1
+            "top_left"
+                | "top_right"
+                | "bottom_left"
+                | "bottom_right"
+                | "horizontal"
+                | "vertical"
+                | "list_bullet"
+        ) && (width != 1 || (name == "list_bullet" && glyph.chars().count() != 1))
         {
             bail!("theme {source_name} structural glyph {name:?} must be one column");
         }
@@ -600,6 +658,7 @@ fn parse_surfaces(
             "user"
                 | "assistant"
                 | "reasoning"
+                | "activity"
                 | "tool"
                 | "notice"
                 | "outcome"
@@ -623,7 +682,13 @@ fn parse_surfaces(
                 }
                 "label" => surface.label = Some(surface_label(value, source_name, &path)?),
                 "padding" => {
-                    surface.padding = bounded_u16(value, source_name, &path, 0, 4)?;
+                    surface.padding = Some(bounded_u16(value, source_name, &path, 0, 4)?);
+                }
+                "marker_gutter" => {
+                    surface.marker_gutter = Some(boolean(value, source_name, &path)?)
+                }
+                "prompt_marker" if kind == "user" => {
+                    surface.prompt_marker = Some(boolean(value, source_name, &path)?)
                 }
                 "width" => {
                     surface.width = match string(value, source_name, &path)?.as_str() {
@@ -749,6 +814,12 @@ fn parse_layout(value: Option<&Value>, source_name: &str) -> anyhow::Result<Them
             "prompt_padding" => layout.prompt_padding = boolean(value, source_name, key)?,
             "transcript_inset" => {
                 layout.transcript_inset = bounded_u16(value, source_name, key, 0, 8)?
+            }
+            "block_padding_x" => {
+                layout.block_padding_x = Some(bounded_u16(value, source_name, key, 0, 4)?);
+            }
+            "tool_body_indent" => {
+                layout.tool_body_indent = bounded_u16(value, source_name, key, 0, 4)?;
             }
             "composer_padding" => {
                 layout.composer_padding = bounded_u16(value, source_name, key, 0, 4)?
@@ -1025,7 +1096,7 @@ mod tests {
         assert_eq!(surface.chrome, ThemeSurfaceChrome::Card);
         assert_eq!(surface.width, ThemeSurfaceWidth::Content);
         assert_eq!(surface.align, ThemeSurfaceAlign::Right);
-        let narrow = surface.resolve(true);
+        let narrow = surface.resolve(true, None);
         assert_eq!(narrow.chrome, ThemeSurfaceChrome::Rail);
         assert_eq!(narrow.heading, ThemeSurfaceHeading::Inline);
         assert_eq!(narrow.label, Some("IN"));
@@ -1060,5 +1131,106 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(unicode.contains("only ASCII"), "{unicode}");
+    }
+}
+
+#[cfg(test)]
+mod transcript_schema_tests {
+    use super::*;
+
+    #[test]
+    fn profile_overlay_and_explicit_surface_overrides_are_bounded() {
+        let source = r#"
+            [metadata]
+            profile = "pi"
+            [layout]
+            block_padding_x = 3
+            [roles.thinking]
+            italic = false
+            [surfaces.reasoning]
+            padding = 0
+            [variants.dark.layout]
+            block_padding_x = 4
+        "#;
+        let parsed = parse_theme(source, "overrides", TerminalBackground::Dark).unwrap();
+        assert_eq!(parsed.layout.block_padding_x, Some(4));
+        assert_eq!(parsed.roles["thinking"].italic, Some(false));
+        assert_eq!(
+            parsed.roles["thinking"].foreground.as_deref(),
+            Some("reasoning_text")
+        );
+        assert_eq!(
+            parsed.surfaces["reasoning"]
+                .resolve(false, parsed.layout.block_padding_x)
+                .padding,
+            0
+        );
+        assert_eq!(
+            parsed.surfaces["notice"]
+                .resolve(true, parsed.layout.block_padding_x)
+                .padding,
+            4
+        );
+        assert_eq!(parsed.glyphs["list_bullet"], "-");
+        assert_eq!(ThemeLayout::default().block_padding_x, None);
+        assert_eq!(ThemeSurface::default().resolve(false, None).padding, 0);
+    }
+
+    #[test]
+    fn pi_profile_model_default_yields_to_each_explicit_token_section() {
+        for section in [
+            "colors",
+            "tokens",
+            "model",
+            "variants.dark.colors",
+            "variants.dark.tokens",
+            "variants.dark.model",
+        ] {
+            let key = if section.ends_with("model") {
+                "use_lab_color"
+            } else {
+                "model.use_lab_color"
+            };
+            let source = format!("[metadata]\nprofile = 'pi'\n[{section}]\n{key} = true\n");
+            let parsed = parse_theme(&source, section, TerminalBackground::Dark).unwrap();
+            assert_eq!(
+                parsed.tokens.get("model.use_lab_color").map(String::as_str),
+                Some("true"),
+                "{section}"
+            );
+        }
+        let default = parse_theme(
+            "[metadata]\nprofile = 'pi'",
+            "default",
+            TerminalBackground::Dark,
+        )
+        .unwrap();
+        assert_eq!(
+            default
+                .tokens
+                .get("model.use_lab_color")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn invalid_profiles_padding_role_fields_and_bullets_are_rejected() {
+        for source in [
+            "[metadata]\nprofile = 'nope'",
+            "[layout]\nblock_padding_x = 9",
+            "[layout]\ntool_body_indent = 9",
+            "[roles.thinking]\nbogus = 1",
+            "[glyphs]\nlist_bullet = '界'",
+            "[glyphs]\nlist_bullet = 'e\u{301}'",
+            "[glyphs_ascii]\nlist_bullet = '→'",
+            "[glyphs_ascii]\nlist_bullet = '--'",
+            "[surfaces.tool]\nprompt_marker = false",
+        ] {
+            assert!(
+                parse_theme(source, "invalid", TerminalBackground::Unknown).is_err(),
+                "{source}"
+            );
+        }
     }
 }

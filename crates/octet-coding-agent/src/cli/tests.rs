@@ -79,6 +79,557 @@ fn config_with_empty_global(cli: Cli, directory: &Path) -> anyhow::Result<Config
     build_config_with_global_path(cli, directory, Some(&directory.join("missing-global.toml")))
 }
 
+mod pi_codemode_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        workspace: PathBuf,
+        global: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let directory = cwd();
+            let root = directory.path().canonicalize().unwrap();
+            let workspace = root.join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            Self {
+                _directory: directory,
+                workspace,
+                global: root.join("home/.octet"),
+            }
+        }
+
+        // Synthetic already-present bundle metadata. No installer or entrypoint runs.
+        fn bundle(&self, root: &Path) -> PathBuf {
+            let directory = root.join(CODEMODE_EXTENSION);
+            std::fs::create_dir_all(&directory).unwrap();
+            let manifest = directory.join("extension.toml");
+            std::fs::write(
+                &manifest,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../extensions/octet-codemode/extension.toml"
+                )),
+            )
+            .unwrap();
+            manifest
+        }
+
+        fn config(&self) -> Config {
+            let mut config = config_with_empty_global(base(), &self.workspace).unwrap();
+            config.workspace_trusted = true;
+            config.effect_policy = EffectPolicy::Controlled;
+            config
+        }
+
+        fn resolver(&self, config: &Config) -> ResourceResolver {
+            ResourceResolver::with_global_octet_dir(
+                config.workspace.clone(),
+                config.workspace_trusted,
+                self.global.clone(),
+            )
+        }
+
+        fn apply(
+            &self,
+            config: &mut Config,
+            global: Option<serde_json::Value>,
+            project: Option<serde_json::Value>,
+            explicit: &BTreeSet<(String, String)>,
+        ) {
+            let resolver = self.resolver(config);
+            let trusted = config.workspace_trusted;
+            apply_pi_codemode_values(config, global, project, trusted, explicit, &resolver);
+        }
+    }
+
+    fn requested() -> serde_json::Value {
+        serde_json::json!({
+            "defaultTools": ["+codemode"],
+            "codemode": {"mode": "only", "inlineBudget": 7000}
+        })
+    }
+
+    #[test]
+    fn present_global_bundle_activates_without_changing_authority_or_other_extensions() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        let mut config = fixture.config();
+        config.enabled_extensions.push("unrelated".into());
+        config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+        for _ in 0..2 {
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(
+                config.enabled_extensions,
+                vec!["unrelated", CODEMODE_EXTENSION]
+            );
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-mode"],
+                "only"
+            );
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-inline-budget"],
+                7000
+            );
+            assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
+            assert!(config.invocation_trusted_extensions.is_empty());
+            assert_eq!(config.effect_policy, EffectPolicy::Controlled);
+            assert!(config.extension_activation_overridden);
+            assert!(!extension_activation_menu_authoritative(&config).unwrap());
+        }
+    }
+
+    #[test]
+    fn missing_bundle_is_not_enabled_or_configured_even_with_a_name_grant() {
+        let fixture = Fixture::new();
+        for already_enabled in [false, true] {
+            let mut config = fixture.config();
+            config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+            if already_enabled {
+                config.enabled_extensions.push(CODEMODE_EXTENSION.into());
+            }
+            let before = format!("{config:?}");
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(format!("{config:?}"), before);
+            assert!(
+                !fixture.global.exists(),
+                "settings must not install a missing bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_incompatible_bundle_metadata_never_activates() {
+        let fixture = Fixture::new();
+        let manifest = fixture.bundle(&fixture.global.join("extensions"));
+        let valid = std::fs::read_to_string(&manifest).unwrap();
+        for invalid in [
+            "not a TOML manifest".to_owned(),
+            valid.replace("name = \"octet-codemode\"", "name = \"different-name\""),
+            valid.replace(
+                "requires_octet = \"=0.10.0\"",
+                "requires_octet = \"=999.0.0\"",
+            ),
+            valid.replace("api_version = \"0.4\"", "api_version = \"9.9\""),
+        ] {
+            std::fs::write(&manifest, invalid).unwrap();
+            let mut config = fixture.config();
+            config.enabled_extensions.push(CODEMODE_EXTENSION.into());
+            config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+            let before = format!("{config:?}");
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(format!("{config:?}"), before);
+        }
+    }
+
+    #[test]
+    fn settings_never_grant_authority_to_a_present_untrusted_bundle() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        for already_enabled in [false, true] {
+            let mut config = fixture.config();
+            if already_enabled {
+                config.enabled_extensions.push(CODEMODE_EXTENSION.into());
+            }
+            let before = format!("{config:?}");
+            let mut settings = requested();
+            settings["trusted_extensions"] = serde_json::json!([CODEMODE_EXTENSION]);
+            fixture.apply(&mut config, Some(settings), None, &BTreeSet::new());
+            assert_eq!(format!("{config:?}"), before);
+        }
+    }
+
+    #[test]
+    fn global_grants_do_not_authorize_a_selected_project_shadow() {
+        let fixture = Fixture::new();
+        let global = fixture.bundle(&fixture.global.join("extensions"));
+        fixture.bundle(&fixture.workspace.join(".octet/extensions"));
+        for grant in [
+            CODEMODE_EXTENSION.to_owned(),
+            format!("{CODEMODE_EXTENSION}@{}", global.display()),
+        ] {
+            let mut config = fixture.config();
+            config.enabled_extensions.push(CODEMODE_EXTENSION.into());
+            config.trusted_extensions.push(grant);
+            let before = format!("{config:?}");
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(format!("{config:?}"), before);
+            assert!(
+                crate::extensions::selected_extension_flag_declarations_with_resolver(
+                    &config,
+                    &fixture.resolver(&config),
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_grants_match_only_the_selected_manifest_and_normalize_parent_aliases() {
+        let fixture = Fixture::new();
+        let selected = fixture.bundle(&fixture.workspace.join(".octet/extensions"));
+        let other = fixture.bundle(&fixture.global.join("extensions"));
+        let nested = selected.parent().unwrap().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        for (path, allowed) in [
+            (other, false),
+            (selected.clone(), true),
+            (nested.join("../extension.toml"), true),
+        ] {
+            let mut config = fixture.config();
+            let grant = format!("{CODEMODE_EXTENSION}@{}", path.display());
+            config.trusted_extensions.push(grant.clone());
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(
+                config
+                    .enabled_extensions
+                    .contains(&CODEMODE_EXTENSION.into()),
+                allowed
+            );
+            assert_eq!(
+                config
+                    .extension_flag_values
+                    .contains_key(CODEMODE_EXTENSION),
+                allowed
+            );
+            assert_eq!(config.trusted_extensions, vec![grant]);
+            assert!(config.invocation_trusted_extensions.is_empty());
+        }
+    }
+
+    #[test]
+    fn untrusted_project_preferences_cannot_activate_or_override_global_preferences() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        let mut config = fixture.config();
+        config.workspace_trusted = false;
+        config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+        let before = format!("{config:?}");
+        fixture.apply(&mut config, None, Some(requested()), &BTreeSet::new());
+        assert_eq!(format!("{config:?}"), before);
+        fixture.apply(
+            &mut config,
+            Some(serde_json::json!({
+                "defaultTools": ["+codemode"], "codemode": {"mode": "on", "inlineBudget": 3000}
+            })),
+            Some(requested()),
+            &BTreeSet::new(),
+        );
+        assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+        assert_eq!(
+            config.extension_flag_values[CODEMODE_EXTENSION]["codemode-mode"],
+            "on"
+        );
+        assert_eq!(
+            config.extension_flag_values[CODEMODE_EXTENSION]["codemode-inline-budget"],
+            3000
+        );
+        assert!(!config.workspace_trusted);
+    }
+
+    #[test]
+    fn project_bundle_requires_workspace_trust_even_with_an_exact_grant() {
+        let fixture = Fixture::new();
+        let manifest = fixture.bundle(&fixture.workspace.join(".octet/extensions"));
+        let mut config = fixture.config();
+        config.workspace_trusted = false;
+        config
+            .trusted_extensions
+            .push(format!("{CODEMODE_EXTENSION}@{}", manifest.display()));
+        let before = format!("{config:?}");
+        fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+        assert_eq!(format!("{config:?}"), before);
+        config.workspace_trusted = true;
+        fixture.apply(&mut config, None, Some(requested()), &BTreeSet::new());
+        assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+    }
+
+    #[test]
+    fn explicit_directory_and_one_shot_grants_follow_existing_admission() {
+        let fixture = Fixture::new();
+        let explicit = fixture.workspace.join("reviewed");
+        fixture.bundle(&explicit);
+        let mut config = fixture.config();
+        config.workspace_trusted = false;
+        config.extension_paths.push(explicit);
+        fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+        assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
+
+        fixture.bundle(&fixture.workspace.join(".octet/extensions"));
+        let mut config = fixture.config();
+        config
+            .invocation_trusted_extensions
+            .push(CODEMODE_EXTENSION.into());
+        fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+        assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+        assert!(config.trusted_extensions.is_empty());
+        assert_eq!(
+            config.invocation_trusted_extensions,
+            vec![CODEMODE_EXTENSION]
+        );
+    }
+
+    #[test]
+    fn full_access_uses_existing_policy_without_writing_trust_grants() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        let mut config = fixture.config();
+        config.effect_policy = EffectPolicy::UnsafeHost;
+        fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+        assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+        assert!(config.trusted_extensions.is_empty());
+        assert!(config.invocation_trusted_extensions.is_empty());
+    }
+
+    #[test]
+    fn process_denial_and_native_host_gates_are_not_bypassed() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        for gate in ["process", "shell", "native-host"] {
+            let mut config = fixture.config();
+            config.enabled_extensions.push(CODEMODE_EXTENSION.into());
+            config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+            match gate {
+                "process" => config.sandbox.allow_process = false,
+                "shell" => config.sandbox.allow_shell = false,
+                _ => config.start_extension_processes = false,
+            }
+            let before = format!("{config:?}");
+            fixture.apply(&mut config, Some(requested()), None, &BTreeSet::new());
+            assert_eq!(format!("{config:?}"), before, "{gate}");
+        }
+    }
+
+    #[test]
+    fn inactive_preferences_do_not_activate_and_project_tool_overrides_are_ordered() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        for (global, project, active) in [
+            (
+                serde_json::json!({"codemode": {"mode": "only"}}),
+                None,
+                false,
+            ),
+            (
+                requested(),
+                Some(serde_json::json!({"defaultTools": ["-codemode"]})),
+                false,
+            ),
+            (
+                requested(),
+                Some(serde_json::json!({"defaultTools": ["read"]})),
+                false,
+            ),
+            (
+                requested(),
+                Some(serde_json::json!({"defaultTools": ["-codemode", "+codemode"]})),
+                true,
+            ),
+        ] {
+            let mut config = fixture.config();
+            config.trusted_extensions.push(CODEMODE_EXTENSION.into());
+            fixture.apply(&mut config, Some(global), project, &BTreeSet::new());
+            assert_eq!(
+                config
+                    .enabled_extensions
+                    .contains(&CODEMODE_EXTENSION.into()),
+                active
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_explicit_cli_values_win_even_when_equal_to_manifest_defaults() {
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        let mut selected = fixture.config();
+        selected.enabled_extensions.push(CODEMODE_EXTENSION.into());
+        selected.trusted_extensions.push(CODEMODE_EXTENSION.into());
+        let declarations = crate::extensions::selected_extension_flag_declarations_with_resolver(
+            &selected,
+            &fixture.resolver(&selected),
+        );
+        assert_eq!(declarations.len(), 2);
+        for (args, mode, budget) in [
+            (vec!["octet"], "only", 7000),
+            (
+                vec![
+                    "octet",
+                    "--codemode-mode",
+                    "on",
+                    "--codemode-inline-budget",
+                    "3000",
+                ],
+                "on",
+                3000,
+            ),
+            (vec!["octet", "--codemode-mode", "on"], "on", 7000),
+            (vec!["octet", "--codemode-inline-budget", "0"], "only", 0),
+        ] {
+            let (_, values, explicit) = extension_flags::parse_declared_extension_flags(
+                args.into_iter().map(OsString::from).collect(),
+                declarations.clone(),
+            )
+            .unwrap();
+            let mut config = selected.clone();
+            config.extension_flag_values = values;
+            fixture.apply(&mut config, Some(requested()), None, &explicit);
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-mode"],
+                mode
+            );
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-inline-budget"],
+                budget
+            );
+        }
+    }
+
+    #[test]
+    fn pi_settings_require_bounded_regular_json_objects() {
+        let directory = cwd();
+        let path = directory.path().join("settings.json");
+        assert!(read_pi_settings(&path).is_none());
+        assert!(read_pi_settings(directory.path()).is_none());
+        for bytes in [b"[1]".as_slice(), b"true", b"{", &[0xff]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(read_pi_settings(&path).is_none());
+        }
+        let mut bytes = vec![b' '; PI_SETTINGS_BYTES];
+        bytes[..2].copy_from_slice(b"{}");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_pi_settings(&path), Some(serde_json::json!({})));
+        bytes.push(b' ');
+        std::fs::write(&path, bytes).unwrap();
+        assert!(read_pi_settings(&path).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::write(&path, requested().to_string()).unwrap();
+            let link = directory.path().join("linked-settings.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(read_pi_settings(&link).is_none());
+        }
+    }
+
+    #[test]
+    fn bootstrap_registers_flags_for_pi_activated_bundle() {
+        const CHILD: &str = "OCTET_TEST_PI_CODEMODE_BOOTSTRAP";
+        if let Some(workspace) = std::env::var_os(CHILD) {
+            let workspace = PathBuf::from(workspace);
+            let config_path = global_config_path().unwrap();
+            let before = std::fs::read(&config_path).unwrap();
+            let args = [
+                "octet",
+                "--safe-mode",
+                "--codemode-mode",
+                "on",
+                "--codemode-inline-budget",
+                "3000",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            let (cli, values, explicit) =
+                parse_with_extension_flags(args, &workspace, None).unwrap();
+            let mut config = build_config(cli, &workspace).unwrap();
+            config.extension_flag_values = values;
+            apply_pi_codemode_settings(&mut config, &explicit);
+            assert_eq!(config.enabled_extensions, vec![CODEMODE_EXTENSION]);
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-mode"],
+                "on"
+            );
+            assert_eq!(
+                config.extension_flag_values[CODEMODE_EXTENSION]["codemode-inline-budget"],
+                3000
+            );
+            assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
+            assert!(config.extension_activation_overridden);
+            assert_eq!(
+                std::fs::read(&config_path).unwrap(),
+                before,
+                "activation is session-only"
+            );
+
+            // Exercise the file boundary too: an untrusted project's request
+            // cannot activate code even when a global bundle/grant exists.
+            let pi = dirs::home_dir().unwrap().join(".pi/agent/settings.json");
+            std::fs::write(&pi, "{}").unwrap();
+            std::fs::create_dir_all(workspace.join(".pi")).unwrap();
+            std::fs::write(workspace.join(".pi/settings.json"), requested().to_string()).unwrap();
+            for trusted in [false, true] {
+                let mut args = vec![OsString::from("octet"), OsString::from("--safe-mode")];
+                if trusted {
+                    args.push(OsString::from("--workspace-trusted"));
+                }
+                let (cli, values, explicit) =
+                    parse_with_extension_flags(args, &workspace, None).unwrap();
+                let mut config = build_config(cli, &workspace).unwrap();
+                config.extension_flag_values = values;
+                apply_pi_codemode_settings(&mut config, &explicit);
+                assert_eq!(
+                    config
+                        .enabled_extensions
+                        .contains(&CODEMODE_EXTENSION.into()),
+                    trusted
+                );
+                assert_eq!(
+                    config
+                        .extension_flag_values
+                        .contains_key(CODEMODE_EXTENSION),
+                    trusted
+                );
+                if trusted {
+                    assert_eq!(
+                        config.extension_flag_values[CODEMODE_EXTENSION]["codemode-mode"],
+                        "only"
+                    );
+                    assert_eq!(
+                        config.extension_flag_values[CODEMODE_EXTENSION]["codemode-inline-budget"],
+                        7000
+                    );
+                }
+                assert_eq!(std::fs::read(&config_path).unwrap(), before);
+            }
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.bundle(&fixture.global.join("extensions"));
+        std::fs::write(
+            fixture.global.join("config.toml"),
+            "trusted_extensions = ['octet-codemode']\n",
+        )
+        .unwrap();
+        let home = fixture.global.parent().unwrap();
+        let pi = home.join(".pi/agent");
+        std::fs::create_dir_all(&pi).unwrap();
+        std::fs::write(pi.join("settings.json"), requested().to_string()).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::tests::pi_codemode_tests::bootstrap_registers_flags_for_pi_activated_bundle",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env(CHILD, &fixture.workspace)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated parser test failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
 #[test]
 fn gpt_6_astra_uses_the_generic_cli_model_path() {
     let directory = cwd();
@@ -527,6 +1078,24 @@ fn mouse_help_documents_auto_without_setting_a_cli_override() {
 }
 
 #[test]
+fn bash_timeout_is_unset_by_default() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+    assert_eq!(config.sandbox.bash_timeout_secs, None);
+    let policy = config
+        .sandbox
+        .effective_tool_policy(&config.workspace, config.effect_policy);
+    assert_eq!(policy.bash_timeout_ms.value, None);
+    assert_eq!(policy.bash_timeout_ms.source, PolicyValueSource::Default);
+    assert_eq!(
+        serde_json::to_value(&policy).unwrap()["bash_timeout_ms"],
+        serde_json::json!({"value": null, "source": "default"})
+    );
+}
+
+#[test]
 fn shell_path_and_bash_timeout_resolve_from_cli() {
     let directory = cwd();
     let mut cli = base();
@@ -538,7 +1107,7 @@ fn shell_path_and_bash_timeout_resolve_from_cli() {
         config.sandbox.shell_path,
         Some(PathBuf::from("/opt/homebrew/bin/bash"))
     );
-    assert_eq!(config.sandbox.bash_timeout_secs, 45);
+    assert_eq!(config.sandbox.bash_timeout_secs, Some(45));
 }
 
 #[test]
@@ -610,7 +1179,7 @@ max_output_bytes = 4096
         octet_agent::ShellSelection::Configured
     );
     assert_eq!(policy.bash_timeout_ms.source, PolicyValueSource::Cli);
-    assert_eq!(policy.bash_timeout_ms.value, 45_000);
+    assert_eq!(policy.bash_timeout_ms.value, Some(45_000));
     assert_eq!(policy.max_output_bytes.source, PolicyValueSource::Cli);
     assert_eq!(policy.max_output_bytes.value, 8192);
     assert_eq!(policy.allow_remote_read.source, PolicyValueSource::Config);

@@ -86,10 +86,12 @@ async fn fast_commands_reach_live_requests_and_fail_closed_on_other_routes() {
     let before = std::fs::read(app.agent.session().path()).unwrap();
     for command in ["/fast on", "/fast off", "/fast", "/fast status"] {
         app = fast_idle(app, &mut shell, command).await;
-        assert!(shell
-            .debug_error()
-            .unwrap()
-            .contains("only available on Codex Responses routes"));
+        assert!(
+            shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes")
+        );
     }
     assert_eq!(std::fs::read(app.agent.session().path()).unwrap(), before);
     app.agent
@@ -118,11 +120,12 @@ async fn fast_commands_reach_live_requests_and_fail_closed_on_other_routes() {
         );
     }
     app.agent.set_max_session_cost_microdollars(Some(u64::MAX));
-    assert!(app
-        .agent
-        .complete("hard ceilings must fail closed")
-        .await
-        .is_err());
+    assert!(
+        app.agent
+            .complete("hard ceilings must fail closed")
+            .await
+            .is_err()
+    );
     assert_eq!(server.received_requests().await.unwrap().len(), 4);
 }
 
@@ -252,9 +255,11 @@ fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
     ] {
         let mut shell = InteractiveShell::test_shell();
         report_compaction(&mut shell, &outcome, &session);
-        assert!(shell
-            .debug_snapshot()
-            .contains("session usage or pricing uncertain"));
+        assert!(
+            shell
+                .debug_snapshot()
+                .contains("session usage or pricing uncertain")
+        );
     }
 }
 
@@ -339,10 +344,12 @@ async fn fast_unsupported_active_controls_are_not_queued() {
             run_active_command(&mut shell, commands::parse(command), &inspection).await;
         assert!(queue.is_empty());
         assert!(!quit);
-        assert!(shell
-            .debug_error()
-            .unwrap()
-            .contains("only available on Codex Responses routes"));
+        assert!(
+            shell
+                .debug_error()
+                .unwrap()
+                .contains("only available on Codex Responses routes")
+        );
     }
 }
 

@@ -12,8 +12,8 @@ use std::time::Duration;
 use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
 use crate::events::AgentEvent;
 use crate::extension_operations::{
-    ApplicableOperationsPage, ApplicableOperationsRequest, DISCOVERY_TOOL_NAME, OperationDiscovery,
-    OperationSelection, cursor_binding, cursor_offset, matching_slots,
+    cursor_binding, cursor_offset, matching_slots, ApplicableOperationsPage,
+    ApplicableOperationsRequest, OperationDiscovery, OperationSelection, DISCOVERY_TOOL_NAME,
 };
 use crate::extension_process::{ExtensionProcess, ExtensionResourceOwner};
 use crate::input::UserInput;
@@ -298,6 +298,17 @@ pub struct ProviderContextProjection {
     pub tools: Option<Vec<octet_ai::ToolDef>>,
 }
 
+/// Outcome for a context callback, keeping remote cancellation distinct from
+/// ordinary extension failures.
+pub enum ProviderContextHookError {
+    /// The callback failed; the message is internal and never shown to users.
+    Failed(String),
+    /// The extension returned JSON-RPC request-cancelled (-32800).
+    Cancelled,
+    /// Host authority or projection validation failed; never fall back.
+    Refused,
+}
+
 /// Run-owned service for authoritative private session appends while a context
 /// hook is pending. Implementations own a bounded typed queue, not a writer.
 /// Dropping the service must revoke its grants and refuse all unclaimed leaves.
@@ -311,7 +322,10 @@ pub trait ProviderContextSessionWait: Send {
         _request: &octet_ai::Request,
         _context: &ProviderContextProjectionContext,
     ) -> Option<
-        futures_util::future::BoxFuture<'static, Result<Option<ProviderContextProjection>, String>>,
+        futures_util::future::BoxFuture<
+            'static,
+            Result<Option<ProviderContextProjection>, ProviderContextHookError>,
+        >,
     > {
         None
     }
@@ -331,8 +345,8 @@ pub trait ProviderContextSessionWait: Send {
 /// Context preparation before provider planning, admission and request freeze.
 ///
 /// Hooks run in registration order against the last validated effective
-/// request. `Ok(None)` leaves that request unchanged. A failure must abort
-/// preparation, not silently fall back to potentially stale canonical context.
+/// request. `Ok(None)` leaves that request unchanged. Host-owned hooks fail
+/// closed by default; extension hooks may opt into Pi's failure-isolation policy.
 /// The caller owns cancellation, deadlines, request-size bounds, and canonical
 /// role/tool-pair validation before any projection reaches the next hook or
 /// provider. Persistence acknowledgements must precede activation of durable
@@ -341,6 +355,17 @@ pub trait ProviderContextSessionWait: Send {
 /// use its guard-owned future instead of an unbound foreground RPC.
 #[async_trait::async_trait]
 pub trait ProviderContextHook: Send + Sync {
+    /// Extension-owned hooks continue with the prior projection if handler
+    /// execution fails. Host authority guards retain the default fail-closed policy.
+    fn continues_on_failure(&self) -> bool {
+        false
+    }
+
+    /// Stable extension identity used to deduplicate failure notices per session.
+    fn failure_notice_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Activate an optional bounded append service for this exact preparation.
     /// The host calls this synchronously before polling the hook. A process
     /// adapter may publish its grant only after returning a real consumer here;
@@ -375,7 +400,7 @@ pub trait CompactionStrategy: Send + Sync {
     /// Render the complete supplied transcript slice as PNG frames. A failed
     /// slice aborts compaction; partial frames must never become a checkpoint.
     async fn render(&self, model_id: &str, text: &str, owner: &str)
-    -> Result<Vec<Vec<u8>>, String>;
+        -> Result<Vec<Vec<u8>>, String>;
 }
 
 /// Stable semantic summary of a completed assistant turn before it becomes a

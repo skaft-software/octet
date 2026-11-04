@@ -1511,6 +1511,9 @@ pub struct Session {
     /// Replaceable durable entry labels. Keyed by an existing entry ID, so the
     /// map can never grow past the session's entry count (one label per entry).
     entry_labels: BTreeMap<EntryId, String>,
+    // Ephemeral notices belong to this live Session, not to the process or
+    // its durable transcript. Pruned against active hooks before preparation.
+    pub(crate) context_failure_notices: BTreeSet<String>,
 }
 
 impl Drop for Session {

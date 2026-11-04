@@ -91,7 +91,15 @@ fn palette(theme: &OctetTheme, selector: &str) -> Value {
     let pi = theme.is_pi_theme();
     for &(token, role) in FOREGROUNDS {
         let pi_role = format!("extension.pi.{token}");
-        let style = theme.semantic_style(if pi { &pi_role } else { role });
+        let style = theme.semantic_style(
+            if token == "thinkingText" && theme.has_semantic_style("thinking") {
+                "thinking"
+            } else if pi {
+                &pi_role
+            } else {
+                role
+            },
+        );
         let resolved = color(if enabled {
             style.foreground
         } else {
@@ -105,14 +113,21 @@ fn palette(theme: &OctetTheme, selector: &str) -> Value {
     }
     for &(token, role, fallback) in BACKGROUNDS {
         let pi_role = format!("extension.pi.{token}");
+        let state_role = match token {
+            "toolPendingBg" => Some("surface.tool.pending"),
+            "toolSuccessBg" => Some("surface.tool.success"),
+            "toolErrorBg" => Some("surface.tool.error"),
+            _ => None,
+        }
+        .filter(|role| theme.has_semantic_style(role));
         let background = theme
-            .semantic_style(if pi { &pi_role } else { role })
+            .semantic_style(state_role.unwrap_or(if pi { &pi_role } else { role }))
             .background;
         backgrounds.insert(
             token.into(),
             color(if !enabled {
                 Color::Default
-            } else if !pi && background == Color::Default {
+            } else if state_role.is_none() && !pi && background == Color::Default {
                 theme.semantic_style(fallback).foreground
             } else {
                 background

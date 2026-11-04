@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::secure_fs::{create_bound_private_directory, PrivateDirectory};
+use crate::secure_fs::{PrivateDirectory, create_bound_private_directory};
 
 const OWNER_BYTES: usize = 64 * 1024 * 1024;
 const OWNER_FILES: usize = 32;

@@ -154,6 +154,7 @@ use self::summaries::*;
 pub(crate) use self::trust_policy::persistent_host_authority_grant;
 pub(crate) use self::trust_policy::provider_preflight_config;
 pub(crate) use self::trust_policy::selected_extension_flag_declarations;
+pub(crate) use self::trust_policy::selected_extension_flag_declarations_with_resolver;
 use self::trust_policy::*;
 
 /// The first-party extension that owns every in-harness child-session surface.

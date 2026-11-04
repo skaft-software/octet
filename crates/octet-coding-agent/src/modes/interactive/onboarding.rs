@@ -663,12 +663,14 @@ mod tests {
             assert_eq!(saves, 0);
             assert_eq!(shell.pending(), "existing draft");
             assert!(!shell.debug_snapshot().contains(secret));
-            assert!(!shell
-                .dump_rendered_frame()
-                .await
-                .unwrap()
-                .join("\n")
-                .contains(secret));
+            assert!(
+                !shell
+                    .dump_rendered_frame()
+                    .await
+                    .unwrap()
+                    .join("\n")
+                    .contains(secret)
+            );
         }
     }
 
@@ -732,10 +734,12 @@ mod tests {
             vec![key(KeyCode::Down), key(KeyCode::Enter)],
         ] {
             let mut shell = InteractiveShell::test_shell();
-            assert!(sign_in(&mut shell, &mut tokio_stream::iter(events), true)
-                .await
-                .unwrap()
-                .is_none());
+            assert!(
+                sign_in(&mut shell, &mut tokio_stream::iter(events), true)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 

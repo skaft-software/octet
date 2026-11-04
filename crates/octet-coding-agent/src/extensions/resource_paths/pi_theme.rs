@@ -198,23 +198,15 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
     );
     metadata.insert("terminal".into(), toml::Value::String(appearance.into()));
     metadata.insert("adaptive".into(), toml::Value::Boolean(false));
+    metadata.insert("profile".into(), toml::Value::String("pi".into()));
     let mut native_colors = toml::Table::new();
     for &(pi, native) in PROJECTION {
         native_colors.insert(native.into(), palette[pi].clone());
     }
-    // Pi colors must not inherit Octet's model wash, syntax backgrounds or shimmer.
     for (token, value) in [
-        ("prompt_wash", toml::Value::Boolean(false)),
-        ("margin_markers", toml::Value::Boolean(false)),
-        ("thinking_spinner", toml::Value::Boolean(true)),
-        // Pi shows the thinking trace as it streams rather than a collapsed line.
-        ("thinking_expanded", toml::Value::Boolean(true)),
-        ("splash_compact", toml::Value::Boolean(true)),
         ("assistant_msg_text", palette["text"].clone()),
         ("model_assistant", palette["text"].clone()),
         ("model_accent", palette["accent"].clone()),
-        ("md_code_bg", toml::Value::String("default".into())),
-        ("md_code_inline_bg", toml::Value::String("default".into())),
     ] {
         native_colors.insert(token.into(), value);
     }
@@ -244,6 +236,22 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
             ])),
         );
     }
+    // State roles are ordinary surface roles, so any TOML theme can opt in.
+    for kind in ["tool", "shell"] {
+        for (state, bg) in [
+            ("pending", "toolPendingBg"),
+            ("success", "toolSuccessBg"),
+            ("error", "toolErrorBg"),
+        ] {
+            roles.insert(
+                format!("surface.{kind}.{state}"),
+                toml::Value::Table(toml::Table::from_iter([
+                    ("foreground".into(), palette["toolOutput"].clone()),
+                    ("background".into(), palette[bg].clone()),
+                ])),
+            );
+        }
+    }
     for (token, value) in palette {
         let mut role = toml::Table::new();
         role.insert(
@@ -261,45 +269,6 @@ pub(crate) fn native_source<'a>(path: &Path, source: &'a str) -> anyhow::Result<
     native.insert("metadata".into(), toml::Value::Table(metadata));
     native.insert("colors".into(), toml::Value::Table(native_colors));
     native.insert("roles".into(), toml::Value::Table(roles));
-    native.insert(
-        "model".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "use_lab_color".into(),
-            toml::Value::Boolean(false),
-        )])),
-    );
-    native.insert(
-        "layout".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "transcript_inset".into(),
-            toml::Value::Integer(0),
-        )])),
-    );
-    let mut surfaces = toml::Table::new();
-    for (kind, chrome) in [
-        ("user", "band"),
-        ("tool", "band"),
-        ("shell", "band"),
-        ("assistant", "plain"),
-        ("reasoning", "plain"),
-    ] {
-        surfaces.insert(
-            kind.into(),
-            toml::Value::Table(toml::Table::from_iter([
-                ("chrome".into(), toml::Value::String(chrome.into())),
-                (
-                    "padding".into(),
-                    toml::Value::Integer(i64::from(kind != "reasoning")),
-                ),
-                ("narrow_chrome".into(), toml::Value::String(chrome.into())),
-                (
-                    "narrow_padding".into(),
-                    toml::Value::Integer(i64::from(kind != "reasoning")),
-                ),
-            ])),
-        );
-    }
-    native.insert("surfaces".into(), toml::Value::Table(surfaces));
     let output = toml::to_string(&native).context("cannot encode native Pi palette")?;
     ensure!(
         output.len() <= MAX_BYTES,
@@ -430,6 +399,8 @@ mod tests {
         let source = format!("\u{feff}{}", input);
         let native = native_source(Path::new("fixture.json"), &source).unwrap();
         let parsed: toml::Value = toml::from_str(&native).unwrap();
+        assert_eq!(parsed["metadata"]["profile"].as_str(), Some("pi"));
+        assert!(parsed.get("surfaces").is_none());
         assert_eq!(parsed["colors"]["accent"].as_str(), Some("#00aaff"));
         assert_eq!(parsed["colors"]["border"].as_str(), Some("index:255"));
         assert_eq!(parsed["colors"]["foreground"].as_str(), Some("default"));
@@ -520,6 +491,22 @@ mod tests {
         let mut unknown = fixture("Unknown", "#abcdef");
         unknown["colors"]["unknown"] = Value::from(1);
         cases.push(unknown);
+        for key in ["layout", "roles", "italic"] {
+            let mut unknown = fixture("Unknown", "#abcdef");
+            unknown[key] = serde_json::json!({});
+            assert!(native_source(Path::new("bad.json"), &unknown.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown Pi theme field"));
+        }
+        let mut unknown_color = fixture("Unknown", "#abcdef");
+        unknown_color["colors"]["italic"] = Value::from(true);
+        assert!(
+            native_source(Path::new("bad.json"), &unknown_color.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown Pi theme field")
+        );
         let mut missing = fixture("Missing", "#abcdef");
         missing["colors"].as_object_mut().unwrap().remove("accent");
         cases.push(missing);

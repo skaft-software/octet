@@ -72,7 +72,7 @@ without assistant-message or turn events. Its usage is session-only.
 | `--effect-policy controlled_bash_approval\|controlled\|unsafe_host` | Set [effect admission](tools.md#authority-profiles). Default `unsafe_host`. |
 | `--safe-mode` | Approval for every bash call and file change. Forces external paths off and removes the implicit authority that starts enabled extensions, so an ungranted extension stays stopped while an explicitly granted one still starts. Can't be combined with `--effect-policy`. |
 | `--shell-path PATH` | Use this Bash-compatible shell. `$SHELL` isn't read. On Windows it also selects `bash` instead of the default `powershell` tool. |
-| `--bash-timeout-secs N`, `--exec-timeout-secs N` | Command timeout in seconds. The example config uses `120`. |
+| `--bash-timeout-secs N`, `--exec-timeout-secs N` | Optional command-timeout ceiling in seconds. No deadline by default; cancellation still applies. |
 | `--max-output-bytes N` | Output capture limit. The example config uses `1048576`. |
 | `--allow-remote-read` | Allow HTTPS image and audio reads. Off by default. Can't be combined with `--offline`. |
 | `--telemetry PATH` | Opt in to owner-only telemetry, kept apart from sessions, with no raw prompts or tool payloads. |

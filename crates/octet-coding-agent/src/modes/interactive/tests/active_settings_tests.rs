@@ -64,9 +64,11 @@ async fn tui_preferences_acknowledge_only_successful_idle_and_active_switches() 
     )
     .await
     .unwrap();
-    assert!(shell
-        .debug_snapshot()
-        .contains("interactive terminal mode saved as fullscreen"));
+    assert!(
+        shell
+            .debug_snapshot()
+            .contains("interactive terminal mode saved as fullscreen")
+    );
     assert!(shell.debug_error().is_none());
     assert!(
         !reload
@@ -136,10 +138,12 @@ async fn tui_preferences_acknowledge_only_successful_idle_and_active_switches() 
         receipt.is_none(),
         "failed renderer switches cannot be acknowledged"
     );
-    assert!(shell
-        .debug_error()
-        .unwrap()
-        .contains("renderer restart failed"));
+    assert!(
+        shell
+            .debug_error()
+            .unwrap()
+            .contains("renderer restart failed")
+    );
     assert!(
         reload
             .observe(now + Duration::from_secs(3), &scan())
@@ -180,14 +184,16 @@ async fn tui_preferences_acknowledge_only_successful_idle_and_active_switches() 
 
     // Persistence failure must not switch the screen or produce a receipt.
     std::fs::write(&path, "broken = [").unwrap();
-    assert!(save_tui_mode_with(
-        &mut shell,
-        &mut app.executable_extensions,
-        Fullscreen,
-        |_| panic!("a failed persistence must not switch the renderer"),
-    )
-    .await
-    .is_none());
+    assert!(
+        save_tui_mode_with(
+            &mut shell,
+            &mut app.executable_extensions,
+            Fullscreen,
+            |_| panic!("a failed persistence must not switch the renderer"),
+        )
+        .await
+        .is_none()
+    );
     assert!(shell.debug_error().unwrap().contains("failed to save"));
 }
 

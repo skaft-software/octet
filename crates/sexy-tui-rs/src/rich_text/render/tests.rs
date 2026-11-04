@@ -1114,3 +1114,32 @@ fn retained_rich_prefix_charges_ownership_for_borrowed_and_expanded_runs() {
         assert_eq!(stats.rich_prefix_layouts, 1);
     }
 }
+
+#[test]
+fn custom_unordered_marker_uses_the_capability_fallback() {
+    for (capabilities, expected) in [
+        (
+            TerminalCapabilities::interactive(ColorDepth::TrueColor, true),
+            "• item",
+        ),
+        (
+            TerminalCapabilities::interactive(ColorDepth::TrueColor, false),
+            "* item",
+        ),
+        (TerminalCapabilities::plain(), "* item"),
+    ] {
+        let renderer = RichRenderer::new(
+            Theme::with_capabilities(capabilities),
+            capabilities,
+            RenderOptions {
+                unordered_list_marker: UnorderedListMarker::Custom {
+                    unicode: '•',
+                    ascii: '*',
+                },
+                ..RenderOptions::default()
+            },
+        );
+        let result = renderer.render(&markdown::parse("- item"), 40);
+        assert_eq!(result.lines[0].plain, expected);
+    }
+}

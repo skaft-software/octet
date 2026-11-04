@@ -261,7 +261,7 @@ pub(super) fn read_layer(
     let parent = match parent.canonicalize() {
         Ok(parent) => parent,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LoadedConfigLayer::default())
+            return Ok(LoadedConfigLayer::default());
         }
         Err(error) => return Err(error.into()),
     };
@@ -274,7 +274,7 @@ pub(super) fn read_layer(
         Err(octet_agent::secure_fs::SecureFileError::Io(error))
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
-            return Ok(LoadedConfigLayer::default())
+            return Ok(LoadedConfigLayer::default());
         }
         Err(error) => anyhow::bail!("cannot read config {}: {error}", path.display()),
     };
@@ -327,7 +327,7 @@ pub(super) fn read_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{build_config_with_global_path, Cli};
+    use crate::cli::{Cli, build_config_with_global_path};
     use clap::Parser;
 
     #[test]

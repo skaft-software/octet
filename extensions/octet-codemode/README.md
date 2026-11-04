@@ -21,8 +21,9 @@ For an unpublished source checkout, copy this complete directory to
 `~/.octet/extensions/octet-codemode/` and explicitly enable it. Installation
 alone does not enable execution. Follow the host's extension trust/grant policy;
 the trusted Rust launcher is an ordinary OS process, **not an OS sandbox**.
-Only guest JavaScript is isolated. `--no-process`/`--no-shell` do not apply to
-this bundle (`process = false` in `extension.toml`).
+Only guest JavaScript is isolated. `--no-process`/`--no-shell` also prevent
+this executable extension from starting, regardless of `process = false` in
+`extension.toml`.
 
 The entrypoint is `bin/codemode`. It resolves, in order, an explicit
 `OCTET_CODEMODE_BINARY`, a prebuilt `bin/octet-codemode` shipped beside it, an
@@ -41,6 +42,23 @@ composition tools alone, without widening the nested tool allowlist.
 (default 3000); omitted/deferred tools remain discoverable. Flags are resolved
 at startup. `/codemode [status|help]` and the extension menu show limits and help;
 neither grants execution authority or starts a VM.
+
+### Existing Pi preferences
+
+Pi `settings.json` can request session-only activation of an already-present
+native bundle with `"defaultTools": ["+codemode"]`. `"codemode": {"mode":
+"only", "inlineBudget": 7000}` supplies presentation defaults; explicit CLI
+flags win, including values equal to manifest defaults. Project `.pi/settings.json`
+is ignored unless the workspace is trusted.
+
+Selection uses native extension precedence and host admission, not a bare-name
+trust shortcut. Full access retains its existing implicit authority; controlled
+policies require a grant for the selected source. A global name grant cannot
+transfer to a project shadow. Exact manifest and invocation grants, explicit
+extension directories, process denial and native-host refusal retain their
+normal rules. Preferences never install a bundle, write a trust grant, or
+persist activation. While these preferences participate in activation, native
+activation toggles are read-only; change the Pi preference instead.
 
 ## Engine and isolation
 

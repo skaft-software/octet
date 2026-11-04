@@ -456,8 +456,10 @@ mod tests {
         );
         let frame = shell.dump_rendered_frame().await.unwrap();
         assert!(frame.len() <= 24);
-        assert!(sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
-            .contains("FAIR-MODELESS-DRAFT"));
+        assert!(
+            sexy_tui_rs::strip_terminal_sequences(&frame.join("\n"))
+                .contains("FAIR-MODELESS-DRAFT")
+        );
         assert!(state.extensions.is_modeless());
         assert!(config.model.is_none());
         assert!(config.reasoning.is_none());

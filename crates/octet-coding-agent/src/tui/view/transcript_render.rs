@@ -18,7 +18,7 @@ use super::tool_render::{
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
     activity_elbow, finish_transcript_block, fit_line, render_shell_output, render_user_prompt,
-    subdued_text, wrap_hanging, TranscriptBlock, ACTIVITY_DETAIL_INDENT,
+    subdued_text, wrap_hanging, TranscriptBlock,
 };
 use crate::presentation::tool_display::{compact_path, is_shell_tool};
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
@@ -52,18 +52,30 @@ fn compact_subagent_tokens(tokens: u64) -> String {
     }
 }
 
+fn tool_output_indent(theme: &OctetTheme, width: u16) -> u16 {
+    // Keep at least one content column even when a theme's configured indent
+    // is wider than the available surface in a narrow terminal.
+    theme.layout().tool_body_indent.min(width.saturating_sub(1))
+}
+
 fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
+    let indent = tool_output_indent(theme, width);
     let mut first_content_row = true;
     rows.into_iter()
         .map(|row| {
             if row.is_empty() {
                 return row;
             }
-            let prefix = if first_content_row {
+            let prefix = if first_content_row && indent > 0 {
                 first_content_row = false;
-                format!("{} ", subdued_text(theme, activity_elbow(theme)))
+                format!(
+                    "{}{}",
+                    subdued_text(theme, activity_elbow(theme)),
+                    " ".repeat(usize::from(indent - 1))
+                )
             } else {
-                ACTIVITY_DETAIL_INDENT.to_owned()
+                first_content_row = false;
+                " ".repeat(usize::from(indent))
             };
             fit_line(&format!("{prefix}{row}"), width)
         })
@@ -97,10 +109,12 @@ fn append_nested_tool_output(
         return;
     }
 
-    let stem = subdued_text(theme, theme.glyph("vertical"));
-    for continuation in header.iter_mut().skip(1) {
-        if let Some(rest) = continuation.strip_prefix(' ') {
-            *continuation = fit_line(&format!("{stem}{rest}"), width);
+    if tool_output_indent(theme, width) > 0 {
+        let stem = subdued_text(theme, theme.glyph("vertical"));
+        for continuation in header.iter_mut().skip(1) {
+            if let Some(rest) = continuation.strip_prefix(' ') {
+                *continuation = fit_line(&format!("{stem}{rest}"), width);
+            }
         }
     }
     header.extend(nest_tool_output(rows, theme, width));
@@ -376,14 +390,7 @@ pub(super) fn render_block_planned_with_rainbow(
                 let label = if quiet_summary {
                     theme.fg("muted", &tool)
                 } else {
-                    theme.bold(&theme.fg(
-                        if theme.is_pi_theme() {
-                            "tool_title"
-                        } else {
-                            "foreground"
-                        },
-                        &tool,
-                    ))
+                    theme.apply_transcript_role_on_surface("tool_header", plan.content_role, &tool)
                 };
                 let label_width = visible_width(&tool);
                 let text = match panel.display.value.as_deref() {
@@ -410,7 +417,9 @@ pub(super) fn render_block_planned_with_rainbow(
                     rows
                 }
             };
-            let nested_width = width.saturating_sub(2).max(1);
+            let nested_width = width
+                .saturating_sub(tool_output_indent(theme, width))
+                .max(1);
             if quiet_summary
                 && panel.display.shell_command.is_none()
                 && (panel.display.value.is_none() || panel.name == "codemode")
@@ -566,7 +575,9 @@ pub(super) fn render_block_planned_with_rainbow(
                 ),
                 width,
             )];
-            let nested_width = width.saturating_sub(2).max(1);
+            let nested_width = width
+                .saturating_sub(tool_output_indent(theme, width))
+                .max(1);
             let (output, source) =
                 render_shell_output(shell, theme, nested_width, verbose_tools, "");
             geometry.shell_output = Some(source);

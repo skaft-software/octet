@@ -109,6 +109,22 @@ palettes are diagnosed; disabling the extension withdraws them. The built-in
 Missing packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
+### Pi packages octet replaces
+
+For now, a few Pi packages overlap a first-party octet feature. octet uses its
+own version and does not load the Pi package, printing one line at startup:
+
+| Pi package | octet uses instead | Startup line |
+|---|---|---|
+| `pi-subagents` | the `octet-subagents` bundle | `pi-subagents: replaced by octet-subagents` |
+| `@narumitw/pi-goal` | built-in `/goal` | `pi-goal: octet uses its built-in /goal` |
+| Pi codemode (`"defaultTools": ["+codemode"]`) | the `octet-codemode` bundle, when installed and admitted | — |
+
+Matching is by exact npm package name. Behavior follows octet's feature, not
+the Pi package: for example, codemode's `tools.bash` resolves to octet's
+`stdout`/`stderr`/`exit_code` result, and `/goal` text is handled by octet's
+command. See the [codemode README](../extensions/octet-codemode/README.md).
+
 ### Command names and native access
 
 Pi commands retain names such as `/mcp:start`. Commands registered during

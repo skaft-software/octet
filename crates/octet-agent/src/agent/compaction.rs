@@ -1258,6 +1258,7 @@ impl CompactionContext<'_> {
                     // of Session. This owning driver services private append
                     // leaves while it waits, then freezes against the post-hook
                     // head without rerunning a mutating hook after its append.
+                    let mut notices = Vec::new();
                     let projection = project_provider_context(
                         request,
                         preparation.hooks,
@@ -1265,8 +1266,15 @@ impl CompactionContext<'_> {
                         self.model,
                         self.abort,
                         self.session,
+                        &mut notices,
                     );
-                    Some(Box::pin(projection).await?)
+                    let projection = Box::pin(projection).await;
+                    for message in notices {
+                        let _ = self
+                            .events
+                            .send(AgentEvent::ExtensionObservationWarning { message });
+                    }
+                    Some(projection?)
                 }
                 None => None,
             };

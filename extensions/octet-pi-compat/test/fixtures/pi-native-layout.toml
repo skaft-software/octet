@@ -4,6 +4,7 @@ name = "Pi presentation QA"
 description = "Pi colors and shaded transcript surfaces; native input and ownership"
 terminal = "dark"
 adaptive = false
+profile = "pi"
 
 [colors]
 accent = "#00aaff"
@@ -46,72 +47,53 @@ syntax_number = "#00aaff"
 syntax_type = "#00aaff"
 syntax_operator = "#00aaff"
 syntax_punctuation = "#00aaff"
-prompt_wash = false
-margin_markers = false
-thinking_spinner = true
-thinking_expanded = true
-splash_compact = true
 assistant_msg_text = "#ddeeff"
 model_assistant = "#ddeeff"
 model_accent = "#00aaff"
-md_code_bg = "default"
-md_code_inline_bg = "default"
-
-[model]
-use_lab_color = false
-
-[layout]
-transcript_inset = 0
 
 [roles."surface.user"]
 foreground = "#ddeeff"
 background = "#223344"
 
-[surfaces.user]
-chrome = "band"
-padding = 1
-narrow_chrome = "band"
-narrow_padding = 1
-
 [roles."surface.assistant"]
 foreground = "#ddeeff"
 background = "default"
-
-[surfaces.assistant]
-chrome = "plain"
-padding = 1
-narrow_chrome = "plain"
-narrow_padding = 1
 
 [roles."surface.reasoning"]
 foreground = "#00aaff"
 background = "default"
 
-[surfaces.reasoning]
-chrome = "plain"
-padding = 0
-narrow_chrome = "plain"
-narrow_padding = 0
-
 [roles."surface.tool"]
 foreground = "#00aaff"
 background = "#182838"
-
-[surfaces.tool]
-chrome = "band"
-padding = 1
-narrow_chrome = "band"
-narrow_padding = 1
 
 [roles."surface.shell"]
 foreground = "#00aaff"
 background = "#182838"
 
-[surfaces.shell]
-chrome = "band"
-padding = 1
-narrow_chrome = "band"
-narrow_padding = 1
+[roles."surface.tool.pending"]
+foreground = "#00aaff"
+background = "#182838"
+
+[roles."surface.tool.success"]
+foreground = "#00aaff"
+background = "#183828"
+
+[roles."surface.tool.error"]
+foreground = "#00aaff"
+background = "#381828"
+
+[roles."surface.shell.pending"]
+foreground = "#00aaff"
+background = "#182838"
+
+[roles."surface.shell.success"]
+foreground = "#00aaff"
+background = "#183828"
+
+[roles."surface.shell.error"]
+foreground = "#00aaff"
+background = "#381828"
 
 [roles."extension.pi.accent"]
 foreground = "#00aaff"

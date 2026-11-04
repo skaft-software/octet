@@ -56,7 +56,7 @@ fn bleed_row(
 }
 
 fn styled_surface_heading(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> String {
-    let (_, border_role, label_role) = surface_roles(plan.kind);
+    let (_, border_role, label_role) = surface_roles(plan.kind, theme);
     let frame_width = usize::from(plan.frame_width);
     let left = theme.glyph("top_left");
     let right = theme.glyph("top_right");
@@ -124,7 +124,7 @@ fn render_surface_content_line(
     if plan.event_spacing && line.is_empty() {
         return String::new();
     }
-    let (_, border_role, _) = surface_roles(plan.kind);
+    let (_, border_role, _) = surface_roles(plan.kind, theme);
     let content_role = plan.content_role;
     let content = fit_line(line, plan.geometry.content_width);
     let left_padding = " ".repeat(usize::from(plan.padding));
@@ -299,7 +299,7 @@ fn sgr_selects_background(params: &str) -> bool {
 
 fn surface_bottom_row(plan: &SurfacePlan<'_>, theme: &OctetTheme) -> Option<String> {
     (plan.chrome == ThemeSurfaceChrome::Card).then(|| {
-        let (_, border_role, _) = surface_roles(plan.kind);
+        let (_, border_role, _) = surface_roles(plan.kind, theme);
         let middle = horizontal_rule(theme, usize::from(plan.frame_width.saturating_sub(2)));
         let bottom = format!(
             "{}{}{}",
@@ -513,7 +513,13 @@ pub(super) fn decorate_surface_with_frame(
     // A bleeding surface paints its own leading columns, so the event marker
     // rides inside the frame row instead of being prefixed outside it.
     let bleeds = plan.bleeds();
-    let mut marker = marker.as_deref();
+    // Do not add a marker when its gutter is explicitly disabled: doing so
+    // would shift the planned frame and clip content at the right edge.
+    let mut marker = if plan.marker_enabled {
+        marker.as_deref()
+    } else {
+        None
+    };
     rows.extend(content.iter().map(|line| {
         let row_marker = if bleeds { marker.take() } else { None };
         render_surface_content_line(

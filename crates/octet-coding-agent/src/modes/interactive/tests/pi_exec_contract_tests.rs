@@ -89,11 +89,13 @@ impl crate::extensions::ExtensionConfirmationHandler for ExecPicker {
         _extension: &'a str,
         request: &'a octet_agent::tool::ToolConfirmation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + 'a>> {
-        assert!(request
-            .technical_detail
-            .as_deref()
-            .unwrap()
-            .contains("complete intent sha256"));
+        assert!(
+            request
+                .technical_detail
+                .as_deref()
+                .unwrap()
+                .contains("complete intent sha256")
+        );
         assert!(!request.detail.as_deref().unwrap().contains("sha256"));
         assert!(request.detail.as_deref().unwrap().contains("Command:"));
         self.prompts += 1;

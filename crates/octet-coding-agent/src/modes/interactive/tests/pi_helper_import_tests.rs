@@ -193,7 +193,9 @@ async fn pi_matrix_optional_context_and_bus_properties_are_absent() {
     app.executable_extensions.shutdown().await;
     result.unwrap();
     let reopened = Session::open_read_only(&path).unwrap();
-    assert!(reopened.entries().iter().any(|entry| reopened
-        .extension_entry(&entry.id, "octet-pi-compat")
-        .is_some_and(|entry| entry.entry_type == "matrix-optional")));
+    assert!(reopened.entries().iter().any(|entry| {
+        reopened
+            .extension_entry(&entry.id, "octet-pi-compat")
+            .is_some_and(|entry| entry.entry_type == "matrix-optional")
+    }));
 }

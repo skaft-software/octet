@@ -17,8 +17,8 @@ use std::io::{Read as _, Seek as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -140,7 +140,9 @@ impl ModelProfile {
             || url.fragment().is_some()
             || url.path() != "/v1/"
         {
-            anyhow::bail!("eval profile requires octet-eval-model-1 and http://<loopback-IP>:<port>/v1/ without userinfo, query or fragment");
+            anyhow::bail!(
+                "eval profile requires octet-eval-model-1 and http://<loopback-IP>:<port>/v1/ without userinfo, query or fragment"
+            );
         }
         if profile.model.is_empty()
             || profile.model.len() > 256

@@ -1877,6 +1877,28 @@ impl ExtensionProcess {
         }
     }
 
+    /// Answer a process request only while its host-issued resource owner is
+    /// live at writer admission. Unlike a generation-only response, this fences
+    /// foreground retirement/replacement during asynchronous host resolution.
+    pub async fn respond_to_extension_request_for_owner(
+        &self,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        owner: &ExtensionResourceOwner,
+        result: serde_json::Value,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return Err(ExtensionRuntimeError::Closed(format!(
+                "extension request belongs to stale generation {generation}; current generation is {}",
+                connection.generation
+            )));
+        }
+        connection
+            .send_child_response_for_owner(request_id, &result, owner)
+            .await
+    }
+
     /// Coalesces one observed assistant delta. A `message/updated` notification
     /// is emitted only at a flush boundary, so no per-delta round trip exists.
     pub fn push_message_delta(&self, delta: &str) -> Result<(), ExtensionRuntimeError> {

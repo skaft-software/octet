@@ -145,8 +145,10 @@ async fn held_open_manual_compaction_keeps_input_live_and_settles_all_outcomes()
             );
             if !matches!(outcome, HeldOutcome::Success) {
                 assert!(app.agent.session().has_uncertain_usage(), "{outcome:?}");
-                assert!(app.agent.session().usage_records().is_empty(),
-                    "failed/abandoned summaries have unknown usage, not invented successful receipts");
+                assert!(
+                    app.agent.session().usage_records().is_empty(),
+                    "failed/abandoned summaries have unknown usage, not invented successful receipts"
+                );
                 assert_eq!(
                     app.agent.session().entries().len(),
                     before,

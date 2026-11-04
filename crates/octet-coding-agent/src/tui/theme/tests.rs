@@ -766,6 +766,32 @@ fn resolver_selected_theme_paths_are_bounded_validated_and_reloadable() {
     assert!(error.contains("too large"));
 }
 
+#[test]
+fn file_reload_recompiles_pi_profile_transcript_overrides() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("profile.toml");
+    std::fs::write(&path, "[metadata]\nprofile = 'pi'\n").unwrap();
+    let theme = load_theme_path_for(
+        &path,
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        TerminalBackground::Dark,
+    )
+    .unwrap();
+    assert_eq!(theme.layout().block_padding_x, Some(1));
+    assert!(theme.semantic_style("thinking").attributes.italic);
+    assert_eq!(theme.glyph("list_bullet"), "-");
+    std::fs::write(&path, "[metadata]\nprofile = 'pi'\n[layout]\nblock_padding_x = 3\n[roles.thinking]\nitalic = false\n[glyphs]\nlist_bullet = '*'\n").unwrap();
+    let reloaded = theme.reload().unwrap();
+    assert_eq!(reloaded.layout().block_padding_x, Some(3));
+    assert!(!reloaded.semantic_style("thinking").attributes.italic);
+    assert_eq!(reloaded.glyph("list_bullet"), "*");
+    assert_eq!(
+        theme.layout().block_padding_x,
+        Some(1),
+        "old snapshot remains unchanged"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn file_theme_reload_rejects_a_path_swapped_to_a_symlink() {

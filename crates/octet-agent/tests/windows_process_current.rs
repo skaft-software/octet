@@ -71,7 +71,7 @@ async fn explicit_windows_bash_preserves_bash_c_and_cwd_semantics() {
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
     sandbox.shell_path = Some(shell);
-    sandbox.bash_timeout = Duration::from_secs(5);
+    sandbox.bash_timeout = Some(Duration::from_secs(5));
     let output = BashTool
         .execute(
             json!({
@@ -103,7 +103,7 @@ async fn windows_job_cleanup_bounds_an_infinite_bash_command() {
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
     sandbox.shell_path = Some(shell);
-    sandbox.bash_timeout = Duration::from_secs(5);
+    sandbox.bash_timeout = Some(Duration::from_secs(5));
 
     let started = Instant::now();
     let error = BashTool
@@ -128,7 +128,7 @@ fn powershell_sandbox(workspace: &Path) -> SandboxConfig {
     let mut sandbox = SandboxConfig::new(workspace);
     sandbox.allow_process = true;
     sandbox.allow_shell = true;
-    sandbox.bash_timeout = Duration::from_secs(30);
+    sandbox.bash_timeout = Some(Duration::from_secs(30));
     sandbox
 }
 

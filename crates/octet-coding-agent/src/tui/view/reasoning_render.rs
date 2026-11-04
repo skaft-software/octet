@@ -1036,8 +1036,8 @@ fn activity_shimmer_label(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
-    // Pi's loader moves the spinner, not a model-colored sweep through its label.
-    if theme.is_pi_theme() {
+    // A theme can keep the label static while animating the spinner.
+    if !theme.activity_shimmer_enabled() {
         return theme.fg("muted", label);
     }
     let static_label = || theme.bold(&theme.model_fg(reasoning.model_lab, label));

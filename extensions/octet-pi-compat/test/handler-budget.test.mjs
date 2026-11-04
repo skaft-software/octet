@@ -19,6 +19,35 @@ const features = ['before_prompt_state_v1'];
 const start = peer => peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
 const prompt = (peer, text) => ({ hook: 'before_prompt', payload: { prompt: text, system_prompt: 'base' }, context: peer.context() });
 
+test('provider-context phases share a budget below the native request deadline', () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  try {
+    assert.deepEqual(budgetFor('context'), { perHandler: 2000, total: 4000 });
+    assert.deepEqual(budgetFor('context_with_system'), { perHandler: 2000, total: 4000 });
+    const first = new HookBudget({}, {}, 'context', performance.now() - 4001);
+    const second = new HookBudget({}, {}, 'context_with_system', first.started);
+    assert.equal(second.wait(), 0, 'the second phase cannot start a new total budget');
+  } finally {
+    if (previous !== undefined) process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('a context callback skipped for exhausted total budget is reported without being run', async () => {
+  const reports = [], state = {};
+  const runtime = { reportCallbackError: (...args) => reports.push(args) };
+  const budget = new HookBudget(runtime, { state }, 'context_with_system');
+  budget.started -= budget.total + 1;
+  let called = false;
+  const result = await budget.run({ factory: 2 }, {}, () => { called = true; });
+  assert.deepEqual(result, { ran: false, busy: false });
+  assert.equal(called, false);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0][0], 'context_with_system');
+  assert.equal(reports[0][1], 2);
+  assert.equal(reports[0][3], state);
+});
+
 test('a session_start handler that never settles is detached instead of wedging the hook queue', async t => {
   const peer = launch(t, [stalled, healthy], options); await peer.init(features);
   const started = await start(peer).response;

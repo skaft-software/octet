@@ -2,7 +2,7 @@ use super::*;
 use crate::extension::ProviderContextProjection;
 use std::sync::atomic::AtomicUsize;
 
-async fn project_provider_context(
+async fn project_with_fresh_session(
     request: Request,
     hooks: &[Arc<dyn ProviderContextHook>],
     context: &ProviderContextProjectionContext,
@@ -11,7 +11,17 @@ async fn project_provider_context(
 ) -> Result<Request, AgentError> {
     let workspace = tempfile::tempdir().unwrap();
     let mut session = Session::create(workspace.path().join("projection.jsonl")).unwrap();
-    super::project_provider_context(request, hooks, context, model, abort, &mut session).await
+    let mut notices = Vec::new();
+    super::project_provider_context(
+        request,
+        hooks,
+        context,
+        model,
+        abort,
+        &mut session,
+        &mut notices,
+    )
+    .await
 }
 
 fn model() -> Model {
@@ -247,8 +257,26 @@ impl ProviderContextHook for Refuse {
         }
     }
 }
+struct ContinueRefuse(Refuse);
+#[async_trait::async_trait]
+impl ProviderContextHook for ContinueRefuse {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn failure_notice_id(&self) -> Option<&str> {
+        Some("test-extension")
+    }
+    async fn project_context(
+        &self,
+        request: &Request,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        self.0.project_context(request, context).await
+    }
+}
+
 #[tokio::test(start_paused = true)]
-async fn hook_error_deadline_and_same_poll_cancellation_abort_without_fallback() {
+async fn extension_hook_error_and_deadline_continue_but_same_poll_cancellation_aborts() {
     for case in ["error", "deadline", "cancel"] {
         let calls = Arc::new(AtomicUsize::new(0));
         let cancellation = CancellationToken::default();
@@ -256,29 +284,612 @@ async fn hook_error_deadline_and_same_poll_cancellation_abort_without_fallback()
             cancellation: cancellation.clone(),
             ..AbortFlag::default()
         };
-        let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
-            Arc::new(Refuse {
-                calls: calls.clone(),
-                wait: case == "deadline",
-                cancel: (case == "cancel").then_some(cancellation),
-            }),
-            Arc::new(Refuse {
-                calls: calls.clone(),
-                wait: false,
-                cancel: None,
-            }),
-        ];
-        let error = project_provider_context(request(), &hooks, &identity(), &model(), &abort)
-            .await
-            .unwrap_err();
+        let mut hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(ContinueRefuse(Refuse {
+            calls: calls.clone(),
+            wait: case == "deadline",
+            cancel: (case == "cancel").then_some(cancellation),
+        }))];
+        if case != "deadline" {
+            hooks.push(Arc::new(Rewrite {
+                system: None,
+                text: "later hook ran".into(),
+                observations: Arc::new(Mutex::new(Vec::new())),
+            }));
+        }
+        let mut notices = Vec::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut session = Session::create(workspace.path().join("hook-failure.jsonl")).unwrap();
+        let mut context = identity();
+        context.session_id = format!("hook-error-{case}");
+        let result = super::project_provider_context(
+            request(),
+            &hooks,
+            &context,
+            &model(),
+            &abort,
+            &mut session,
+            &mut notices,
+        )
+        .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(if case == "cancel" {
-            matches!(error, AgentError::Cancelled)
+            matches!(result, Err(AgentError::Cancelled)) && notices.is_empty()
         } else {
-            matches!(error, AgentError::ProviderContextPreparation(_))
+            result.is_ok() && notices.len() == 1 && notices[0].contains("context hook failed")
         });
-        assert!(!error.to_string().contains("secret-bearing"));
+        if let Ok(result) = result {
+            let messages = serialize_conversation(&result.messages);
+            assert!(messages.contains(if case == "deadline" {
+                "canonical user"
+            } else {
+                "later hook ran"
+            }));
+        }
+        assert!(notices
+            .iter()
+            .all(|notice| !notice.contains("secret-bearing")));
     }
+}
+
+#[tokio::test]
+async fn extension_hook_failure_keeps_canonical_request_and_reports_once_per_extension_session() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(ContinueRefuse(Refuse {
+        calls,
+        wait: false,
+        cancel: None,
+    }));
+    let mut context = identity();
+    context.session_id = "dedupe-session-w7".into();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("unused.jsonl")).unwrap();
+    let canonical = request();
+    let mut first_notices = Vec::new();
+    let first = super::project_provider_context(
+        canonical.clone(),
+        &[hook.clone()],
+        &context,
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut first_notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&first.messages),
+        serialize_conversation(&canonical.messages)
+    );
+    assert_eq!(first.system, canonical.system);
+    assert_eq!(first_notices.len(), 1);
+    let mut second_notices = Vec::new();
+    let second = super::project_provider_context(
+        canonical.clone(),
+        &[hook],
+        &context,
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut second_notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&second.messages),
+        serialize_conversation(&canonical.messages)
+    );
+    assert!(second_notices.is_empty(), "notice repeated in one session");
+    // A reopened session has its own bounded, non-durable notice lifetime.
+    let path = session.path().to_owned();
+    drop(session);
+    let mut reopened = Session::open(path).unwrap();
+    let mut reopened_notices = Vec::new();
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(ContinueRefuse(Refuse {
+        calls: Arc::new(AtomicUsize::new(0)),
+        wait: false,
+        cancel: None,
+    }));
+    super::project_provider_context(
+        canonical,
+        &[hook],
+        &context,
+        &model(),
+        &AbortFlag::default(),
+        &mut reopened,
+        &mut reopened_notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened_notices.len(), 1);
+}
+
+struct NamedFailure(String);
+#[async_trait::async_trait]
+impl ProviderContextHook for NamedFailure {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn failure_notice_id(&self) -> Option<&str> {
+        Some(&self.0)
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        Err("private error".into())
+    }
+}
+#[tokio::test]
+async fn session_notice_ledger_is_capped_pruned_and_does_not_hide_overflow() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("notices.jsonl")).unwrap();
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = (0..=MAX_CONTEXT_FAILURE_NOTICES)
+        .map(|n| Arc::new(NamedFailure(format!("extension-{n}"))) as Arc<dyn ProviderContextHook>)
+        .collect();
+    let mut notices = Vec::new();
+    super::project_provider_context(
+        request(),
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session.context_failure_notices.len(),
+        MAX_CONTEXT_FAILURE_NOTICES
+    );
+    assert_eq!(notices.len(), MAX_CONTEXT_FAILURE_NOTICES + 1);
+    notices.clear();
+    super::project_provider_context(
+        request(),
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(notices.len(), 1, "untracked overflow must remain visible");
+    notices.clear();
+    super::project_provider_context(
+        request(),
+        &hooks[MAX_CONTEXT_FAILURE_NOTICES..],
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.context_failure_notices.len(), 1);
+    assert_eq!(notices.len(), 1);
+    assert!(notices.iter().all(|n| !n.contains("private error")));
+}
+
+struct SimulatedProcessTimeout {
+    revoked: Arc<AtomicUsize>,
+}
+impl Drop for SimulatedProcessTimeout {
+    fn drop(&mut self) {
+        self.revoked.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl crate::ProviderContextSessionWait for SimulatedProcessTimeout {
+    fn projection_future(
+        &mut self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Option<
+        futures_util::future::BoxFuture<
+            'static,
+            Result<Option<ProviderContextProjection>, ProviderContextHookError>,
+        >,
+    > {
+        Some(Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(ProviderContextHookError::Failed(
+                "simulated process request timeout".into(),
+            ))
+        }))
+    }
+    fn ready(&self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(std::future::pending())
+    }
+    fn consume_next(
+        &mut self,
+        _: &mut Session,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<(), String> {
+        unreachable!()
+    }
+}
+struct SimulatedProcessTimeoutHook(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl ProviderContextHook for SimulatedProcessTimeoutHook {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn begin_session_wait(
+        &self,
+        _: &Session,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn crate::ProviderContextSessionWait>>, String> {
+        Ok(Some(Box::new(SimulatedProcessTimeout {
+            revoked: self.0.clone(),
+        })))
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        unreachable!()
+    }
+}
+struct SimulatedSuccessfulExtension(Rewrite);
+#[async_trait::async_trait]
+impl ProviderContextHook for SimulatedSuccessfulExtension {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    async fn project_context(
+        &self,
+        request: &Request,
+        context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        self.0.project_context(request, context).await
+    }
+}
+struct AcceptingHostGuard(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl ProviderContextHook for AcceptingHostGuard {
+    async fn project_context(
+        &self,
+        request: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        assert!(serialize_conversation(&request.messages).contains("later extension"));
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn process_request_timeout_before_aggregate_deadline_allows_later_extension_and_host_guard() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("timeout-success.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let revoked = Arc::new(AtomicUsize::new(0));
+    let guarded = Arc::new(AtomicUsize::new(0));
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(SimulatedProcessTimeoutHook(revoked.clone())),
+        Arc::new(SimulatedSuccessfulExtension(Rewrite {
+            system: None,
+            text: "later extension".into(),
+            observations: Arc::new(Mutex::new(Vec::new())),
+        })),
+        Arc::new(AcceptingHostGuard(guarded.clone())),
+    ];
+    let start = tokio::time::Instant::now();
+    let result = super::project_provider_context(
+        request(),
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert!(serialize_conversation(&result.messages).contains("later extension"));
+    assert_eq!(guarded.load(Ordering::SeqCst), 1);
+    assert_eq!(revoked.load(Ordering::SeqCst), 1);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(1));
+}
+
+struct RemoteCancelAtDeadline;
+impl crate::ProviderContextSessionWait for RemoteCancelAtDeadline {
+    fn projection_future(
+        &mut self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Option<
+        futures_util::future::BoxFuture<
+            'static,
+            Result<Option<ProviderContextProjection>, ProviderContextHookError>,
+        >,
+    > {
+        Some(Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Err(ProviderContextHookError::Cancelled)
+        }))
+    }
+    fn ready(&self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(std::future::pending())
+    }
+    fn consume_next(
+        &mut self,
+        _: &mut Session,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<(), String> {
+        unreachable!()
+    }
+}
+#[async_trait::async_trait]
+impl ProviderContextHook for RemoteCancelAtDeadline {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn begin_session_wait(
+        &self,
+        _: &Session,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn crate::ProviderContextSessionWait>>, String> {
+        Ok(Some(Box::new(RemoteCancelAtDeadline)))
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        unreachable!()
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn remote_cancellation_wins_same_poll_as_deadline() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("remote-cancel.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(RemoteCancelAtDeadline);
+    assert!(matches!(
+        super::project_provider_context(
+            request(),
+            &[hook],
+            &identity(),
+            &model(),
+            &AbortFlag::default(),
+            &mut session,
+            &mut notices
+        )
+        .await,
+        Err(AgentError::Cancelled)
+    ));
+    assert!(notices.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn exhausted_aggregate_deadline_cannot_skip_a_later_host_guard() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("deadline-guard.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(ContinueRefuse(Refuse {
+            calls: calls.clone(),
+            wait: true,
+            cancel: None,
+        })),
+        Arc::new(Refuse {
+            calls: calls.clone(),
+            wait: false,
+            cancel: None,
+        }),
+    ];
+    let start = tokio::time::Instant::now();
+    assert!(matches!(
+        super::project_provider_context(
+            request(),
+            &hooks,
+            &identity(),
+            &model(),
+            &AbortFlag::default(),
+            &mut session,
+            &mut notices,
+        )
+        .await,
+        Err(AgentError::ProviderContextPreparation(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "later guard was polled");
+    assert_eq!(notices.len(), 1);
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(5));
+}
+
+struct DeadlineSuccess {
+    extension: bool,
+    calls: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl ProviderContextHook for DeadlineSuccess {
+    fn continues_on_failure(&self) -> bool {
+        self.extension
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn aggregate_extension_timeout_skips_later_extensions_but_runs_successful_guard() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("deadline-success.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let extension_calls = Arc::new(AtomicUsize::new(0));
+    let guard_calls = Arc::new(AtomicUsize::new(0));
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(ContinueRefuse(Refuse {
+            calls: Arc::new(AtomicUsize::new(0)),
+            wait: true,
+            cancel: None,
+        })),
+        Arc::new(DeadlineSuccess {
+            extension: true,
+            calls: extension_calls.clone(),
+        }),
+        Arc::new(DeadlineSuccess {
+            extension: false,
+            calls: guard_calls.clone(),
+        }),
+    ];
+    let canonical = request();
+    let start = tokio::time::Instant::now();
+    let result = super::project_provider_context(
+        canonical.clone(),
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&result.messages),
+        serialize_conversation(&canonical.messages)
+    );
+    assert_eq!(result.system, canonical.system);
+    assert_eq!(
+        extension_calls.load(Ordering::SeqCst),
+        0,
+        "no new extension authority is activated after the budget expires"
+    );
+    assert_eq!(
+        guard_calls.load(Ordering::SeqCst),
+        1,
+        "the authority guard must run despite the timeout"
+    );
+    assert_eq!(notices.len(), 2);
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(5));
+}
+
+struct LateProjection;
+#[async_trait::async_trait]
+impl ProviderContextHook for LateProjection {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok(Some(ProviderContextProjection {
+            system: Some("late system".into()),
+            messages: vec![projected_user("late context")],
+            tools: None,
+        }))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn extension_success_at_deadline_is_discarded_before_guard_and_dispatch() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("late-projection.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let guarded = Arc::new(AtomicUsize::new(0));
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(LateProjection),
+        Arc::new(DeadlineSuccess {
+            extension: false,
+            calls: guarded.clone(),
+        }),
+    ];
+    let canonical = request();
+    let result = super::project_provider_context(
+        canonical.clone(),
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&result.messages),
+        serialize_conversation(&canonical.messages)
+    );
+    assert_eq!(result.system, canonical.system);
+    assert_eq!(guarded.load(Ordering::SeqCst), 1);
+    assert_eq!(notices.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_guard_timeout_after_extension_timeout_still_fails_closed() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("late-guard.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(ContinueRefuse(Refuse {
+            calls: calls.clone(),
+            wait: true,
+            cancel: None,
+        })),
+        Arc::new(Refuse {
+            calls: calls.clone(),
+            wait: true,
+            cancel: None,
+        }),
+    ];
+    let start = tokio::time::Instant::now();
+    assert!(matches!(
+        super::project_provider_context(
+            request(),
+            &hooks,
+            &identity(),
+            &model(),
+            &AbortFlag::default(),
+            &mut session,
+            &mut notices,
+        )
+        .await,
+        Err(AgentError::ProviderContextPreparation(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn host_owned_context_hook_still_fails_closed_by_default() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("host-guard.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(Refuse {
+        calls: Arc::new(AtomicUsize::new(0)),
+        wait: false,
+        cancel: None,
+    });
+    assert!(matches!(
+        super::project_provider_context(
+            request(),
+            &[hook],
+            &identity(),
+            &model(),
+            &AbortFlag::default(),
+            &mut session,
+            &mut notices,
+        )
+        .await,
+        Err(AgentError::ProviderContextPreparation(_))
+    ));
+    assert!(notices.is_empty());
 }
 
 fn tool_history() -> Request {
@@ -388,7 +999,7 @@ async fn oversized_replacements_fail_before_the_next_hook() {
         }),
     ];
     assert!(matches!(
-        project_provider_context(
+        project_with_fresh_session(
             request(),
             &hooks,
             &identity(),
@@ -412,7 +1023,7 @@ async fn opaque_replay_change_is_refused_instead_of_ignored_or_discarded() {
     let mut request = request();
     request.responses = Some(ResponsesOptions::full_replay(ResponsesInput::default()));
     assert!(matches!(
-        project_provider_context(
+        project_with_fresh_session(
             request,
             &[hook],
             &identity(),
@@ -432,6 +1043,7 @@ struct AppendHook {
     calls: Arc<AtomicUsize>,
     revoked: Arc<AtomicUsize>,
     cancel: Option<CancellationToken>,
+    pending_after_commit: bool,
 }
 struct AppendWait {
     ready: Arc<tokio::sync::Notify>,
@@ -483,6 +1095,9 @@ impl crate::ProviderContextSessionWait for AppendWait {
 }
 #[async_trait::async_trait]
 impl ProviderContextHook for AppendHook {
+    fn continues_on_failure(&self) -> bool {
+        self.pending_after_commit
+    }
     fn begin_session_wait(
         &self,
         session: &Session,
@@ -511,6 +1126,9 @@ impl ProviderContextHook for AppendHook {
         }
         // Projection becomes active only after the real synced append receipt.
         receipt.await.unwrap()?;
+        if self.pending_after_commit {
+            std::future::pending::<()>().await;
+        }
         Ok(Some(ProviderContextProjection {
             system: None,
             tools: None,
@@ -533,6 +1151,7 @@ fn append_hook(
             calls: calls.clone(),
             revoked: revoked.clone(),
             cancel,
+            pending_after_commit: false,
         },
         calls,
         revoked,
@@ -570,6 +1189,58 @@ async fn owning_driver_services_synced_private_append_without_reexecuting_mutati
     assert!(serialize_conversation(&request.messages).contains("effective checkpoint context"));
     assert!(!serialize_conversation(&request.messages).contains("private checkpoint"));
 }
+#[tokio::test(start_paused = true)]
+async fn no_reply_after_private_append_revokes_service_and_keeps_session_usable() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("timeout-append.jsonl")).unwrap();
+    let (mut hook, calls, revoked) = append_hook(None);
+    hook.pending_after_commit = true;
+    let mut notices = Vec::new();
+    let canonical = request();
+    let result = super::project_provider_context(
+        canonical.clone(),
+        &[Arc::new(hook)],
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&result.messages),
+        serialize_conversation(&canonical.messages)
+    );
+    assert_eq!(result.system, canonical.system);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(revoked.load(Ordering::SeqCst), 1);
+    assert_eq!(session.entries().len(), 1);
+    assert_eq!(
+        Session::open_read_only(session.path())
+            .unwrap()
+            .entries()
+            .len(),
+        1
+    );
+    session
+        .append_extension_entry(
+            "after-timeout",
+            Some(1),
+            "still-usable",
+            serde_json::json!({}),
+        )
+        .unwrap();
+    assert_eq!(
+        Session::open_read_only(session.path())
+            .unwrap()
+            .entries()
+            .len(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn cancellation_wins_before_queued_private_leaf_commit_and_revokes_service() {
     let workspace = tempfile::tempdir().unwrap();
@@ -580,6 +1251,7 @@ async fn cancellation_wins_before_queued_private_leaf_commit_and_revokes_service
         ..AbortFlag::default()
     };
     let (hook, calls, revoked) = append_hook(Some(cancellation));
+    let mut notices = Vec::new();
     let error = super::project_provider_context(
         request(),
         &[Arc::new(hook)],
@@ -587,6 +1259,7 @@ async fn cancellation_wins_before_queued_private_leaf_commit_and_revokes_service
         &model(),
         &abort,
         &mut session,
+        &mut notices,
     )
     .await
     .unwrap_err();

@@ -332,6 +332,10 @@ and `tool_policy.data.decision.policy` share one schema. `effect_policy`,
 `allow_shell`, `shell_path`, `bash_timeout_ms`, `max_output_bytes`, and
 `allow_remote_read` each have `{ "value": ..., "source": ... }` with source
 `default`, `config`, `environment`, `cli`, or `host_request`.
+`bash_timeout_ms.value` is an integer ceiling in milliseconds, or JSON `null`
+when no deadline is configured (the default). Rust embedders use
+`SandboxConfig::bash_timeout: Option<Duration>`; cancellation remains active
+with `None`.
 `shell_path.value` contains only `{ "selection": "configured" | "system_bash" |
 "path_bash" | "sh_fallback" | "unavailable" }`, never a path, digest, or cross-run
 identifier. Decisions contain optional effect, `allowed`, `authorization` when

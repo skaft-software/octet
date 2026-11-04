@@ -186,17 +186,27 @@ export class ExtensionIssues {
       reason: `${display(event, 128)} data was unavailable, so some activity was missed`,
       next: 'Update octet if this keeps happening.' })));
   }
+  contextIssue(event, path, state) {
+    if (!state || !['context', 'context_with_system'].includes(event)) return this.firstEventIssue(event, path);
+    if (!state.alive) return false; // Detached late callbacks cannot revive a retired notice ledger.
+    const seen = state.contextFailureNotices ??= new Set();
+    if (seen.has(path)) return false;
+    // Factory configuration bounds distinct paths; cap even if it is replaced.
+    if (seen.size < 1024) seen.add(path);
+    return true;
+  }
   // A handler outlived its budget and the hook stopped waiting for it. One
   // notice per extension and event; the handler itself keeps running. Each item
   // is [path, milliseconds the hook actually waited].
-  slow(event, items) {
-    this.publish(items.filter(([path]) => this.firstEventIssue(`slow:${event}`, path)).map(([path, milliseconds]) => ({ path, level: 'warning',
+  slow(event, items, state) {
+    this.publish(items.filter(([path]) => ['context', 'context_with_system'].includes(event)
+      ? this.contextIssue(event, path, state) : this.firstEventIssue(`slow:${event}`, path)).map(([path, milliseconds]) => ({ path, level: 'warning',
       reason: `${display(event, 128)} hook took over ${Math.round(milliseconds / 100) / 10} s and was skipped this time`,
       next: 'If status or prompt additions are missing, update or disable.' })));
   }
-  callback(event, factory, error) {
+  callback(event, factory, error, state) {
     const path = this.runtime.config.extensions[factory];
-    if (!this.firstEventIssue(event, path)) return;
+    if (!this.contextIssue(event, path, state)) return;
     const reason = error?.code === -32601
       ? `${display(event, 128)} hook uses an event field octet does not support and was skipped`
       : `${display(event, 128)} hook failed and was skipped`;

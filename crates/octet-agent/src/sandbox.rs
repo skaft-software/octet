@@ -208,7 +208,7 @@ pub struct EffectiveToolPolicy {
     pub shell_path: EffectivePolicyValue<ShellPathSummary>,
     /// Rounded down to whole milliseconds, which is the execution boundary's
     /// diagnostic precision.
-    pub bash_timeout_ms: EffectivePolicyValue<u64>,
+    pub bash_timeout_ms: EffectivePolicyValue<Option<u64>>,
     /// Maximum bytes retained for one tool result.
     pub max_output_bytes: EffectivePolicyValue<u64>,
     /// Whether direct public HTTPS media reads are allowed.
@@ -323,8 +323,8 @@ pub struct SandboxConfig {
     /// Explicit Bash-compatible shell executable. When unset on Unix, octet
     /// follows Pi's order: `/bin/bash`, `bash` on `PATH`, then `sh`.
     pub shell_path: Option<PathBuf>,
-    /// Maximum duration for a `bash` call.
-    pub bash_timeout: Duration,
+    /// Optional maximum duration for a `bash` call.
+    pub bash_timeout: Option<Duration>,
     /// Maximum bytes of tool output before truncation.
     pub max_output_bytes: usize,
     /// Provenance for fields included in [`Self::effective_tool_policy`].
@@ -337,7 +337,7 @@ pub struct SandboxConfig {
 impl SandboxConfig {
     /// Creates a conservative library configuration rooted at `workspace`:
     /// workspace-only paths, no edits, no process, shell, or remote-read
-    /// authority, a 120s execution timeout, and a 50 KiB per-tool output cap.
+    /// authority, no execution timeout, and a 50 KiB per-tool output cap.
     /// Hosts may enable capabilities or trusted-local path access through the
     /// public fields.
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
@@ -351,7 +351,7 @@ impl SandboxConfig {
             allow_remote_read: false,
             remote_read_retry: RemoteReadRetryPolicy::default(),
             shell_path: None,
-            bash_timeout: Duration::from_secs(120),
+            bash_timeout: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             policy_provenance: ToolPolicyProvenance::default(),
         }
@@ -392,7 +392,9 @@ impl SandboxConfig {
                 source: provenance.shell_path,
             },
             bash_timeout_ms: EffectivePolicyValue {
-                value: u64::try_from(self.bash_timeout.as_millis()).unwrap_or(u64::MAX),
+                value: self
+                    .bash_timeout
+                    .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
                 source: provenance.bash_timeout,
             },
             max_output_bytes: EffectivePolicyValue {
@@ -663,7 +665,7 @@ mod tests {
         sandbox.allow_shell = true;
         sandbox.allow_remote_read = true;
         sandbox.shell_path = Some(raw_shell_path.clone());
-        sandbox.bash_timeout = Duration::from_millis(12_345);
+        sandbox.bash_timeout = Some(Duration::from_millis(12_345));
         sandbox.max_output_bytes = 98_765;
         sandbox.policy_provenance = ToolPolicyProvenance {
             effect_policy: PolicyValueSource::Cli,
