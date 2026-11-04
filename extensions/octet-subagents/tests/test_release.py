@@ -71,16 +71,18 @@ class ReleaseTests(unittest.TestCase):
         for relative in required:
             self.assertTrue((ROOT / relative).is_file(), relative)
         shared = REPOSITORY / "sdk" / "python" / "octet_extension"
-        vendored = ROOT / "vendor" / "octet_extension"
         shared_files = {path.name for path in shared.glob("*.py")}
-        vendored_files = {path.name for path in vendored.glob("*.py")}
-        self.assertEqual(vendored_files, shared_files)
-        for name in sorted(shared_files):
-            self.assertEqual(
-                hashlib.sha256((shared / name).read_bytes()).hexdigest(),
-                hashlib.sha256((vendored / name).read_bytes()).hexdigest(),
-                "vendored SDK drift: %s" % name,
-            )
+        for extension in ("octet-computer-use", "octet-mcp", "octet-subagents"):
+            vendored = REPOSITORY / "extensions" / extension / "vendor" / "octet_extension"
+            with self.subTest(extension=extension):
+                vendored_files = {path.name for path in vendored.glob("*.py")}
+                self.assertEqual(vendored_files, shared_files)
+                for name in sorted(shared_files):
+                    self.assertEqual(
+                        hashlib.sha256((shared / name).read_bytes()).hexdigest(),
+                        hashlib.sha256((vendored / name).read_bytes()).hexdigest(),
+                        "vendored SDK drift: %s/%s" % (extension, name),
+                    )
 
     def test_host_staged_entrypoint_release_handshake_and_shutdown_smoke(self):
         frames = [initialize_request(), rpc_request(900, "shutdown", {})]

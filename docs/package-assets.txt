@@ -366,6 +366,7 @@ text sdk/python/octet_extension/event_bus.py
 text sdk/python/octet_extension/extension.py
 text sdk/python/octet_extension/protocol.py
 text sdk/python/pyproject.toml
+text sdk/python/tests/test_api_04_surfaces.py
 text sdk/python/tests/test_event_bus.py
 text sdk/python/tests/test_extension.py
 text sdk/python/tests/test_extension_api_v03.py

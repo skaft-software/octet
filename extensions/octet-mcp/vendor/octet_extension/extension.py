@@ -7,6 +7,7 @@ import contextvars
 import hashlib
 import inspect
 import json
+import math
 import os
 import queue
 import threading
@@ -69,7 +70,13 @@ API_V02_FEATURES = (
     "secrets",
     "compaction_strategy",
     "cache_warming_decision",
+    "message_injection",
+    "provider_credentials",
+    "remote_ui",
 )
+_EXPLICIT_FEATURES = frozenset({"message_injection", "provider_credentials", "remote_ui"})
+_TEARDOWN_METHODS = frozenset({"session/settled", "ui/closed"})
+_REMOTE_UI_EVENTS = frozenset({"ui/key", "ui/mouse", "ui/resize", "ui/closed", "ui/editor-text", "context/updated"})
 LIFECYCLE_METHODS = (
     "session/started",
     "session/settled",
@@ -318,6 +325,12 @@ class _Command:
 
 
 @dataclass
+class _Shortcut:
+    description: Optional[str]
+    handler: Handler
+
+
+@dataclass
 class _PendingResponse:
     event: threading.Event = field(default_factory=threading.Event)
     response: Optional[dict[str, Any]] = None
@@ -335,8 +348,32 @@ class _PendingResponse:
 @dataclass
 class _WriteItem:
     message: Mapping[str, Any]
+    deadline: Optional[float] = None
+    cancellation_event: Optional[threading.Event] = None
+    cancellation: Optional[CancellationToken] = None
+    cancellation_not_before: Optional[float] = None
+    pending: Optional[_PendingResponse] = None
+    cancel_for: Optional["_WriteItem"] = None
     done: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
     error: Optional[BaseException] = None
+    started: bool = False
+    abandoned: bool = False
+
+    def interruption(self) -> Optional[tuple[bool, str]]:
+        if (self.cancellation is not None and self.cancellation.cancelled
+                and (self.cancellation_not_before is None or time.monotonic() >= self.cancellation_not_before)):
+            return False, self.cancellation.reason or "parent_cancelled"
+        if self.cancellation_event is not None and self.cancellation_event.is_set():
+            return False, "cancelled"
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            return True, "timeout"
+        return None
+
+    def wait_interval(self) -> float:
+        if self.deadline is None:
+            return 0.05
+        return min(0.05, max(0.0, self.deadline - time.monotonic()))
 
 
 @dataclass(frozen=True)
@@ -365,15 +402,21 @@ def _protocol_stream(stream: Any) -> Any:
 
 
 class _SerializedWriter:
-    """One bounded queue and one stdout owner for complete JSON-RPC frames."""
+    """One bounded FIFO and one stdout owner for complete JSON-RPC frames."""
 
     _STOP = object()
 
-    def __init__(self, transport: JsonRpcTransport, capacity: int) -> None:
+    def __init__(self, transport: JsonRpcTransport, capacity: int,
+                 on_cancel_failure: Callable[[], None]) -> None:
         if capacity <= 0:
             raise ValueError("writer_queue_size must be greater than zero")
         self._transport = transport
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=capacity)
+        self._on_cancel_failure = on_cancel_failure
+        # Reserve a bounded cancellation lane and one stop slot, while keeping
+        # all frames in a single FIFO. Ordinary sends retain their existing bound.
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=2 * capacity + 1)
+        self._ordinary_slots = threading.BoundedSemaphore(capacity)
+        self._cancel_slots = threading.BoundedSemaphore(capacity)
         self._closed = threading.Event()
         self._failure: Optional[BaseException] = None
         self._thread = threading.Thread(
@@ -387,52 +430,105 @@ class _SerializedWriter:
 
     def send(self, message: Mapping[str, Any]) -> None:
         item = _WriteItem(message)
-        while True:
+        self.enqueue(item, lambda: False)
+        self.wait(item, lambda: False)
+
+    def enqueue(self, item: _WriteItem, stop: Callable[[], bool]) -> bool:
+        while not stop():
             if self._closed.is_set():
                 raise self._closed_error()
-            try:
-                self._queue.put(item, timeout=0.05)
-                break
-            except queue.Full:
-                continue
-        while not item.done.wait(0.05):
-            if self._closed.is_set() and self._failure is not None:
+            if self._ordinary_slots.acquire(timeout=item.wait_interval()):
+                if stop() or self._closed.is_set():
+                    self._ordinary_slots.release()
+                    if self._closed.is_set() and not stop():
+                        raise self._closed_error()
+                    return False
+                self._queue.put_nowait(item)
+                return True
+        return False
+
+    def wait(self, item: _WriteItem, stop: Callable[[], bool]) -> None:
+        while not stop():
+            if item.done.wait(item.wait_interval()):
+                if item.error is not None:
+                    raise item.error
+                return
+            if self._closed.is_set():
                 raise self._closed_error()
-        if item.error is not None:
-            raise item.error
+
+    def abandon(self, item: _WriteItem, reason: Optional[str] = None) -> bool:
+        """Suppress an unwritten request or queue one ordered cancellation.
+
+        Once the writer has claimed a frame its outcome is ambiguous; never
+        interrupt or retry that write. A separate bounded reservation means the
+        caller need not wait for stdout to make room for its cancellation.
+        """
+        with item.lock:
+            if not item.started:
+                item.abandoned = True
+                return True
+            if reason is None or item.error is not None:
+                return True
+            if self._closed.is_set() or not self._cancel_slots.acquire(blocking=False):
+                return False
+            cancellation = _WriteItem({
+                "jsonrpc": "2.0", "method": "$/cancelRequest",
+                "params": {"id": item.message["id"], "reason": reason},
+            }, cancel_for=item)
+            self._queue.put_nowait(cancellation)
+            return True
+
+    def abort(self) -> None:
+        # An in-progress transport write must finish (or fail) on its own.
+        # No later queued frame is written after that point.
+        self._closed.set()
 
     def close(self) -> None:
         if self._closed.is_set():
             return
-        while True:
-            try:
-                self._queue.put(self._STOP, timeout=0.05)
-                break
-            except queue.Full:
-                if self._closed.is_set():
-                    return
+        self._queue.put_nowait(self._STOP)
         self._thread.join(timeout=2.0)
         self._closed.set()
 
     def _run(self) -> None:
         try:
-            while True:
-                item = self._queue.get()
+            while not self._closed.is_set():
+                try:
+                    item = self._queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
                 if item is self._STOP:
                     return
                 assert isinstance(item, _WriteItem)
+                (self._cancel_slots if item.cancel_for is not None else self._ordinary_slots).release()
+                with item.lock:
+                    if (self._closed.is_set() or item.abandoned or item.interruption() is not None
+                            or (item.pending is not None and item.pending.error is not None)
+                            or (item.cancel_for is not None and item.cancel_for.error is not None)):
+                        item.abandoned = True
+                        item.done.set()
+                        continue
+                    # Claiming the item is the write-start boundary. The caller
+                    # can now return, but only this thread may finish the frame.
+                    item.started = True
                 try:
                     self._transport.send(item.message)
                 except ProtocolError as error:
-                    # A locally invalid/oversized frame is rejected without
-                    # sacrificing an otherwise healthy persistent stream.
+                    # A locally invalid/oversized frame does not damage stdout.
                     item.error = error
                     item.done.set()
+                    if item.cancel_for is not None:
+                        self._closed.set()
+                        self._on_cancel_failure()
+                        return
                     continue
                 except BaseException as error:
                     item.error = error
                     self._failure = error
                     item.done.set()
+                    if item.cancel_for is not None:
+                        self._closed.set()
+                        self._on_cancel_failure()
                     return
                 item.done.set()
         finally:
@@ -443,6 +539,7 @@ class _SerializedWriter:
                 except queue.Empty:
                     break
                 if isinstance(pending, _WriteItem):
+                    (self._cancel_slots if pending.cancel_for is not None else self._ordinary_slots).release()
                     pending.error = self._closed_error()
                     pending.done.set()
 
@@ -495,27 +592,37 @@ class Extension:
         self.writer_queue_size = writer_queue_size
         self.shutdown_timeout = shutdown_timeout
         self.cancellation_grace = cancellation_grace
-        selected_features = API_V02_FEATURES if supported_features is None else supported_features
+        selected_features = (
+            tuple(feature for feature in API_V02_FEATURES if feature not in _EXPLICIT_FEATURES)
+            if supported_features is None else supported_features
+        )
         if not all(isinstance(feature, str) and feature for feature in selected_features):
             raise ValueError("supported_features must contain non-empty strings")
         unknown_features = set(selected_features) - set(API_V02_FEATURES)
         if unknown_features:
             raise ValueError(f"unknown supported_features: {sorted(unknown_features)}")
+        if "remote_ui" in selected_features and self.api_version != "0.4":
+            raise ValueError("remote_ui requires extension API 0.4")
         self._supported_features = tuple(dict.fromkeys(selected_features))
 
         self._tools: dict[str, _Tool] = {}
         self._commands: dict[str, _Command] = {}
+        self._shortcuts: dict[str, _Shortcut] = {}
         self._hooks: dict[str, Handler] = {}
         self._context_handler: Optional[Handler] = None
         self._menu_handler: Optional[Handler] = None
         self._status_handlers: dict[str, Handler] = {}
         self._renderer_handlers: dict[str, Handler] = {}
         self._lifecycle_handlers: dict[str, Handler] = {}
+        self._ui_handlers: dict[str, Handler] = {}
         self._shutdown_handler: Optional[Handler] = None
 
         self._transport: Optional[JsonRpcTransport] = None
         self._writer: Optional[_SerializedWriter] = None
         self._executor: Optional[ThreadPoolExecutor] = None
+        self._teardown_executor: Optional[ThreadPoolExecutor] = None
+        self._resize_tail: Optional[Future[Any]] = None
+        self._fail_closed_deadline: Optional[float] = None
         self._initialized = False
         self._running = False
         self._closed = False
@@ -539,6 +646,7 @@ class Extension:
         self._presentation_revision: Optional[int] = None
         self._presentation_lock = threading.Lock()
         self._admission = threading.BoundedSemaphore(max_pending_requests)
+        self._teardown_admission = threading.BoundedSemaphore(max_pending_requests)
         self._lock = threading.RLock()
         self._future_condition = threading.Condition(self._lock)
         self._shutdown_done = threading.Event()
@@ -733,6 +841,31 @@ class Extension:
 
         return decorate
 
+    def shortcut(
+        self,
+        *,
+        name: str,
+        description: Optional[str] = None,
+    ) -> Callable[[Handler], Handler]:
+        """Handle a static manifest shortcut as handler(context).
+
+        The manifest supplies the key and description; an optional description
+        here must match it exactly. Return the same values as a command handler.
+        """
+        self._validate_shortcut_name(name)
+        if description is not None and (
+            not isinstance(description, str) or not description.strip()
+        ):
+            raise ValueError("shortcut description must be non-empty or None")
+
+        def decorate(handler: Handler) -> Handler:
+            if name in self._shortcuts:
+                raise ValueError(f"duplicate shortcut: {name}")
+            self._shortcuts[name] = _Shortcut(description, handler)
+            return handler
+
+        return decorate
+
     def hook(self, name: str) -> Callable[[Handler], Handler]:
         self._validate_name("hook", name)
         if name in ("compaction_strategy", "cache_warming_decision") and self.api_version != "0.4":
@@ -830,6 +963,29 @@ class Extension:
         return decorate
 
     lifecycle = on_lifecycle
+
+    def on_ui_event(self, method: str) -> Callable[[Handler], Handler]:
+        """Handle a negotiated remote_ui notification without acquiring terminal ownership.
+
+        Resize handlers run in arrival order. If admission is full or a resize
+        handler fails, the extension fails closed and invokes the shutdown hook.
+        """
+        if method not in _REMOTE_UI_EVENTS or self.api_version != "0.4":
+            raise ValueError("unknown remote UI notification or unsupported API")
+
+        def decorate(handler: Handler) -> Handler:
+            if method in self._ui_handlers:
+                raise ValueError(f"duplicate remote UI handler: {method}")
+            self._ui_handlers[method] = handler
+            return handler
+
+        return decorate
+
+    def publish_ui_frame(self, params: Mapping[str, Any]) -> None:
+        """Publish a complete owner-fenced remote UI frame; host validates geometry/styling."""
+        if self.api_version != "0.4" or "remote_ui" not in self._features:
+            raise ValueError("remote_ui was not negotiated")
+        self._send({"jsonrpc": "2.0", "method": "ui/frame", "params": dict(params)})
 
     def on_shutdown(self, handler: Handler) -> Handler:
         if self._shutdown_handler is not None:
@@ -961,8 +1117,16 @@ class Extension:
         *,
         parent_request_id: Any = _MISSING,
         operation_scoped: bool = False,
+        timeout: Optional[float] = None,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> Any:
-        """Send a request to the host while the reader keeps dispatching frames."""
+        """Send a host request with optional timeout and cooperative cancellation.
+
+        The deadline includes enqueueing and writing as well as the reply wait.
+        An unwritten expired request is suppressed; an already-started write is
+        ambiguous and queues one ordered cancellation without being retried. A
+        full or failed cancellation lane instead fails the extension closed.
+        """
 
         return self._request(
             method,
@@ -971,6 +1135,8 @@ class Extension:
             operation_scoped=operation_scoped,
             correlate_parent=True,
             cancel_with_parent=True,
+            timeout=timeout,
+            cancellation_event=cancellation_event,
         )
 
     def _request(
@@ -982,12 +1148,24 @@ class Extension:
         operation_scoped: bool,
         correlate_parent: bool,
         cancel_with_parent: bool,
+        timeout: Optional[float] = None,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> Any:
         """Send one host request with explicit ownership semantics."""
 
+        if cancellation_event is not None and not isinstance(cancellation_event, threading.Event):
+            raise TypeError("cancellation_event must be a threading.Event or None")
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("request timeout must be a positive finite number or None")
+        deadline = None if timeout is None else time.monotonic() + timeout
         if not isinstance(method, str) or not method:
             raise ValueError("request method must be non-empty")
         self._require_initialized()
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise CancelledError("cancelled")
         payload = dict(params) if params is not None else {}
         if self.api_version in ("0.2", "0.4") and correlate_parent:
             parent = self._resolve_parent(parent_request_id, required=operation_scoped)
@@ -1003,32 +1181,54 @@ class Extension:
             pending = _PendingResponse()
             self._pending[key] = pending
         try:
-            self._send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": method,
-                    "params": payload,
-                }
-            )
+            writer = self._writer
+            if writer is None or self._closed:
+                raise RpcError(-32000, "protocol transport is closed")
             scope = _CURRENT_REQUEST.get() if cancel_with_parent else None
-            cancellation_sent = False
-            while not pending.event.wait(0.05):
+            parent_cancellation = scope.cancellation if scope is not None else None
+            # A cancelled bulk reader makes a best-effort release of its lease.
+            # Preserve that cleanup's existing one-poll opportunity to send, but
+            # never let an already-cancelled parent strand it behind stdout.
+            cleanup_grace = (time.monotonic() + 0.05 if method == "bulk/release"
+                             and parent_cancellation is not None and parent_cancellation.cancelled else None)
+            item = _WriteItem(
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": payload},
+                deadline=deadline, cancellation_event=cancellation_event,
+                cancellation=parent_cancellation, cancellation_not_before=cleanup_grace, pending=pending,
+            )
+
+            def stopped() -> bool:
+                return pending.event.is_set() or item.interruption() is not None
+
+            try:
+                if writer.enqueue(item, stopped):
+                    writer.wait(item, stopped)
+            except (BrokenPipeError, OSError) as error:
+                self._closed = True
+                raise RpcError(-32000, "protocol stream is closed") from error
+
+            while True:
+                # A reply already observed wins the cancellation race. Failure
+                # during shutdown must also suppress an as-yet-unwritten item.
+                if pending.event.is_set():
+                    if pending.error is not None:
+                        writer.abandon(item)
+                    break
+                interruption = item.interruption()
+                if interruption is not None:
+                    timed_out, reason = interruption
+                    if not writer.abandon(item, reason):
+                        # Never block the request on a full cancellation lane or
+                        # silently lose cancellation: stop the process instead.
+                        writer.abort()
+                        self._fail_closed("writer_overflow", "writer cancellation queue is full")
+                    if timed_out:
+                        raise TimeoutError(f"host request timed out: {method}")
+                    raise CancelledError(reason)
                 if self._closed:
+                    writer.abandon(item)
                     raise RpcError(-32000, "protocol transport is closed")
-                if scope is not None and scope.cancellation.cancelled and not cancellation_sent:
-                    cancellation_sent = True
-                    self._send(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "$/cancelRequest",
-                            "params": {
-                                "id": request_id,
-                                "reason": scope.cancellation.reason or "parent_cancelled",
-                            },
-                        }
-                    )
-                    raise CancelledError(scope.cancellation.reason or "parent_cancelled")
+                pending.event.wait(item.wait_interval())
             if pending.error is not None:
                 raise pending.error
             response = pending.response
@@ -1790,6 +1990,8 @@ class Extension:
 
         if self._running:
             raise RuntimeError("extension is already running")
+        if self._writer is not None and self._writer._thread.is_alive():
+            raise RuntimeError("previous extension protocol writer has not stopped")
         reader = stdin if stdin is not None else self.stdin
         writer = stdout if stdout is not None else self.stdout
         if reader is None:
@@ -1806,7 +2008,10 @@ class Extension:
             writer,
             max_message_bytes=self.max_message_bytes,
         )
-        self._writer = _SerializedWriter(self._transport, self.writer_queue_size)
+        self._writer = _SerializedWriter(
+            self._transport, self.writer_queue_size,
+            lambda: self._fail_closed("writer_failure", "writer cancellation failed"),
+        )
         self._writer.start()
         inbound: queue.Queue[Any] = queue.Queue()
         reader_thread = threading.Thread(
@@ -1820,7 +2025,9 @@ class Extension:
         eof_seen = False
         try:
             while True:
-                if self._shutdown_done.is_set() or self._eof_done.is_set():
+                if (self._shutdown_done.is_set() or self._eof_done.is_set()
+                        or (self._fail_closed_deadline is not None
+                            and time.monotonic() >= self._fail_closed_deadline)):
                     break
                 try:
                     item = inbound.get(timeout=0.05)
@@ -1851,12 +2058,17 @@ class Extension:
             self._fail_pending(RpcError(-32000, "extension stopped"))
             if self._executor is not None:
                 self._executor.shutdown(wait=False, cancel_futures=True)
+            if self._teardown_executor is not None:
+                self._teardown_executor.shutdown(wait=False, cancel_futures=True)
             if self._writer is not None:
                 self._writer.close()
             self._running = False
             self._closed = True
             self._transport = None
-            self._writer = None
+            # A stalled write can outlive run(). Retain it so a subsequent run
+            # cannot create a second writer concurrently on the same stream.
+            if self._writer is not None and not self._writer._thread.is_alive():
+                self._writer = None
 
     def handle_message(self, message: Mapping[str, Any]) -> bool:
         """Queueing is required for 0.2; use :meth:`run` for embedded tests."""
@@ -1966,27 +2178,76 @@ class Extension:
                 self._active.pop(key, None)
             self._admission.release()
             raise
-        self._track_future(future, admitted=True)
+        self._track_future(future, admission=self._admission)
 
     def _submit_notification(self, method: str, params: Any) -> None:
         executor = self._executor
         if executor is None:
             return
-        if method not in self._lifecycle_handlers:
+        if method not in self._lifecycle_handlers and method not in self._ui_handlers:
             self.logger.warning("ignored unknown notification", method=method)
             return
-        if "lifecycle_events" not in self._features:
+        feature = "remote_ui" if method in self._ui_handlers else "lifecycle_events"
+        if feature not in self._features:
             self.logger.warning("ignored unnegotiated lifecycle event", method=method)
             return
-        if not self._admission.acquire(blocking=False):
-            self.logger.warning("dropped lifecycle event because request queue is full", method=method)
+        teardown = method in _TEARDOWN_METHODS
+        admission = self._teardown_admission if teardown else self._admission
+        if teardown:
+            executor = self._teardown_executor
+        if not admission.acquire(blocking=False):
+            if teardown:
+                # Losing an owner-retirement observation can leave live devices.
+                self._fail_closed("teardown_overflow", "teardown notification queue is full", method)
+            elif method == "ui/resize":
+                # The host discards the old frame and may send this geometry only
+                # once. Never keep a device active behind an invisible surface.
+                self._fail_closed("resize_overflow", "resize notification queue is full", method)
+            else:
+                self.logger.warning("dropped lifecycle event because request queue is full", method=method)
             return
         try:
-            future = executor.submit(self._handle_lifecycle, method, params)
+            if method == "ui/resize":
+                # Ordinary workers may run concurrently. Chain resize handlers so
+                # an older geometry cannot overwrite a newer one after it runs.
+                future = executor.submit(self._handle_resize, params, self._resize_tail)
+                self._resize_tail = future
+            else:
+                future = executor.submit(self._handle_lifecycle, method, params)
         except Exception:
-            self._admission.release()
+            admission.release()
             raise
-        self._track_future(future, admitted=True)
+        self._track_future(future, admission=admission)
+
+    def _handle_resize(self, params: Any, previous: Optional[Future[Any]]) -> None:
+        if previous is not None:
+            previous.result()
+        if not self._draining:
+            self._handle_lifecycle("ui/resize", params)
+
+    def _fail_closed(self, reason: str, message: str, method: Optional[str] = None,
+                     *, error: Optional[str] = None) -> None:
+        with self._lock:
+            if self._draining:
+                return
+            self._draining = True
+            self._fail_closed_deadline = time.monotonic() + self.shutdown_timeout + self.cancellation_grace
+        self._cancel_all(reason)
+        self._fail_pending(RpcError(-32000, message))
+        self._start_shutdown(_MISSING, {"reason": reason})
+
+        def report() -> None:
+            # Stderr is an external stream too. A blocked diagnostic must not
+            # delay device shutdown or the fail-closed routing deadline.
+            try:
+                fields = {"method": method}
+                if error is not None:
+                    fields["error"] = error
+                self.logger.error(f"{message}; stopping extension", **fields)
+            except Exception:
+                pass
+
+        threading.Thread(target=report, name="octet-extension-failure-log", daemon=True).start()
 
     def _handle_request(
         self,
@@ -2035,11 +2296,14 @@ class Extension:
                 self._active.pop(self._id_key(request_id), None)
 
     def _handle_lifecycle(self, method: str, params: Any) -> None:
-        handler = self._lifecycle_handlers[method]
+        handler = self._ui_handlers.get(method) or self._lifecycle_handlers[method]
         try:
             self._invoke(handler, self._object_params(params, method))
         except Exception as error:
-            self.logger.error("lifecycle handler failed", event=method, error=str(error))
+            if method == "ui/resize":
+                self._fail_closed("resize_failure", "resize handler failed", method, error=str(error))
+            else:
+                self.logger.error("lifecycle handler failed", event=method, error=str(error))
 
     def _dispatch(self, method: str, params: Any) -> Any:
         if method == "resource/dispose" and self._resources is not None:
@@ -2048,6 +2312,8 @@ class Extension:
             return self._call_tool(params)
         if method == "command/execute":
             return self._execute_command(params)
+        if method == "shortcut/execute":
+            return self._execute_shortcut(params)
         if method == "hook/run":
             return self._run_hook(params)
         if method == "context/collect":
@@ -2149,6 +2415,10 @@ class Extension:
             max_workers=self._negotiated_concurrency,
             thread_name_prefix="octet-extension-handler",
         )
+        self._teardown_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="octet-extension-teardown",
+        )
         result: dict[str, Any] = {
             "api_version": self.api_version,
             "tools": [self._tool_definition(tool) for tool in self._tools.values()],
@@ -2161,6 +2431,8 @@ class Extension:
                 for command in self._commands.values()
             ],
         }
+        if self.api_version in ("0.2", "0.4") and self._declared.get("shortcuts"):
+            result["shortcuts"] = [dict(shortcut) for shortcut in self._declared["shortcuts"]]
         if protocol_response is not None:
             result["protocol"] = protocol_response
         return result
@@ -2173,6 +2445,7 @@ class Extension:
             raise RpcError(-32602, "cache_warming_decision requires API 0.4")
         self._require_exact_names("tools", self._declared_names("tools"), self._tools)
         self._require_exact_names("commands", self._declared_names("commands"), self._commands)
+        self._validate_shortcuts()
         # A host that declares contributions must declare the menu it serves.
         if (
             self._menu_handler is not None
@@ -2180,6 +2453,51 @@ class Extension:
             and self._declared.get("menu") is not True
         ):
             raise RpcError(-32602, "a menu handler requires contributes.menu = true")
+
+    @staticmethod
+    def _validate_shortcut_name(name: Any) -> None:
+        if (
+            not isinstance(name, str) or not name or len(name) > 64
+            or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
+            or any(not (char.isalnum() or char in "_-.") for char in name)
+        ):
+            raise ValueError("invalid shortcut name")
+
+    def _validate_shortcuts(self) -> None:
+        shortcuts = self._declared.get("shortcuts", [])
+        if self.api_version == "0.1" and (self._shortcuts or shortcuts):
+            raise RpcError(-32602, "shortcuts require API 0.2 or 0.4")
+        if not isinstance(shortcuts, list) or len(shortcuts) > 64:
+            raise RpcError(-32602, "initialize contributes.shortcuts must be an array of at most 64 definitions")
+        names = []
+        keys = set()
+        for shortcut in shortcuts:
+            if not isinstance(shortcut, Mapping) or set(shortcut) != {"name", "key", "description"}:
+                raise RpcError(-32602, "invalid manifest shortcut definition")
+            try:
+                self._validate_shortcut_name(shortcut["name"])
+            except ValueError as error:
+                raise RpcError(-32602, "invalid manifest shortcut name") from error
+            for field, limit in (("key", 128), ("description", 4096)):
+                value = shortcut[field]
+                if (
+                    not isinstance(value, str) or not value.strip()
+                    or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+                    or len(value.encode("utf-8")) > limit
+                    or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+                    or (field == "key" and value.strip() != value)
+                ):
+                    raise RpcError(-32602, f"invalid manifest shortcut {field}")
+            name = shortcut["name"]
+            key = shortcut["key"].lower()
+            if name in names or key in keys:
+                raise RpcError(-32602, "duplicate manifest shortcut name or key")
+            names.append(name)
+            keys.add(key)
+            registered = self._shortcuts.get(name)
+            if registered is not None and registered.description not in (None, shortcut["description"]):
+                raise RpcError(-32602, "registered shortcut description does not match manifest declaration")
+        self._require_exact_names("shortcuts", names, self._shortcuts)
 
     def _declared_names(self, key: str) -> list[str]:
         value = self._declared.get(key, _MISSING)
@@ -2271,6 +2589,23 @@ class Extension:
         except Exception as error:
             self.logger.error("command handler failed", command=name, error=str(error))
             raise RpcError(-32603, "internal error") from error
+        return self._command_result(value)
+
+    def _execute_shortcut(self, params: Any) -> dict[str, Any]:
+        if self.api_version not in ("0.2", "0.4"):
+            raise RpcError(-32601, "shortcuts require API 0.2 or 0.4")
+        request = self._object_params(params, "shortcut/execute")
+        name = request.get("name")
+        try:
+            self._validate_shortcut_name(name)
+        except ValueError as error:
+            raise RpcError(-32602, "invalid shortcut name") from error
+        if set(request) - {"name", "context"} or not isinstance(request.get("context", {}), Mapping):
+            raise RpcError(-32602, "invalid shortcut params")
+        shortcut = self._shortcuts.get(name)
+        if shortcut is None:
+            raise RpcError(-32601, f"unknown shortcut: {name}")
+        value = self._invoke(shortcut.handler, self._context_from(request))
         return self._command_result(value)
 
     def _run_hook(self, params: Any) -> dict[str, Any]:
@@ -2682,15 +3017,17 @@ class Extension:
 
         def shutdown_flow() -> None:
             try:
-                if not self._wait_for_futures(timeout):
+                if request_id is not _MISSING and not self._wait_for_futures(timeout):
                     self._cancel_all("shutdown")
                     self._wait_for_futures(self.cancellation_grace)
                 if self._shutdown_handler is not None:
                     self._invoke(self._shutdown_handler, values, self._context_from(values))
-                self._send_result(request_id, {})
+                if request_id is not _MISSING:
+                    self._send_result(request_id, {})
             except Exception as error:
                 self.logger.error("shutdown handler failed", error=str(error))
-                self._send_error(request_id, RpcError(-32603, "shutdown failed"))
+                if request_id is not _MISSING:
+                    self._send_error(request_id, RpcError(-32603, "shutdown failed"))
             finally:
                 self._shutdown_done.set()
 
@@ -2717,8 +3054,9 @@ class Extension:
 
         threading.Thread(target=eof_flow, name="octet-extension-eof", daemon=True).start()
 
-    def _track_future(self, future: Future[Any], *, admitted: bool = False) -> None:
-        admission = self._admission
+    def _track_future(
+        self, future: Future[Any], *, admission: Optional[threading.BoundedSemaphore] = None,
+    ) -> None:
         with self._future_condition:
             self._futures.add(future)
 
@@ -2726,7 +3064,7 @@ class Extension:
             with self._future_condition:
                 self._futures.discard(done)
                 self._future_condition.notify_all()
-            if admitted:
+            if admission is not None:
                 admission.release()
 
         future.add_done_callback(completed)
@@ -2934,6 +3272,9 @@ class Extension:
         self._pending.clear()
         self._futures.clear()
         self._admission = threading.BoundedSemaphore(self.max_pending_requests)
+        self._teardown_admission = threading.BoundedSemaphore(self.max_pending_requests)
+        self._resize_tail = None
+        self._fail_closed_deadline = None
         self._shutdown_done.clear()
         self._eof_done.clear()
 

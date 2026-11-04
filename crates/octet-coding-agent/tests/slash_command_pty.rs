@@ -111,6 +111,10 @@ impl PtyOctet {
     }
 
     fn spawn_with_provider(binary: &Path, base_url: &str) -> Self {
+        Self::spawn_with_shortcut_fixture(binary, base_url, false)
+    }
+
+    fn spawn_with_shortcut_fixture(binary: &Path, base_url: &str, shortcut: bool) -> Self {
         let root = tempfile::tempdir().expect("PTY fixture tempdir");
         let root_path = root
             .path()
@@ -135,6 +139,9 @@ impl PtyOctet {
             .permissions();
         permissions.set_mode(0o600);
         fs::set_permissions(&credential, permissions).expect("credential fixture permissions");
+        if shortcut {
+            install_shortcut_fixture(&home);
+        }
 
         let pty = Pty::open();
         let stdin = duplicate_stdio(pty.slave.as_raw_fd());
@@ -169,6 +176,9 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+        if shortcut {
+            command.env("OCTET_EXTENSIONS", "shortcut-fixture");
+        }
         // `openpty` does not make the slave a controlling terminal by itself.
         unsafe {
             command.pre_exec(move || {
@@ -430,6 +440,116 @@ fn streaming_octet() -> (StreamApi, PtyOctet) {
     api.wait_for_request(&mut octet);
     octet.pty.wait_for(HEAD_MARKER);
     (api, octet)
+}
+
+// A real SDK subprocess exercises the native static-shortcut path without
+// requiring a separately distributed extension, audio device, or live provider.
+fn install_shortcut_fixture(home: &Path) {
+    let directory = home.join(".octet/extensions/shortcut-fixture");
+    fs::create_dir_all(&directory).expect("shortcut fixture directory");
+    fs::write(
+        directory.join("extension.toml"),
+        r#"name = "shortcut-fixture"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "fixture.py"
+[contributes]
+commands = ["fixture-prime"]
+shortcuts = [{ name = "fixture-toggle", key = "ctrl+f6", description = "Fixture action" }]
+"#,
+    )
+    .expect("shortcut fixture manifest");
+    let script = directory.join("fixture.py");
+    let sdk = format!("{}/../../sdk/python", env!("CARGO_MANIFEST_DIR"));
+    fs::write(
+        &script,
+        format!(
+            r#"#!/usr/bin/env python3
+import sys
+sys.path.insert(0, {sdk:?})
+from octet_extension import Extension
+ext = Extension(api_version="0.4")
+count = 0
+@ext.command(name="fixture-prime", description="Prime fixture")
+def prime(args, context):
+    return "FIXTURE_PRIME_READY"
+@ext.shortcut(name="fixture-toggle")
+def toggle(context):
+    global count
+    count += 1
+    if count == 3:
+        raise RuntimeError("FIXTURE_SHORTCUT_FAILURE")
+    return "FIXTURE_SHORTCUT_RESULT_" + str(count)
+ext.run()
+"#
+        ),
+    )
+    .expect("shortcut fixture script");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+        .expect("shortcut fixture permissions");
+}
+
+#[test]
+fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
+    let api = StreamApi::start();
+    let mut octet = PtyOctet::spawn_with_shortcut_fixture(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        &api.url,
+        true,
+    );
+    octet.pty.wait_for(b"custom/probe");
+    // Extension startup is asynchronous. Refresh the partial command until
+    // its completion appears; do not race a command against initialization.
+    octet.pty.write_input(b"/fixt");
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        octet.pty.read_available();
+        if contains_bytes(&octet.pty.output, b"/fixture-prime") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture never became ready: {}",
+            visible_bytes(&octet.pty.output)
+        );
+        thread::sleep(Duration::from_millis(100));
+        octet.pty.write_input(b"\x7ft");
+    }
+    octet.pty.write_input(b"ure-prime\r");
+    octet.pty.wait_for(b"FIXTURE_PRIME_READY");
+    // Command output is a modal; close it before testing shortcut routing.
+    octet.pty.output.clear();
+    octet.pty.write_input(PICKER_ESCAPE);
+    octet.pty.wait_for(b"custom/probe");
+    octet.pty.output.clear();
+
+    // Terminal encoding of Ctrl+F6, in the same mode as the real TUI.
+    const SHORTCUT: &[u8] = b"\x1b[17;5~";
+    octet.pty.write_input(SHORTCUT);
+    octet.pty.wait_for(b"FIXTURE_SHORTCUT_RESULT_1");
+    assert!(!contains_bytes(
+        &octet.pty.output,
+        b"running extension shortcut"
+    ));
+
+    octet.pty.write_input(b"stream a long answer\r");
+    api.wait_for_request(&mut octet);
+    octet.pty.wait_for(HEAD_MARKER);
+    octet.pty.output.clear();
+    octet.pty.write_input(SHORTCUT);
+    octet.pty.wait_for(b"FIXTURE_SHORTCUT_RESULT_2");
+    octet.pty.write_input(SHORTCUT);
+    octet.pty.wait_for(b"fixture-toggle\" failed");
+    assert!(!contains_bytes(
+        &octet.pty.output,
+        b"running extension shortcut"
+    ));
+    assert!(!contains_bytes(&octet.pty.output, TAIL_MARKER));
+    assert!(!api.completed.load(Ordering::SeqCst));
+    api.release();
+    octet.pty.wait_for(TAIL_MARKER);
+    octet.shutdown();
 }
 
 #[test]

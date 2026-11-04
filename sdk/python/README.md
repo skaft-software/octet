@@ -327,6 +327,107 @@ local; provider I/O remains host-owned. API `0.1`/`0.2`/`0.3` cannot register th
 hook. See the [runnable local example](../../examples/extensions/cache-warming/README.md)
 and [host contract](../../docs/extensions.md#cache-warming-decision-advice-api-04).
 
+## Static shortcuts and optional host services
+
+API `0.2`/`0.4` static shortcuts use the manifest, not runtime shortcut
+registration. Declare the full binding:
+
+```toml
+[contributes]
+shortcuts = [{ name = "panel-refresh", key = "ctrl+shift+m", description = "Refresh panel" }]
+```
+
+Register exactly one handler per declared name (no extra handlers):
+
+```python
+@ext.shortcut(name="panel-refresh")
+def refresh(context):
+    ext.cancellation.raise_if_cancelled()
+    return "Refreshed"
+```
+
+The signature is `@ext.shortcut(name=..., description=None)` with a synchronous
+`handler(context)` (or no-argument handler). Optional decorator `description`
+must exactly match the manifest. Initialization echoes the complete manifest
+bindings in order; missing, duplicate, malformed or mismatched declarations fail.
+`shortcut/execute` supplies `{name, context}`, with no arguments array. Results
+use the command shape: return text, `None`, or `{text, notifications, context}`.
+Ordinary request IDs, owner context and cooperative cancellation apply. This
+selects neither runtime `shortcuts` nor `lifecycle_events_v2`. API `0.1` rejects
+shortcut registration at initialization.
+
+`message_injection` and `provider_credentials` are supported only through explicit
+`supported_features` selection; they are not selected by the default SDK feature
+set. Include the required base features, for example:
+
+```python
+ext = Extension(api_version="0.4", supported_features=[
+    "request_cancellation", "content_parts", "message_injection", "provider_credentials",
+])
+
+# Inside an owner-scoped handler, after checking ext.negotiated_features:
+ext.request("session/send_user_message", {
+    "text": "Please inspect the failing test", "resource_owner": context["resource_owner"],
+}, operation_scoped=True, timeout=5.0)
+ext.request("provider/credentials", {
+    "provider": "openai", "model": "gpt-4o",
+    "resource_owner": context["resource_owner"],
+}, operation_scoped=True, timeout=5.0)
+```
+
+`ext.request(..., timeout=None)` retains the unbounded-wait default. A positive,
+finite timeout uses a monotonic deadline covering queue admission, writing and the
+reply wait. Expiry raises `TimeoutError` without retrying: an unwritten request is
+suppressed, while an already-started write is ambiguous and queues one ordered
+`$/cancelRequest`. If the bounded cancellation lane is full or fails, the SDK
+fails closed. Cancellation is not rollback; a timed-out operation may already have
+committed. Use finite waits for background callbacks so a blocked writer or missing
+host reply cannot strand a worker. An optional `cancellation_event=threading.Event()`
+adds caller-controlled cancellation with the same unwritten/started distinction;
+an already-set event raises `CancelledError` without sending. Parent cancellation
+and timeouts still apply; a response already received can win the race.
+
+Only offered features are selected. Credential access additionally requires the
+reviewed manifest `[capabilities].provider_credentials = true` and host admission;
+never log or persist credential replies. Raw `ext.request` does not enforce
+service-specific feature/parameter gates: the host remains authoritative.
+During a handler it automatically correlates `parent_request_id`. For a deferred
+callback, retain the original issued owner and numeric request ID, pass the owner
+in params and `parent_request_id=original_id` explicitly; never invent either.
+Owner retirement, cancellation and process replacement may refuse the call.
+See the [wire reference](../../docs/extensions/PROTOCOL-REFERENCE.md) for injection
+bounds, credential admission and retained-owner semantics.
+
+## Remote UI snapshots (API `0.4`)
+
+Opt into `"remote_ui"` explicitly in `supported_features` (not selected by default).
+Check negotiation before opening an owner-scoped surface with `ext.request("ui/open", ...)`.
+Publish cached styled line snapshots with `ext.publish_ui_frame(params)`; this
+helper refuses unnegotiated use. Painting never calls back into Python. The host
+validates owner, surface identity, increasing revision, geometry and checked SGR.
+
+`@ext.on_ui_event("ui/resize")` and `@ext.on_ui_event("ui/closed")` receive dict
+payloads through bounded worker lanes; `ui/key`, `ui/mouse`,
+`ui/editor-text` and `context/updated` are also supported. Ordinary observations
+share request admission. Critical `ui/closed` and `session/settled` observations
+instead share an independent, single-worker teardown lane with at most
+`max_pending_requests` outstanding handlers (running plus queued). If that lane
+fills, the SDK stops admission, cancels active requests, fails pending host waits,
+and invokes `@ext.on_shutdown` with `{"reason": "teardown_overflow"}` rather than
+silently losing retirement. Cleanup must release devices and stop publishers
+promptly; `run()` stops waiting for this hook after
+`shutdown_timeout + cancellation_grace`, so a stalled hook cannot strand the
+protocol loop. Resize handlers run in arrival order; a full resize admission lane
+or a failed resize handler also fails closed because the host may have discarded
+the old frame. Failure diagnostics are best-effort and cannot delay the shutdown
+hook when stderr is blocked. Teardown handlers may run concurrently with ordinary
+observations, so protect shared state and fence retired owners. Handlers are
+synchronous, feature-gated, and do not acquire an ambient request ID. Stop publishers on close;
+retain exact host-issued owner/request identities for deferred requests. Do not
+block a media/event loop on frame output or let frame timers write terminal bytes.
+See [remote UI](../../docs/extensions/remote-ui.md) for the complete mount, frame,
+focus, resize and retirement contract.
+
 ## Bounded event bus
 
 `octet_extension.event_bus` carries the bounded, extension-scoped bus contract:
