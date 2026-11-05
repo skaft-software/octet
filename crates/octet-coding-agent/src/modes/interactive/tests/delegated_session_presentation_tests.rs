@@ -266,6 +266,66 @@ fn delegated_session_hydrates_main_transcript_tool_cards_and_results() {
     assert!(plain.contains("SUBAGENT-TOOL-RESULT"), "{plain}");
 }
 
+#[tokio::test]
+async fn worker_transcript_ctrl_o_rerenders_disclosure_and_ctrl_g_opens_message() {
+    use crossterm::event::KeyEvent;
+    use octet_ai::{AssistantMessage, AssistantPart, Message, ModelId, Protocol, ReasoningPart};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("child.jsonl")).unwrap();
+    session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            content: vec![AssistantPart::Reasoning(ReasoningPart {
+                text: Some("RETAINED-WORKER-REASONING".into()),
+                state: None,
+            })],
+            model: ModelId("test".into()),
+            protocol: Protocol::OpenAiResponses,
+        })))
+        .unwrap();
+    let theme = test_theme();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_verbose_tools(false);
+    shell.prefill_editor("parent draft".into());
+    let initial = delegated_session_text(&session, &theme, 80, false).unwrap();
+    assert!(!initial.contains("RETAINED-WORKER-REASONING"));
+    let renders = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = renders.clone();
+    let mut input = tokio_stream::iter([
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ))),
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ))),
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))),
+    ]);
+    let action = subagent_document_live_styled(
+        &mut shell,
+        &mut input,
+        "worker",
+        initial,
+        |width, verbose| {
+            let text = delegated_session_text(&session, &theme, width, verbose).unwrap();
+            observed.lock().unwrap().push((verbose, text.clone()));
+            std::future::ready(Ok(Some(text)))
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(action, SubagentDocumentAction::Message);
+    let renders = renders.lock().unwrap();
+    assert!(renders[0].0 && renders[0].1.contains("RETAINED-WORKER-REASONING"));
+    assert!(!renders[1].0 && !renders[1].1.contains("RETAINED-WORKER-REASONING"));
+    assert_eq!(shell.pending(), "parent draft");
+    assert!(!shell.has_panel());
+}
+
 #[test]
 fn subagent_presentation_becomes_navigable_rows_with_opaque_session_references() {
     let mut snapshot: octet_agent::ExtensionPresentationSnapshot = serde_json::from_str(

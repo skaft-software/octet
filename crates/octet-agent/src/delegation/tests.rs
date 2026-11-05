@@ -790,6 +790,64 @@ async fn telemetry_stream_coalesces_slow_consumer_updates_to_the_latest_snapshot
     assert_eq!(latest.failure_reason.as_deref(), Some("failure-127"));
 }
 
+#[tokio::test]
+async fn telemetry_subscribers_are_independent_and_late_subscribers_resync() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let root = manager.root_binding();
+    let mut first = root.telemetry_receiver().unwrap();
+    first.changed().await.unwrap();
+    first.borrow_and_update();
+
+    // Attaching a run or a second frontend must not close the first receiver.
+    let mut second = root.telemetry_receiver().unwrap();
+    second.changed().await.unwrap();
+    second.borrow_and_update();
+    first.changed().await.unwrap();
+    first.borrow_and_update();
+    manager.publish_external_failure("test", "both receivers");
+    first.changed().await.unwrap();
+    second.changed().await.unwrap();
+    let first_snapshot = first.borrow_and_update().clone().unwrap();
+    let second_snapshot = second.borrow_and_update().clone().unwrap();
+    assert_eq!(first_snapshot.revision, second_snapshot.revision);
+    assert_eq!(
+        first_snapshot.failure_reason.as_deref(),
+        Some("both receivers")
+    );
+
+    drop(second);
+    manager.publish_external_failure("test", "still subscribed");
+    first.changed().await.unwrap();
+    assert_eq!(
+        first
+            .borrow_and_update()
+            .as_ref()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("still subscribed")
+    );
+    drop(first);
+
+    // No receiver is required for the manager to remain usable. A new
+    // subscription publishes an authoritative current roster immediately.
+    manager.publish_external_failure("test", "while unsubscribed");
+    let mut late = root.telemetry_receiver().unwrap();
+    late.changed().await.unwrap();
+    assert!(late.borrow_and_update().is_some());
+    manager.publish_external_failure("test", "after resubscribe");
+    late.changed().await.unwrap();
+    assert_eq!(
+        late.borrow_and_update()
+            .as_ref()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("after resubscribe")
+    );
+}
+
 #[test]
 fn owning_run_restart_reactivates_root_without_recycling_session_capacity() {
     let directory = tempfile::tempdir().unwrap();

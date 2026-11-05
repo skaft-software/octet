@@ -64,6 +64,26 @@ impl Agent {
         Ok(team_directory)
     }
 
+    /// Subscribes to the current root session's latest delegation telemetry.
+    ///
+    /// The independent, coalescing stream remains live between runs and can be
+    /// used alongside run events. A fresh snapshot is published on subscription;
+    /// intermediate snapshots may be skipped. It is observational only and
+    /// does not claim or acknowledge a worker result. Child agents and agents
+    /// without delegation return `None`.
+    ///
+    /// A receiver is bound to this agent's delegation manager, not a frontend's
+    /// currently selected session. Frontends must discard it and subscribe to
+    /// the replacement agent when the owner or runtime changes; events from an
+    /// old receiver must not be applied to the replacement session.
+    pub fn subscribe_delegation_telemetry(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<Option<DelegationTelemetrySnapshot>>> {
+        self.delegation
+            .as_ref()
+            .and_then(DelegationBinding::telemetry_receiver)
+    }
+
     /// Returns the authoritative host count of active delegated workers.
     ///
     /// Returns zero when delegation is not enabled; frontend roster snapshots

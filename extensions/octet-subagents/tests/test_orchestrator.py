@@ -170,6 +170,72 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(SubagentError):
                 _host_model_policy({"policy": policy})
 
+    def test_host_resolved_model_identifier_accepts_bounded_plain_custom_names(self):
+        from octet_subagents.orchestrator import _host_model_policy
+
+        for model in ("custom/Local Model", "custom/モデル"):
+            with self.subTest(model=model):
+                policy = {"resolved_model": {"provider": "custom", "model": model,
+                                             "reasoning": {"type": "off"}}}
+                effective = _host_model_policy({"policy": policy})
+                self.assertEqual(effective["effective_model"], model)
+                self.assertEqual(effective["effective_provider"], "custom")
+
+        for field, invalid in (("model", None), ("provider", ""),
+                               ("model", "bad\x1b[31m"), ("model", "bad\u202ename"),
+                               ("model", "界" * 86), ("model", "\ud800")):
+            with self.subTest(field=field, invalid=ascii(invalid)):
+                resolved = {"provider": "custom", "model": "custom/Local Model",
+                            "reasoning": {"type": "off"}}
+                resolved[field] = invalid
+                with self.assertRaises(SubagentError) as raised:
+                    _host_model_policy({"policy": {"resolved_model": resolved}})
+                self.assertEqual(raised.exception.code, "host_state_invalid")
+
+    def test_inherited_custom_model_with_spaces_survives_spawn_restore_and_continue(self):
+        host = FakeHostState()
+        client = host.client()
+        original_spawn = client.spawn_agent
+
+        def spawn_with_custom_model(**kwargs):
+            response = original_spawn(**kwargs)
+            resolved = {"provider": "custom", "model": "custom/Local Model",
+                        "reasoning": {"type": "budget", "value": 2048}}
+            response["policy"]["resolved_model"] = resolved
+            host.agents[response["agent_id"]].policy["resolved_model"] = resolved
+            return response
+
+        client.spawn_agent = spawn_with_custom_model
+        orchestrator = Orchestrator(now_ms=host.clock)
+        args = {"name": "reader", "task": "Inspect.", "idempotency_key": "custom-v1"}
+        first = orchestrator.spawn(client, owner(), args)["worker"]
+        self.assertEqual(first["model"], "custom/Local Model")
+        self.assertEqual(first["reasoning"], "budget=2048")
+        self.assertEqual(first["model_policy"], "inherit")
+        self.assertEqual(len(host.agents), 1)
+
+        restored = Orchestrator(now_ms=host.clock)
+        retry = restored.spawn(client, owner(), args)
+        self.assertTrue(retry["duplicate"])
+        self.assertEqual(retry["worker"]["model"], first["model"])
+        host.complete(first["id"], "done")
+        continued = restored.continue_worker(client, owner(), {
+            "target": first["id"], "message": "next"})
+        self.assertEqual(continued["worker"]["model"], first["model"])
+        self.assertEqual(len(host.agents), 1)
+
+    def test_host_states_do_not_require_an_optional_completion_timestamp(self):
+        from octet_subagents.orchestrator import _host_timestamps
+
+        record = {"created_at_ms": 100, "started_at_ms": 120, "completed_at_ms": None}
+        for state in ("orphaned", "detached", "completed", "failed", "shutdown"):
+            with self.subTest(state=state):
+                self.assertEqual(_host_timestamps(record, state, None), (100, 120, None))
+        # A present timestamp is still validated, never blindly trusted.
+        record["completed_at_ms"] = 110
+        with self.assertRaises(SubagentError):
+            _host_timestamps(record, "completed", None)
+
     def test_canonical_child_message_keeps_task_as_data_and_never_grants_writer(self):
         request = SpawnRequest.parse(
             {
@@ -232,9 +298,52 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(worker["state"], "queued")
         self.assertEqual(worker["session"], fake_session_reference("agent-1"))
         self.assertEqual(worker["tools"], ["read", "edit", "write", "bash"])
-        self.assertEqual(result["completion_delivery"], "host_owned_claim_ack_parent_turn")
+        self.assertEqual(result["completion_delivery"], "retrieve_via_status_or_wait")
         self.assertTrue(self.snapshots)
         self.assertEqual(self.snapshots[-1]["collection"]["nodes"][0]["id"], "worker:agent-1")
+
+    def test_terminal_without_completion_time_does_not_block_roster_or_resume(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        self.host.complete(agent_id, "finished")
+        self.host.agents[agent_id].completed_at_ms = None
+        status = self.orchestrator.status(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(status["worker"]["state"], "done")
+        self.assertIsNone(status["worker"]["completed_at_ms"])
+        self.assertIsNone(status["worker"]["elapsed_ms"])
+        self.assertIn("Elapsed: unknown", self.snapshots[-1]["collection"]["detail"]["body"])
+        continued = self.orchestrator.continue_worker(
+            self.client, self.owner, {"target": agent_id, "message": "Check the tests."}
+        )
+        self.assertTrue(continued["accepted"])
+        self.assertEqual(self.host.follow_ups, [(agent_id, "Check the tests.")])
+
+    def test_accepted_continuation_survives_failed_post_send_refresh(self):
+        from octet_extension import RpcError
+        from octet_subagents.runtime import _compact_metadata, _result_text
+
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        original_list = self.client.list_agents
+        calls = 0
+
+        def list_then_fail():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RpcError(-32000, "status unavailable after acceptance")
+            return original_list()
+
+        self.client.list_agents = list_then_fail
+        result = self.orchestrator.continue_worker(
+            self.client, self.owner, {"target": agent_id, "message": "Also check docs."}
+        )
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["status_refreshed"])
+        self.assertEqual(self.host.steers, [(agent_id, "Also check docs.")])
+        self.assertFalse(_compact_metadata(result)["status_refreshed"])
+        self.assertIn("accepted the message", _result_text("continue", result))
+        self.assertIn("before retrying", _result_text("continue", result))
 
     def test_capture_revisions_precede_publication_without_holding_state_lock(self):
         agent_id = self.spawn()["worker"]["id"]
@@ -466,7 +575,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(worker["artifacts"], [])
         self.assertEqual(worker["session"], fake_session_reference(agent_id))
         detail = self.snapshots[-1]["collection"]["detail"]
-        self.assertIn("Host-observed final summary", detail["body"])
+        self.assertIn("Result:\nAuth ownership is fenced in src/auth.rs:41.", detail["body"])
         self.assertIn("Requested tool policy: granted mutation scope", detail["body"])
 
     def test_turn_limit_is_terminal_with_partial_output_and_claimable_completion(self):

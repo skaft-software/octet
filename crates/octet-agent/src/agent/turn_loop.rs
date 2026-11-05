@@ -3615,7 +3615,6 @@ impl Agent {
                         }
                     }
                 }
-                delegation.detach_telemetry();
             }
             // Settlement never awaits a warm provider/hook. Idle mode keeps
             // the request-opening age; streaming mode stops at this boundary.

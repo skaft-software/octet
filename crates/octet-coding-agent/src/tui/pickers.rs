@@ -397,17 +397,23 @@ pub struct SubagentPickerSnapshot {
     pub notices: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SubagentPickerSelection {
+    Inspect(String),
+    Message(String),
+    Stop(String),
+}
+
 /// Select one subagent node while periodically refreshing presentation state.
-/// Selection is preserved by stable node ID and the returned ID is revalidated
-/// by the caller before opening a transcript.
-pub async fn subagent_picker<S, C, F>(
+/// The caller revalidates its stable ID and owner before performing an action.
+pub(crate) async fn subagent_picker<S, C, F>(
     shell: &mut InteractiveShell,
     input: &mut S,
     initial: SubagentPickerSnapshot,
     initial_selected: usize,
     context: &mut C,
     mut refresh: F,
-) -> anyhow::Result<Option<String>>
+) -> anyhow::Result<Option<SubagentPickerSelection>>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
     F: for<'a> FnMut(&'a mut C) -> Pin<Box<dyn Future<Output = SubagentPickerSnapshot> + 'a>>,
@@ -425,9 +431,8 @@ where
         action: PanelAction::SelectSubagent(SubagentPanel {
             node_ids: initial.node_ids,
             groups: initial.groups,
-            // Terminal groups start collapsed so finished workers cannot bury
-            // live ones; ctrl+t toggles them back on.
-            collapsed: true,
+            // Retained outcomes stay visible; ctrl+t can hide them.
+            collapsed: false,
             revealed_node: None,
             state_filter: None,
         }),
@@ -470,11 +475,25 @@ where
                 if matches!(event, Event::Mouse(_)) {
                     continue;
                 }
+                if let Event::Key(key) = &event {
+                    if key.kind == KeyEventKind::Press && key.modifiers == KeyModifiers::CONTROL {
+                        let selection = match key.code {
+                            KeyCode::Char('g') => shell.selected_subagent_node().map(SubagentPickerSelection::Message),
+                            KeyCode::Char('x') => shell.selected_subagent_node().map(SubagentPickerSelection::Stop),
+                            _ => None,
+                        };
+                        if selection.is_some() {
+                            shell.close_panel();
+                            shell.render();
+                            return Ok(selection);
+                        }
+                    }
+                }
                 if let Some((result, action)) = shell.panel_input(&event) {
                     shell.render();
                     return Ok(match (result, action) {
                         (PanelResult::Confirm(index), PanelAction::SelectSubagent(panel)) => {
-                            panel.node_ids.get(index).cloned()
+                            panel.node_ids.get(index).cloned().map(SubagentPickerSelection::Inspect)
                         }
                         (PanelResult::Cancel, _) => None,
                         _ => None,
@@ -494,12 +513,130 @@ where
                     SubagentPanel {
                         node_ids: snapshot.node_ids,
                         groups: snapshot.groups,
-                        collapsed: true,
+                        collapsed: false,
                         revealed_node: None,
                         state_filter: None,
                     },
                 );
                 shell.render();
+            }
+        }
+    }
+}
+
+/// Outcome of the private subagent message editor. It never modifies the root draft.
+pub(crate) enum SubagentMessageInput {
+    Editing,
+    Submit(String),
+    Cancelled,
+}
+
+pub(crate) fn subagent_message_input(
+    shell: &mut InteractiveShell,
+    event: &Event,
+) -> SubagentMessageInput {
+    use sexy_tui_rs::TextEditAction;
+    let event = shell.tool_input_event(event);
+    match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            let action = match key.code {
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(TextEditAction::Newline)
+                }
+                KeyCode::Enter if shell.tool_input_overflowed() => {
+                    shell.error("message exceeds the 4096-byte limit; press Esc and retry".into());
+                    return SubagentMessageInput::Editing;
+                }
+                KeyCode::Enter => {
+                    let message = shell
+                        .end_tool_input()
+                        .expect("subagent message owns an editor");
+                    return if message.trim().is_empty() {
+                        SubagentMessageInput::Cancelled
+                    } else {
+                        SubagentMessageInput::Submit(message)
+                    };
+                }
+                KeyCode::Esc => {
+                    shell.end_tool_input();
+                    return SubagentMessageInput::Cancelled;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    shell.end_tool_input();
+                    return SubagentMessageInput::Cancelled;
+                }
+                KeyCode::Backspace => Some(TextEditAction::Backspace),
+                KeyCode::Delete => Some(TextEditAction::Delete),
+                KeyCode::Left => Some(TextEditAction::Left),
+                KeyCode::Right => Some(TextEditAction::Right),
+                KeyCode::Up => Some(TextEditAction::Up),
+                KeyCode::Down => Some(TextEditAction::Down),
+                KeyCode::Home => Some(TextEditAction::Home),
+                KeyCode::End => Some(TextEditAction::End),
+                KeyCode::Char(character)
+                    if !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    Some(TextEditAction::Char(character))
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                shell.edit_tool_input(action);
+            }
+        }
+        Event::Paste(text) => shell.edit_tool_input(TextEditAction::Paste(text)),
+        Event::Resize(columns, rows) => shell.set_size(columns, rows),
+        _ => {}
+    }
+    SubagentMessageInput::Editing
+}
+
+pub(crate) async fn subagent_message_picker<S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    label: &str,
+) -> anyhow::Result<Option<String>>
+where
+    S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    shell.begin_tool_input(
+        &format!("Message {label} · Enter sends · Shift+Enter newline · Esc cancels"),
+        false,
+    );
+    shell.render();
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => None,
+            next = input.next() => next,
+        };
+        let event = match next {
+            Some(Ok(event)) => event,
+            Some(Err(error)) => {
+                shell.end_tool_input();
+                return Err(error.into());
+            }
+            None => {
+                shell.end_tool_input();
+                return Ok(None);
+            }
+        };
+        if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
+            shell.end_tool_input();
+            shell.request_close();
+            return Ok(None);
+        }
+        match subagent_message_input(shell, &event) {
+            SubagentMessageInput::Editing => shell.render(),
+            SubagentMessageInput::Submit(message) => {
+                shell.render();
+                return Ok(Some(message));
+            }
+            SubagentMessageInput::Cancelled => {
+                shell.render();
+                return Ok(None);
             }
         }
     }
@@ -562,20 +699,26 @@ where
     }
 }
 
-/// Styled variant of [`read_only_document`]: the producer sanitizes its
-/// content once and applies trusted theme ANSI, which rendering preserves. The
-/// refresh callback receives the current panel content width and is rerun
-/// immediately after a resize so pre-laid-out transcript surfaces stay exact.
-pub async fn read_only_document_live_styled<S, F, Fut>(
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SubagentDocumentAction {
+    Back,
+    Message,
+}
+
+/// A live worker transcript supports global disclosure and a separate message
+/// composer. Its retained history remains immutable and owner-authorized. The
+/// producer sanitizes content and applies trusted theme ANSI. Refresh receives
+/// the current panel width, including immediately after a resize.
+pub(crate) async fn subagent_document_live_styled<S, F, Fut>(
     shell: &mut InteractiveShell,
     input: &mut S,
     title: impl Into<String>,
     text: String,
     mut refresh: F,
-) -> anyhow::Result<()>
+) -> anyhow::Result<SubagentDocumentAction>
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
-    F: FnMut(u16) -> Fut,
+    F: FnMut(u16, bool) -> Fut,
     Fut: Future<Output = anyhow::Result<Option<String>>>,
 {
     shell.open_panel(Panel::ReadOnlyDocument {
@@ -593,7 +736,7 @@ where
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
                 shell.close_panel();
                 shell.request_close();
-                return Ok(());
+                return Ok(SubagentDocumentAction::Back);
             }
             next = input.next() => {
                 let event = match next {
@@ -605,25 +748,45 @@ where
                     None => {
                         shell.close_panel();
                         shell.request_close();
-                        return Ok(());
+                        return Ok(SubagentDocumentAction::Back);
                     }
                 };
                 if matches!(&event, Event::Key(key) if crate::tui::keymap::is_close_key(key)) {
                     shell.close_panel();
                     shell.render();
-                    return Ok(());
+                    return Ok(SubagentDocumentAction::Back);
                 }
                 if matches!(event, Event::Mouse(_)) {
+                    continue;
+                }
+                if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL)
+                {
+                    shell.close_panel();
+                    shell.render();
+                    return Ok(SubagentDocumentAction::Message);
+                }
+                if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('o') && key.modifiers == KeyModifiers::CONTROL)
+                {
+                    shell.toggle_disclosure();
+                    let width = shell.read_only_document_width();
+                    match refresh(width, shell.verbose_tools()).await {
+                        Ok(Some(text)) => shell.update_read_only_document_styled(text),
+                        Ok(None) => {},
+                        Err(error) => shell.error(format!("failed to refresh worker transcript: {error}")),
+                    }
+                    shell.render();
                     continue;
                 }
                 let resized = matches!(&event, Event::Resize(_, _));
                 if shell.panel_input(&event).is_some() {
                     shell.render();
-                    return Ok(());
+                    return Ok(SubagentDocumentAction::Back);
                 }
                 if resized {
                     let width = shell.read_only_document_width();
-                    if let Ok(Some(text)) = refresh(width).await {
+                    if let Ok(Some(text)) = refresh(width, shell.verbose_tools()).await {
                         shell.update_read_only_document_styled(text);
                     }
                 }
@@ -631,7 +794,7 @@ where
             }
             _ = refresh_tick.tick() => {
                 let width = shell.read_only_document_width();
-                if let Ok(Some(text)) = refresh(width).await {
+                if let Ok(Some(text)) = refresh(width, shell.verbose_tools()).await {
                     shell.update_read_only_document_styled(text);
                     shell.render();
                 }

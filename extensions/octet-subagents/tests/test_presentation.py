@@ -57,7 +57,8 @@ class PresentationTests(unittest.TestCase):
                 self.assertIn("Model/profile: custom/fixture/alternate / explore", detail)
                 self.assertIn("provider/model custom/fixture/alternate", detail)
                 self.assertIn("effective custom/fixture/alternate / reasoning off", detail)
-                self.assertIn("model custom/fixture/alternate", row)
+                self.assertIn("alternate", row)
+                self.assertNotIn("requested ", row)
                 self.assertNotIn("custom/fixture/custom/fixture", detail + row)
                 self.assertNotIn("(inherited)", detail)
         inherited = self.worker()
@@ -441,7 +442,7 @@ class PresentationTests(unittest.TestCase):
                 self.assertIn("Host reattachment: " + hint, detail)
                 self.assertLessEqual(len(node["secondary"].encode("utf-8")), 1024)
                 diagnostic = detail.split("Host reattachment: ", 1)[1].split(
-                    "\n\nHost-observed final summary", 1
+                    "\n\nResult:", 1
                 )[0]
                 self.assertLessEqual(len(diagnostic.encode("utf-8")), MAX_ERROR_BYTES)
                 for text in (node["secondary"], detail):
@@ -512,9 +513,30 @@ class PresentationTests(unittest.TestCase):
         secondary = snapshot["collection"]["nodes"][0]["secondary"]
         self.assertIn("failed", secondary)
         self.assertIn("provider boundary rejected the request", secondary)
+        self.assertLess(secondary.index("provider boundary"), secondary.index("claude-sonnet-test"))
         self.assertNotIn("x" * 200, secondary)
         self.assertNotIn("?", secondary)
         self.assertLessEqual(len(secondary.encode("utf-8")), 1024)
+
+    def test_unconfirmed_or_different_model_is_still_visible(self):
+        from octet_subagents.presentation import worker_secondary
+
+        for applied, effective in ((False, "gpt-test"), (True, "gpt-other")):
+            with self.subTest(applied=applied, effective=effective):
+                worker = self.worker(
+                    requested_provider="openai", requested_model="gpt-test",
+                    effective_provider="openai", effective_model=effective,
+                    model_policy_applied=applied,
+                )
+                row = worker_secondary(worker, worker.created_at_ms)
+                self.assertIn("requested openai/gpt-test", row)
+                self.assertEqual("not applied by host" in row, not applied)
+
+    def test_failure_without_an_error_does_not_invent_one(self):
+        from octet_subagents.presentation import worker_secondary
+
+        worker = self.worker("failed", last_error=None)
+        self.assertNotIn("unknown", worker_secondary(worker, worker.created_at_ms))
 
     def test_checked_in_presentation_fixtures_cover_live_tree_resync_and_inspection(self):
         live = json.loads(
@@ -545,7 +567,7 @@ class PresentationTests(unittest.TestCase):
         self.assertFalse(inspection["parent_head_changed_by_inspection"])
         narrow = (FIXTURES / "presentation" / "narrow-terminal.txt").read_text(encoding="utf-8")
         self.assertIn("/subagents inspect", narrow)
-        self.assertIn("subagent_stop", narrow)
+        self.assertIn("/subagents stop", narrow)
 
 
 if __name__ == "__main__":

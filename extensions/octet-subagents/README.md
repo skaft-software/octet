@@ -1,10 +1,10 @@
 # octet-subagents
 
-**Source candidate distribution: 0.10.0.** This bundle needs exactly octet 0.10.0.
-Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.0 candidate record](../../docs/releases/v0.10.0.md) for availability and
-remaining qualification. 0.10.0 assets are not published; use the reviewed
-source-checkout route below until publication is approved.
+**Unreleased post-0.10.0 changes.** This source tree retains the 0.10.0
+manifest and currently requires exactly octet 0.10.0, but the changes described
+here are not part of the 0.10.0 release. A future release must update the
+extension and host versions together. See the [version-matched installation](../../docs/installation.md)
+and [0.10.0 release record](../../docs/releases/v0.10.0.md) for published availability.
 
 Hand a bounded task to a background worker while the main session carries on.
 octet owns the child conversations, permissions, saving, limits and shutdown. It
@@ -20,22 +20,16 @@ After [installing and enabling the bundle](#install-and-enable), a
   "name": "explore-auth",
   "task": "Trace authentication ownership and report relevant files and invariants.",
   "profile": "explore",
-  "provider": "inherit",
-  "model": "inherit",
-  "reasoning": "inherit",
   "tools": ["read"],
-  "timeout_seconds": 300,
-  "max_turns": 8,
-  "max_output_bytes": 8192,
-  "max_cost_microdollars": 200000,
-  "background": true,
   "idempotency_key": "auth-audit-v1"
 }
 ```
 
-The acknowledgement is **not completion**. Keep doing independent work. octet
-delivers the final output through its durable parent mailbox. Reusing an
-identical spawn key is safe to retry. Using it with different input fails.
+The acknowledgement is **not completion**. Keep doing independent work, then
+use `subagent_wait` or `subagent_status` to retrieve the result. Workers persist
+beyond the parent turn, but their completion does not currently start a new
+parent turn automatically. Reusing an identical spawn key is safe to retry.
+Using it with different input fails.
 
 | Tool | Use |
 | --- | --- |
@@ -52,6 +46,9 @@ Explicit routing needs the negotiated `agent_model_selection_v1`. The host alone
 validates and normalizes it, and unknown routes never fall back to the parent.
 The requested and host-confirmed effective selections show in the inspector and
 are kept across restoration and continuation. Credentials are never returned.
+Host-confirmed inherited model names may contain spaces or Unicode, but explicit
+model selection currently accepts only the narrower identifier syntax; use
+inheritance when a discovered custom model ID is outside that syntax.
 
 <a id="enable-the-local-bundle"></a>
 
@@ -97,19 +94,26 @@ generation and negotiated features. The packaged skill is opt-in too:
   and extension policy. A shared filesystem is **not isolation**, so scope
   changes to owned paths. Task text can't relax host policy.
 - Omitted time, turn and cost ceilings inherit the parent's limits, including
-  unlimited. The explicit limits and output bounds are in the [safety
-  reference](REFERENCE.md#safety-model).
+  unlimited. Set a separate ceiling only when you actually need one; an
+  arbitrary short timeout or turn limit can interrupt useful work. Explicit
+  limits and output bounds are in the [safety reference](REFERENCE.md#safety-model).
 
 ## Inspect the work
 
 Open `/subagents` (also `/subagents list` or `/subagents status`) to see the
 host-owned live roster, including while a turn runs. Up and Down select, Enter
-opens a scrollable, read-only transcript, Ctrl+X stops the selected worker, and
-Escape or Left goes back. `/subagents stop <name-or-id|all>` requests interruption
-without waiting for the parent turn to end. `/subagents inspect <name-or-id>`,
-`/subagents wait [name-or-id]` and `/subagents reattach [name-or-id]` run at idle,
-or queue until idle during a turn. `/extensions` only enables, disables and
-configures the extension; runtime worker controls are not in its options menu.
+opens a scrollable worker transcript, Ctrl+G composes a message to the selected
+worker, and Ctrl+X stops it. In the transcript, Ctrl+O expands or collapses
+retained details and Ctrl+G messages that worker. The recorded history itself
+is not edited. Escape or Left goes back. In the message composer, Enter sends,
+Shift+Enter adds a line, and Escape cancels. A message steers an active worker
+or resumes a settled one with its conversation. You can also use
+`/subagents continue <name-or-id> <message>` or `/subagents stop <name-or-id|all>`;
+these controls do not wait for the parent turn to end. `/subagents inspect
+<name-or-id>`, `/subagents wait [name-or-id]` and `/subagents reattach [name-or-id]`
+run at idle, or queue until idle during a turn. `/extensions` only enables,
+disables and configures the extension; runtime worker controls are not in its
+options menu.
 
 A bounded, tool-like **Subagents** transcript block updates in place while
 workers are active, including between root turns. Its heading counts worker
@@ -130,8 +134,8 @@ tool and run failures and approval prompts stay visible.
 
 </details>
 
-Serve inspection is also owner-bound and read-only, and can't send a prompt. In
-both frontends, `/subagents inspect <name-or-id>` gives cached detail, and
+Serve transcript inspection is owner-bound and read-only. In both frontends,
+`/subagents inspect <name-or-id>` gives cached detail, and
 `/extensions inspect agent-session:<digest>` is the fallback for an explicit
 reference.
 

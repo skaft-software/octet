@@ -57,8 +57,9 @@ use crate::tui::keymap::{self, InputAction};
 use crate::tui::pickers::{
     self, confirmation_picker, extension_confirmation_picker, extension_input_picker,
     extension_picker, message_picker, optional_model_picker, pick_list_with_preview,
-    provider_setup_picker, read_only_document, read_only_document_live_styled, session_picker,
-    subagent_picker, thinking_picker, SubagentPickerSnapshot,
+    provider_setup_picker, read_only_document, session_picker, subagent_document_live_styled,
+    subagent_message_input, subagent_message_picker, subagent_picker, thinking_picker,
+    SubagentDocumentAction, SubagentMessageInput, SubagentPickerSelection, SubagentPickerSnapshot,
 };
 use crate::tui::terminal::TerminalInput as EventStream;
 use crate::tui::theme::OctetTheme;
@@ -664,6 +665,19 @@ where
     let mut scroll_dirty = false;
     let mut cache_warming_failed = false;
     let remote_ui_wake = executable_extensions.remote_ui_wake();
+    // This receiver belongs only to the Agent borrowed for this idle wait. A
+    // session/host replacement drops it before subscribing to the new owner.
+    let mut delegation = agent
+        .as_deref()
+        .and_then(|agent| agent.subscribe_delegation_telemetry());
+    if let Some(snapshot) = delegation
+        .as_ref()
+        .and_then(|receiver| receiver.borrow().clone())
+    {
+        if shell.set_subagent_telemetry(Some(&snapshot), true) {
+            shell.render();
+        }
+    }
     loop {
         executable_extensions.sync_editor_autocomplete(shell);
         if shell.close_requested() {
@@ -863,6 +877,18 @@ where
                     None => std::future::pending::<()>().await,
                 }
             } => return Ok(Idle::GoalContinuation),
+            changed = async {
+                match delegation.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    delegation = None;
+                } else if let Some(snapshot) = delegation.as_mut().and_then(|receiver| receiver.borrow_and_update().clone()) {
+                    if shell.set_subagent_telemetry(Some(&snapshot), true) { shell.render(); }
+                }
+            }
             _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
                 if apply_extension_background(shell, executable_extensions) { shell.render(); }
                 if executable_extensions.is_modeless() { return Ok(Idle::ExtensionWake); }
@@ -3773,7 +3799,7 @@ fn active_subagent_panel(snapshot: &SubagentPickerSnapshot) -> SubagentPanel {
     SubagentPanel {
         node_ids: snapshot.node_ids.clone(),
         groups: snapshot.groups.clone(),
-        collapsed: true,
+        collapsed: false,
         revealed_node: None,
         state_filter: None,
     }
@@ -3861,7 +3887,7 @@ fn open_active_subagent_document(
     };
     if opening {
         shell.open_panel(Panel::ReadOnlyDocument {
-            title: format!("{} · read-only transcript", entry.label),
+            title: format!("{} · ^g message · ^o details", entry.label),
             text: text.into(),
             styled: true,
             scroll_from_bottom: 0,
@@ -3943,6 +3969,7 @@ where
     let mut extension_collection: Option<extension_menu::OwnedCollection> = None;
     let mut subagents_open = false;
     let mut subagent_document = None::<String>;
+    let mut subagent_document_binding = None::<SubagentMessageBinding>;
     let mut subagent_refresh: Option<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> =
         None;
     let mut subagent_refresh_error = None::<String>;
@@ -3950,6 +3977,9 @@ where
     // arrives, even if the root finishes first. Never spawn a detached mutation.
     let mut subagent_stops = VecDeque::<SubagentStop>::new();
     let mut subagent_stop: Option<SubagentStop> = None;
+    let mut subagent_messages = VecDeque::<SubagentStop>::new();
+    let mut subagent_message: Option<SubagentStop> = None;
+    let mut subagent_draft: Option<SubagentMessageBinding> = None;
     // Retain the root outcome while owned stop requests finish, using this same
     // input/event loop rather than a blocking drain or a detached mutation task.
     let mut settled_outcome = None;
@@ -3979,16 +4009,24 @@ where
             if aborting && !dispatch_queued {
                 shell.settle_queued_follow_ups(false);
             }
-            if subagent_stop.is_none() && subagent_stops.is_empty() {
+            if subagent_stop.is_none()
+                && subagent_stops.is_empty()
+                && subagent_message.is_none()
+                && subagent_messages.is_empty()
+            {
                 return Ok(settled_outcome.take().expect("settled root outcome"));
             }
             if *quit_requested || shell.close_requested() {
-                shell.error("subagent stop response interrupted by shutdown; check /subagents after restart".into());
+                shell.error("subagent control response interrupted by shutdown; check /subagents after restart".into());
                 shell.render();
                 return Ok(HostRunOutcome::shutdown());
             }
         }
         if aborting || shell.close_requested() {
+            if subagent_draft.take().is_some() {
+                shell.end_tool_input();
+                shell.notice("subagent message cancelled while closing");
+            }
             if extension_menu.is_open() {
                 extension_menu.cancel();
                 shell.close_panel();
@@ -4046,6 +4084,9 @@ where
         }
         if subagent_stop.is_none() {
             subagent_stop = subagent_stops.pop_front();
+        }
+        if subagent_message.is_none() {
+            subagent_message = subagent_messages.pop_front();
         }
 
         tokio::select! {
@@ -4150,6 +4191,16 @@ where
                 subagent_stop = None;
                 if let Some(result) = result {
                     show_active_subagent_stop_result(shell, result);
+                }
+            }
+            result = futures_util::future::OptionFuture::from(subagent_message.as_mut().map(|future| future.as_mut())), if subagent_message.is_some() => {
+                subagent_message = None;
+                if let Some(result) = result {
+                    match result {
+                        Ok(output) => shell.show_extension_output("Subagent message", output),
+                        Err(error) => shell.error(format!("subagent message not confirmed: {error}; check /subagents")),
+                    }
+                    shell.render();
                 }
             }
             result = futures_util::future::OptionFuture::from(subagent_refresh.as_mut().map(|future| future.as_mut())), if subagent_refresh.is_some() => {
@@ -4267,6 +4318,29 @@ where
                     shell.render();
                     continue;
                 }
+                if !clipboard_replay && subagent_draft.is_some() {
+                    match subagent_message_input(shell, &event) {
+                        SubagentMessageInput::Editing => {},
+                        SubagentMessageInput::Cancelled => { subagent_draft = None; },
+                        SubagentMessageInput::Submit(message) => {
+                            let binding = subagent_draft.take().expect("subagent editor has a binding");
+                            if aborting || *quit_requested || shell.close_requested() {
+                                shell.error("subagent message not admitted while closing".into());
+                            } else if !subagent_message_target_is_current(executable_extensions, &inspection.resource_owner, &binding) {
+                                shell.error("subagent changed while composing; message not sent".into());
+                            } else if subagent_messages.len() + usize::from(subagent_message.is_some()) >= 8 {
+                                shell.error("subagent message queue is full; retry after a response".into());
+                            } else {
+                                match executable_extensions.subagent_continue_control(binding.target, message, &inspection.resource_owner) {
+                                    Ok(control) => { subagent_messages.push_back(control); shell.notice("subagent message submitted; waiting for the owner-bound response"); }
+                                    Err(error) => shell.error(format!("subagent message not admitted: {error}")),
+                                }
+                            }
+                        }
+                    }
+                    shell.render();
+                    continue;
+                }
                 if !clipboard_replay && shell.has_panel() {
                     // Ctrl+C remains draft-sensitive even while an ordinary picker
                     // owns navigation. Escape only dismisses that picker.
@@ -4283,6 +4357,42 @@ where
                             shell.set_run_preparing(run_id, "cancelling");
                         }
                         shell.render(); continue;
+                    }
+                    if subagents_open && subagent_document.is_some()
+                        && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('o') && key.modifiers == KeyModifiers::CONTROL)
+                    {
+                        shell.toggle_disclosure();
+                        if let Some(id) = subagent_document.as_deref() {
+                            open_active_subagent_document(shell, executable_extensions, run, id, false);
+                        }
+                        shell.render();
+                        continue;
+                    }
+                    if subagents_open
+                        && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL)
+                    {
+                        let binding = if subagent_document.is_some() {
+                            subagent_document_binding.clone().filter(|binding| {
+                                subagent_message_target_is_current(executable_extensions, &inspection.resource_owner, binding)
+                            })
+                        } else {
+                            shell.selected_subagent_node().and_then(|node| {
+                                subagent_message_binding(executable_extensions, &inspection.resource_owner, &node)
+                            })
+                        };
+                        if let Some(binding) = binding {
+                            shell.close_panel();
+                            subagents_open = false;
+                            subagent_document = None;
+                            shell.begin_tool_input(&format!("Message {} · Enter sends · Shift+Enter newline · Esc cancels", binding.label), false);
+                            subagent_draft = Some(binding);
+                        } else {
+                            shell.error("subagent state changed; select it again to message".into());
+                        }
+                        shell.render();
+                        continue;
                     }
                     if subagents_open && subagent_document.is_none()
                         && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press
@@ -4424,6 +4534,9 @@ where
                             }
                             (PanelResult::Confirm(index), PanelAction::SelectSubagent(panel)) => {
                                 subagent_document = panel.node_ids.get(index).cloned();
+                                subagent_document_binding = subagent_document.as_deref().and_then(|id| {
+                                    subagent_message_binding(executable_extensions, &inspection.resource_owner, id)
+                                });
                                 if let Some(id) = subagent_document.as_deref() {
                                     open_active_subagent_document(shell, executable_extensions, run, id, true);
                                 }
@@ -4659,7 +4772,7 @@ where
                             continue;
                         }
                         let live_subagent_control = match &parsed {
-                            Command::Unknown(text) => subagents_command_arguments(text, executable_extensions).is_some_and(|args| subagent_list_requested(&args) || matches!(args.as_slice(), [action, _] if action == "stop")),
+                            Command::Unknown(text) => subagents_command_arguments(text, executable_extensions).is_some_and(|args| subagent_list_requested(&args) || matches!(args.as_slice(), [action, _] if action == "stop") || matches!(args.as_slice(), [action, _, _] if action == "continue")),
                             _ => false,
                         };
                         let live_thinking = matches!(&parsed, Command::Thinking(Some(_))) && inspection.model.responses_features().reasoning_effort_updates && !aborting && model_controls::can_apply_reasoning_at_response(pending_actions);
@@ -4673,7 +4786,8 @@ where
                             shell.render();
                             continue;
                         }
-                        let command = executable_extensions.parse_command(&shell.consume_command_text(text));
+                        let text = shell.consume_command_text(text);
+                        let command = parse_subagent_command_preserving_message(&text, executable_extensions);
                         if let Command::Thinking(Some(level)) = &command {
                             let requested = ThinkingLevel::parse(level).and_then(|level| requested_thinking_to_reasoning(
                                 level, &inspection.model, inspection.subagents_available,
@@ -4737,6 +4851,22 @@ where
                                     subagent_document = None;
                                     shell.render();
                                     continue;
+                                }
+                                if let [action, target, message] = arguments.as_slice() {
+                                    if action == "continue" {
+                                        if aborting || *quit_requested || shell.close_requested() {
+                                            shell.error("subagent message not admitted while closing".into());
+                                        } else if subagent_messages.len() + usize::from(subagent_message.is_some()) >= 8 {
+                                            shell.error("subagent message queue is full; retry after a response".into());
+                                        } else {
+                                            match executable_extensions.subagent_continue_control(target.clone(), message.clone(), &inspection.resource_owner) {
+                                                Ok(control) => { subagent_messages.push_back(control); shell.notice("subagent message submitted; waiting for the owner-bound response"); }
+                                                Err(error) => shell.error(format!("subagent message not admitted: {error}")),
+                                            }
+                                        }
+                                        shell.render();
+                                        continue;
+                                    }
                                 }
                                 if let [action, target] = arguments.as_slice() {
                                     if action == "stop" {
@@ -4933,6 +5063,10 @@ where
                             shell.notice_error("interactive tool request denied while cancelling or at the pending-request limit");
                         } else {
                             if interactions.is_empty() {
+                                if subagent_draft.take().is_some() {
+                                    shell.end_tool_input();
+                                    shell.notice("subagent message cancelled by a tool request");
+                                }
                                 extension_menu.cancel();
                                 extension_collection = None;
                                 shell.close_panel(); shell.close_overlay();
@@ -5017,6 +5151,10 @@ where
                     }
                     let run_finished = matches!(&event, AgentEvent::RunFinished { .. });
                     if run_finished {
+                        if subagent_draft.take().is_some() {
+                            shell.end_tool_input();
+                            shell.notice("subagent message cancelled when the turn settled; reopen /subagents");
+                        }
                         extension_menu.cancel();
                         extension_collection = None;
                         settle_active_thinking(shell, inspection, pending_actions);
@@ -5049,6 +5187,10 @@ where
                     }
                 }
                 None => {
+                    if subagent_draft.take().is_some() {
+                        shell.end_tool_input();
+                        shell.notice("subagent message cancelled when the turn stream ended");
+                    }
                     extension_menu.cancel();
                     extension_collection = None;
                     settle_active_thinking(shell, inspection, pending_actions);
@@ -6949,6 +7091,79 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
     })
 }
 
+/// Capture the exact owner, process instance and inspect target behind a node.
+/// Re-resolving this binding before submission prevents a stale editor from
+/// sending to a removed/replaced worker or a different extension generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SubagentMessageBinding {
+    owner: String,
+    instance: String,
+    generation: u64,
+    node_id: String,
+    target: String,
+    label: String,
+}
+
+fn subagent_message_binding(
+    extensions: &crate::extensions::ExecutableExtensions,
+    owner: &str,
+    node_id: &str,
+) -> Option<SubagentMessageBinding> {
+    if owner.is_empty()
+        || extensions.command_owner("subagents").as_deref()
+            != Some(crate::extensions::SUBAGENTS_EXTENSION_NAME)
+    {
+        return None;
+    }
+    let view = extensions.presentation_views().into_iter().find(|view| {
+        view.extension == crate::extensions::SUBAGENTS_EXTENSION_NAME
+            && view.resource_owner.as_deref() == Some(owner)
+    })?;
+    let node = view
+        .snapshot
+        .collection
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)?;
+    let target = node.action_ids.iter().find_map(|id| {
+        let action = view
+            .snapshot
+            .actions
+            .iter()
+            .find(|action| &action.id == id)?;
+        match action.arguments.as_slice() {
+            [verb, target]
+                if action.command == "subagents" && verb == "inspect" && !target.is_empty() =>
+            {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    })?;
+    Some(SubagentMessageBinding {
+        owner: owner.to_owned(),
+        instance: view.extension_instance_id,
+        generation: view.generation,
+        node_id: node_id.to_owned(),
+        target,
+        label: node.label.clone(),
+    })
+}
+
+fn subagent_message_target_is_current(
+    extensions: &crate::extensions::ExecutableExtensions,
+    owner: &str,
+    binding: &SubagentMessageBinding,
+) -> bool {
+    owner == binding.owner
+        && subagent_message_binding(extensions, owner, &binding.node_id).is_some_and(|current| {
+            current.instance == binding.instance
+                && current.generation == binding.generation
+                && current.target == binding.target
+        })
+}
+
 /// The stop target (the worker's agent id) behind a live list node, taken from
 /// the destructive "stop" action the octet-subagents presentation attaches to
 /// that node. A worker without one is not running.
@@ -7006,15 +7221,52 @@ fn native_slash_command_suggestions(
 }
 
 /// Admit only the runtime command registered by the first-party package.
+// General slash-command parsing trims the input. A subagent continuation
+// carries user-authored free-form text, so retain its original bytes.
+fn parse_subagent_command_preserving_message(
+    text: &str,
+    extensions: &crate::extensions::ExecutableExtensions,
+) -> Command {
+    let parsed = commands::parse(text);
+    if matches!(parsed, Command::Unknown(_))
+        && subagents_command_arguments(text, extensions).is_some()
+    {
+        Command::Unknown(text.to_owned())
+    } else {
+        parsed
+    }
+}
+
 fn subagents_command_arguments(
     text: &str,
     extensions: &crate::extensions::ExecutableExtensions,
 ) -> Option<Vec<String>> {
-    let (name, arguments) = split_prompt_invocation(text)?;
-    (name == "subagents"
-        && extensions.command_owner(name).as_deref()
-            == Some(crate::extensions::SUBAGENTS_EXTENSION_NAME))
-    .then(|| arguments.split_whitespace().map(str::to_owned).collect())
+    let text = text.trim_start().trim_start_matches('/');
+    let name_end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let name = &text[..name_end];
+    if name != "subagents"
+        || extensions.command_owner(name).as_deref()
+            != Some(crate::extensions::SUBAGENTS_EXTENSION_NAME)
+    {
+        return None;
+    }
+    let arguments = text[name_end..].trim_start();
+    let action_end = arguments
+        .find(char::is_whitespace)
+        .unwrap_or(arguments.len());
+    if &arguments[..action_end] == "continue" {
+        let rest = arguments[action_end..].trim_start();
+        let target_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let target = &rest[..target_end];
+        // Exactly one whitespace character separates the target from the
+        // message; any further whitespace belongs to the message itself.
+        let delimiter = rest[target_end..].chars().next();
+        let message = delimiter.map_or("", |ch| &rest[target_end + ch.len_utf8()..]);
+        if !target.is_empty() && !message.trim().is_empty() {
+            return Some(vec!["continue".into(), target.into(), message.into()]);
+        }
+    }
+    Some(arguments.split_whitespace().map(str::to_owned).collect())
 }
 
 fn subagent_list_requested(arguments: &[String]) -> bool {
@@ -7197,11 +7449,11 @@ where
             .await?;
             return Ok(());
         }
+        let initial = subagent_picker_snapshot(&title, &entries, notices);
         let initial_selected = selected_node_id
             .as_ref()
-            .and_then(|id| entries.iter().position(|entry| &entry.node_id == id))
+            .and_then(|id| initial.node_ids.iter().position(|node| node == id))
             .unwrap_or(0);
-        let initial = subagent_picker_snapshot(&title, &entries, notices);
         let selected_id = {
             let mut refresh = SubagentRefreshContext {
                 extensions: &mut app.executable_extensions,
@@ -7217,8 +7469,51 @@ where
             )
             .await?
         };
-        let Some(selected_id) = selected_id else {
+        let Some(selection) = selected_id else {
             return Ok(());
+        };
+        let selected_id = match selection {
+            SubagentPickerSelection::Inspect(id) => id,
+            SubagentPickerSelection::Stop(id) => {
+                selected_node_id = Some(id.clone());
+                if let Some(target) = subagent_stop_target(&app.executable_extensions, &id) {
+                    run_subagents_command(app, shell, input, vec!["stop".into(), target]).await?;
+                } else {
+                    shell.error("the selected worker is not running".into());
+                }
+                continue;
+            }
+            SubagentPickerSelection::Message(id) => {
+                selected_node_id = Some(id.clone());
+                let owner = app.agent.session().resource_owner_key();
+                let Some(binding) =
+                    subagent_message_binding(&app.executable_extensions, &owner, &id)
+                else {
+                    shell.error("subagent state changed; select it again to message".into());
+                    continue;
+                };
+                let Some(message) = subagent_message_picker(shell, input, &binding.label).await?
+                else {
+                    if shell.close_requested() {
+                        return Ok(());
+                    }
+                    continue;
+                };
+                let owner = app.agent.session().resource_owner_key();
+                if !subagent_message_target_is_current(&app.executable_extensions, &owner, &binding)
+                {
+                    shell.error("subagent changed while composing; message not sent".into());
+                    continue;
+                }
+                run_subagents_command(
+                    app,
+                    shell,
+                    input,
+                    vec!["continue".into(), binding.target, message],
+                )
+                .await?;
+                continue;
+            }
         };
         selected_node_id = Some(selected_id.clone());
 
@@ -7246,6 +7541,11 @@ where
                 .presentation_session_reference_principal(reference)
         });
         let node_id = entry.node_id.clone();
+        // A transcript can outlive a roster revision or extension restart.
+        // Bind messaging to the worker that was selected when it opened.
+        let document_owner = app.agent.session().resource_owner_key();
+        let document_binding =
+            subagent_message_binding(&app.executable_extensions, &document_owner, &node_id);
         let fallback_detail = entry.fallback_detail.clone();
         let theme = shell.theme();
         let verbose_tools = shell.verbose_tools();
@@ -7272,7 +7572,7 @@ where
         } else {
             fallback_detail.clone()
         };
-        let refresh = |width| {
+        let refresh = |width, verbose_tools| {
             let current_fallback = subagent_view_entries(&app.executable_extensions)
                 .and_then(|(_, entries)| {
                     entries
@@ -7305,16 +7605,43 @@ where
             };
             std::future::ready(result)
         };
-        read_only_document_live_styled(
+        let action = subagent_document_live_styled(
             shell,
             input,
-            format!("{} · read-only transcript", entry.label),
+            format!("{} · ^g message · ^o details", entry.label),
             initial_text,
             refresh,
         )
         .await?;
         if shell.close_requested() {
             return Ok(());
+        }
+        if action == SubagentDocumentAction::Message {
+            let owner = app.agent.session().resource_owner_key();
+            let Some(binding) = document_binding.filter(|binding| {
+                subagent_message_target_is_current(&app.executable_extensions, &owner, binding)
+            }) else {
+                shell.error("subagent state changed; select it again to message".into());
+                continue;
+            };
+            let Some(message) = subagent_message_picker(shell, input, &binding.label).await? else {
+                if shell.close_requested() {
+                    return Ok(());
+                }
+                continue;
+            };
+            let owner = app.agent.session().resource_owner_key();
+            if !subagent_message_target_is_current(&app.executable_extensions, &owner, &binding) {
+                shell.error("subagent changed while composing; message not sent".into());
+                continue;
+            }
+            run_subagents_command(
+                app,
+                shell,
+                input,
+                vec!["continue".into(), binding.target, message],
+            )
+            .await?;
         }
     }
 }
@@ -13336,7 +13663,10 @@ async fn run_interactive_once(
                     }
                     continue;
                 }
-                let command = app.executable_extensions.parse_command(&command_input);
+                let command = parse_subagent_command_preserving_message(
+                    &command_input,
+                    &app.executable_extensions,
+                );
                 match run_idle_command(
                     app,
                     &mut shell,
