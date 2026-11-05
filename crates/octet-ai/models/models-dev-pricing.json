@@ -4662,10 +4662,10 @@
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-120b": {
-    "cache_read": 10000,
+    "cache_read": 75000,
     "cache_write_5m": 0,
-    "input": 11000,
-    "output": 40000,
+    "input": 150000,
+    "output": 600000,
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-20b": {
@@ -5600,10 +5600,10 @@
     "reasoning": 10000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 150000,
+    "cache_read": 180000,
     "cache_write_5m": 0,
-    "input": 152900,
-    "output": 9338800,
+    "input": 182400,
+    "output": 10148900,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
