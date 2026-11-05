@@ -619,10 +619,10 @@ impl ExtensionProviderStreamTransport {
         let hooks = hooks.filter(|hooks| !hooks.is_empty());
         let bridge_allowed = hooks.is_some()
             && self.supports_request_hooks()
-            && !route
+            && route
                 .model_metadata
                 .as_ref()
-                .is_some_and(|metadata| metadata.inherit_provider.is_some());
+                .is_none_or(|metadata| metadata.inherit_provider.is_none());
         if hooks.is_some() {
             if bridge_allowed {
                 params

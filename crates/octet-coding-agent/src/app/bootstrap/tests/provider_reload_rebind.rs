@@ -757,9 +757,9 @@ async fn provider_reload_changed_selected_facts_before_capture_cannot_authorize(
                     .await;
                 assert!(outcomes.iter().all(Result::is_ok));
                 tokio::time::timeout(Duration::from_secs(5), async {
-                    while !runtime
+                    while runtime
                         .registered_route_for_test(&app.model.spec.id)
-                        .is_some_and(|route| route.0.owner != before.0.owner)
+                        .is_none_or(|route| route.0.owner == before.0.owner)
                     {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
