@@ -3411,7 +3411,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "cache_read": 35000,
     "cache_write_5m": 0,
-    "input": 58000,
+    "input": 55300,
     "output": 300000,
     "reasoning": null
   },
@@ -3654,10 +3654,10 @@
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
-    "cache_read": 21000,
+    "cache_read": 15000,
     "cache_write_5m": 0,
-    "input": 43000,
-    "output": 129000,
+    "input": 29000,
+    "output": 87000,
     "reasoning": null
   },
   "openrouter/google/gemma-4-26b-a4b-it:free": {
@@ -4151,7 +4151,7 @@
     "reasoning": null
   },
   "openrouter/moonshotai/kimi-k2.7-code": {
-    "cache_read": 150000,
+    "cache_read": 160000,
     "cache_write_5m": 0,
     "input": 600000,
     "output": 3500000,
@@ -5567,7 +5567,7 @@
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "cache_read": 35000,
     "cache_write_5m": 0,
-    "input": 58000,
+    "input": 55300,
     "output": 300000,
     "reasoning": null
   },
@@ -5586,10 +5586,10 @@
     "reasoning": 10000000
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "cache_read": 160000,
+    "cache_read": 180000,
     "cache_write_5m": 0,
-    "input": 167200,
-    "output": 10544800,
+    "input": 182400,
+    "output": 9338800,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
