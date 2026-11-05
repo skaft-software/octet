@@ -291,8 +291,10 @@ async fn inherited_pipe_writer_survives_return_until_cancelled() {
     let cancellation = crate::tool::CancellationToken::default();
     let mut ctx = f.ctx();
     ctx.cancellation = cancellation.clone();
+    // The writer must outlive the tool's return, not race a cold interpreter
+    // start: it runs far longer than the wait below (cancellation ends it).
     let command = r#"python3 -c 'import os,time
-for i in range(300):
+for i in range(3000):
  os.write(1,b"out\n"); os.write(2,b"err\n")
  if i == 100: open("writer-alive", "w").write("ok")
  time.sleep(.01)' & echo $! > child.pid"#;
@@ -307,7 +309,9 @@ for i in range(300):
         .parse()
         .unwrap();
     let marker = f.workspace.join("writer-alive");
-    for _ in 0..200 {
+    // 100 writes after the tool returned prove the pipe stayed drained; allow a
+    // slow runner's cold `python3` start (seen on macOS CI) up to 20 seconds.
+    for _ in 0..2000 {
         if marker.exists() {
             break;
         }

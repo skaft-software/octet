@@ -233,7 +233,7 @@ jobs:
         run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
       - name: Run workspace tests
         timeout-minutes: 15
-        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-fail-fast
         env:
           OCTET_PTY_TRACE: "1"
       # `cargo test --all-targets` builds examples only as test harnesses.
