@@ -883,7 +883,25 @@ impl ExecutableExtensions {
                         "no foreground session is available".to_owned(),
                     ),
                     Some(session_id) => match sessions.rename(&session_id, &name) {
-                        Ok(_) => {
+                        Ok(metadata) => {
+                            // Publish the committed name before its notification and
+                            // acknowledgement. Otherwise an earlier host snapshot
+                            // can overwrite the adapter's optimistic setter while
+                            // it awaits this request, until the next shell pump.
+                            let state = {
+                                let mut state = self
+                                    .host_state
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.session_name = metadata.name;
+                                state.clone()
+                            };
+                            super::turns::publish_host_state(
+                                &self.processes,
+                                &state,
+                                session,
+                                &mut self.diagnostics,
+                            );
                             if pending
                                 .process
                                 .supports_feature(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2)
