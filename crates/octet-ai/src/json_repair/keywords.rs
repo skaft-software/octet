@@ -165,7 +165,7 @@ fn ecma_pattern(pattern: &str) -> Result<String, String> {
             }
             '*' | '+' | '?' if !class => {
                 let group = ch == '?' && output.ends_with('(');
-                if quantified && !(ch == '?' && !lazy) {
+                if (lazy || ch != '?') && quantified {
                     return Err("invalid repeated pattern quantifier".into());
                 }
                 lazy = quantified && ch == '?';
