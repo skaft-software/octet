@@ -98,19 +98,19 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 
 | Module | Tests | Covers |
 | --- | --- | --- |
-| `pi_baseline_contract_tests` | 5 | baseline registration and lifecycle |
+| `pi_baseline_contract_tests` | 7 | baseline registration and lifecycle, shortcuts, the event bus, session entries and compaction/tree hooks |
 | `pi_context_contract_tests` | 5 | context/prompt projections and live-command system-prompt reads/refusals |
 | `pi_exec_contract_tests` | 3 | exact argv, controlled-policy approval/refusal, timeout and cancellation |
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
 | `pi_messages_tests` | 9 | text/images, public message events, persistence/resume, delivery and tool pairing |
-| `pi_model_provider_tests` | 4 | model facts, scoped views, cold interactive startup/reload facts and model/thinking selection |
+| `pi_model_provider_tests` | 9 | model facts, scoped views, cold interactive startup/reload facts, model/thinking selection, custom and inherited providers, request hooks and custom HTTP delegation |
 | `pi_session_replacement_tests` | 8 | replacement, busy-turn deferral, setup/parentSession, withSession and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
-| `pi_ui_contract_tests` | 13 | dialogs, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
+| `pi_ui_contract_tests` | 14 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
-| `resource_paths::pi_app_tests` | 6 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
+| `resource_paths::pi_app_tests` | 7 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
 | `mcp_native_tests` | 3 | registration/replacement, execution, removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | 1 (ignored) | original `pi-clm`, source unavailable here |
 

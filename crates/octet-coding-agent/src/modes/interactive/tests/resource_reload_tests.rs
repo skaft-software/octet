@@ -49,6 +49,9 @@ export default pi => {
     std::fs::create_dir_all(&prompts).unwrap();
     let prompt = prompts.join("reload-driver.md");
     std::fs::write(&prompt, "Native reload driver resource $1\n").unwrap();
+    // The host resolves resource paths to their real location, so expect that
+    // path; macOS temporary directories sit behind the /var -> /private/var link.
+    let prompt = prompt.canonicalize().unwrap();
     let session = app.agent.session().path().to_owned();
     let owner = app.agent.session().resource_owner_key();
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();

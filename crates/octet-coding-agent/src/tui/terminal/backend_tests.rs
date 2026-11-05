@@ -358,6 +358,73 @@ fn a_repeated_placement_reuses_the_encoded_bytes() {
 }
 
 #[test]
+fn carried_image_columns_position_new_and_cached_payloads_without_logging_graphics() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("image-write.log");
+    let id = ImageId::new(1).unwrap();
+    let layout = ImageLayout::new(2, 3).unwrap();
+    let first = ImageAnchor::new(ImageProtocol::Kitty, id, layout)
+        .cropped(1, 2)
+        .unwrap()
+        .with_column(2)
+        .marker();
+    let second = ImageAnchor::new(ImageProtocol::Kitty, id, layout)
+        .cropped(1, 2)
+        .unwrap()
+        .with_column(6)
+        .marker();
+    let mut backend = terminal();
+    backend.write_log = Some(File::create(&path).unwrap());
+    backend.image_store.register(id, png_payload());
+
+    // The first placement encodes the payload; the second one must use that
+    // cache while still applying its own carried destination column.
+    backend.write(&format!("{first}after"));
+    let first_bytes = backend.out.clone();
+    assert!(
+        first_bytes.starts_with(b"\x1b7\x1b[3G\x1b_G"),
+        "{first_bytes:?}"
+    );
+    assert!(first_bytes.ends_with(b"\x1b8after"));
+    backend.write(&format!("{second}after"));
+    let second_bytes = &backend.out[first_bytes.len()..];
+    assert!(
+        second_bytes.starts_with(b"\x1b7\x1b[7G\x1b_G"),
+        "{second_bytes:?}"
+    );
+    assert!(second_bytes.ends_with(b"\x1b8after"));
+    assert_eq!(backend.image_store.encoded_len(), 1);
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        b"[terminal image omitted]after[terminal image omitted]after"
+    );
+}
+
+#[test]
+fn carried_image_column_is_bounded_to_the_terminal_canvas() {
+    let id = ImageId::new(1).unwrap();
+    let marker = ImageAnchor::new(ImageProtocol::Kitty, id, ImageLayout::new(2, 3).unwrap())
+        .cropped(1, 2)
+        .unwrap()
+        .with_column(u16::MAX)
+        .marker();
+    let mut backend = terminal();
+    backend.image_store.register(id, png_payload());
+
+    backend.write(&marker);
+
+    assert!(
+        backend.out.starts_with(b"\x1b7\x1b[80G\x1b_G"),
+        "{:?}",
+        backend.out
+    );
+    assert!(!backend
+        .out
+        .windows(b"65536G".len())
+        .any(|bytes| bytes == b"65536G"));
+}
+
+#[test]
 fn a_resized_placement_is_encoded_again_rather_than_reusing_the_old_layout() {
     let id = ImageId::new(1).unwrap();
     let mut backend = terminal();

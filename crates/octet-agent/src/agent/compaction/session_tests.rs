@@ -232,6 +232,80 @@ async fn default_manual_summary_uses_existing_provider_accounting_once() {
     ));
 }
 
+struct SizedSummaryProvider(String);
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for SizedSummaryProvider {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        _: Request,
+        _: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, AiError> {
+        Ok(Box::pin(futures_util::stream::iter(vec![
+            Ok(StreamEvent::Started { response_id: None }),
+            Ok(StreamEvent::Finished(octet_ai::Response {
+                message: AssistantMessage {
+                    content: vec![AssistantPart::Text(self.0.clone())],
+                    model: model.id,
+                    protocol: model.protocol,
+                },
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+                cost: Some(octet_ai::Cost::default()),
+                response_id: None,
+                responses_output: None,
+                deferred: None,
+                inference: None,
+                diagnostics: Vec::new(),
+            })),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn large_utf8_summary_survives_checkpoint_and_reopen() {
+    let (mut agent, _, _, dir) = agent(Action::Observe);
+    let summary = "é".repeat(70_000); // Above the former 128 KiB byte cap.
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(SizedSummaryProvider(summary.clone())),
+    );
+    let info = agent
+        .compact_session_with_instructions(None, CancellationToken::default(), drop)
+        .await
+        .unwrap();
+    assert_eq!(info.summary, summary);
+    drop(agent);
+    let reopened = Session::open(dir.path().join("session.jsonl")).unwrap();
+    assert!(serialize_conversation(&reopened.context().unwrap()).contains(&summary));
+}
+
+#[tokio::test]
+async fn oversized_summary_does_not_publish_checkpoint() {
+    let (mut agent, _, _, dir) = agent(Action::Observe);
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(SizedSummaryProvider(
+            "x".repeat(MAX_COMPACTION_HANDOFF_BYTES + 1),
+        )),
+    );
+    assert!(agent
+        .compact_session_with_instructions(None, CancellationToken::default(), drop)
+        .await
+        .is_err());
+    assert!(!agent
+        .session
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+    drop(agent);
+    let reopened = Session::open(dir.path().join("session.jsonl")).unwrap();
+    assert!(!reopened
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+}
+
 #[tokio::test]
 async fn threshold_veto_allows_in_budget_request_without_reentering_hook() {
     let (mut agent, seen, calls, _dir) = agent(Action::Cancel);

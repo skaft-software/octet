@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeEditorHost } from './native-editor-host.mjs';
 export const root = fileURLToPath(new URL('../', import.meta.url));
+// A JavaScript expression for `value`, safe to splice into generated fixture
+// source: JSON.stringify plus escapes for the characters that can end a script or
+// a line early (`<`, `>`, `/`, U+2028, U+2029). Only string content can contain
+// them, and `\uXXXX` is equivalent inside a string literal.
+const unsafeLiteralCharacters = { '<': '\\u003C', '>': '\\u003E', '/': '\\u002F', '\u2028': '\\u2028', '\u2029': '\\u2029' };
+export const jsLiteral = value => JSON.stringify(value).replace(/[<>/\u2028\u2029]/g, character => unsafeLiteralCharacters[character]);
 // Tests never read the developer's real Pi setup: the agent directory defaults to
 // a path that does not exist, and a test that wants one passes its own.
 export const noPiAgent = join(root, 'test/fixtures/no-pi-agent');

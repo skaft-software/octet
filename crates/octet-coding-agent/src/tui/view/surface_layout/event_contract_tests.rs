@@ -3,11 +3,16 @@ use std::time::Duration;
 
 use sexy_tui_rs::{strip_terminal_sequences, visible_width};
 
-use super::super::{render_block_planned, AssistantBlock, NoticeTone, OutcomeBlock, ToolPanel};
+use super::super::{
+    render_block_planned, AssistantBlock, NoticeTone, OutcomeBlock, SubagentTranscript, ToolPanel,
+};
 use super::*;
 use crate::presentation::{summarize_tool, RunOutcome, RunSummary};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-use crate::tui::theme::{test_theme, test_theme_for, test_theme_from_source, TerminalBackground};
+use crate::tui::theme::{
+    compiled_theme_for_selector, test_theme, test_theme_for, test_theme_from_source,
+    test_theme_source_with, TerminalBackground,
+};
 
 fn themes() -> Vec<(String, OctetTheme)> {
     let mut themes = vec![
@@ -517,6 +522,137 @@ fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
                 at >= 2 && painted_row(&rows[at - 2]),
                 "{name}/{width}: the filled card cushion must remain above its gap: {rows:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn subagent_lifecycle_rows_keep_neutral_host_gaps_after_bash_output() {
+    let bash = tool();
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    let summaries = [
+        (
+            "active",
+            SubagentTranscript {
+                queued: 0,
+                running: 2,
+                succeeded: 0,
+                failed: 0,
+                stopped: 0,
+                live_workers: Vec::new(),
+                hydrated: false,
+                worker_ids: vec!["worker-a".into(), "worker-b".into()],
+            },
+            "Subagents",
+        ),
+        (
+            "settled",
+            SubagentTranscript {
+                queued: 0,
+                running: 0,
+                succeeded: 0,
+                failed: 2,
+                stopped: 0,
+                live_workers: Vec::new(),
+                hydrated: false,
+                worker_ids: vec!["worker-a".into(), "worker-b".into()],
+            },
+            "Subagents",
+        ),
+    ];
+    for density in ["compact", "comfortable", "airy"] {
+        let source = format!("[metadata]\nprofile = \"pi\"\n[layout]\ndensity = \"{density}\"\n");
+        for background in [
+            TerminalBackground::Unknown,
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+        ] {
+            let theme = test_theme_source_with(
+                &source,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            );
+            for width in [32, 120] {
+                for (state, summary, label) in &summaries {
+                    let subagents = TranscriptBlock::Subagents(summary.clone());
+                    let rows = raw_rows(&[&bash, &subagents, &prose], &theme, width);
+                    assert_eq!(
+                        neutral_runs(&rows, label),
+                        (1, 1),
+                        "{state}/{density}/{background:?}/{width}: {rows:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn every_notice_status_tone_keeps_neutral_host_gaps() {
+    let before = TranscriptBlock::Notice("Notice before status".into());
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    for density in ["compact", "comfortable", "airy"] {
+        let source = format!(
+            "[metadata]\nprofile = \"pi\"\n[colors]\nquiet_tool_summaries = true\n[layout]\ndensity = \"{density}\"\n"
+        );
+        for background in [
+            TerminalBackground::Unknown,
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+        ] {
+            let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+            let themes = [
+                (
+                    "pi-toml",
+                    test_theme_source_with(&source, capabilities, background),
+                ),
+                (
+                    "pi",
+                    compiled_theme_for_selector("pi", capabilities, background)
+                        .expect("built-in pi selector")
+                        .expect("valid built-in pi theme"),
+                ),
+            ];
+            for (name, theme) in themes {
+                for width in [32, 120] {
+                    for (tone, label) in [
+                        (NoticeTone::Success, "success status"),
+                        (NoticeTone::Error, "error status"),
+                        (NoticeTone::ToolActive, "active tool status"),
+                        (NoticeTone::ToolSuccess, "success tool status"),
+                        (NoticeTone::ToolError, "error tool status"),
+                    ] {
+                        let status = TranscriptBlock::NoticeStatus {
+                            text: label.into(),
+                            tone,
+                            reserved_rows: 0,
+                        };
+                        let rows = raw_rows(&[&before, &status, &prose], &theme, width);
+                        if matches!(
+                            tone,
+                            NoticeTone::ToolActive
+                                | NoticeTone::ToolSuccess
+                                | NoticeTone::ToolError
+                        ) && !theme
+                            .resolve::<bool>("quiet_tool_summaries")
+                            .unwrap_or(false)
+                        {
+                            // Ordinary tool themes omit grouped summaries entirely;
+                            // hidden statuses must not introduce empty spacer rows.
+                            assert!(raw_rows(&[&status], &theme, width).is_empty());
+                            assert!(visible_position(&rows, label).is_none());
+                            continue;
+                        }
+                        assert_eq!(
+                            neutral_runs(&rows, label),
+                            (1, 1),
+                            "{name}/{tone:?}/{density}/{background:?}/{width}: {rows:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

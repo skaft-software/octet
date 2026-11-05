@@ -28,7 +28,7 @@ class Environment:
     root: Path
     name: str
     provider_port: int
-    model: str = "custom/mock-1"
+    model: str = "custom/custom/mock-1"
 
     @property
     def home(self) -> Path:
@@ -48,7 +48,7 @@ class Environment:
 
     @property
     def model_label(self) -> str:
-        return self.model.split("/", 1)[1]
+        return self.model.rsplit("/", 1)[1]
 
     def child_env(self, repo_root: Path, *, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {key: value for key, value in os.environ.items() if not key.startswith("OCTET_")}
@@ -71,21 +71,36 @@ class Environment:
         return env
 
 
-def build_environment(root: Path, name: str, provider_port: int, *, model: str = "custom/mock-1") -> Environment:
+def build_environment(root: Path, name: str, provider_port: int, *, model: str = "custom/custom/mock-1") -> Environment:
     env = Environment(root=root / name, name=name, provider_port=provider_port, model=model)
     (env.home / ".octet" / "credentials").mkdir(parents=True)
     env.workspace.mkdir(parents=True)
     env.sessions.mkdir(parents=True)
     env.extensions.mkdir(parents=True)
     credentials = env.home / ".octet" / "credentials" / "custom.json"
+    # The versioned registry (docs/providers.md "Custom registry"). Model IDs are
+    # custom/<provider-id>/<model-id>; discovery is off so the mock needs no /v1/models.
+    provider_id, api_name = model.split("/")[1], model.rsplit("/", 1)[1]
     credentials.write_text(
         json.dumps(
             {
-                "base_url": f"http://127.0.0.1:{provider_port}/v1/",
-                "api_key": "",
-                "api_name": model.split("/", 1)[1],
-                "headers": [],
-                "auto_discover": False,
+                "version": 1,
+                "providers": {
+                    provider_id: {
+                        "label": "octet e2e mock",
+                        "base_url": f"http://127.0.0.1:{provider_port}/v1/",
+                        "auth": {"kind": "none"},
+                        "auto_discover": False,
+                        "models": [
+                            {
+                                "api_name": api_name,
+                                "context_window": 32768,
+                                "max_output_tokens": 4096,
+                                "tools": True,
+                            }
+                        ],
+                    }
+                },
             }
         )
     )

@@ -1,0 +1,9 @@
+{
+  "name": "octet-pi-reference-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test-only: the pinned supported-reference Pi provider package (Pi 1.0.2) that installed-Pi acceptance tests resolve. Never shipped.",
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.0.2"
+  }
+}

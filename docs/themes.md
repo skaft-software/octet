@@ -160,8 +160,11 @@ its presentation policy:
 | Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `block_padding_x`, `tool_body_indent`, `composer_padding`, `narrow_*`; per-surface `padding`, `narrow_padding`, `marker_gutter`, `prompt_marker` |
 | Model colors | `[model] use_lab_color` and per-family colors |
 
-These are not controls for every rendered pixel: event-dot glyphs and some live
-status spacing remain compiled policy, and Tern owns native widget geometry.
+These are not controls for every rendered pixel. The host keeps one neutral
+separator around notice, outcome, Subagent lifecycle and status events; it is
+separate from a surface's painted cushion rows and is not a theme token. `density`
+and `block_padding_x` still control ordinary transcript surfaces. Tern owns native
+widget geometry.
 A custom tool renderer may own its entire shell (`renderShell: "self"`), omitting
 native gutters/frames without changing the surrounding theme. A renderer that
 keeps the native shell retains its selected theme's decoration.
@@ -283,6 +286,7 @@ profile = "pi"
 activity_shimmer = false
 
 [layout]
+# This controls surface interiors, not the host-owned neutral event separator.
 block_padding_x = 2
 tool_body_indent = 0
 

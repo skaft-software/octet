@@ -2058,7 +2058,7 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
 async fn dispatch_prepared_test_prompt(
     agent: &mut octet_agent::Agent,
     prompt: crate::app::PreparedAppSubmission,
-) -> Result<(String, octet_agent::FinishReason), octet_agent::AgentError> {
+) -> Result<(String, octet_agent::FinishReason), Box<octet_agent::AgentError>> {
     let mut run = prompt
         .start(agent, octet_agent::PreparedPromptMode::Normal)
         .await?;
@@ -2081,7 +2081,7 @@ async fn dispatch_prepared_test_prompt(
         }
     }
     match terminal.expect("one settled terminal") {
-        octet_agent::FinishReason::Failed(error) => Err(error),
+        octet_agent::FinishReason::Failed(error) => Err(Box::new(error)),
         reason => Ok((text, reason)),
     }
 }
@@ -2241,7 +2241,7 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                 });
                 let old_callback_count = callbacks.lines().count();
                 let old_error_is_continuity = result.as_ref().err().is_some_and(|error| {
-                    matches!(error, octet_agent::AgentError::Ai(octet_ai::AiError::Transport(octet_ai::TransportError {
+                    matches!(&**error, octet_agent::AgentError::Ai(octet_ai::AiError::Transport(octet_ai::TransportError {
                         phase: octet_ai::TransportPhase::ResponseHeaders, timeout: false, message,
                     })) if message == "extension provider stream request failed")
                 });

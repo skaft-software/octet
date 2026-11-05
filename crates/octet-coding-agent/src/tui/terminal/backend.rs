@@ -557,18 +557,41 @@ impl<W: FrameSink> OctetTerminal<W> {
                 .map(|crop| (crop.skip_rows(), crop.shown_rows())),
         };
         const LOG_MARKER: &[u8] = b"[terminal image omitted]";
+        // A carried anchor has no visible prefix to advance the terminal cursor.
+        // Bound its saved zero-based column to the current canvas before placing
+        // the image; restore the text cursor afterward because anchors are zero-width.
+        // The image payload/cache remains independent of position.
+        let column = anchor.column().map(|column| {
+            let width = self.size.lock().expect("terminal size mutex poisoned").0;
+            let column = column.min(width.saturating_sub(1));
+            format!("\x1b7\x1b[{}G", u32::from(column) + 1)
+        });
+        let placement_len = |encoded_len: usize| {
+            column.as_ref().map_or(Some(encoded_len), |column| {
+                column.len().checked_add(encoded_len)?.checked_add(2)
+            })
+        };
         // A visible image is re-emitted on every frame that touches its row, and
         // a shimmer or dot tick touches many rows. Re-encoding means re-running
         // base64 over the whole payload in bounded chunks per frame, so reuse
         // the bytes once this exact placement has been written.
         if let Some(encoded) = self.image_store.encoded(&key) {
-            if self.pending.try_reserve(encoded.len()).is_err()
+            let Some(placement_len) = placement_len(encoded.len()) else {
+                return;
+            };
+            if self.pending.try_reserve(placement_len).is_err()
                 || (self.write_log.is_some()
                     && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
             {
                 return;
             }
+            if let Some(column) = &column {
+                self.pending.extend_from_slice(column.as_bytes());
+            }
             self.pending.extend_from_slice(&encoded);
+            if column.is_some() {
+                self.pending.extend_from_slice(b"\x1b8");
+            }
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }
@@ -588,14 +611,23 @@ impl<W: FrameSink> OctetTerminal<W> {
         // before emitting either. An allocation failure therefore cannot leave
         // a partial graphics sequence in a synchronized frame or an image
         // write without its payload-free log replacement.
-        if self.pending.try_reserve(command.encoded_len()).is_err()
+        let Some(placement_len) = placement_len(command.encoded_len()) else {
+            return;
+        };
+        if self.pending.try_reserve(placement_len).is_err()
             || (self.write_log.is_some() && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
         {
             return;
         }
         let mut encoded = Vec::with_capacity(command.encoded_len());
         if command.write_to(&mut encoded).is_ok() {
+            if let Some(column) = &column {
+                self.pending.extend_from_slice(column.as_bytes());
+            }
             self.pending.extend_from_slice(&encoded);
+            if column.is_some() {
+                self.pending.extend_from_slice(b"\x1b8");
+            }
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }

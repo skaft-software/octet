@@ -764,6 +764,26 @@
     "structured_output": true,
     "tool_call": true
   },
+  "baseten/moonshotai/Kimi-K3.1-Pro": {
+    "limit": {
+      "context": 1000000,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": true,
+    "tool_call": true
+  },
   "baseten/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B": {
     "interleaved": {
       "field": "reasoning_content"
@@ -7185,7 +7205,7 @@
         "text"
       ]
     },
-    "name": "DeepSeek V4 Pro (New)",
+    "name": "DeepSeek V4 Pro",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -7510,6 +7530,34 @@
         "values": [
           "none",
           "low",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "opencode-go/hy4": {
+    "limit": {
+      "context": 1048576,
+      "input": 983010,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Hy4",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
           "high"
         ]
       }
@@ -8766,6 +8814,40 @@
         ]
       }
     ],
+    "tool_call": true
+  },
+  "opencode/crouton-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 270000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "opencode/deepseek-v4-flash": {
@@ -11603,6 +11685,34 @@
     "structured_output": false,
     "tool_call": true
   },
+  "opencode/pulse-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pulse Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "opencode/qwen3-coder": {
     "limit": {
       "context": 262144,
@@ -13052,7 +13162,7 @@
   "openrouter/deepseek/deepseek-v3.2": {
     "limit": {
       "context": 163840,
-      "output": 65536
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -13191,7 +13301,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 384000
+      "output": 393216
     },
     "modalities": {
       "input": [
@@ -13219,7 +13329,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -14125,7 +14235,7 @@
   "openrouter/google/gemma-4-26b-a4b-it": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -14606,7 +14716,7 @@
   "openrouter/meta-llama/llama-3.1-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 8192
     },
     "modalities": {
       "input": [
@@ -14618,8 +14728,8 @@
     },
     "name": "Llama-3.1-70B-Instruct",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
+    "structured_output": false,
+    "tool_call": false
   },
   "openrouter/meta-llama/llama-3.1-8b-instruct": {
     "limit": {
@@ -14660,7 +14770,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 72000
     },
     "modalities": {
       "input": [
@@ -14678,7 +14788,7 @@
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 128000
     },
     "modalities": {
       "input": [
@@ -14696,7 +14806,7 @@
   "openrouter/meta-llama/llama-4-maverick": {
     "limit": {
       "context": 524288,
-      "output": 16384
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -14950,7 +15060,7 @@
   "openrouter/meta/muse-spark-open": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -15143,7 +15253,7 @@
     },
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -15408,7 +15518,8 @@
       {
         "type": "effort",
         "values": [
-          "none",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -15981,42 +16092,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Hermes 3 405B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
-  "openrouter/nousresearch/hermes-3-llama-3.1-70b": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Hermes 3 70B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
   "openrouter/nousresearch/hermes-4-405b": {
     "limit": {
       "context": 131072,
@@ -16282,7 +16357,7 @@
   "openrouter/nvidia/nemotron-3.5-super-vl": {
     "limit": {
       "context": 1048576,
-      "output": 235929
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -18233,98 +18308,6 @@
     "structured_output": false,
     "tool_call": false
   },
-  "openrouter/poolside/laguna-s-2.1": {
-    "limit": {
-      "context": 1048576,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna S 2.1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-s-2.1:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna S 2.1 (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-xs-2.1": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna XS 2.1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-xs-2.1:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna XS 2.1 (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/prism-ml/ternary-bonsai-2-27b": {
     "limit": {
       "context": 262144,
@@ -18495,7 +18478,7 @@
   "openrouter/qwen/qwen3-235b-a22b-2507": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -18668,7 +18651,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -18963,7 +18946,7 @@
   "openrouter/qwen/qwen3.6-27b": {
     "limit": {
       "context": 262144,
-      "output": 81920
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -19166,7 +19149,7 @@
   },
   "openrouter/qwen/qwen3.8-27b": {
     "limit": {
-      "context": 1000000,
+      "context": 1024000,
       "output": 235929
     },
     "modalities": {
@@ -19440,6 +19423,24 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/ricursiveai/ripple-65b-preview": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "ricursiveAI/Ripple-65B-Preview",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/sakana/fugu-max": {
     "limit": {
       "context": 1000000,
@@ -19633,6 +19634,41 @@
     "reasoning": false,
     "structured_output": false,
     "tool_call": false
+  },
+  "openrouter/stealth/crouton-alpha": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf",
+        "audio"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
   "openrouter/stepfun/step-3.5-flash": {
     "limit": {
@@ -19849,6 +19885,36 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/tencent/hy4": {
+    "limit": {
+      "context": 1048576,
+      "input": 983010,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Hy4",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/tencent/hy4-preview": {
     "limit": {
       "context": 1048576,
@@ -19980,72 +20046,6 @@
       ]
     },
     "name": "Inkling Small",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/thinkingmachines/inkling-small:free": {
-    "limit": {
-      "context": 1048576,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Inkling Small (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/thinkingmachines/inkling:free": {
-    "limit": {
-      "context": 1048576,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Inkling (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -20406,7 +20406,7 @@
       "field": "reasoning_details"
     },
     "limit": {
-      "context": 1050000,
+      "context": 1000000,
       "output": 65536
     },
     "modalities": {
@@ -20867,7 +20867,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -20922,6 +20922,36 @@
       }
     ],
     "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/z-ai/glm-5.3-flashx-legal": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 FlashX Legal",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "openrouter/z-ai/glm-5.3-prime": {
@@ -23676,6 +23706,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "together/moonshotai/Kimi-K3.1-Pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "together/nvidia/NVIDIA-Nemotron-3.5-Super-VL": {
     "interleaved": {
       "field": "reasoning_content"
@@ -24202,24 +24266,6 @@
       ]
     },
     "name": "Grok Imagine Image",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "xai/grok-imagine-image-quality": {
-    "limit": {
-      "context": 16000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "image"
-      ]
-    },
-    "name": "Grok Imagine Image Quality",
     "reasoning": false,
     "tool_call": false
   },

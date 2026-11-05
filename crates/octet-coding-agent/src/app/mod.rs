@@ -602,7 +602,7 @@ impl PreparedAppSubmission {
         self,
         agent: &mut Agent,
         mode: octet_agent::PreparedPromptMode,
-    ) -> Result<octet_agent::Run<'_>, octet_agent::AgentError> {
+    ) -> Result<octet_agent::Run<'_>, Box<octet_agent::AgentError>> {
         match self {
             Self::Host(prepared) => agent.prompt_prepared(*prepared, mode).await,
             Self::Ordinary(input) => match mode {
@@ -615,6 +615,7 @@ impl PreparedAppSubmission {
                 }
             },
         }
+        .map_err(Box::new)
     }
 }
 

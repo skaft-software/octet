@@ -1,5 +1,19 @@
 # SPICE source verification
 
+## Release Space follow-up
+
+Real ngspice 42 is installed in the existing release Space. A direct Python
+backend invocation of `SimulationSession(Circuit()).transient(...)` using
+that executable returned 511 samples, final time 0.005 s, final voltage
+0.9932623 V and absolute error 2.469990855180626e-7 V; the owned child was
+started and settled. This is backend evidence only, not host F01/F02 acceptance.
+The production-host harness now adds wrong-type and foreign-owner zero-entry
+checks, foreign and retired discovery rejection, and a post-release real provider
+projection probe; this modified harness has not been built or executed. The
+parent owns Cargo and must run both F tests before any F acceptance claim.
+
+The sections below are historical records of the earlier environment.
+
 ## Parent follow-up
 
 The parent independently reran all 14 Python source/utility tests successfully;

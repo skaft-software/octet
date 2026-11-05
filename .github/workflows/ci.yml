@@ -210,6 +210,13 @@ jobs:
           node-version: "22.19.0"
       - name: Install reviewed Pi adapter test dependencies
         run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
+      - name: Provide the pinned Pi provider package that installed-Pi acceptance tests resolve
+        run: |
+          set -euo pipefail
+          npm ci --prefix scripts/fixtures/pi-reference --ignore-scripts --no-audit --no-fund
+          mkdir -p extensions/octet-pi-compat/node_modules/@earendil-works
+          ln -s "$PWD/scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-ai" \
+            extensions/octet-pi-compat/node_modules/@earendil-works/pi-ai
       - name: Install ripgrep for the search tool
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then

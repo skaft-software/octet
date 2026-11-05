@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureMirror } from '../configure.mjs';
 import { Runtime } from '../lib/runtime.mjs';
-import { host, launch, owner } from './helper.mjs';
+import { host, jsLiteral, launch, owner } from './helper.mjs';
 
 const features = ['dynamic_tools', 'runtime_commands', 'resource_paths_v1', 'session_entries'];
-const definition = (name, description = name) => `{name:${JSON.stringify(name)},description:${JSON.stringify(description)},parameters:{type:'object'},execute(){return {content:[{type:'text',text:${JSON.stringify(description)}}]};}}`;
+const definition = (name, description = name) => `{name:${jsLiteral(name)},description:${jsLiteral(description)},parameters:{type:'object'},execute(){return {content:[{type:'text',text:${jsLiteral(description)}}]};}}`;
 async function fixture(t, source) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'octet-mirror-dynamic-')));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

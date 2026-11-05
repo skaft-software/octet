@@ -161,8 +161,12 @@ process cleanup remain active when no deadline is set.
 On Unix, background descendants with redirected output stay supervised after
 the shell exits, until they finish, the run is cancelled, a configured deadline
 expires, or the host shuts down. An absent deadline does not kill them at shell
-exit. Descendants that keep stdout or stderr open can still keep a call waiting;
-redirect both streams for background work and set an explicit timeout when needed.
+exit. After the shell exits, octet drains inherited stdout and stderr for up to
+500 ms, then returns the captured output with incomplete streams marked. Later
+output from those streams is discarded while their registered descendants remain
+supervised, so writers do not receive a broken pipe merely because the call
+returned. Draining stops when supervision ends. Redirect output when it must be
+retained, and set an explicit timeout when needed.
 
 `max_output_bytes` bounds capture independently of timeouts. Expanding a panel
 in the TUI can't restore output that was discarded at capture.

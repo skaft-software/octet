@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { configure, configureMirror, MIRROR_SUBSCRIBED_HOOKS, mirrorReviewPrompt, preparePiMirror } from '../configure.mjs';
 import { discoverPiSetup, resolveThemeFile } from '../lib/pi-setup.mjs';
 import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
-import { launch } from './helper.mjs';
+import { jsLiteral, launch } from './helper.mjs';
 
 function temporary(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'octet-pi-setup-')));
@@ -383,7 +383,7 @@ test('pi setup: non-mirror palette discovery respects package deltas and live pr
   // The malformed later same-stem file must reach native winner resolution;
   // the adapter must not remove it and revive the earlier valid palette.
   const factory = join(root, 'manual.mjs');
-  put(factory, `export default pi => pi.on('resources_discover', () => ({themePaths:[${JSON.stringify(later)}]}));`);
+  put(factory, `export default pi => pi.on('resources_discover', () => ({themePaths:[${jsLiteral(later)}]}));`);
   const { registrations: metadata } = configure({ output, reviewed: true, extensions: [factory], piAgentDir: agent, cwd: root });
   const peer = launch(t, [factory], { config: join(output, 'bridge.json'), metadata, cwd: root });
   await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();

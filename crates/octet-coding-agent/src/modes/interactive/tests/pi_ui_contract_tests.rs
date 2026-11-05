@@ -729,3 +729,75 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
     assert_eq!(shell.extension_editor_snapshot().text, "");
     app.executable_extensions.shutdown().await;
 }
+
+// Exercise a real process and the native frontend with the same before-tool
+// hook as the Agent. This does not replace the separate native effect broker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_tool_guard_dialog_requires_explicit_yes() {
+    use octet_agent::extension_process::{ExtensionHook, ExtensionHookDisposition};
+    let (_directory, mut app, mut shell) = live_ui_app(
+        r#"export default pi => pi.on('tool_call', async (_, ctx) =>
+            await ctx.ui.confirm('ALLOW-TOOL-GUARD', 'explicit question')
+              ? undefined : {block: true, reason: 'guard denied'});"#,
+    )
+    .await;
+    let process = app
+        .executable_extensions
+        .test_process("octet-pi-compat")
+        .unwrap();
+    let context =
+        process.current_context_for_resource_owner(app.agent.session().resource_owner_key());
+    assert_eq!(context.host.has_ui, Some(true));
+    for yes in [false, true] {
+        let process = process.clone();
+        let context = context.clone();
+        let task = tokio::spawn(async move {
+            process.run_hook(
+                ExtensionHook::BeforeToolCall,
+                serde_json::json!({"name": "write", "arguments": {"path": "note.txt", "content": "test"}, "tool_call_id": "call-1"}),
+                context,
+            ).await
+        });
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("ALLOW-TOOL-GUARD")
+        })
+        .await;
+        if yes {
+            let key = Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            ));
+            assert!(app
+                .executable_extensions
+                .route_remote_ui_event(&mut shell, &key, true));
+        }
+        let key = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        assert!(app
+            .executable_extensions
+            .route_remote_ui_event(&mut shell, &key, true));
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                apply_extension_background(&mut shell, &mut app.executable_extensions);
+                if task.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            task.await.unwrap().unwrap()
+        })
+        .await
+        .expect("guard dialog did not settle");
+        assert_eq!(
+            matches!(result.disposition, ExtensionHookDisposition::Continue),
+            yes
+        );
+        pump_until(&mut app, &mut shell, |frame| {
+            !frame.contains("ALLOW-TOOL-GUARD")
+        })
+        .await;
+    }
+    app.executable_extensions.shutdown().await;
+}

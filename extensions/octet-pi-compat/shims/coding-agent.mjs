@@ -139,7 +139,18 @@ export const truncateToVisualLines = localFunction('coding-agent', 'modes/intera
 export const wrapRegisteredTool = refused('pi-coding-agent.wrapRegisteredTool');
 export const wrapRegisteredTools = refused('pi-coding-agent.wrapRegisteredTools');
 export function parseSkillBlock(text) {
-  const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-  return match ? { name: match[1], location: match[2], content: match[3], userMessage: match[4]?.trim() || undefined } : null;
+  const header = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n/);
+  if (!header) return null;
+  const closing = '\n</skill>';
+  let end = header[0].length;
+  while ((end = text.indexOf(closing, end)) !== -1) {
+    const after = end + closing.length;
+    if (after === text.length || (text.startsWith('\n\n', after) && after + 2 < text.length)) {
+      return { name: header[1], location: header[2], content: text.slice(header[0].length, end),
+        userMessage: text.slice(after + 2).trim() || undefined };
+    }
+    end = after;
+  }
+  return null;
 }
 export { getLanguageFromPath, formatSkillsForPrompt } from './pi-1.0.2/coding-pure.mjs';

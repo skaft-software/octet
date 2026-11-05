@@ -211,12 +211,10 @@ fn has_event_spacing(block: &TranscriptBlock, expanded_reasoning: bool) -> bool 
                 && (!expanded_reasoning
                     || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
         }
-        TranscriptBlock::Outcome(_)
+        TranscriptBlock::Subagents(_)
+        | TranscriptBlock::Outcome(_)
         | TranscriptBlock::Notice(_)
-        | TranscriptBlock::NoticeStatus {
-            tone: super::NoticeTone::Success | super::NoticeTone::Error,
-            ..
-        }
+        | TranscriptBlock::NoticeStatus { .. }
         | TranscriptBlock::UpdateAvailable(_) => true,
         _ => false,
     }

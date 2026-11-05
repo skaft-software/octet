@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { configureFromPi, configureMirror, firstPartyTools, routeExtensions } from '../configure.mjs';
 import { backgroundTokens, foregroundTokens } from '../lib/theme-palette.mjs';
 import { nativeEsmAvailable } from '../lib/native-esm.mjs';
-import { host, launch, root } from './helper.mjs';
+import { host, jsLiteral, launch, root } from './helper.mjs';
 
 function put(path, value) {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -125,7 +125,7 @@ test('new factories and changed entrypoint/imported sources require review befor
   await changedEntry.close();
   put(f.entry, original);
   const marker = join(f.dir, 'executed');
-  put(join(f.agent, 'extensions/new.js'), `import {writeFileSync} from 'node:fs'; export default () => writeFileSync(${JSON.stringify(marker)},'no');`);
+  put(join(f.agent, 'extensions/new.js'), `import {writeFileSync} from 'node:fs'; export default () => writeFileSync(${jsLiteral(marker)},'no');`);
   const added = peer(t, f, captured);
   assert.match((await initialize(added, captured)).error.message, /factory list changed.*configure again/);
   assert.equal(existsSync(marker), false);

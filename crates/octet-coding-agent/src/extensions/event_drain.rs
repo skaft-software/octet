@@ -113,6 +113,15 @@ impl ExecutableExtensions {
         consumed
     }
 
+    /// Observe the actual negotiated process in real-frontend acceptance tests.
+    #[cfg(test)]
+    pub(crate) fn test_process(&self, name: &str) -> Option<ExtensionProcess> {
+        self.processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == name)
+            .cloned()
+    }
+
     /// Drain extension events while an interactive shell owns the editor. This
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.

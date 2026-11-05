@@ -17,6 +17,7 @@ use super::capabilities::ImageProtocol;
 use super::layout::ImageLayout;
 use super::limits::{HARD_MAX_LIVE_IMAGES, MAX_RESERVED_IMAGE_ROWS};
 use super::registry::ImageId;
+use crate::utils::visible_width;
 
 /// The rows of a placement that are actually inside the visible window.
 ///
@@ -58,6 +59,9 @@ pub struct ImageAnchor {
     id: ImageId,
     layout: ImageLayout,
     crop: Option<ImageCrop>,
+    /// Zero-based destination column retained when a viewport re-anchors an
+    /// image without its original visible prefix.
+    column: Option<u16>,
 }
 
 const IMAGE_ANCHOR_PREFIX: &str = "\x1bP+octet-image;";
@@ -71,6 +75,7 @@ impl ImageAnchor {
             id,
             layout,
             crop: None,
+            column: None,
         }
     }
 
@@ -89,9 +94,34 @@ impl ImageAnchor {
         Some(Self { crop, ..self })
     }
 
+    /// Crop relative to the rows this anchor currently exposes. This composes
+    /// repeated viewport cuts instead of treating a prior crop as a full image.
+    fn crop_visible_rows(self, skip_rows: u16, shown_rows: u16) -> Option<Self> {
+        if shown_rows == 0 || skip_rows.checked_add(shown_rows)? > self.placed_rows() {
+            return None;
+        }
+        let base_skip = self.crop.map_or(0, ImageCrop::skip_rows);
+        self.cropped(base_skip.checked_add(skip_rows)?, shown_rows)
+    }
+
     /// Visible slice of the placement's rows, when the window cut it.
     pub const fn crop(self) -> Option<ImageCrop> {
         self.crop
+    }
+
+    /// Retain a zero-based destination column when re-anchoring a clipped
+    /// placement on a blank reservation row. Column zero is canonicalized to
+    /// the ordinary marker spelling.
+    pub const fn with_column(self, column: u16) -> Self {
+        Self {
+            column: if column == 0 { None } else { Some(column) },
+            ..self
+        }
+    }
+
+    /// Destination column retained by a viewport re-anchor, if any.
+    pub const fn column(self) -> Option<u16> {
+        self.column
     }
 
     /// Rows the terminal draws for this anchor: the crop when present.
@@ -127,8 +157,11 @@ impl ImageAnchor {
         let crop = self.crop.map_or_else(String::new, |crop| {
             format!(",t={},n={}", crop.skip_rows, crop.shown_rows)
         });
+        let column = self
+            .column
+            .map_or_else(String::new, |column| format!(",x={column}"));
         format!(
-            "{IMAGE_ANCHOR_PREFIX}v=1,p={protocol},i={},c={},r={}{crop}{}",
+            "{IMAGE_ANCHOR_PREFIX}v=1,p={protocol},i={},c={},r={}{crop}{column}{}",
             self.id.get(),
             self.layout.columns(),
             self.layout.rows(),
@@ -154,18 +187,31 @@ impl ImageAnchor {
         let id = ImageId::new(fields.next()?.strip_prefix("i=")?.parse().ok()?).ok()?;
         let columns = fields.next()?.strip_prefix("c=")?.parse().ok()?;
         let rows = fields.next()?.strip_prefix("r=")?.parse().ok()?;
-        let anchor = Self::new(protocol, id, ImageLayout::new(columns, rows).ok()?);
-        let Some(skip) = fields.next() else {
+        let mut anchor = Self::new(protocol, id, ImageLayout::new(columns, rows).ok()?);
+        let Some(field) = fields.next() else {
             return Some(anchor);
         };
-        let skip = skip.strip_prefix("t=")?.parse().ok()?;
-        let shown = fields.next()?.strip_prefix("n=")?.parse().ok()?;
-        if fields.next().is_some() {
-            return None;
+        if let Some(skip) = field.strip_prefix("t=") {
+            let skip = skip.parse().ok()?;
+            let shown = fields.next()?.strip_prefix("n=")?.parse().ok()?;
+            anchor = anchor.cropped(skip, shown)?;
+            // A crop that covers the whole placement is spelled without one.
+            anchor.crop?;
+            if let Some(column) = fields.next() {
+                let column: u16 = column.strip_prefix("x=")?.parse().ok()?;
+                if column == 0 {
+                    return None;
+                }
+                anchor = anchor.with_column(column);
+            }
+        } else {
+            let column: u16 = field.strip_prefix("x=")?.parse().ok()?;
+            if column == 0 {
+                return None;
+            }
+            anchor = anchor.with_column(column);
         }
-        let cropped = anchor.cropped(skip, shown)?;
-        // A crop that covers the whole placement is spelled without one.
-        cropped.crop.is_some().then_some(cropped)
+        fields.next().is_none().then_some(anchor)
     }
 
     /// Find every complete, bounded anchor in a rendered line. At most the
@@ -215,12 +261,12 @@ pub fn crop_anchors_to_window(lines: &[String], start: usize, end: usize) -> Vec
         }
         let remaining = end - start - offset;
         *line = rewrite_anchors(line, |anchor| {
-            let rows = usize::from(anchor.layout().rows());
+            let rows = usize::from(anchor.placed_rows());
             if rows <= remaining {
                 return Some(anchor);
             }
             // `remaining` < rows <= u16::MAX here.
-            anchor.cropped(0, remaining as u16)
+            anchor.crop_visible_rows(0, remaining as u16)
         });
     }
     let reach = usize::from(MAX_RESERVED_IMAGE_ROWS);
@@ -231,16 +277,16 @@ pub fn crop_anchors_to_window(lines: &[String], start: usize, end: usize) -> Vec
         if !line.contains(IMAGE_ANCHOR_PREFIX) {
             continue;
         }
-        for anchor in ImageAnchor::parse_all(line) {
-            let rows = usize::from(anchor.layout().rows());
+        for (anchor, column) in anchors_with_columns(line) {
+            let rows = usize::from(anchor.placed_rows());
             let image_end = index + rows;
             if image_end <= start {
                 continue;
             }
             let skip = start - index;
             let shown = image_end.min(end) - start;
-            if let Some(cropped) = anchor.cropped(skip as u16, shown as u16) {
-                carried.push_str(&cropped.marker());
+            if let Some(cropped) = anchor.crop_visible_rows(skip as u16, shown as u16) {
+                carried.push_str(&cropped.with_column(column).marker());
             }
         }
     }
@@ -248,6 +294,35 @@ pub fn crop_anchors_to_window(lines: &[String], start: usize, end: usize) -> Vec
         window[0].insert_str(0, &carried);
     }
     window
+}
+
+/// Parse bounded anchors together with their original zero-based destination
+/// column. A carried anchor already has an explicit column, which wins over
+/// the visible text preceding the marker when it crosses another viewport.
+fn anchors_with_columns(line: &str) -> Vec<(ImageAnchor, u16)> {
+    let mut anchors = Vec::new();
+    let mut search_from = 0;
+    while anchors.len() < HARD_MAX_LIVE_IMAGES {
+        let Some(relative_start) = line[search_from..].find(IMAGE_ANCHOR_PREFIX) else {
+            break;
+        };
+        let start = search_from.saturating_add(relative_start);
+        let body_start = start.saturating_add(IMAGE_ANCHOR_PREFIX.len());
+        let Some(relative_end) = line[body_start..].find(IMAGE_ANCHOR_SUFFIX) else {
+            break;
+        };
+        let end = body_start
+            .saturating_add(relative_end)
+            .saturating_add(IMAGE_ANCHOR_SUFFIX.len());
+        if let Some(anchor) = ImageAnchor::parse(&line[start..end]) {
+            let column = anchor.column().unwrap_or_else(|| {
+                u16::try_from(visible_width(&line[..start])).unwrap_or(u16::MAX)
+            });
+            anchors.push((anchor, column));
+        }
+        search_from = end;
+    }
+    anchors
 }
 
 /// Replace each complete anchor in `line`; a `None` from `map` removes it.

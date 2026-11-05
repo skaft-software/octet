@@ -2,8 +2,26 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update pulldown-cmark from 0.13.5 to 0.13.6 for RUSTSEC-2026-0433 (quadratic
+  parsing of nested image wikilinks). octet does not enable the affected
+  wikilinks extension.
+
 ### Fixed
 
+- Compaction accepts textual summaries up to 2 MiB (previously 128 KiB),
+  including the host-derived file list, so routes that cannot enforce the
+  requested output budget no longer fail compaction of long sessions; this was
+  reported with long Codex sessions. Oversized output is still refused before any
+  checkpoint is published, and opaque native Responses compaction state is
+  unchanged. Branch summaries and extension-supplied replacement summaries share
+  the same bound.
+- Subagent lifecycle and tool-status events keep neutral transcript separators,
+  independent of theme density and painted surface padding.
+- Top-clipped tool images retain their original horizontal gutter while scrolling.
+  Repeated viewport crops compose correctly, and image placement preserves the
+  text cursor and payload-free diagnostic logs.
 - Reasoning prose preserves the terminal foreground when its background is
   unknown, rather than guessing a gray that loses contrast on common palettes.
   Known light/dark profiles and explicit theme colors remain unchanged.

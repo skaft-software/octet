@@ -346,6 +346,11 @@ text. It never loads a URL or path, copied, plain and print output never contain
 image data, and it doesn't upload anything or replace [attachment
 consent](media.md#attach-explicitly). The model must still support the format.
 
+Fullscreen image crops keep the original tool gutter when their first row scrolls
+above the viewport. Only the visible image rows are placed, leaving the composer
+and footer outside the placement. Terminal-specific pixels still require separate
+qualification; protocol and retained-row tests are not Rex or Ghostty verification.
+
 Ctrl+O and `/verbose [on|off]` reveal reasoning, compaction, subagent activity,
 bounded search and shell output, and edit and write diffs. They can't recover
 output that was discarded when it was captured. Raw arguments, unsanitized

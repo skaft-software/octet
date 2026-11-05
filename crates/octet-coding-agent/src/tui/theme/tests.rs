@@ -62,6 +62,71 @@ fn config(workspace: PathBuf) -> Config {
     }
 }
 
+#[test]
+fn one_toml_controls_ansi_chrome_surfaces_density_and_native_palette_snapshot() {
+    let source = r##"
+        [metadata]
+        name = "One file"
+        [colors]
+        accent = "#44aa88"
+        composer = "framed"
+        composer_border = "#6688aa"
+        [roles."surface.tool"]
+        background = "#203040"
+        [surfaces.tool]
+        chrome = "band"
+        padding = 2
+        [layout]
+        density = "airy"
+        composer_padding = 2
+    "##;
+    let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    let theme = load_theme_source_for(
+        source,
+        "one-file.toml",
+        ThemeSource::File(PathBuf::from("one-file.toml")),
+        "One file",
+        capabilities,
+        TerminalBackground::Dark,
+    )
+    .expect("one file compiles");
+
+    assert_eq!(
+        theme.resolve::<String>("accent").as_deref(),
+        Some("#44aa88")
+    );
+    assert_eq!(
+        theme.resolve::<String>("composer").as_deref(),
+        Some("framed")
+    );
+    assert_eq!(
+        theme.resolve::<String>("composer_border").as_deref(),
+        Some("#6688aa")
+    );
+    assert_eq!(theme.layout().density, ThemeDensity::Airy);
+    let tool = theme.surface_for_width("tool", 80);
+    assert_eq!(tool.chrome, ThemeSurfaceChrome::Band);
+    assert_eq!(tool.padding, 2);
+    assert_eq!(
+        theme.semantic_style("surface.tool").background,
+        Color::Rgb(32, 48, 64)
+    );
+
+    // Tern resolves dark/light variants from this admitted source; it does not
+    // reparse the TOML as a different theme format.
+    let native = theme
+        .for_native_background(TerminalBackground::Light)
+        .expect("native snapshot resolves");
+    assert_eq!(
+        native.resolve::<String>("accent").as_deref(),
+        Some("#44aa88")
+    );
+    assert_eq!(
+        native.resolve::<String>("composer_border").as_deref(),
+        Some("#6688aa")
+    );
+}
+
 fn contrast(left: Rgb, right: Rgb) -> f64 {
     let (dark, light) = if relative_luminance(left) < relative_luminance(right) {
         (left, right)

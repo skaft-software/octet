@@ -970,6 +970,18 @@ impl ProcessGroupGuard {
         refresh_registered_descendants();
     }
 
+    /// Whether this exact detached Bash registration still owns its descendants.
+    #[cfg(unix)]
+    pub(crate) fn bash_supervision_registered(key: (u64, u64)) -> bool {
+        valid_process_group_id(key.0).is_some_and(|id| {
+            lock_std_mutex(&REGISTERED_PROCESS_GROUPS)
+                .get(&id)
+                .is_some_and(|entry| {
+                    entry.registration_id == key.1 && entry.detached_bash.is_some()
+                })
+        })
+    }
+
     /// Transfers a successfully reaped direct `bash` child to the centralized
     /// descendant supervisor. The registry entry remains live until the group
     /// disappears naturally, the run is cancelled, the original execution
@@ -979,13 +991,13 @@ impl ProcessGroupGuard {
         self,
         lifetime: Option<Duration>,
         cancellation: CancellationToken,
-    ) {
+    ) -> Option<(u64, u64)> {
         #[cfg(unix)]
         {
             let process_group_id = self.process_group_id.load(Ordering::Acquire);
             let Some(process_group_id_i32) = valid_process_group_id(process_group_id) else {
                 self.disarm();
-                return;
+                return None;
             };
             // A whole-process-table scan can race the shell's final exit and
             // miss a background child that has already inherited its group.
@@ -1010,20 +1022,20 @@ impl ProcessGroupGuard {
             }
             if !descendants_found {
                 self.disarm();
-                return;
+                return None;
             }
             if lifetime.is_some_and(|lifetime| lifetime.is_zero())
                 || cancellation.is_cancelled()
                 || HOST_SHUTDOWN_REQUESTED.load(Ordering::Acquire)
             {
                 self.terminate_now();
-                return;
+                return None;
             }
             let deadline = match lifetime {
                 Some(lifetime) => {
                     let Some(deadline) = Instant::now().checked_add(lifetime) else {
                         self.terminate_now();
-                        return;
+                        return None;
                     };
                     Some(deadline)
                 }
@@ -1031,18 +1043,16 @@ impl ProcessGroupGuard {
             };
             let Some(reaper) = LazyLock::force(&PROCESS_REAPER) else {
                 self.terminate_now();
-                return;
+                return None;
             };
 
             let transferred = {
                 let mut registered = lock_std_mutex(&REGISTERED_PROCESS_GROUPS);
-                let Some(entry) = registered.get_mut(&process_group_id_i32) else {
-                    return;
-                };
+                let entry = registered.get_mut(&process_group_id_i32)?;
                 if entry.registration_id != self.registration_id
                     || entry.kind != RegisteredProcessKind::Bash
                 {
-                    return;
+                    return None;
                 }
                 entry.detached_bash = Some(DetachedBashSupervision {
                     deadline,
@@ -1057,11 +1067,13 @@ impl ProcessGroupGuard {
             if transferred {
                 reaper.unpark();
             }
+            Some((process_group_id, self.registration_id))
         }
         #[cfg(not(unix))]
         {
             let _ = (lifetime, cancellation);
             self.disarm();
+            None
         }
     }
 }

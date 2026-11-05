@@ -332,7 +332,16 @@ export function createContext(runtime, store, replaced = false) {
     },
     ...dialogAPI(custom, {
       async confirm(title, message) {
-        foreground();
+        const state = foreground();
+        // Hook requests do not have the command-owned confirmation broker. Use
+        // the real foreground surface for Pi's own guard question instead; this
+        // does not approve or bypass the host's separate tool-effect policy.
+        // Default to No, and let cancellation/retirement refuse the guard.
+        if (store.hook === 'before_tool_call' && state.host.has_ui === true && runtime.features.has('remote_ui')) {
+          const heading = bounded(title, 'confirmation', 16384);
+          const detail = message === undefined ? '' : bounded(message, 'confirmation detail', 16384, { controls: true });
+          return await dialogAPI(custom).select(`${heading}\n${detail}`, ['No', 'Yes']) === 'Yes';
+        }
         return (await userAnswer(runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store))).confirmed;
       },
       async input(title) {

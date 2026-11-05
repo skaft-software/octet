@@ -243,6 +243,121 @@ async fn successful_command_without_descendants_releases_its_registry_entry() {
 }
 
 #[tokio::test]
+async fn inherited_pipes_finish_after_shell_exit_and_remain_supervised() {
+    let mut f = fixture();
+    f.sandbox.bash_timeout = None;
+    let cancellation = crate::tool::CancellationToken::default();
+    let mut ctx = f.ctx();
+    ctx.cancellation = cancellation.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        BashTool.execute(
+            json!({"command": "sleep 30 & echo $! > child.pid; printf 'out\\n'; printf 'err\\n' >&2"}),
+            &ctx,
+        ),
+    )
+    .await;
+    let pid: i32 = std::fs::read_to_string(f.workspace.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = process_is_alive(pid);
+    cancellation.cancel();
+    let exited = wait_for_process_exit(pid, Duration::from_secs(3)).await;
+    if !exited {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    let out = result
+        .expect("inherited pipes blocked shell completion")
+        .unwrap();
+    assert!(out.text.contains("out"), "{}", out.text);
+    assert!(out.text.contains("err"), "{}", out.text);
+    assert!(out.text.contains("complete_stdout=false"), "{}", out.text);
+    assert!(out.text.contains("complete_stderr=false"), "{}", out.text);
+    assert!(alive, "shell completion killed the background descendant");
+    assert!(
+        exited,
+        "cancellation did not clean up the background descendant"
+    );
+}
+
+#[tokio::test]
+async fn inherited_pipe_writer_survives_return_until_cancelled() {
+    let mut f = fixture();
+    f.sandbox.bash_timeout = None;
+    let cancellation = crate::tool::CancellationToken::default();
+    let mut ctx = f.ctx();
+    ctx.cancellation = cancellation.clone();
+    let command = r#"python3 -c 'import os,time
+for i in range(300):
+ os.write(1,b"out\n"); os.write(2,b"err\n")
+ if i == 100: open("writer-alive", "w").write("ok")
+ time.sleep(.01)' & echo $! > child.pid"#;
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        BashTool.execute(json!({"command": command}), &ctx),
+    )
+    .await;
+    let pid: i32 = std::fs::read_to_string(f.workspace.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let marker = f.workspace.join("writer-alive");
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let survived = marker.exists() && process_is_alive(pid);
+    cancellation.cancel();
+    let exited = wait_for_process_exit(pid, Duration::from_secs(3)).await;
+    if !exited {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    let out = result
+        .expect("inherited pipe blocked shell completion")
+        .unwrap();
+    assert!(out.text.contains("complete_stdout=false"), "{}", out.text);
+    assert!(out.text.contains("complete_stderr=false"), "{}", out.text);
+    assert!(survived, "background writer failed after capture returned");
+    assert!(exited, "writer survived cancellation");
+}
+
+#[tokio::test]
+async fn inherited_pipe_descendant_respects_deadline_after_shell_exit() {
+    let mut f = fixture();
+    f.sandbox.bash_timeout = Some(Duration::from_secs(2));
+    let out = tokio::time::timeout(
+        Duration::from_secs(4),
+        BashTool.execute(
+            json!({"command": "sleep 30 & echo $! > child.pid"}),
+            &f.ctx(),
+        ),
+    )
+    .await;
+    let pid: i32 = std::fs::read_to_string(f.workspace.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let exited = wait_for_process_exit(pid, Duration::from_secs(4)).await;
+    if !exited {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    assert!(out.expect("inherited pipe blocked completion").is_ok());
+    assert!(exited, "detached descendant survived the original deadline");
+}
+
+#[tokio::test]
 async fn detached_setsid_descendant_remains_supervised_after_leader_exit() {
     check_detached_descendant_supervision(Some(Duration::from_secs(2))).await;
 }

@@ -15,8 +15,7 @@ use super::inspect::png_crc32;
 use super::transmit::base64_string;
 use super::*;
 use crate::capabilities::CellPixelSize;
-use crate::ColorDepth;
-use crate::TerminalCapabilities;
+use crate::{visible_width, ColorDepth, TerminalCapabilities};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -700,6 +699,15 @@ fn cropped_anchor_round_trips_and_rejects_impossible_windows() {
     assert_eq!(cropped.placed_rows(), 4);
     assert_eq!(ImageAnchor::parse(&cropped.marker()), Some(cropped));
     assert!(cropped.marker().ends_with(",t=3,n=4\x1b\\"));
+    let positioned = cropped.with_column(6);
+    assert_eq!(positioned.column(), Some(6));
+    assert_eq!(ImageAnchor::parse(&positioned.marker()), Some(positioned));
+    assert!(positioned.marker().ends_with(",t=3,n=4,x=6\x1b\\"));
+    let full_positioned = anchor.with_column(6);
+    assert_eq!(
+        ImageAnchor::parse(&full_positioned.marker()),
+        Some(full_positioned)
+    );
     // The whole placement needs no crop and keeps the original spelling.
     let whole = anchor.cropped(0, 10).unwrap();
     assert_eq!(whole.crop(), None);
@@ -708,7 +716,16 @@ fn cropped_anchor_round_trips_and_rejects_impossible_windows() {
         assert!(anchor.cropped(skip, shown).is_none(), "{skip}+{shown}");
     }
     let marker = anchor.marker();
-    for suffix in [",t=0,n=10", ",t=9,n=5", ",t=1", ",n=1,t=1", ",t=1,n=1,x=2"] {
+    for suffix in [
+        ",t=0,n=10",
+        ",t=9,n=5",
+        ",t=1",
+        ",n=1,t=1",
+        ",t=1,n=1,x=2,z=3",
+        ",x=0",
+        ",x=65536",
+        ",x=1,t=1,n=1",
+    ] {
         let malformed = marker.replace("\x1b\\", &format!("{suffix}\x1b\\"));
         assert!(ImageAnchor::parse(&malformed).is_none(), "{suffix}");
     }
@@ -720,7 +737,11 @@ fn window_crop_limits_placements_cut_by_either_edge() {
     let first = kitty_anchor(1, 10, 6);
     let second = kitty_anchor(2, 10, 4);
     let mut lines = vec!["intro".to_owned()];
-    lines.extend(reservation(first)); // rows 1..7
+    let mut first_reservation = reservation(first);
+    // The first of the two image reservations is nested after a visible tool
+    // glyph, while the second remains at column zero.
+    first_reservation[0] = format!("│ {}", first.marker());
+    lines.extend(first_reservation); // rows 1..7
     lines.push("between".to_owned()); // row 7
     lines.extend(reservation(second)); // rows 8..12
     lines.push("outro".to_owned()); // row 12
@@ -734,7 +755,7 @@ fn window_crop_limits_placements_cut_by_either_edge() {
     // The first image's anchor row scrolled above the window: it is carried
     // onto the first window row with its hidden top skipped.
     let carried = ImageAnchor::parse_all(&window[0]);
-    assert_eq!(carried, vec![first.cropped(1, 5).unwrap()]);
+    assert_eq!(carried, vec![first.cropped(1, 5).unwrap().with_column(2)]);
 
     // A window fully containing both images leaves them unchanged.
     assert_eq!(crop_anchors_to_window(&lines, 0, lines.len()), lines);
@@ -743,9 +764,45 @@ fn window_crop_limits_placements_cut_by_either_edge() {
     let inside = crop_anchors_to_window(&lines, 3, 5);
     assert_eq!(
         ImageAnchor::parse_all(&inside[0]),
-        vec![first.cropped(2, 2).unwrap()]
+        vec![first.cropped(2, 2).unwrap().with_column(2)]
     );
     assert!(inside[1].is_empty());
+}
+
+#[test]
+fn window_crop_carries_the_styled_wide_prefix_column_without_repainting_it() {
+    let anchor = kitty_anchor(3, 12, 4);
+    // This is the actual shape of a nested tool image row: styled frame text,
+    // then a two-cell gutter and a wide character before the zero-width anchor.
+    // Re-anchoring its lower rows must preserve the destination column without
+    // copying that visible frame text onto the reservation row.
+    let source = format!("\x1b[2m│\x1b[0m  界 {anchor}", anchor = anchor.marker());
+    let lines = vec![
+        "before".to_owned(),
+        source,
+        String::new(),
+        String::new(),
+        String::new(),
+    ];
+
+    let window = crop_anchors_to_window(&lines, 2, 5);
+
+    assert_eq!(window.len(), 3);
+    assert_eq!(visible_width(&window[0]), 0, "{window:?}");
+    assert!(
+        window[0].contains(",t=1,n=3,x=6\x1b\\"),
+        "the carried image must retain its original six-cell destination column: {window:?}"
+    );
+
+    // Viewport transforms may be composed by a retained renderer. The next
+    // crop consumes one more visible row without losing the original column or
+    // treating the already-cropped source rectangle as a whole image.
+    let repeated = crop_anchors_to_window(&window, 1, 3);
+    assert_eq!(visible_width(&repeated[0]), 0, "{repeated:?}");
+    assert!(
+        repeated[0].contains(",t=2,n=2,x=6\x1b\\"),
+        "the repeated crop must compose source rows and retain its column: {repeated:?}"
+    );
 }
 
 #[test]

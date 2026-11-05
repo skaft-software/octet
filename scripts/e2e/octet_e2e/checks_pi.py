@@ -197,14 +197,22 @@ def check_compat_bundle(ctx: Context) -> list[str]:
             f"the shipped octet-pi-compat bundle failed to start: {notices[0][:200]}\n"
             f"screen snapshot:\n{_screen_snapshot(session)}"
         )
-    panel = _open_extension_panel(session)
-    row = _panel_row(panel, "octet-pi-compat")
-    if row is None or "running" not in row:
-        raise CheckFailure(
-            "the shipped octet-pi-compat bundle is not running with --enable-extension: "
-            f"{row!r}\n"
-            f"screen snapshot:\n{_screen_snapshot(session)}"
-        )
+    # The adapter starts asynchronously (its Node process boots after the composer is
+    # ready), so reopen the panel until the row reads `running` or the budget is spent.
+    deadline = time.monotonic() + 30 * ctx.timeout_scale
+    while True:
+        panel = _open_extension_panel(session)
+        row = _panel_row(panel, "octet-pi-compat")
+        if row is not None and "running" in row:
+            break
+        if time.monotonic() >= deadline:
+            raise CheckFailure(
+                "the shipped octet-pi-compat bundle is not running with --enable-extension: "
+                f"{row!r}\n"
+                f"screen snapshot:\n{_screen_snapshot(session)}"
+            )
+        session.key("escape")
+        time.sleep(1.0)
     session.key("escape")
     time.sleep(0.3)
     session.submit("R1-COMPAT-BUNDLE-ASK")
