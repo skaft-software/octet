@@ -6314,10 +6314,9 @@ impl InteractiveShell {
         false
     }
 
-    /// Replace the host-owned delegation telemetry for the active root run.
-    /// Unlike generic extension presentation, this path is fed directly by
-    /// `AgentEvent::DelegationUpdated` and never polls a slash command.
-    #[allow(dead_code)]
+    /// Replace the host-owned delegation telemetry for the root session.
+    /// Active runs deliver the same snapshots through
+    /// `AgentEvent::DelegationUpdated`; idle updates never poll a slash command.
     pub fn set_subagent_telemetry(
         &mut self,
         snapshot: Option<&octet_agent::DelegationTelemetrySnapshot>,

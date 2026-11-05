@@ -169,7 +169,7 @@ class ReleaseToolchainTests(unittest.TestCase):
         job = ci.split("\n  test:\n", 1)[1].split("\n  windows:\n", 1)[0]
         command = "cargo test --workspace --all-targets --all-features --profile ci-test --locked"
         build = "\n        run: " + command + " --no-run\n"
-        execute = "\n        run: " + command + "\n"
+        execute = "\n        run: " + command + " --no-fail-fast\n"
         self.assertIn(build, job)
         self.assertIn(execute, job)
         self.assertLess(job.index(build), job.index(execute))

@@ -1,7 +1,7 @@
 //! Terminal restoration under a real terminal multiplexer.
 //!
-//! The kernel clears `PENDIN` when anything checks a cooked tty for readable
-//! input. A raw PTY harness exits before the runtime's own tty watcher turns
+//! On macOS, the kernel clears `PENDIN` when anything checks a cooked tty for
+//! readable input. A raw PTY harness exits before the runtime's own tty watcher turns
 //! again; tmux, like an interactive terminal, does not. Restoration must run
 //! after the runtime's I/O driver has stopped, including after extension cleanup.
 //! Requires `tmux`.
@@ -112,11 +112,18 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool, tmux: &Tmux, session: &
 }
 
 #[test]
-fn ctrl_d_under_tmux_keeps_the_starting_pendin_flag() {
+fn ctrl_d_under_tmux_restores_starting_terminal_attributes() {
     if Command::new("tmux").arg("-V").output().is_err() {
         eprintln!("tmux is not installed; terminal_restore_tmux did not run");
         return;
     }
+    // GNU stty does not expose PENDIN. Keep the macOS-specific regression while
+    // checking the full reported terminal attributes on both platforms.
+    let pendin_setup = if cfg!(target_os = "macos") {
+        "stty pendin\n"
+    } else {
+        ""
+    };
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path();
     let home = root.join("home");
@@ -143,7 +150,7 @@ fn ctrl_d_under_tmux_keeps_the_starting_pendin_flag() {
             &script,
             format!(
                 "#!/bin/sh\n\
-                 stty pendin\n\
+                 {pendin_setup}\
                  stty -a | tail -n +2 > '{run}/before'\n\
                  cd '{workspace}'\n\
                  env -i HOME='{home}' PATH=/usr/bin:/bin TERM=xterm-256color OCTET_THEME=auto OCTET_STARTUP_TRACE=1 \
@@ -226,6 +233,7 @@ fn ctrl_d_under_tmux_keeps_the_starting_pendin_flag() {
         }
         let before = std::fs::read_to_string(run.join("before")).expect("starting attributes");
         let after = std::fs::read_to_string(run.join("after")).expect("final attributes");
+        #[cfg(target_os = "macos")]
         assert!(
             before.contains(" pendin "),
             "starting PENDIN was not applied"

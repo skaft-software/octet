@@ -663,6 +663,9 @@ where
 {
     let mut scroll_dirty = false;
     let mut cache_warming_failed = false;
+    let mut delegation_telemetry = agent
+        .as_deref()
+        .and_then(octet_agent::Agent::delegation_telemetry);
     let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
         executable_extensions.sync_editor_autocomplete(shell);
@@ -938,6 +941,20 @@ where
                 }
                 if reload.is_due(now) {
                     return Ok(Idle::ReloadDue);
+                }
+            }
+            snapshot = async {
+                let receiver = delegation_telemetry.as_mut().expect("delegation observer");
+                receiver.changed().await.ok()?;
+                receiver.borrow_and_update().clone()
+            }, if delegation_telemetry.is_some() => {
+                match snapshot {
+                    Some(snapshot) => {
+                        if shell.set_subagent_telemetry(Some(&snapshot), true) {
+                            shell.render();
+                        }
+                    }
+                    None => delegation_telemetry = None,
                 }
             }
             warm = async {
@@ -4156,7 +4173,9 @@ where
                 subagent_refresh = None;
                 let error = result.and_then(Result::err).map(|error| format!("subagent view live refresh failed; showing the last accepted state: {error}"));
                 if error != subagent_refresh_error {
-                    if let Some(error) = error.as_ref() { shell.notice(error.clone()); }
+                    if let Some(error) = error.as_ref() {
+                        executable_extensions.record_subagent_refresh_error(error);
+                    }
                     subagent_refresh_error = error;
                 }
                 apply_extension_background(shell, executable_extensions);
@@ -6928,10 +6947,10 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
                 "subagent view live refresh failed; showing the last accepted state: {error}"
             )),
         };
-        let mut notices = context.extensions.drain_events();
+        let notices = context.extensions.drain_events();
         if refresh_error != context.last_error {
             if let Some(error) = refresh_error.as_ref() {
-                notices.push(error.clone());
+                context.extensions.record_subagent_refresh_error(error);
             }
             context.last_error = refresh_error;
         }

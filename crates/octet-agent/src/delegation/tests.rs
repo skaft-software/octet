@@ -790,6 +790,35 @@ async fn telemetry_stream_coalesces_slow_consumer_updates_to_the_latest_snapshot
     assert_eq!(latest.failure_reason.as_deref(), Some("failure-127"));
 }
 
+#[tokio::test]
+async fn telemetry_receivers_share_the_session_stream_without_retiring_each_other() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let root = manager.root_binding();
+    let mut idle = root.telemetry_receiver().unwrap();
+    idle.borrow_and_update();
+    let mut run = root.telemetry_receiver().unwrap();
+    run.borrow_and_update();
+
+    root.detach_run();
+    manager.publish_external_failure("test", "worker update after root settlement");
+    for receiver in [&mut idle, &mut run] {
+        receiver
+            .changed()
+            .await
+            .expect("another subscriber or root settlement must not close telemetry");
+        assert_eq!(
+            receiver
+                .borrow_and_update()
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some("worker update after root settlement")
+        );
+    }
+}
+
 #[test]
 fn owning_run_restart_reactivates_root_without_recycling_session_capacity() {
     let directory = tempfile::tempdir().unwrap();

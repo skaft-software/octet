@@ -585,6 +585,12 @@ commands = ["subagents"]
         );
     }
 
+    /// Background observations must not append transcript notices. Keep their
+    /// failures in the bounded diagnostic history exposed by /extensions status.
+    pub(crate) fn record_subagent_refresh_error(&mut self, error: &str) {
+        self.diagnostics.push(error);
+    }
+
     /// An owned, single-flight observation request for the active modal loop.
     /// Only the first-party status command is admitted, without consent or
     /// context-injection authority. Persistent receivers still own snapshots.

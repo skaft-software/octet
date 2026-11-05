@@ -14157,6 +14157,66 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/google/gemini-omni-1.1-flash": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text",
+        "video"
+      ]
+    },
+    "name": "Gemini Omni 1.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": false
+  },
+  "openrouter/google/gemini-omni-1.2-flash": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text",
+        "video"
+      ]
+    },
+    "name": "Gemini Omni 1.2 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": false
+  },
   "openrouter/google/gemma-2-27b-it": {
     "limit": {
       "context": 8192,
@@ -14235,7 +14295,7 @@
   "openrouter/google/gemma-4-26b-a4b-it": {
     "limit": {
       "context": 262144,
-      "output": 32768
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -14811,7 +14871,7 @@
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 128000
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -19263,7 +19323,7 @@
   "openrouter/reflection/beam-1.0-501b-a23b": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [

@@ -64,6 +64,18 @@ impl Agent {
         Ok(team_directory)
     }
 
+    /// Subscribe to the root session's latest worker telemetry, including
+    /// updates between prompts. Observers share a bounded, coalescing stream;
+    /// starting or settling a root run does not retire another observer.
+    /// Returns `None` without a root delegation binding.
+    pub fn delegation_telemetry(
+        &self,
+    ) -> Option<watch::Receiver<Option<DelegationTelemetrySnapshot>>> {
+        self.delegation
+            .as_ref()
+            .and_then(DelegationBinding::telemetry_receiver)
+    }
+
     /// Returns the authoritative host count of active delegated workers.
     ///
     /// Returns zero when delegation is not enabled; frontend roster snapshots

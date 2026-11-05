@@ -1798,9 +1798,11 @@ async fn rpc_provider_preentry_aba_retains_submission_authority() {
             "selected-aba",
             "auth-aba",
         ] {
+            // macOS's default TMPDIR makes the provider's Unix socket path
+            // exceed sockaddr_un.sun_path before turn_started can be delivered.
             let directory = tempfile::Builder::new()
                 .prefix("rpc009-")
-                .tempdir()
+                .tempdir_in("/tmp")
                 .unwrap()
                 .keep();
             std::fs::write(directory.join("preentry-evidence"), "enabled").unwrap();

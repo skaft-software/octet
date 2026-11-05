@@ -346,6 +346,98 @@ fn enable_native_delegation(app: &mut App, directory: &std::path::Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polling() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let roots = Arc::new(AtomicUsize::new(0));
+    let root_turns = roots.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let response = ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream");
+            if body["system"].to_string().contains("You are /root/idle-worker") {
+                return response
+                    .set_body_string(text_turn())
+                    .set_delay(Duration::from_secs(5));
+            }
+            response.set_body_string(match roots.fetch_add(1, Ordering::SeqCst) {
+                0 => worker_tool_turn(
+                    "spawn_agent",
+                    serde_json::json!({"task_name":"idle-worker", "message":"finish in the background"}),
+                ),
+                1 => text_turn(),
+                unexpected => panic!("unexpected root turn {unexpected}"),
+            })
+        })
+        .mount(&server)
+        .await;
+    let mut model = scripted_model(&server.uri());
+    // The held child response must settle before the fixture provider deadline.
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_secs(30);
+    let (directory, mut app) = fast_test_app(model);
+    app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    enable_native_delegation(&mut app, directory.path());
+    // This observer must survive the root run subscribing and settling too.
+    let mut telemetry = app.agent.delegation_telemetry().unwrap();
+    app.agent.complete("start idle worker").await.unwrap();
+    assert_no_tool_errors(&app);
+    assert_eq!(app.agent.busy_delegated_worker_count(), 1);
+    let mut shell = InteractiveShell::test_shell();
+    shell.extension_set_editor("untouched draft".into());
+    shell.set_subagent_telemetry(telemetry.borrow_and_update().as_ref(), true);
+    let before = shell.debug_snapshot();
+    assert!(before.contains("Subagents · 1 running"), "{before}");
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_secs(60));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    {
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut app.executable_extensions,
+            None,
+            &mut reload_tick,
+            &watcher,
+            &mut reload,
+            Some(&mut app.agent),
+        );
+        tokio::pin!(idle);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    result = &mut idle => panic!("idle prompt unexpectedly ended: {}", result.is_ok()),
+                    changed = telemetry.changed() => {
+                        changed.expect("root settlement must not close a session observer");
+                        let snapshot = telemetry.borrow_and_update().clone().unwrap();
+                        if snapshot.children.iter().any(|child| child.state == "completed") {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Drain the ready idle observation without sending a key, starting
+            // another root run, or waiting for the extension polling interval.
+            assert!(futures_util::poll!(&mut idle).is_pending());
+        }).await.expect("the local worker settles while the root stays idle");
+    }
+    let after = shell.debug_snapshot();
+    assert!(after.contains("Subagents · 1 completed"), "{after}");
+    assert!(!after.contains("Subagents · 1 running"), "{after}");
+    assert_eq!(after.matches("Subagents").count(), 1, "{after}");
+    assert_eq!(shell.pending(), "untouched draft");
+    assert_eq!(root_turns.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resource_reload_parks_a_settled_host_worker_and_keeps_it_resumable() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};

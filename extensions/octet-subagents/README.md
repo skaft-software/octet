@@ -112,7 +112,9 @@ or queue until idle during a turn. `/extensions` only enables, disables and
 configures the extension; runtime worker controls are not in its options menu.
 
 A bounded, tool-like **Subagents** transcript block updates in place while
-workers are active, including between root turns. Its heading counts worker
+workers are active, including between root turns without another prompt or
+keypress. Background roster refresh failures keep the last accepted view and
+stay in `/extensions status` diagnostics, not transcript notices. Its heading counts worker
 states, and up to four active child lines show the task and input and output
 tokens. Ctrl+O keeps disclosure. Once the block settles, the worker list shows
 all retained workers (up to 32), exact outcomes, models, tool-call counts (not

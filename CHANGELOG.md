@@ -10,6 +10,10 @@
 
 ### Fixed
 
+- Subagent chrome continues updating while the parent waits for input after its
+  turn ends. Worker telemetry is session-lived; background roster refresh
+  failures retain the last accepted view and go to extension diagnostics instead
+  of adding repeated transcript notices.
 - Compaction accepts textual summaries up to 2 MiB (previously 128 KiB),
   including the host-derived file list, so routes that cannot enforce the
   requested output budget no longer fail compaction of long sessions; this was
