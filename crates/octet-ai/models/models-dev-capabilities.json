@@ -14553,6 +14553,29 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/inclusionai/ling-3.0-tiny": {
+    "limit": {
+      "context": 262144,
+      "output": 250000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ling 3.0 Tiny",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/inclusionai/ling-3.1-flash": {
     "limit": {
       "context": 1000000,
@@ -14579,7 +14602,7 @@
   "openrouter/inference-net/schematron-v2-small": {
     "limit": {
       "context": 128000,
-      "output": 4096
+      "output": 8192
     },
     "modalities": {
       "input": [
@@ -15143,25 +15166,6 @@
     "structured_output": true,
     "tool_call": false
   },
-  "openrouter/minimax/minimax-01": {
-    "limit": {
-      "context": 1000192,
-      "output": 40000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-01",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/minimax/minimax-m1": {
     "limit": {
       "context": 1000000,
@@ -15182,68 +15186,6 @@
         "type": "toggle"
       }
     ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/minimax/minimax-m2": {
-    "interleaved": {
-      "field": "reasoning_details"
-    },
-    "limit": {
-      "context": 204800,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/minimax/minimax-m2-her": {
-    "limit": {
-      "context": 65536,
-      "output": 2048
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2 Her",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
-  "openrouter/minimax/minimax-m2.1": {
-    "interleaved": {
-      "field": "reasoning_details"
-    },
-    "limit": {
-      "context": 204800,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2.1",
-    "reasoning": true,
-    "reasoning_options": [],
     "structured_output": false,
     "tool_call": true
   },
@@ -15272,7 +15214,7 @@
   "openrouter/minimax/minimax-m2.7": {
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 176947
     },
     "modalities": {
       "input": [
@@ -17910,7 +17852,7 @@
   "openrouter/openai/gpt-oss-20b": {
     "limit": {
       "context": 131072,
-      "output": 32768
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -18651,7 +18593,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 16384
     },
     "modalities": {
       "input": [
