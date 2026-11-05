@@ -375,18 +375,19 @@ async fn live_styled_document_rerenders_at_panel_content_width_after_resize() {
     let widths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = std::sync::Arc::clone(&widths);
 
-    read_only_document_live_styled(
+    let action = subagent_document_live_styled(
         &mut shell,
         &mut input,
         "worker transcript",
         "initial".into(),
-        move |width| {
+        move |width, _| {
             observed.lock().unwrap().push(width);
             std::future::ready(Ok(Some(format!("rendered at {width}"))))
         },
     )
     .await
     .unwrap();
+    assert_eq!(action, SubagentDocumentAction::Back);
 
     assert!(widths.lock().unwrap().contains(&44));
     assert!(!shell.has_panel());
@@ -545,8 +546,51 @@ async fn live_subagent_picker_refreshes_and_keeps_the_stable_selection() {
     .await
     .unwrap();
 
-    assert_eq!(selected.as_deref(), Some("node-b"));
+    assert_eq!(
+        selected,
+        Some(SubagentPickerSelection::Inspect("node-b".into()))
+    );
     assert!(refresh.calls >= 1);
+}
+
+#[tokio::test]
+async fn subagent_picker_returns_explicit_message_and_stop_actions() {
+    for (key, expected) in [
+        ('g', SubagentPickerSelection::Message("node-a".into())),
+        ('x', SubagentPickerSelection::Stop("node-a".into())),
+    ] {
+        let mut input = futures_util::stream::iter([Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char(key),
+            KeyModifiers::CONTROL,
+        )))]);
+        let mut shell = InteractiveShell::test_shell();
+        let mut refresh = LivePickerRefresh {
+            calls: 0,
+            refreshed: None,
+        };
+        let selected = subagent_picker(
+            &mut shell,
+            &mut input,
+            SubagentPickerSnapshot {
+                title: "Subagents".into(),
+                items: vec!["alpha".into()],
+                descriptions: vec![Some("running".into())],
+                node_ids: vec!["node-a".into()],
+                groups: vec![SubagentGroup {
+                    label: "Running".into(),
+                    indices: vec![0],
+                    collapsible: false,
+                }],
+                notices: Vec::new(),
+            },
+            0,
+            &mut refresh,
+            refresh_live_picker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, Some(expected));
+    }
 }
 
 #[test]

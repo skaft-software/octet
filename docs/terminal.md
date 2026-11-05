@@ -366,10 +366,12 @@ transcript updates in place. It no longer stays pinned above the input. Its
 heading counts worker states, and up to four child lines show active tasks with
 input and output tokens. Ctrl+O keeps disclosure. `/subagents` opens the live
 worker list, including during a run, with the complete roster (up to 32) and
-failure details. Enter opens a worker's read-only transcript and Ctrl+X stops
-the selected worker. `/subagents stop <name-or-id|all>` also works during a run;
-other worker operations wait for idle. `/extensions` manages extension
-enablement and configuration instead.
+failure details. Enter opens a worker transcript; Ctrl+O toggles its retained
+details and Ctrl+G composes a message to that worker without editing its history.
+Ctrl+G also works from the list, and Ctrl+X stops the selected worker.
+`/subagents continue <name-or-id> <message>` and `/subagents stop <name-or-id|all>`
+also work during a run; inspect, wait and reattach wait for idle. `/extensions`
+manages extension enablement and configuration instead.
 Finished workers' usage is added once to the main session's ledger, so cost
 limits count it. [Worker
 display](../extensions/octet-subagents/README.md#tui-and-serve-presentation).

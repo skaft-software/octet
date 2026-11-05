@@ -32,6 +32,60 @@ fn first_party_status_marks_missing_delegation_telemetry_incompatible() {
     assert_eq!(compatibility, "compatible");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn subagent_continue_control_is_owner_fenced_and_preserves_message() {
+    let fixture = tempfile::tempdir().unwrap();
+    let (extensions, process, log) = ExecutableExtensions::test_subagent_stop_fixture(
+        fixture.path(),
+        Some("owner-a"),
+        SUBAGENTS_EXTENSION_NAME,
+        0,
+    )
+    .await;
+    assert!(extensions
+        .subagent_continue_control("worker".into(), "instruction".into(), "owner-b")
+        .is_err());
+    assert!(extensions
+        .subagent_continue_control("worker".into(), "  \n".into(), "owner-a")
+        .is_err());
+    assert!(!log.exists());
+
+    let message = "Check two things:\n  1. auth\n  2. tests";
+    let output = extensions
+        .subagent_continue_control("worker".into(), message.into(), "owner-a")
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(output.contains("Message not sent."));
+    assert!(output.contains("Worker is awaiting approval."));
+    let wire: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log).unwrap().trim()).unwrap();
+    assert_eq!(
+        wire["params"]["arguments"],
+        serde_json::json!(["continue", "worker", message])
+    );
+    assert_eq!(
+        wire["params"]["context"]["resource_owner"]["session_id"],
+        "owner-a"
+    );
+    assert!(process.shutdown().await);
+
+    let other_fixture = tempfile::tempdir().unwrap();
+    let (impostor, process, log) = ExecutableExtensions::test_subagent_stop_fixture(
+        other_fixture.path(),
+        Some("owner-a"),
+        "other-extension",
+        0,
+    )
+    .await;
+    assert!(impostor
+        .subagent_continue_control("worker".into(), "instruction".into(), "owner-a")
+        .is_err());
+    assert!(!log.exists());
+    assert!(process.shutdown().await);
+}
+
 #[test]
 fn streamable_http_mcp_gate_is_host_owned() {
     let mut descriptor = DiscoveredExtension {

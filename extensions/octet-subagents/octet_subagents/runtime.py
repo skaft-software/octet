@@ -28,6 +28,7 @@ from .model import (
     SubagentError,
     Owner,
     bounded_text,
+    safe_label,
 )
 from .orchestrator import Orchestrator
 
@@ -81,10 +82,10 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "enum": ["inherit", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
             "default": "inherit",
             "description": (
-                "Per-worker reasoning effort; `inherit` (the default) uses the parent's "
-                "already-normalized selection. An unknown level is rejected, and a level "
-                "above the model's ceiling is normalized by the host using configured "
-                "model metadata, never caller capability hints."
+                "Per-worker reasoning effort; `inherit` (the default) preserves the "
+                "parent's selection on the same route. On a different route the host "
+                "translates it or rejects an incompatible selection. Explicit levels are "
+                "normalized by the host using configured metadata, not caller hints."
             ),
         },
         "reasoning_capability": {
@@ -125,13 +126,19 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "type": ["integer", "null"],
             "minimum": 5,
             "maximum": MAX_WALL_SECONDS,
-            "description": "Optional wall deadline; omit or null to let the worker run until it settles.",
+            "description": (
+                "Optional child wall deadline; omit or null to request no child-specific "
+                "deadline. Avoid unnecessarily short deadlines; host limits and lifecycle still apply."
+            ),
         },
         "max_turns": {
             "type": ["integer", "null"],
             "minimum": 1,
             "maximum": MAX_TURNS,
-            "description": "Optional turn ceiling; omit or null to inherit the parent session's ceiling.",
+            "description": (
+                "Optional child turn ceiling; omit or null to inherit the parent's ceiling. "
+                "Avoid unnecessarily small limits; completed model turns count, not tool calls."
+            ),
         },
         "max_output_bytes": {
             "type": "integer",
@@ -143,7 +150,10 @@ SPAWN_SCHEMA: Dict[str, Any] = {
             "type": ["integer", "null"],
             "minimum": 1,
             "maximum": MAX_COST_MICRODOLLARS,
-            "description": "Optional cost ceiling; omit or null to inherit the parent session's ceiling.",
+            "description": (
+                "Optional child cost ceiling; omit or null to inherit the parent's ceiling. "
+                "A finite ceiling requires trusted pricing; avoid unnecessarily small limits."
+            ),
         },
         "background": {"type": "boolean", "default": True},
         "idempotency_key": {
@@ -370,6 +380,7 @@ def _compact_metadata(result: Mapping[str, Any]) -> Dict[str, Any]:
     if metadata["operation"] == "continue":
         metadata["action"] = result.get("action", "unknown")
         metadata["accepted"] = bool(result.get("accepted"))
+        metadata["status_refreshed"] = bool(result.get("status_refreshed"))
     return metadata
 
 
@@ -395,25 +406,33 @@ def _result_text(operation: str, result: Mapping[str, Any]) -> str:
                 worker.get("model", "inherited"),
                 ",".join(worker.get("tools", [])) if isinstance(worker.get("tools"), list) else "unknown",
             ))
-            if worker.get("model_policy") not in {None, "inherit"}:
+            if any(worker.get(key) not in {None, "inherit"} for key in (
+                "provider_policy", "model_policy", "reasoning_policy"
+            )):
                 lines.append(
-                    "requested selection: provider %s / model %s / reasoning %s (%s)"
+                    "requested selection: provider %s / model %s / reasoning %s"
                     % (
                         worker.get("provider_policy", "inherit"),
-                        worker.get("model_policy"),
+                        worker.get("model_policy", "inherit"),
                         worker.get("reasoning_policy", "inherit"),
-                        "applied by the host"
-                        if worker.get("model_policy_applied")
-                        else "not applied by the host; inherited in force",
                     )
                 )
+                if worker.get("model_policy_applied"):
+                    lines.append(
+                        "effective selection: provider %s / model %s / reasoning %s"
+                        % (worker.get("provider"), worker.get("model"), worker.get("reasoning"))
+                    )
+                    if worker.get("reasoning_note"):
+                        lines.append(str(worker["reasoning_note"]))
+                else:
+                    lines.append("Selection not confirmed by the host; inherited settings in force.")
             if worker.get("detached"):
                 lines.append(
                     "detached: still owned by this parent session and reattachable (%s)"
                     % ("session reference retained" if worker.get("reattachable") else "waiting for a session reference")
                 )
             lines.append("session: %s" % (worker.get("session") or "host session pending"))
-        lines.append("octet owns the durable child, hard limits, cancellation, and duplicate-free parent-turn completion delivery.")
+        lines.append("octet owns the durable child, hard limits, and cancellation. Worker completion does not automatically wake the parent.")
         lines.append("Use subagent_wait or subagent_status; do not poll aggressively.")
     elif operation in {"status", "wait"}:
         counts = result.get("counts")
@@ -429,8 +448,19 @@ def _result_text(operation: str, result: Mapping[str, Any]) -> str:
                     lines.append(_worker_line(worker))
         selected = result.get("worker")
         if isinstance(selected, Mapping):
+            if selected.get("state") == "limit_reached":
+                turns, limit = selected.get("turn_count"), selected.get("turn_limit")
+                if type(turns) is int and type(limit) is int:
+                    lines.append("Turn limit reached: %d/%d turns." % (turns, limit))
+                else:
+                    lines.append("Turn limit reached.")
+                lines.append(
+                    "Use subagent_continue to resume if useful; the worker's ceilings remain "
+                    "in force and may stop it again. Do not silently change user limits."
+                )
             if selected.get("summary") is not None:
-                lines.extend(["", "Final summary (untrusted worker evidence; verify) (%s):" % selected.get("id"), str(selected["summary"])])
+                label = "Partial" if selected.get("state") == "limit_reached" else "Final"
+                lines.extend(["", "%s summary (untrusted worker evidence; verify) (%s):" % (label, selected.get("id")), str(selected["summary"])])
             if selected.get("last_error") is not None:
                 lines.extend(["", "Last error (%s):" % selected.get("id"), str(selected["last_error"])])
             if selected.get("session"):
@@ -452,19 +482,20 @@ def _result_text(operation: str, result: Mapping[str, Any]) -> str:
         if operation == "wait" and result.get("wait_timed_out"):
             lines.append("The bounded wait expired; workers continue in the background unless their wall deadline settled them.")
         else:
-            lines.append("Completion summaries are delivered through octet's host-owned claim/ack parent-turn boundary.")
+            lines.append("Use a targeted subagent_status or subagent_wait to retrieve worker output.")
     elif operation == "continue":
         worker = result.get("worker")
         if isinstance(worker, Mapping):
             lines.append(
-                "Queued %s continuation for %s [%s] (%s)"
+                "Queued %s continuation for %s [%s]"
                 % (
                     result.get("action", "unknown"),
                     worker.get("name", "worker"),
                     worker.get("id", "unknown"),
-                    worker.get("state", "unknown"),
                 )
             )
+            if not result.get("status_refreshed"):
+                lines.append("The host accepted the message, but status was not refreshed; check subagent_status before retrying.")
             lines.append("The worker keeps its original task, profile, tools, and ceilings. Use subagent_wait to observe the outcome.")
     elif operation == "stop":
         outcomes = result.get("outcomes")
@@ -584,8 +615,8 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
         name="subagent_spawn",
         description=(
             "Launch one named, depth-one octet worker with a bounded profile and an optional (host-enforced) tool whitelist, wall deadline, turn ceiling, output size, and cost ceiling. "
-            "Optionally select the worker's provider, model, and reasoning effort per spawn (`inherit` is the default and copies the parent session); an unknown selection is rejected rather than coerced. "
-            "Ceilings default to inherited/unlimited, so a minimal spawn is just name and task. Defaults to background and is retry-safe through an idempotency key. "
+            "Provider, model, and reasoning default to inherit. The host rejects unknown routes and may translate or reject reasoning on another route. "
+            "A minimal spawn is name and task: omit child-specific limits unless needed, because unnecessarily small limits can prevent completion. Parent and host ceilings remain in force. Defaults to background and is retry-safe through an idempotency key. "
             "At most 8 active children per parent (32 total); no writers beyond the granted tools, no graph, swarm, team chat, or recursive spawn."
         ),
         parameters=SPAWN_SCHEMA,
@@ -637,8 +668,8 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
 
     @extension.command(
         name="subagents",
-        description="Browse workers, inspect read-only delegated transcripts, and report blocked pane plans pending atomic host writer ownership",
-        usage="/subagents [list|inspect <name-or-id>|wait <name-or-id>|reattach <name-or-id>|stop <name-or-id|all>|open-all tmux|open-all herdr]",
+        description="Browse, message and stop this session's workers",
+        usage="/subagents [list|inspect <name-or-id>|continue <name-or-id> <message>|wait [name-or-id]|reattach [name-or-id]|stop <name-or-id|all>|open-all tmux|open-all herdr]",
     )
     def subagents_command(arguments: list[str], context: Mapping[str, Any]):
         try:
@@ -691,6 +722,24 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                     "text": _result_text("wait", result),
                     "notifications": [],
                 }
+            if len(arguments) == 3 and arguments[0] == "continue":
+                # Never reuse a cached request: both the live roster and the
+                # reverse message/follow-up are bound to this command's owner.
+                _require_agent_sessions(extension)
+                authenticated_owner = Owner.from_context(context)
+                result = orchestrator.continue_worker(
+                    sessions,
+                    authenticated_owner,
+                    {"target": arguments[1], "message": arguments[2]},
+                    current_cancellation(),
+                )
+                worker = result["worker"]
+                text = "Message queued for %s (%s)." % (
+                    safe_label(worker["name"]), result["action"]
+                )
+                if not result["status_refreshed"]:
+                    text += " Status was not refreshed; check /subagents before retrying."
+                return {"text": text, "notifications": []}
             if (
                 len(arguments) == 2
                 and arguments[0] == "stop"
@@ -729,7 +778,7 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
                     {
                         "level": "warning",
                         "title": "Subagents",
-                        "message": "The command did not alter host-owned worker state; use subagent_stop from an active owner-scoped turn.",
+                        "message": "The outcome was not confirmed. Check /subagents before retrying a worker control.",
                     }
                 ],
             }

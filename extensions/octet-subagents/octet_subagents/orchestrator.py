@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from octet_extension import CancelledError, RpcError
+
 from .model import (
     CHILD_TOOLS,
     DETACHED_LABEL,
@@ -35,6 +37,7 @@ from .model import (
     safe_label,
     sanitize_document,
     validate_plain_text,
+    _unsafe_presentation_character,
 )
 from .launcher import execute_plan, plan_open_all, render_outcome, skipped_worker_row
 from .presentation import build_snapshot, detail_body, narrow_list
@@ -62,6 +65,24 @@ REATTACHED_PHASE = "reattached to the owning session; the host record is live ag
 DETACHED_HOST_STATES = frozenset({"shutdown", "orphaned", "detached"})
 
 
+def _host_model_identifier(value: Any) -> str:
+    """Validate a host-confirmed identifier used only as data, not as a route request.
+
+    Configured model IDs can include display names (including spaces and Unicode),
+    unlike the SDK's narrower syntax for model-supplied selections. Preserve their
+    exact identity while rejecting unsafe, malformed or unbounded host output.
+    """
+    if isinstance(value, str) and value.strip() and not any(
+        _unsafe_presentation_character(character) for character in value
+    ):
+        try:
+            if len(value.encode("utf-8")) <= 256:
+                return value
+        except UnicodeEncodeError:
+            pass
+    raise SubagentError("invalid host-resolved model identifier", code="host_state_invalid")
+
+
 def _host_model_policy(record: Mapping[str, Any]) -> Dict[str, Any]:
     """Render only host-confirmed settings; never infer a route from a request."""
     from .model import _model_id
@@ -85,8 +106,8 @@ def _host_model_policy(record: Mapping[str, Any]) -> Dict[str, Any]:
         return fields
     if not isinstance(resolved, Mapping):
         raise SubagentError("invalid host model settings", code="host_state_invalid")
-    provider = _model_id(resolved.get("provider"), "provider")
-    model = _model_id(resolved.get("model"), "model")
+    provider = _host_model_identifier(resolved.get("provider"))
+    model = _host_model_identifier(resolved.get("model"))
     reasoning = resolved.get("reasoning")
     if not isinstance(reasoning, Mapping):
         raise SubagentError("invalid host reasoning settings", code="host_state_invalid")
@@ -234,7 +255,6 @@ def _host_timestamps(
         "interrupted",
         "cancelled",
         "shutdown",
-        "orphaned",
         "timed_out",
         "stopped",
     }
@@ -256,11 +276,9 @@ def _host_timestamps(
         # A resumed worker can still expose the previous run's completion
         # timestamp from an older host; an active record is not completed.
         completed = None
-    if terminal and completed is None:
-        raise SubagentError(
-            "agent_sessions omitted the worker completion timestamp",
-            code="host_state_invalid",
-        )
+    # Completion time is optional in the host's durable record, including on
+    # restored and persistence-failure paths. A missing time must not make the
+    # entire owner roster inaccessible or be invented from the observation time.
     return created, started if isinstance(started, int) else created, completed
 
 
@@ -562,7 +580,7 @@ class Orchestrator:
             result["operation"] = "wait"
             result["wait_timed_out"] = wait_timed_out
             result["completion_delivery"] = (
-                "host_owned_parent_turn" if not wait_timed_out else "workers_continue_in_background"
+                "observed_in_wait_result" if not wait_timed_out else "workers_continue_in_background"
             )
             # An explicit parent wait is also the reattachment surface: the
             # reconcile above is what lets the owning session pick a detached
@@ -755,14 +773,28 @@ class Orchestrator:
                 worker.timeout_requested = False
             else:
                 client.send_agent_message(worker.agent_id, message)
-        self._check_cancelled(cancellation)
-        self._refresh(client, state, cancellation)
+            # A successful reverse response is already an acceptance. Do not
+            # turn a later status/cancellation failure into a false rejection:
+            # that could prompt an unsafe duplicate message on retry.
+            observed_before_refresh = worker.public(self._now_ms())
+        try:
+            self._check_cancelled(cancellation)
+            self._refresh(client, state, cancellation)
+        except (CancelledError, RpcError, SubagentError):
+            return {
+                "operation": "continue",
+                "accepted": True,
+                "action": action,
+                "status_refreshed": False,
+                "worker": observed_before_refresh,
+            }
         with self._lock:
             worker = self._resolve_locked(state, target)
             result: Dict[str, Any] = {
                 "operation": "continue",
                 "accepted": True,
                 "action": action,
+                "status_refreshed": True,
                 "worker": worker.public(self._now_ms()),
             }
             publish = self._snapshot_locked(state)
@@ -1722,7 +1754,7 @@ class Orchestrator:
             },
             "workers": [worker.public(now) for worker in workers],
             "persistence": "host_owned",
-            "completion_delivery": "host_owned_claim_ack_parent_turn",
+            "completion_delivery": "retrieve_via_status_or_wait",
         }
         if selected is not None:
             result["worker"] = selected.public(now)
@@ -1737,7 +1769,7 @@ class Orchestrator:
             "duplicate": duplicate,
             "background": request.background,
             "worker": worker.public(self._now_ms()),
-            "completion_delivery": "host_owned_claim_ack_parent_turn",
+            "completion_delivery": "retrieve_via_status_or_wait",
             "next": "Use subagent_wait or subagent_status; do not poll aggressively.",
         }
 

@@ -58,7 +58,9 @@ def semantic_id(prefix: str, value: str) -> str:
     return "%s:%s" % (prefix, digest)
 
 
-def duration_label(elapsed_ms: int) -> str:
+def duration_label(elapsed_ms: Optional[int]) -> str:
+    if elapsed_ms is None:
+        return "unknown"
     total_seconds = max(0, elapsed_ms // 1000)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -67,8 +69,10 @@ def duration_label(elapsed_ms: int) -> str:
     return "%02d:%02d" % (minutes, seconds)
 
 
-def human_duration(elapsed_ms: int) -> str:
+def human_duration(elapsed_ms: Optional[int]) -> str:
     """Readable elapsed label for the live panel: `42s`, `5m49s`, `2h05m`."""
+    if elapsed_ms is None:
+        return "elapsed unknown"
     total_seconds = max(0, elapsed_ms // 1000)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -198,24 +202,30 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
     workers cannot fill with `no ceiling`/`?` placeholders. Values are
     human-format (`5m49s`, `263K`) so a bounded row still reads as data.
     """
-    pieces = [
-        STATE_LABEL.get(worker.state, safe_label(worker.state)),
-        human_duration(worker.elapsed_ms(now_ms)),
-        # The row is labelled as a model, so it must name a model and nothing
-        # else. The worker's profile is documented in the detail document
-        # (`Model/profile: <model> (inherited) / <profile>`), never spliced into
-        # the model string: `explore/deepseek/deepseek-flash` reads as a
-        # provider-qualified id that does not exist.
-        worker.effective_model,
-    ]
-    # Per-worker orchestration selection. `inherit` is the default and stays
-    # absent (absence is never rendered as text); an explicit request is shown as
-    # `requested→effective` so a pane-per-worker fleet is legible and a selection
-    # the host has not applied is never implied to be in force.
+    pieces = [STATE_LABEL.get(worker.state, safe_label(worker.state))]
+    elapsed = worker.elapsed_ms(now_ms)
+    if elapsed is not None:
+        pieces.append(human_duration(elapsed))
+    # The row is labelled as a model, so it must name a model and nothing
+    # else. The worker's profile is documented in the detail document
+    # (`Model/profile: <model> (inherited) / <profile>`), never spliced into
+    # the model string: `explore/deepseek/deepseek-flash` reads as a
+    # provider-qualified id that does not exist.
+    pieces.append(worker.effective_model)
+    # Put actionable failures before usage: a narrow terminal must not truncate
+    # the reason behind less urgent metrics. Details keep the complete error.
+    if worker.state in {"failed", "timed_out"} and worker.last_error:
+        reason = bounded_text(safe_label(worker.last_error), 160).strip()
+        if reason:
+            pieces.insert(1, reason)
+    # The effective model is already shown. Only repeat a requested model when
+    # it differs or has not been confirmed; full policy remains in the detail.
     if worker.requested_model != "inherit":
         requested_model = _model_label(worker.requested_provider, worker.requested_model)
-        marker = "" if worker.model_policy_applied else " (not applied by host)"
-        pieces.append("model %s%s" % (requested_model, marker))
+        effective_model = _model_label(worker.effective_provider, worker.effective_model)
+        if not worker.model_policy_applied or requested_model != effective_model:
+            marker = "" if worker.model_policy_applied else " (not applied by host)"
+            pieces.append("requested %s%s" % (requested_model, marker))
     if worker.requested_reasoning != "inherit":
         if not worker.model_policy_applied:
             pieces.append(
@@ -273,12 +283,6 @@ def worker_secondary(worker: Worker, now_ms: int) -> str:
         pieces.append("reattached ×%d" % worker.reattach_count)
     if worker.awaiting_approval:
         pieces.append("approval required")
-    if worker.state in {"failed", "timed_out"}:
-        # A failed row without its bounded reason is useless; the reason is a
-        # host-observed failure class, never tool arguments or child prose.
-        reason = bounded_text(safe_label(worker.last_error or ""), 160).strip()
-        if reason:
-            pieces.append(reason)
     return bounded_text(" · ".join(pieces), 1024)
 
 
@@ -395,9 +399,9 @@ def detail_body(worker: Worker, now_ms: int) -> str:
             )
         ),
         "Cwd/workspace: inherited from the parent octet session.",
-        "Sandbox/approval/environment/extensions: inherited and host-enforced; API 0.2 agent_sessions does not expose exact values to this view.",
+        "Sandbox/approval/environment/extensions: inherited and host-enforced; exact values are not exposed here.",
         "Isolation: the cwd/filesystem may be shared and is not an isolation boundary.",
-        "Delivery: %s; octet's durable parent mailbox owns completion claim/ack." % worker.delivery_state,
+        "Delivery state: %s." % worker.delivery_state,
         "Session: %s" % (worker.session or "not yet exposed by agent_sessions"),
         "Session ownership: %s" % ownership,
     ]
@@ -441,9 +445,9 @@ def detail_body(worker: Worker, now_ms: int) -> str:
                 marker = "ok"
             lines.append("- [%s] %s" % (marker, action))
     if worker.summary is not None:
-        lines.extend(["", "Host-observed final summary (unsafe controls escaped):", worker.summary])
+        lines.extend(["", "Result:", worker.summary])
     if worker.last_error is not None:
-        lines.extend(["", "Last bounded error:", worker.last_error])
+        lines.extend(["", "Error:", worker.last_error])
     return bounded_text("\n".join(lines), 64 * 1024)
 
 
@@ -588,6 +592,7 @@ def narrow_list(workers: Sequence[Worker], now_ms: int) -> str:
                 worker.agent_id,
             )
         )
-    lines.append("Use /subagents inspect <name-or-id> for cached detail.")
-    lines.append("Use the model-callable subagent_stop tool for authoritative cancellation.")
+    lines.append("")
+    lines.append("Inspect: /subagents inspect <name-or-id>")
+    lines.append("Stop: /subagents stop <name-or-id|all> (when owner-bound control is available)")
     return bounded_text("\n".join(lines), 16 * 1024)

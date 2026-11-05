@@ -256,6 +256,111 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn active_worker_transcript_supports_disclosure_and_owner_bound_messages() {
+    let (server, started, release) = HeldApi::start(text_turn()).await;
+    let (_agent_dir, mut agent) =
+        scripted_agent_for_route(scripted_model(&server.uri), octet_ai::AiClient::new());
+    let owner = agent.session().resource_owner_key();
+    let mut inspection = test_run_inspection().clone();
+    inspection.session_path = agent.session().path().to_path_buf();
+    inspection.resource_owner = owner.clone();
+    let fixture = tempfile::tempdir().unwrap();
+    let (mut extensions, process, log) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            fixture.path(),
+            Some(&owner),
+            "octet-subagents",
+            0,
+        )
+        .await;
+    extensions.test_publish_worker_roster(
+        &process,
+        &[("worker:one", "worker-one", Some("worker-one"))],
+    );
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    let mut shell = InteractiveShell::test_shell();
+    let old_verbose = shell.verbose_tools();
+    let run_id = shell.begin_run("test");
+    let mut run = agent.prompt("held turn").await.unwrap();
+    shell.set_awaiting_provider(run_id);
+    let control = run.control();
+    let mut ticker = tokio::time::interval(Duration::from_millis(16));
+    let mut pending = VecDeque::new();
+    let mut quit = false;
+    let mut made_tool_call = false;
+    let mut deadline = None;
+    let driver = drive_active_run(
+        &mut run,
+        &control,
+        &mut shell,
+        &mut input,
+        &mut ticker,
+        &mut pending,
+        &mut quit,
+        None,
+        None,
+        &mut extensions,
+        &mut made_tool_call,
+        &inspection,
+        &mut deadline,
+    );
+    let producer = async {
+        started.await.unwrap();
+        let key =
+            |code, modifiers| Ok(Event::Key(crossterm::event::KeyEvent::new(code, modifiers)));
+        for event in [
+            Ok(Event::Paste("/subagents".into())),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            key(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            Ok(Event::Paste("Continue from here.".into())),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            sender.send(event).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let wire = std::fs::read_to_string(&log).unwrap_or_default();
+                if wire.lines().any(|line| line.contains("\"continue\"")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker message reaches extension while root is active");
+        release.send(true).unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(driver, producer)
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.unwrap(), HostRunOutcome::Completed);
+    drop(run);
+    let wire = std::fs::read_to_string(log).unwrap();
+    let sent: Vec<serde_json::Value> = wire
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|command: &serde_json::Value| command["params"]["arguments"][0] == "continue")
+        .collect();
+    assert_eq!(sent.len(), 1, "{wire}");
+    assert_eq!(
+        sent[0]["params"]["arguments"],
+        serde_json::json!(["continue", "worker-one", "Continue from here."])
+    );
+    assert_eq!(
+        sent[0]["params"]["context"]["resource_owner"]["session_id"],
+        owner
+    );
+    assert_ne!(shell.verbose_tools(), old_verbose);
+    assert!(process.shutdown().await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn idle_subagents_opens_the_live_roster_and_routes_worker_commands() {
     let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
     let owner = app.agent.session().resource_owner_key();
@@ -307,8 +412,14 @@ async fn idle_subagents_opens_the_live_roster_and_routes_worker_commands() {
         "/subagents wait worker-one",
         "/subagents reattach worker-one",
         "/subagents stop all",
+        "/subagents continue worker-one  \tCheck  both:\n  auth and tests  \n",
     ] {
-        let arguments = subagents_command_arguments(text, &app.executable_extensions).unwrap();
+        let Command::Unknown(text) =
+            parse_subagent_command_preserving_message(text, &app.executable_extensions)
+        else {
+            panic!("extension command")
+        };
+        let arguments = subagents_command_arguments(&text, &app.executable_extensions).unwrap();
         run_subagents_command(&mut app, &mut shell, &mut input, arguments)
             .await
             .unwrap();
@@ -331,11 +442,178 @@ async fn idle_subagents_opens_the_live_roster_and_routes_worker_commands() {
             .iter()
             .any(|command| command["params"]["arguments"][0] == action));
     }
+    assert!(commands.iter().any(|command| command["params"]["arguments"]
+        == serde_json::json!([
+            "continue",
+            "worker-one",
+            " \tCheck  both:\n  auth and tests  \n"
+        ])));
     assert!(process.shutdown().await);
     assert!(app
         .executable_extensions
         .tui_command_suggestions()
         .is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_worker_transcript_messages_its_owner_bound_worker() {
+    let (_workspace, mut app) = crate::compaction::tests::app_for_estimate();
+    let owner = app.agent.session().resource_owner_key();
+    let fixture = tempfile::tempdir().unwrap();
+    let (extensions, process, log) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            fixture.path(),
+            Some(&owner),
+            "octet-subagents",
+            0,
+        )
+        .await;
+    app.executable_extensions = extensions;
+    app.executable_extensions.test_publish_worker_roster(
+        &process,
+        &[("worker:one", "worker-one", Some("worker-one"))],
+    );
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    let mut shell = InteractiveShell::test_shell();
+    shell.prefill_editor("parent draft".into());
+    let old_verbose = shell.verbose_tools();
+    let panel_open = shell.test_subagent_panel_probe();
+    let driver = run_subagents_command(&mut app, &mut shell, &mut input, vec![]);
+    let input_driver = async {
+        while !panel_open() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let key =
+            |code, modifiers| Ok(Event::Key(crossterm::event::KeyEvent::new(code, modifiers)));
+        for event in [
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            key(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            Ok(Event::Paste("  Check auth\n  and tests  ".into())),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            sender.send(event).await.unwrap();
+        }
+        loop {
+            let wire = std::fs::read_to_string(&log).unwrap_or_default();
+            if wire.contains("\"continue\"") && panel_open() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sender
+            .send(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(driver, input_driver)
+    })
+    .await
+    .expect("worker transcript must dispatch and return to the roster");
+    result.unwrap();
+    let commands = std::fs::read_to_string(log).unwrap();
+    let sent: Vec<serde_json::Value> = commands
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|command: &serde_json::Value| command["params"]["arguments"][0] == "continue")
+        .collect();
+    assert_eq!(sent.len(), 1, "{commands}");
+    assert_eq!(
+        sent[0]["params"]["arguments"],
+        serde_json::json!(["continue", "worker-one", "  Check auth\n  and tests  "])
+    );
+    assert_eq!(
+        sent[0]["params"]["context"]["resource_owner"]["session_id"],
+        owner
+    );
+    assert_eq!(shell.pending(), "parent draft");
+    assert_ne!(shell.verbose_tools(), old_verbose);
+    assert!(process.shutdown().await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn transcript_message_binding_rejects_replaced_workers_and_wrong_owners() {
+    let fixture = tempfile::tempdir().unwrap();
+    let (mut extensions, process, _) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            fixture.path(),
+            Some("owner"),
+            "octet-subagents",
+            0,
+        )
+        .await;
+    extensions
+        .test_publish_worker_roster(&process, &[("worker:one", "original", Some("original"))]);
+    let binding = subagent_message_binding(&extensions, "owner", "worker:one").unwrap();
+    assert!(subagent_message_target_is_current(
+        &extensions,
+        "owner",
+        &binding
+    ));
+    assert!(!subagent_message_target_is_current(
+        &extensions,
+        "other-owner",
+        &binding
+    ));
+    extensions.test_publish_worker_roster(
+        &process,
+        &[("worker:one", "replacement", Some("replacement"))],
+    );
+    assert!(!subagent_message_target_is_current(
+        &extensions,
+        "owner",
+        &binding
+    ));
+    extensions.test_publish_worker_roster(&process, &[]);
+    assert!(!subagent_message_target_is_current(
+        &extensions,
+        "owner",
+        &binding
+    ));
+    assert!(process.shutdown().await);
+}
+
+#[test]
+fn subagent_message_editor_preserves_multiline_content_and_parent_draft() {
+    use crate::tui::pickers::{subagent_message_input, SubagentMessageInput};
+    use sexy_tui_rs::TextEditAction;
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.apply_edit(TextEditAction::Paste("parent draft".into()));
+    shell.begin_tool_input("Message worker", false);
+    assert!(matches!(
+        subagent_message_input(&mut shell, &Event::Paste("Check  auth".into())),
+        SubagentMessageInput::Editing
+    ));
+    assert!(matches!(
+        subagent_message_input(
+            &mut shell,
+            &Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT
+            )),
+        ),
+        SubagentMessageInput::Editing
+    ));
+    assert!(matches!(
+        subagent_message_input(&mut shell, &Event::Paste("  and tests".into())),
+        SubagentMessageInput::Editing
+    ));
+    let result = subagent_message_input(
+        &mut shell,
+        &Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )),
+    );
+    assert!(
+        matches!(result, SubagentMessageInput::Submit(ref message) if message == "Check  auth\n  and tests")
+    );
+    assert_eq!(shell.pending(), "parent draft");
 }
 
 #[cfg(unix)]

@@ -248,16 +248,12 @@ impl DelegationBinding {
         self.identity.id == ROOT_AGENT_ID
     }
 
-    /// Attach the owning root run to the manager's loss-tolerant latest
-    /// telemetry stream. Child runs deliberately do not receive this stream.
+    /// Subscribe to the owning root session's loss-tolerant latest telemetry.
+    /// Child agents deliberately do not receive this stream.
     pub(crate) fn telemetry_receiver(
         &self,
     ) -> Option<watch::Receiver<Option<DelegationTelemetrySnapshot>>> {
         self.is_root().then(|| self.manager.attach_telemetry())
-    }
-
-    pub(crate) fn detach_telemetry(&self) {
-        self.manager.detach_telemetry();
     }
 
     /// Count worker tasks that still own host state, independent of telemetry
