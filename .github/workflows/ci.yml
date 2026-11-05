@@ -247,7 +247,11 @@ jobs:
           while IFS= read -r extension; do
             root="extensions/$extension"
             [[ -f "$root/package.json" && ! -d "$root/tests" ]] || continue
-            npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            # Pi was installed before the Rust tests; reinstalling removes its
+            # pinned provider fixture link, which the Node tests also require.
+            if [[ "$extension" != octet-pi-compat ]]; then
+              npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            fi
             npm test --prefix "$root"
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
       - run: cargo check --workspace --all-targets --no-default-features --locked

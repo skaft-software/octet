@@ -180,6 +180,35 @@ class ReleaseToolchainTests(unittest.TestCase):
                           "        timeout-minutes: 15" + run, job)
         self.assertIn('          OCTET_PTY_TRACE: "1"', job)
 
+    def test_node_adapter_tests_reuse_the_prepared_pi_reference(self):
+        ci = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
+        job = ci.split("\n  test:\n", 1)[1].split("\n  windows:\n", 1)[0]
+        self.assertLess(job.index("Install reviewed Pi adapter test dependencies"),
+                        job.index("Build workspace test binaries"))
+        self.assertLess(job.index("Provide the pinned Pi provider package"),
+                        job.index("Build workspace test binaries"))
+        step = job.split("      - name: Test the Node extension adapters in the release catalog\n", 1)[1]
+        run = step.split("        run: |\n", 1)[1].split("      - run:", 1)[0]
+        script = "\n".join(line[10:] for line in run.splitlines())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "extensions").mkdir()
+            (root / "extensions/release-catalog.txt").write_text("octet-pi-compat\ntest-node-adapter\n")
+            for name in ("octet-pi-compat", "test-node-adapter"):
+                package = root / "extensions" / name
+                package.mkdir()
+                (package / "package.json").write_text("{}")
+            result = subprocess.run(
+                ["bash", "-euc", 'npm() { printf "%s\\n" "$*"; }\n' + script],
+                cwd=root, env={"PATH": os.defpath}, text=True, capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "test --prefix extensions/octet-pi-compat",
+            "ci --prefix extensions/test-node-adapter --ignore-scripts --no-audit --no-fund",
+            "test --prefix extensions/test-node-adapter",
+        ])
+
     def test_workspace_packaging_installs_its_explicit_toolchain(self):
         ci = (SCRIPTS.parent / ".github/workflows/ci.yml").read_text()
         quality = ci.split("\n  quality:\n", 1)[1].split("\n  first-party-extension-tests:\n", 1)[0]

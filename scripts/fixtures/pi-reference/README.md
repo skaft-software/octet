@@ -25,6 +25,8 @@ ln -s "$PWD/scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-ai" \
 
 Run the same two steps once after `npm ci --prefix extensions/octet-pi-compat` to
 run those tests locally. (`npm ci` in the adapter directory removes the link.)
+CI reuses that prepared adapter installation for both the Rust and Node tests;
+it must not reinstall the adapter between those suites and remove the fixture.
 
 Change the pinned version only together with the supported Pi range and the
 shim inventory; Dependabot does not manage this directory.
