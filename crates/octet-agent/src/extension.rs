@@ -307,6 +307,11 @@ pub enum ProviderContextHookError {
     Failed(String),
     /// The extension returned JSON-RPC request-cancelled (-32800).
     Cancelled,
+    /// Host authority or native validation refused preparation; never fall back.
+    /// A refused append grant or session-lease check happens before queue
+    /// admission, so no later guard can catch it: dispatching inference anyway
+    /// would continue after an authoritative session operation was refused.
+    Refused,
 }
 
 /// Run-owned service for authoritative private session appends while a context

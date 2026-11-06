@@ -402,6 +402,11 @@ async fn project_context_hooks(
             }
             Ok(projection) => projection,
             Err(ProviderContextHookError::Cancelled) => return Err(AgentError::Cancelled),
+            // Never fall back after a host-authority or native validation
+            // refusal, whatever the hook's isolation policy says.
+            Err(ProviderContextHookError::Refused) => {
+                return Err(refused("host authority refused preparation"))
+            }
             Err(ProviderContextHookError::Failed(_)) if recoverable => {
                 note_context_failure(hook.as_ref(), session, notices);
                 continue;

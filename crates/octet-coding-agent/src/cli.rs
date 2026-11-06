@@ -899,6 +899,24 @@ pub(crate) fn pi_codemode_mirrored() -> bool {
     PI_CODEMODE_MIRRORED.load(Ordering::Relaxed)
 }
 
+/// Apply one interactive toggle to the effective activation list.
+///
+/// The persisted user list is not the effective list: other sources (a project
+/// layer, `--enable-extension`, the mirrored Pi preference) contribute names the
+/// saved file never mentions, and a saved name may be switched off through
+/// `disabled_extensions`. Rewriting the whole list from the saved file would
+/// silently change unrelated extensions, so only `name` moves here.
+pub(crate) fn apply_extension_toggle(config: &mut Config, name: &str, enabled: bool) {
+    config.enabled_extensions.retain(|active| active != name);
+    if enabled {
+        config.enabled_extensions.push(name.to_owned());
+    }
+    config.disabled_extensions.retain(|disabled| disabled != name);
+    if !enabled {
+        config.disabled_extensions.push(name.to_owned());
+    }
+}
+
 /// Apply the activation decisions the user makes directly in octet, after every
 /// other source. `--no-extensions` is authoritative for one invocation, and the
 /// saved off list outranks project, environment, CLI and mirrored Pi activation

@@ -48,6 +48,34 @@ fn snapshot_activation_refusal(error: ExtensionRuntimeError) -> String {
     .to_owned()
 }
 
+/// Classify one failed process hook round trip.
+///
+/// Pi isolates a handler that fails on its own terms and keeps the request, so
+/// those cases skip with a notice. Everything else is fail-closed: a host-owner
+/// refusal, a session-lease check, and any error this function does not
+/// explicitly recognize. An unrecognized native error must never become a
+/// skippable fault, because the host cannot prove nothing authoritative was
+/// refused first. Reasons stay finite and payload-free.
+fn hook_failure(error: ExtensionRuntimeError) -> ProviderContextHookError {
+    match error {
+        ExtensionRuntimeError::Remote { code: -32800, .. }
+        | ExtensionRuntimeError::Cancelled { .. } => ProviderContextHookError::Cancelled,
+        // Host-owner refusal (`not_foreground_owner` and its siblings).
+        ExtensionRuntimeError::Remote { code: -32002, .. } => ProviderContextHookError::Refused,
+        // The handler answered for itself: method-not-found, invalid params, a
+        // server error, or a transport timeout while it was running.
+        ExtensionRuntimeError::Remote { .. } | ExtensionRuntimeError::Timeout { .. } => {
+            ProviderContextHookError::Failed("process context hook failed".into())
+        }
+        ExtensionRuntimeError::Closed(_) => {
+            ProviderContextHookError::Failed("process context hook closed".into())
+        }
+        // Native protocol/authority failures, including the session-lease
+        // hook-authority check, are never a handler's own answer.
+        _ => ProviderContextHookError::Refused,
+    }
+}
+
 struct ProcessContextWait {
     process: ExtensionProcess,
     consumer: SessionLeafConsumer,
@@ -89,25 +117,7 @@ impl ProviderContextSessionWait for ProcessContextWait {
         execution.host.session_id = Some(context.session_id.clone());
         let future = lease.run_hook(ExtensionHook::ProviderContext, payload, execution);
         Some(Box::pin(async move {
-            // Every rejection from the process is a handler failure. Pi isolates
-            // handler errors and keeps the request, so a recoverable hook skips
-            // with a notice instead of failing preparation; host authority is
-            // enforced separately by begin_session_wait/consume_next. Reasons
-            // stay finite and payload-free.
-            let output = future.await.map_err(|error| match error {
-                ExtensionRuntimeError::Remote { code: -32800, .. }
-                | ExtensionRuntimeError::Cancelled { .. } => ProviderContextHookError::Cancelled,
-                ExtensionRuntimeError::Remote {
-                    code: -32601 | -32602 | -32002,
-                    ..
-                } => ProviderContextHookError::Failed("process context hook refused".into()),
-                ExtensionRuntimeError::Remote { .. }
-                | ExtensionRuntimeError::Timeout { .. }
-                | ExtensionRuntimeError::Closed(_) => {
-                    ProviderContextHookError::Failed("process context hook failed".into())
-                }
-                _ => ProviderContextHookError::Failed("process context hook rejected".into()),
-            })?;
+            let output = future.await.map_err(hook_failure)?;
             if output.disposition != ExtensionHookDisposition::Continue {
                 return Err(ProviderContextHookError::Failed(
                     "process context hook declined".into(),

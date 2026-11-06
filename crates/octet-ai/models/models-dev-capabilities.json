@@ -7189,6 +7189,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "opencode-go/crouton-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 270000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode-go/deepseek-v4-pro": {
     "interleaved": {
       "field": "reasoning_content"
@@ -13061,7 +13095,7 @@
   "openrouter/deepseek/deepseek-chat": {
     "limit": {
       "context": 163840,
-      "output": 16000
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -16172,7 +16206,7 @@
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
       "context": 1048576,
-      "output": 262144
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -16277,30 +16311,6 @@
       ]
     },
     "name": "Nemotron 3.5 Content Safety",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": false
-  },
-  "openrouter/nvidia/nemotron-3.5-content-safety:free": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nemotron 3.5 Content Safety (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -19438,7 +19448,7 @@
         "text"
       ]
     },
-    "name": "ricursiveAI/Ripple-65B-Preview",
+    "name": "Ripple 65B Preview",
     "reasoning": false,
     "structured_output": false,
     "tool_call": true

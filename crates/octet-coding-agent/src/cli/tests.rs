@@ -1497,6 +1497,46 @@ fn environment_effect_policy_layer_overrides_config() {
 }
 
 #[test]
+fn an_extension_toggle_leaves_every_other_activation_source_alone() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    let mut config = config_with_empty_global(cli, directory.path()).unwrap();
+    // codemode is active only because the mirrored Pi preference contributed it;
+    // web-search is active from the saved user list.
+    config.enabled_extensions = vec![CODEMODE_EXTENSION.into(), "octet-web-search".into()];
+
+    apply_extension_toggle(&mut config, "octet-web-search", false);
+    assert_eq!(
+        config.enabled_extensions,
+        vec![CODEMODE_EXTENSION],
+        "an unrelated toggle must not drop the mirrored activation"
+    );
+    assert_eq!(
+        config.disabled_extensions,
+        vec!["octet-web-search".to_owned()]
+    );
+
+    apply_extension_toggle(&mut config, "octet-web-search", true);
+    assert_eq!(
+        config.enabled_extensions,
+        vec![CODEMODE_EXTENSION, "octet-web-search"]
+    );
+    assert!(config.disabled_extensions.is_empty());
+
+    // A name that is both disabled and present in a stale saved list stays off
+    // until the user re-enables it explicitly.
+    config.enabled_extensions.push("octet-mcp".into());
+    config.disabled_extensions.push("octet-mcp".into());
+    apply_extension_toggle(&mut config, CODEMODE_EXTENSION, false);
+    let mut effective = config.enabled_extensions.clone();
+    apply_native_extension_activation(&mut config, false);
+    effective.retain(|name| !config.disabled_extensions.contains(name));
+    assert_eq!(config.enabled_extensions, effective);
+    assert!(!config.enabled_extensions.iter().any(|n| n == "octet-mcp"));
+}
+
+#[test]
 fn native_activation_outranks_saved_and_mirrored_enables() {
     let directory = cwd();
     let mut cli = base();
