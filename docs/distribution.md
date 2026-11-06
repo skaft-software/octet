@@ -130,11 +130,16 @@ unqualified; catalog inclusion does not close any partial API or workflow gate. 
 ## Reviewed model metadata
 
 Release preparation refreshes and reviews the checked-in models.dev names,
-pricing, capabilities and source identity together. On a workspace
-product-version change, or an explicit CI dispatch that asks for it, CI runs the
-live models.dev `--check` gate. Stale snapshots must be refreshed and reviewed
-before the release source is frozen, and the check never silently rewrites
-release inputs.
+pricing, capabilities and source identity together. On a pull request that
+changes the workspace product version, and on every explicit CI dispatch, CI
+runs the live models.dev `--check` gate. Stale snapshots must be refreshed and
+reviewed before the release source is frozen; the check never rewrites inputs.
+
+On a version-changing main push, CI may reuse a successful exact-head dispatch
+only when Git and GitHub prove that a merged, protected PR delivered the same
+source tree and the dispatch's quality job ran the freshness step successfully.
+If that proof is unavailable or ambiguous, CI requires the live check instead.
+This does not replace PR checks, main CI, or release qualification.
 
 Ordinary compilation uses checked-in metadata without network access. This gate
 isn't an all-provider test or live-inference qualification. Interactive sessions

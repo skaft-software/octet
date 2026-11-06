@@ -330,6 +330,37 @@ DeepSeek pricing remains unverified and excluded. These are aggregator quotes,
 not direct tariffs or inference acceptance. The matching response and complete
 delta remain local evidence; this refresh does not waive later hosted freshness.
 
+### 2026-11-06 PR #639 freshness follow-up
+
+The exact-head hosted freshness check detected a changed public catalog. All
+four outputs were regenerated together from the retained 5,967,397-byte response,
+SHA-256 `0850f662653901bf02eae657e5e2f3d3983ac122aada3ff38d117be9c9ddf1e3`.
+The raw response and complete projection delta remain local qualification evidence.
+Saved-source reproduction and the live projection comparison passed locally.
+
+Relative to the immediately preceding candidate there are still 912 priced
+routes, 378 canonical names and 931 capability routes, with no membership or
+name changes. Eight OpenRouter prices changed, including DeepSeek V4 Pro's
+input/output/cache-read quote to $0.95526/$1.91052/$0.079605 per million
+and GPT-OSS 120B's to $0.02/$0.073/$0.018. These are exact aggregator-route
+catalog quotes, not direct-provider tariffs or live inference evidence.
+
+Two OpenRouter output ceilings changed within their unchanged 1,048,576-token
+contexts: DeepSeek V4 Flash Vision Exp from 262,144 to 943,717, and DeepSeek
+V4 Pro from 393,216 to 384,000. Modalities, tool, reasoning and
+structured-output assertions are unchanged. Generator policy, endpoint
+precedence and the unverified direct DeepSeek exclusion remain unchanged;
+final hosted freshness and exact-head CI still apply.
+
+A later local comparison caught four further OpenRouter quote changes. All
+outputs were regenerated from the retained 5,967,391-byte response with
+SHA-256 `c7be4066e260e9adac354090144c5992f6571dc00fe0df2dd68c434a1b16bcb5`.
+GPT-OSS 120B now quotes $0.014/$0.05/$0.012 per million
+input/output/cache-read tokens, superseding its earlier quote above; DeepSeek
+V4.1 Flash 1017, MiniMax M3.1 Flash and the Kimi latest alias also changed.
+Names, capability records, route membership and extraction policy are unchanged.
+These remain exact aggregator-route catalog assertions, not direct tariffs.
+
 ## Reviewed metadata refresh (v0.8.2)
 
 The 2026-10-01 PR #480 closeout pins public `https://models.dev/api.json` SHA-256

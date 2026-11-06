@@ -13268,7 +13268,7 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "limit": {
       "context": 1048576,
-      "output": 262144
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -13301,7 +13301,7 @@
     },
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 384000
     },
     "modalities": {
       "input": [

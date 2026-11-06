@@ -34,6 +34,10 @@ jobs:
       - run: cargo deny check
 
   quality:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -46,12 +50,15 @@ jobs:
         run: |
           python3 scripts/test_refresh_models_dev_metadata.py
           python3 scripts/test_release_model_metadata_gate.py
-      # Check before reviewed release source is frozen, not in build.rs or the
-      # signed-release workflows (which use frozen model snapshots).
+      # PR version changes and manual dispatch check live metadata. Main may
+      # reuse only an API-proven exact-PR-head dispatch run with identical trees;
+      # missing proof falls back to live. Signed-release/build inputs stay frozen.
       - name: Check pre-release model metadata freshness
         timeout-minutes: 2
         env:
           MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
+          MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"
+          MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 scripts/check-release-model-metadata.py
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884

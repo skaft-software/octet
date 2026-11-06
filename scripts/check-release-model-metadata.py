@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Check live models.dev metadata before a version change freezes release source.
 
+PR version changes and manual dispatch always use the live check. A main squash
+push may reuse a successful exact-PR-head dispatch freshness check with API/Git
+proof of identical source (see check-pr-model-metadata-proof.py). Missing proof
+falls back to the live check; it never waives CI or refreshes frozen inputs.
+
 Ordinary same-version CI is offline for this gate. This script only compares
 reviewed snapshots; refreshes and review remain explicit maintainer operations.
 It is not part of compilation or the historical signed-release workflows.
@@ -17,6 +22,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 REFRESH = "scripts/refresh-models-dev-pricing.py"
+PROOF = "scripts/check-pr-model-metadata-proof.py"
 
 
 def workspace_version(manifest: str, source: str) -> str:
@@ -29,7 +35,7 @@ def workspace_version(manifest: str, source: str) -> str:
     return version
 
 
-def check_release_metadata(event_name: str, base_sha: str) -> None:
+def check_release_metadata(event_name: str, base_sha: str, token: str = "") -> None:
     if event_name not in {"pull_request", "push", "workflow_dispatch"}:
         raise ValueError("unsupported CI event; expected pull_request, push or workflow_dispatch")
 
@@ -60,6 +66,21 @@ def check_release_metadata(event_name: str, base_sha: str) -> None:
             return
         reason = f"workspace version changed from {previous} to {current}"
 
+    if event_name == "push" and token and os.environ.get("GITHUB_REF") == "refs/heads/main":
+        try:
+            # Whole-process bound includes all API reads and local Git checks.
+            # Only this helper receives the step-scoped read-only GitHub token.
+            proof = subprocess.run(
+                [sys.executable, PROOF], cwd=ROOT, check=True, timeout=35,
+                capture_output=True, text=True,
+                env={**os.environ, "MODEL_METADATA_GITHUB_TOKEN": token},
+            )
+        except (OSError, subprocess.SubprocessError):
+            print("PR frozen-source proof unavailable; requiring live models.dev check.", flush=True)
+        else:
+            print(proof.stdout.strip(), flush=True)
+            return
+
     print(f"Checking current models.dev metadata: {reason}.", flush=True)
     try:
         # No --source override: compare all three projections against the public
@@ -79,10 +100,13 @@ def check_release_metadata(event_name: str, base_sha: str) -> None:
 
 
 def main() -> int:
+    # Keep the GitHub token out of the refresher and local Git environments.
+    token = os.environ.pop("MODEL_METADATA_GITHUB_TOKEN", "")
     try:
         check_release_metadata(
             os.environ.get("GITHUB_EVENT_NAME", ""),
             os.environ.get("MODEL_METADATA_BASE_SHA", ""),
+            token,
         )
     except (OSError, ValueError) as error:
         print(f"models.dev pre-release freshness gate failed: {error}", file=sys.stderr)
