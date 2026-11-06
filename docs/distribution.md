@@ -65,8 +65,27 @@ The release workflows don't publish every source package automatically:
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
 Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
-canonical release commit. Its metadata generator requires that ref, and the
-protected environment must admit the tag without removing required reviewers.
+canonical release commit, or at a descendant that changes only release workflows.
+Its metadata generator requires that ref, and the protected environment must admit
+the tag without removing required reviewers.
+
+The binary workflow normally requires successful CI for the exact canonical
+source. An authorized maintainer can explicitly waive **only that CI gate** with
+`force_release=true` on a manual dispatch. It defaults to false and has no effect
+on tag-push runs. The run records the actor, immutable source, tooling commit and
+**WAIVED, not passed** status. Source/version checks, dependency audits, release
+build checks, protected publishing and Sigstore verification still apply.
+
+For a workflow-only repair, keep the canonical tag unchanged, put the reviewed
+release workflow on its dedicated tooling tag, and dispatch that exact tag:
+
+```sh
+gh workflow run release-octet.yml --ref octet-binaries-v0.10.0 \
+  -f release_tag=v0.10.0 -f force_release=true
+```
+
+This does not restart product CI or turn failed CI into a pass. Record the
+remaining qualification limitations in the release notes.
 
 Cargo can build the published canonical tag's exact source (Rust 1.88+;
 ripgrep is optional, with `grep` as the content-search fallback):

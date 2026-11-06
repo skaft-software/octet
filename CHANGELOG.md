@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Release tooling
+
+- Add a default-off `force_release` manual input to waive source CI qualification
+  explicitly, with an actor/source audit summary. Immutable source checks,
+  dependency audits, release build checks and protected signing remain required;
+  workflow-only repairs can be dispatched from their dedicated tooling tag.
+
 ### Security
 
 - Update pulldown-cmark from 0.13.5 to 0.13.6 for RUSTSEC-2026-0433 (quadratic
