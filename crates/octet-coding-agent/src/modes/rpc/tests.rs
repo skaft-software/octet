@@ -1495,6 +1495,207 @@ fn rpc_tool_execution_end_carries_details_and_structured_content_like_pi() {
 }
 
 #[cfg(unix)]
+fn rpc_input_hook_app(uri: &str) -> (tempfile::TempDir, App) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (directory, mut app) = rpc_loopback_app(uri);
+    let root = directory.path().join("extensions/rpc-input");
+    std::fs::create_dir_all(&root).unwrap();
+    let script = root.join("input.py");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method, params = message.get('method'), message.get('params', {})
+    if method == 'initialize':
+        result = dict(api_version='0.4', tools=[], commands=[], protocol=dict(
+            version='0.4', features=params['protocol']['required_features'] + ['input_transform_v1'],
+            limits=dict(max_concurrent_requests=4)))
+    elif method == 'hook/run':
+        payload = params['payload']
+        with open(os.path.join(os.environ['OCTET_WORKSPACE'], 'rpc-input-trace.jsonl'), 'a') as trace:
+            trace.write(json.dumps(payload) + '\n')
+        result = dict(disposition=dict(action='continue'), notifications=[], context=[])
+        if payload.get('phase') == 'input':
+            text = payload['text']
+            if text == 'cancelled':
+                print(json.dumps(dict(jsonrpc='2.0', id=message['id'], error=dict(code=-32800, message='cancelled'))), flush=True)
+                continue
+            result['input_event'] = dict(action='handled') if text == 'handled' else dict(
+                action='transform', text='/rpc-expanded argument')
+            if text == 'strip-images':
+                result['input_event']['images'] = []
+    elif method == 'shutdown':
+        print(json.dumps(dict(jsonrpc='2.0', id=message['id'], result={})), flush=True)
+        break
+    else:
+        continue
+    print(json.dumps(dict(jsonrpc='2.0', id=message['id'], result=result)), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        root.join("extension.toml"),
+        r#"name = "rpc-input"
+version = "0.4.0"
+api_version = "0.4"
+[entrypoint]
+command = "input.py"
+[contributes]
+hooks = ["before_prompt"]
+"#,
+    )
+    .unwrap();
+    app.config.extension_paths = vec![root.parent().unwrap().to_owned()];
+    app.config.enabled_extensions = vec!["rpc-input".into()];
+    app.config.invocation_trusted_extensions = vec!["rpc-input".into()];
+    app.config.mode = crate::config::Mode::Rpc;
+    app = rebuild_app_for_reload(app).unwrap();
+    assert!(
+        app.executable_extensions
+            .summaries()
+            .iter()
+            .any(|summary| summary.name == "rpc-input" && summary.running),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    let template = directory.path().join("rpc-expanded.md");
+    std::fs::write(&template, "RPC-TEMPLATE $1\n").unwrap();
+    app.prompts = Arc::new(PromptRegistry::from_sources(&[
+        crate::prompts::PromptSource {
+            path: template,
+            trust: crate::prompts::PromptTrust::ExplicitExternal,
+        },
+    ]));
+    (directory, app)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_raw_input_precedes_templates_and_preserves_or_replaces_images() {
+    let (directory, mut app) = rpc_input_hook_app("http://127.0.0.1:1");
+    for (text, image_count) in [("omitted-images", 1), ("strip-images", 0)] {
+        let (prepared, _, display) = prepare_prompt(
+            &mut app,
+            &json!({
+                "message": text, "streamingBehavior": "followUp",
+                "images": [{"data": "aW1hZ2U=", "mimeType": "image/png"}]
+            }),
+        )
+        .await
+        .unwrap()
+        .expect("transformed input");
+        let crate::app::PreparedAppSubmission::Ordinary(input) = prepared else {
+            panic!("native model uses ordinary submission");
+        };
+        assert!(
+            matches!(&input.parts[0], InputPart::Text(text) if text.contains("RPC-TEMPLATE argument"))
+        );
+        assert_eq!(
+            input
+                .parts
+                .iter()
+                .filter(|part| matches!(part, InputPart::Media(_)))
+                .count(),
+            image_count
+        );
+        assert_eq!(display["content"][0]["text"], "/rpc-expanded argument");
+    }
+    let trace: Vec<Value> = std::fs::read_to_string(directory.path().join("rpc-input-trace.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        trace.len(),
+        4,
+        "one raw input and one composition hook per prompt"
+    );
+    for (pair, text) in trace
+        .chunks_exact(2)
+        .zip(["omitted-images", "strip-images"])
+    {
+        assert_eq!(pair[0]["phase"], "input");
+        assert_eq!(pair[0]["text"], text);
+        assert_eq!(pair[0]["source"], "rpc");
+        assert_eq!(pair[0]["streaming_behavior"], "followUp");
+        assert_eq!(pair[0]["images"].as_array().unwrap().len(), 1);
+        assert!(pair[1]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("RPC-TEMPLATE argument"));
+    }
+    assert!(app.agent.session().usage_records().is_empty());
+    app.executable_extensions.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_handled_input_acknowledges_without_provider_persistence_or_queue_replay() {
+    let server = wiremock::MockServer::start().await;
+    let (_directory, app) = rpc_input_hook_app(&server.uri());
+    let path = app.agent.session().path().to_owned();
+    let head = app.agent.session().head();
+    let capture = RpcCapture::default();
+    let (tx, input) = mpsc::channel(4);
+    for command in [
+        json!({"type": "steer", "message": "keep queued", "id": "queue"}),
+        json!({"type": "follow_up", "message": "keep follow-up", "id": "follow-up"}),
+        json!({"type": "prompt", "message": "handled", "id": "handled"}),
+        json!({"type": "get_state", "id": "state"}),
+    ] {
+        tx.send(RpcInput::Value(command)).await.unwrap();
+    }
+    drop(tx);
+    run_rpc_loop(app, input, capture.output(false))
+        .await
+        .unwrap();
+    let frames = capture.frames();
+    assert_eq!(
+        frames
+            .iter()
+            .find(|frame| frame["id"] == "handled")
+            .unwrap(),
+        &json!({"type": "response", "command": "prompt", "id": "handled", "success": true})
+    );
+    assert_eq!(
+        frames.iter().find(|frame| frame["id"] == "state").unwrap()["data"]["pendingMessageCount"],
+        2
+    );
+    assert!(!frames.iter().any(|frame| matches!(
+        frame["type"].as_str(),
+        Some("agent_start" | "turn_start" | "message_start" | "agent_end" | "agent_settled")
+    )));
+    assert_eq!(octet_agent::Session::open(path).unwrap().head(), head);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_cancelled_raw_input_does_not_compose_or_persist() {
+    let (directory, mut app) = rpc_input_hook_app("http://127.0.0.1:1");
+    let head = app.agent.session().head();
+    let system = app.agent.system_prompt().to_owned();
+    let error = prepare_prompt(&mut app, &json!({"message": "cancelled"}))
+        .await
+        .err()
+        .expect("cancellation refuses prompt");
+    assert!(error.to_string().contains("cancelled"));
+    assert_eq!(app.agent.session().head(), head);
+    assert_eq!(app.agent.system_prompt(), system);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("rpc-input-trace.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_provider_reload_prompt_reconciles_the_selected_route() {
     let directory = tempfile::tempdir().unwrap();
@@ -1503,7 +1704,8 @@ async fn rpc_provider_reload_prompt_reconciles_the_selected_route() {
     let mut app = reload_resources(app).await.unwrap();
     prepare_prompt(&mut app, &json!({"message": "local scripted request"}))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("input was not handled");
     let current = app.catalog.resolve(&app.model.spec.id).unwrap();
     assert_ne!(current.endpoint.id, old);
     assert_eq!(app.model.endpoint.id, current.endpoint.id);
@@ -2117,7 +2319,8 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                     .unwrap();
                 let (prompt, _, _) = prepare_prompt(&mut app, &json!({"message": "prepared D0"}))
                     .await
-                    .unwrap();
+                    .unwrap()
+                    .expect("input was not handled");
                 let captured = runtime
                     .registered_route_for_test(&app.model.spec.id)
                     .unwrap();
@@ -2269,7 +2472,8 @@ async fn rpc_provider_reload_preentry_aba_rejects_prepared_native_dispatch() {
                 let (fresh_app, _, _) =
                     prepare_prompt(&mut app, &json!({"message": "prepared D0"}))
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .expect("input was not handled");
                 let fresh_app = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     dispatch_prepared_test_prompt(&mut app.agent, fresh_app),
@@ -2388,7 +2592,8 @@ async fn rpc_provider_reload_prepared_route_rejects_mutation_before_dispatch() {
             }
             prepare_prompt(&mut app, &json!({"message": "prepared D0"}))
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("input was not handled");
             let runtime = app.executable_extensions.provider_runtime();
             let original = runtime
                 .registered_route_for_test(&app.model.spec.id)

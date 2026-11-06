@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-06
+
+### Release tooling
+
+- Add a default-off `force_release` manual input to waive source CI qualification
+  explicitly, with an actor/source audit summary. Immutable source checks,
+  dependency audits, release build checks and protected signing remain required;
+  workflow-only repairs can be dispatched from their dedicated tooling tag.
+
 ### Security
 
 - Update pulldown-cmark from 0.13.5 to 0.13.6 for RUSTSEC-2026-0433 (quadratic
@@ -10,6 +19,60 @@
 
 ### Fixed
 
+- A Pi theme you selected, and Pi's built-in palettes, load as they do in Pi
+  instead of ending a reload with `rejected resource path: untrusted workspace
+  resource has no explicit path grant` and `default theme was not an admitted
+  theme file`. A palette under your Pi agent directory (or `OCTET_PI_AGENT_DIR`,
+  `~/.octet`, `~/.agents`) is a user resource, so it is never classified as a
+  project resource even when the workspace contains it (for example when you
+  start octet from your home directory), and it therefore needs no workspace
+  trust grant. Project palettes still require trust, and a refused theme now
+  names the file and the reason.
+- Pi prompt hooks no longer run under an Octet-only deadline. `input`,
+  `before_agent_start` and context collection await handlers the way Pi does, so
+  a handler that waits for a user answer still delivers its prompt transform or
+  system-prompt replacement instead of having it silently dropped.
+- The Pi bridge can create native child agent sessions, so `createAgentSession`
+  callers work under the same owner, generation, cancellation and accounting
+  fences as the delegation extension. No other extension name receives it.
+- Print and plain modes run Pi input hooks before template/skill expansion and
+  prompt composition. Transforms retain images; handled input starts no provider
+  request and saves no user prompt, matching Pi's print path.
+- A failing Pi context hook no longer ends the run with
+  `provider context preparation refused: hook refused preparation`. Handler
+  failures, malformed projections and remote refusals are isolated the way Pi
+  isolates them: the extension's changes are skipped, one warning is reported per
+  session, and the request proceeds unmodified. Any remaining refusal now names
+  the request shape, for example `40 messages, 40 tools, 118.0 KiB tool schema
+  (largest: mcp_ableton_get_session_info 9.1 KiB), request 214.0 KiB`, instead of
+  an unactionable reason.
+- `/extensions` can switch any extension off again. A mirrored Pi `codemode`
+  preference used to mark activation as overridden and make every row read-only;
+  it is now an ordinary enable, and a Disable is recorded in
+  `disabled_extensions`, which outranks project, environment, CLI and mirrored
+  activation on the next launch. A project layer cannot silence an extension.
+- `--no-extensions` (`-ne`) also covers the mirrored Pi codemode preference. The
+  clear ran before Pi settings were applied, so codemode stayed active; native
+  activation is now applied last.
+- `--model <provider>/<model>` resolves when that provider exposes the model, so
+  the two-column model list can be pasted as one value. An unavailable model no
+  longer claims a resume is in flight when none is.
+- Pi UI dialogs in print and plain modes answer the way Pi's `noOpUIContext`
+  does (`custom`/`select`/`input` → `undefined`, `confirm` → `false`) instead of
+  mounting a surface nobody can see and holding the hook open until the transport
+  timed out.
+- Documented the headless `@gotgenes/pi-permission-system` tool-hook stall, its
+  30 s timeout, and the misleading zero exit status in
+  [docs/pi-compat-deviations.md](docs/pi-compat-deviations.md).
+- Startup failures retain owner/instance/generation attribution and safe remote
+  error codes when resource discovery is blocked after process reload. Private
+  remote messages remain redacted; discovery still requires successful startup.
+- Informational theme-discovery skips no longer become red reload failures.
+  Ungranted extension resource paths are still rejected and reported.
+- Large Pi/MCP tool fleets are no longer refused by a default 128 KiB tool-schema
+  quota. Complete definitions remain unchanged and subject to full-request model
+  context admission; Rust hosts can still set an explicit byte quota, inherited
+  by delegated agents.
 - Pi session-name writes acknowledge the committed, normalized name, including
   clears, even without a custom footer, editor or widget. Concurrent host
   snapshots cannot leave the adapter reading the old name until another shell

@@ -46,6 +46,21 @@ export class BorderedLoader extends Container {
   dispose() { if (this.loader.dispose) this.loader.dispose(); else this.loader.stop(); }
 }
 
+// Pi's chrome setters are synchronous local state updates that can never fail or
+// delay a hook (`ExtensionUIContext.setStatus/setFooter/...`:
+// core/extensions/types.ts:181-226; the interactive implementation only mutates
+// local state and calls `requestRender()`: modes/interactive/interactive-mode.ts
+// :2401-2404, 2739-2752, 4657). Delivery to the host is therefore best-effort:
+// one coalesced request per kind per tick, never awaited on a hook/turn stack,
+// and a failure is one bounded diagnostic instead of a hook failure or a retry.
+const chromeChannels = new WeakMap();
+const CHROME_DELIVERY_TIMEOUT_MS = 2000;
+function chromeChannel(state) {
+  let channel = chromeChannels.get(state);
+  if (!channel) chromeChannels.set(state, channel = { pending: new Map(), scheduled: false, reported: new Set() });
+  return channel;
+}
+
 export function chromeAPI(runtime, store) {
   // The same synchronous transport used for durable append provides a real
   // shell receipt. Getters never invent state, and set/get in one callback sees
@@ -60,12 +75,62 @@ export function chromeAPI(runtime, store) {
   const headless = () => !runtime.features.has('remote_ui');
   const headlessReceipt = operation => {
     const state = store.state;
-    if (operation.kind === 'tools_expanded') state.host.tools_expanded = operation.expanded;
+    applyLocal(operation);
     if (['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) {
       unsupported(`ctx.ui.${operation.kind === 'theme_set' ? 'setTheme' : 'theme'}`, 'the native theme catalog requires an interactive frontend');
     }
     return { tools_expanded: state.host.tools_expanded === true };
   };
+  const report = (kind, error) => {
+    const channel = chromeChannel(store.state);
+    if (runtime.stopping || channel.reported.has(kind)) return;
+    channel.reported.add(kind);
+    runtime.backgroundError(error);
+  };
+  // Local facts Pi keeps in its own UI state are applied here immediately, so a
+  // getter after a setter is correct without a round trip.
+  const applyLocal = operation => {
+    if (operation.kind === 'tools_expanded') store.state.host.tools_expanded = operation.expanded;
+  };
+  const deliver = operation => {
+    if (runtime.stopping || !store.state.alive) return;
+    let request;
+    try {
+      // No store controller signal and no `parent`: a chrome update outlives the
+      // hook that requested it, exactly as Pi's local state does.
+      request = runtime.transport.request('ui/chrome', { parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation },
+        { timeout: CHROME_DELIVERY_TIMEOUT_MS });
+    } catch (error) { report(operation.kind, error); return; }
+    request.then(result => {
+      if (['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) return;
+      try {
+        fields(result, ['tools_expanded', 'theme'], 'UI chrome receipt');
+        if (typeof result.tools_expanded !== 'boolean') invalid('UI chrome tools_expanded receipt');
+        if (result.theme != null) { nativeTheme(result.theme); store.state.host.theme = result.theme; }
+      } catch (error) { report(operation.kind, error); }
+    }, error => report(operation.kind, error));
+  };
+  const flush = () => {
+    const channel = chromeChannel(store.state);
+    if (channel.scheduled) return;
+    channel.scheduled = true;
+    setImmediate(() => {
+      channel.scheduled = false;
+      const operations = [...channel.pending.values()];
+      channel.pending.clear();
+      for (const operation of operations) deliver(operation);
+    });
+  };
+  const queue = operation => {
+    if (headless()) return headlessReceipt(operation);
+    runtime.require('remote_ui');
+    applyLocal(operation);
+    chromeChannel(store.state).pending.set(operation.kind, operation);
+    flush();
+    return undefined;
+  };
+  // A real host contract that returns a value Pi reads (the theme catalog) still
+  // blocks like Pi's own theme selection does, but it is never joined to a hook.
   const call = operation => {
     runtime.assertOwner(store);
     store.controller.signal.throwIfAborted();
@@ -74,6 +139,7 @@ export function chromeAPI(runtime, store) {
     const result = runtime.transport.requestSync('ui/chrome', {
       parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation,
     }, { parent: store.live ? store.id : undefined, signal: store.controller.signal });
+    applyLocal(operation);
     if (!['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) {
       fields(result, ['tools_expanded', 'theme'], 'UI chrome receipt');
       if (typeof result.tools_expanded !== 'boolean') invalid('UI chrome tools_expanded receipt');
@@ -116,29 +182,33 @@ export function chromeAPI(runtime, store) {
       }
       return { success: true };
     },
-    setTitle(title) { bounded(title, 'terminal title', 1024); call({ kind: 'title', title }); },
+    setTitle(title) { bounded(title, 'terminal title', 1024); queue({ kind: 'title', title }); },
     setWorkingMessage(message) {
       if (message !== undefined) bounded(message, 'working message', 4096);
-      call({ kind: 'working_message', message: message ?? null });
+      queue({ kind: 'working_message', message: message ?? null });
     },
     setWorkingVisible(visible) {
       if (typeof visible !== 'boolean') invalid('working visibility');
-      call({ kind: 'working_visible', visible });
+      queue({ kind: 'working_visible', visible });
     },
     setWorkingIndicator(options) {
       if (options !== undefined) fields(options, ['frames', 'intervalMs'], 'working indicator');
       if (options?.frames !== undefined) safeLines(options.frames);
       if (options?.intervalMs !== undefined && (!Number.isSafeInteger(options.intervalMs) || options.intervalMs < 0)) invalid('working interval');
-      call({ kind: 'working_indicator', frames: options?.frames ?? null, interval_ms: options?.intervalMs ?? null });
+      queue({ kind: 'working_indicator', frames: options?.frames ?? null, interval_ms: options?.intervalMs ?? null });
     },
     setHiddenThinkingLabel(label) {
       if (label !== undefined) bounded(label, 'hidden thinking label', 4096);
-      call({ kind: 'hidden_thinking', label: label ?? null });
+      queue({ kind: 'hidden_thinking', label: label ?? null });
     },
-    getToolsExpanded() { return call({ kind: 'get' }).tools_expanded; },
+    // Pi reads its own local expanded flag; no round trip on a render path.
+    getToolsExpanded() {
+      runtime.assertOwner(store);
+      return store.state.host.tools_expanded === true;
+    },
     setToolsExpanded(expanded) {
       if (typeof expanded !== 'boolean') invalid('tools expanded');
-      call({ kind: 'tools_expanded', expanded });
+      queue({ kind: 'tools_expanded', expanded });
     },
   };
 }

@@ -41,9 +41,76 @@ pub(super) fn provider_request_client(
 }
 
 fn refused(reason: &'static str) -> AgentError {
+    AgentError::ProviderContextPreparation(reason.to_owned())
+}
+
+fn refused_owned(reason: String) -> AgentError {
     AgentError::ProviderContextPreparation(reason)
 }
 
+/// Model-visible tool names are extension/API vocabulary, but bound them so a
+/// hostile manifest cannot turn a refusal into a wall of text.
+fn bounded_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_graphic())
+        .take(64)
+        .collect()
+}
+
+fn kib(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Counts serialized bytes without retaining the encoded body.
+#[derive(Default)]
+struct ByteCount(usize);
+impl Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Bounded, redaction-safe description of the request shape: counts, byte
+/// sizes and the largest tool schemas. Never message text, arguments, session
+/// IDs or paths, so this can be shown to the user as-is.
+fn request_descriptor(request: &Request) -> String {
+    let mut tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            let bytes = serde_json::to_string(tool).map_or(0, |text| text.len());
+            (bounded_name(&tool.name), bytes)
+        })
+        .collect::<Vec<_>>();
+    tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let schema_bytes = tools.iter().map(|(_, bytes)| *bytes).sum::<usize>();
+    let largest = tools
+        .iter()
+        .take(3)
+        .map(|(name, bytes)| format!("{name} {}", kib(*bytes)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut counter = ByteCount::default();
+    let request_bytes = serde_json::to_writer(&mut counter, request).map_or(0, |()| counter.0);
+    format!(
+        "{} messages, {} tools, {} tool schema (largest: {}), request {}",
+        request.messages.len(),
+        request.tools.len(),
+        kib(schema_bytes),
+        if largest.is_empty() { "none".to_owned() } else { largest },
+        kib(request_bytes),
+    )
+}
+
+/// Stops serializing as soon as the context ceiling is crossed.
 struct BoundedRequestSize(usize);
 impl Write for BoundedRequestSize {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -57,6 +124,7 @@ impl Write for BoundedRequestSize {
         Ok(())
     }
 }
+
 fn validate_size(request: &Request) -> Result<(), AgentError> {
     serde_json::to_writer(BoundedRequestSize(0), request)
         .map_err(|_| refused("request exceeds the context byte limit"))
@@ -213,6 +281,26 @@ fn note_context_failure(
 }
 
 pub(super) async fn project_provider_context(
+    request: Request,
+    hooks: &[Arc<dyn ProviderContextHook>],
+    context: &ProviderContextProjectionContext,
+    model: &Model,
+    abort: &AbortFlag,
+    session: &mut Session,
+    notices: &mut Vec<String>,
+) -> Result<Request, AgentError> {
+    // Every refusal names the shape that caused it: an unactionable "hook
+    // refused preparation" cost a whole run and could not be diagnosed.
+    let descriptor = request_descriptor(&request);
+    match project_context_hooks(request, hooks, context, model, abort, session, notices).await {
+        Err(AgentError::ProviderContextPreparation(reason)) => {
+            Err(refused_owned(format!("{reason}; request {descriptor}")))
+        }
+        other => other,
+    }
+}
+
+async fn project_context_hooks(
     mut request: Request,
     hooks: &[Arc<dyn ProviderContextHook>],
     context: &ProviderContextProjectionContext,
@@ -314,8 +402,10 @@ pub(super) async fn project_provider_context(
             }
             Ok(projection) => projection,
             Err(ProviderContextHookError::Cancelled) => return Err(AgentError::Cancelled),
+            // Never fall back after a host-authority or native validation
+            // refusal, whatever the hook's isolation policy says.
             Err(ProviderContextHookError::Refused) => {
-                return Err(refused("hook refused preparation"))
+                return Err(refused("host authority refused preparation"))
             }
             Err(ProviderContextHookError::Failed(_)) if recoverable => {
                 note_context_failure(hook.as_ref(), session, notices);
@@ -334,7 +424,10 @@ pub(super) async fn project_provider_context(
                         .iter()
                         .find(|original| original.name == tool.name)
                     else {
-                        return Err(refused("loadout introduced an unregistered tool"));
+                        return Err(refused_owned(format!(
+                        "loadout introduced unregistered tool {}",
+                        bounded_name(&tool.name)
+                    )));
                     };
                     let mut unchanged = tool.clone();
                     unchanged.description = original.description.clone();
@@ -342,7 +435,10 @@ pub(super) async fn project_provider_context(
                         || serde_json::to_value(&unchanged).expect("canonical tool serializes")
                             != serde_json::to_value(original).expect("canonical tool serializes")
                     {
-                        return Err(refused("loadout changed tool authority"));
+                        return Err(refused_owned(format!(
+                        "loadout changed the authority of tool {}",
+                        bounded_name(&tool.name)
+                    )));
                     }
                 }
                 request.tools = tools;

@@ -1825,6 +1825,88 @@ where
     }
 }
 
+/// Keep terminal input, resize handling and repainting live while awaited work
+/// that owns the whole application runs.
+///
+/// Extension startup, provider registration and activation installs belong to
+/// the extension fleet and its processes, with their own deadlines and
+/// barriers. They must never become the input deadline: the frontend owns the
+/// only terminal input stream, so anything awaited on this task without a pump
+/// is a keystroke nobody reads. The work owns the `App`, so the pump serves only
+/// what the shell can serve alone (editing, resize, repaint), exactly like
+/// [`await_lifecycle`] for work that moved to a worker thread.
+///
+/// The owned work is never dropped mid-flight: a Ctrl-C key asks for the same
+/// coordinated shutdown as the signal thread, and a delivered signal is already
+/// announced, so either way the work settles before the caller's shutdown path
+/// runs on a complete `App`.
+async fn pump_owned<F, T, S>(shell: &mut InteractiveShell, input: &mut S, work: F) -> anyhow::Result<T>
+where
+    F: Future<Output = T>,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let mut work = Box::pin(work);
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut input_open = true;
+    let mut shutting_down = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut work => return Ok(result),
+            _ = crate::tui::terminal::wait_for_shutdown_signal() => {
+                // The signal thread already announced this shutdown; asking for
+                // it again would take the emergency exit and kill the fleet
+                // mid-attach. Announce once and let the owned work settle, so
+                // the caller's shutdown path still owns a complete `App`.
+                if !shutting_down {
+                    shutting_down = true;
+                    shell.set_run_label("shutting down…");
+                    shell.render();
+                }
+            }
+            event = input.next(), if input_open => match event {
+                Some(Ok(Event::Key(key))) if is_ctrl_c(&key) => {
+                    if !shutting_down {
+                        shutting_down = true;
+                        crate::tui::terminal::request_coordinated_shutdown(RAW_CTRL_C_SIGNAL)?;
+                        shell.set_run_label("shutting down…");
+                        shell.render();
+                    }
+                }
+                Some(Ok(Event::Resize(columns, rows))) => {
+                    shell.set_size(columns, rows);
+                    shell.render();
+                }
+                Some(Ok(event)) => {
+                    if shell.intercept_transcript_input(&event) {
+                        continue;
+                    }
+                    // Submission is the outer loop's decision. Ordinary editing
+                    // and a native clipboard paste stay admitted, so a draft
+                    // typed while extensions attach is never lost.
+                    if paste_clipboard_text(shell, &event).await {
+                        continue;
+                    }
+                    let _ = handle_cancellable_wait_input(shell, event);
+                }
+                Some(Err(error)) => {
+                    // The terminal is gone; the same coordinated shutdown owns
+                    // the rest of the process. The owned work still settles.
+                    if !shutting_down {
+                        shutting_down = true;
+                        crate::tui::terminal::request_coordinated_shutdown(RAW_CTRL_C_SIGNAL)?;
+                    }
+                    input_open = false;
+                    shell.error(format!("terminal input failed: {error}"));
+                }
+                None => input_open = false,
+            },
+            _ = tick.tick() => shell.render(),
+        }
+    }
+}
+
 pub(crate) async fn run_blocking_lifecycle<T, W, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -5660,7 +5742,11 @@ where
             problems.push(problem);
         }
     }
-    shell.set_theme(theme);
+    // A rebuild re-resolves the theme from the resources it just produced.
+    // Publishing it (rather than forcing it) keeps a reload that changed no
+    // theme from replaying the whole transcript for an identical one; the
+    // hydration below installs the rebuilt history either way.
+    shell.publish_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     app.executable_extensions
@@ -6491,7 +6577,7 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     colliding_tools.join(", ")
                 ),
                 Some(summary) if toggleable => format!(
-                    "{} · Host authority: {} · {} · API {}",
+                    "{} · Host authority: {} · {} · API {}{}",
                     if summary.running {
                         "running"
                     } else {
@@ -6500,6 +6586,11 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     authority_label(&app.config, summary),
                     bundle.version,
                     summary.api_version,
+                    if bundle.id == crate::cli::CODEMODE_EXTENSION && crate::cli::pi_codemode_mirrored() {
+                        " · also enabled by your Pi settings; Disable here wins"
+                    } else {
+                        ""
+                    },
                 ),
                 Some(summary) => format!(
                     "installed {} · Host authority: {} · shadowed by {:?} source; toggle unavailable",
@@ -13173,8 +13264,19 @@ async fn run_interactive_once(
         refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
         // Attach every extension handshake that settled while the loop was
         // idle. An attach can add tools, commands, skills, prompts, themes and
-        // UI, so the projections below are re-derived once it lands.
-        let startup_progress = app.pump_extension_startup().await?;
+        // UI, so the projections below are re-derived once it lands. The round
+        // waits on extension processes and their provider-registration barrier,
+        // so terminal input is pumped for its whole duration: an extension
+        // deadline is never the input deadline, and the composer stays live
+        // while the fleet (and the theme it contributes) is still attaching.
+        let mut starting = app;
+        let (restored, progress) = pump_owned(&mut shell, &mut input, async move {
+            let progress = starting.pump_extension_startup().await;
+            (starting, progress)
+        })
+        .await?;
+        app = restored;
+        let startup_progress = progress?;
         if startup_progress.changed {
             refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
             update_status(&mut shell, &app);
@@ -13560,6 +13662,17 @@ async fn run_interactive_once(
                     &app.reasoning,
                     &app.sessions,
                 );
+                // Pi's `before_agent_start` user event names the images attached
+                // to the run, so the peer that negotiated the state payload must
+                // see the same media this submission will carry.
+                let attached_media = composed
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        octet_agent::InputPart::Media(media) => Some(media.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
                 let composition = tokio::select! {
                     biased;
                     _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -13571,9 +13684,10 @@ async fn run_interactive_once(
                         let mut frontend = ShellPromptFrontend::new(&mut shell, &mut input);
                         prompt_wait_result(
                             app.executable_extensions
-                                .compose_prompt_with_frontend(
+                                .compose_prompt_images_with_frontend(
                                     &app.system,
                                     model_prompt,
+                                    attached_media,
                                     Some(&mut frontend),
                                 )
                                 .await,

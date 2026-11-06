@@ -612,12 +612,47 @@ fn input_from_command(command: &Value, text: String) -> anyhow::Result<UserInput
 async fn prepare_prompt(
     app: &mut App,
     command: &Value,
-) -> anyhow::Result<(crate::app::PreparedAppSubmission, usize, Value)> {
+) -> anyhow::Result<Option<(crate::app::PreparedAppSubmission, usize, Value)>> {
     let original = required_string(command, "message")?.to_owned();
     crate::commands::reject_tui_changelog(&original)?;
+    // Validate and decode attachments before handing the raw RPC input to an
+    // extension, and before any prompt-template selection can be persisted.
+    let raw_input = input_from_command(command, original.clone())?;
+    let images = raw_input
+        .parts
+        .into_iter()
+        .filter_map(|part| match part {
+            InputPart::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     for diagnostic in app.synchronize_extension_provider_catalog_for_request()? {
         crate::output::stderr_line(diagnostic);
     }
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    app.executable_extensions
+        .refresh_native_credential_catalog(&app.catalog);
+    // Pi suppresses the delivery hint unless the run is streaming, even when a
+    // caller supplies one, so an idle prompt's handlers see it absent.
+    let streaming_behavior: Option<&str> = None;
+    let Some(raw_input) = app
+        .executable_extensions
+        .process_input(
+            original,
+            (!images.is_empty()).then_some(images),
+            "rpc",
+            streaming_behavior,
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let original = raw_input.text;
     let mut expanded = expand_skill_command(
         app.skills.as_ref(),
         &original,
@@ -662,16 +697,31 @@ async fn prepare_prompt(
     // catalog an approved provider-credential request resolves against.
     app.executable_extensions
         .refresh_native_credential_catalog(&app.catalog);
+    // Pi's `before_agent_start` event names the images attached to this run, so
+    // the peer that negotiated the state payload receives the same media the
+    // provider will.
     let composition = app
         .executable_extensions
-        .compose_prompt(&app.system, rendered)
+        .compose_prompt_with_images(
+            &app.system,
+            rendered,
+            raw_input.images.clone().unwrap_or_default(),
+        )
         .await?;
     for notification in composition.notifications {
         crate::output::stderr_line(format!("extension: {notification}"));
     }
 
     let prompt_display_text = original.clone();
-    let mut input = input_from_command(command, composition.prompt)?;
+    let mut parts = vec![InputPart::Text(composition.prompt)];
+    parts.extend(
+        raw_input
+            .images
+            .unwrap_or_default()
+            .into_iter()
+            .map(InputPart::Media),
+    );
+    let mut input = UserInput::from(parts);
     input.custom_messages = composition.custom_messages;
     let mut display_input = input.clone();
     if let Some(InputPart::Text(text)) = display_input.parts.first_mut() {
@@ -684,7 +734,11 @@ async fn prepare_prompt(
     for diagnostic in diagnostics {
         crate::output::stderr_line(diagnostic);
     }
-    Ok((prepared, composition.pending_context_count, display_message))
+    Ok(Some((
+        prepared,
+        composition.pending_context_count,
+        display_message,
+    )))
 }
 
 fn rpc_error_diagnostic(model: &Model, error: &AgentError) -> String {
@@ -1807,7 +1861,18 @@ async fn run_rpc_loop(
         let id = command_id(&command).map(str::to_owned);
         let (prompt, pending_context_count, user_message) =
             match prepare_prompt(&mut app, &command).await {
-                Ok(prepared) => prepared,
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    // An input hook handled this locally: acknowledge the
+                    // command with Pi's disposition and without a user turn,
+                    // lifecycle or queue replay.
+                    output.success(
+                        id.as_deref(),
+                        "prompt",
+                        Some(serde_json::json!({ "disposition": "handled" })),
+                    )?;
+                    continue;
+                }
                 Err(error) => {
                     command_error(&mut output, &command, error)?;
                     continue;

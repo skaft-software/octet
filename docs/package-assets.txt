@@ -72,6 +72,7 @@ text crates/sexy-tui-rs/docs/rich-rendering.md
 text crates/sexy-tui-rs/upstream/pi-tui-1.0.2.json
 text docs/CHANGELOG-POLICY.md
 text docs/README.md
+text docs/pi-compat-deviations.md
 text docs/assets/evidence/README.md
 text docs/assets/evidence/codex-tb21-submission.json
 text docs/assets/evidence/export.py
@@ -309,6 +310,7 @@ text docs/releases/v0.9.4.md
 text docs/releases/v0.9.5.md
 text docs/releases/v0.9.6.md
 text docs/releases/v0.10.0.md
+text docs/releases/v0.10.1.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md

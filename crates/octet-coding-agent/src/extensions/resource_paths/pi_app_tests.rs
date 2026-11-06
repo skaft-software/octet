@@ -968,6 +968,175 @@ async fn configured_pi_callback_start_error_preserves_discovery_and_reload_witho
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_pi_process_reload_retains_refused_start_diagnostic_without_replay() {
+    use octet_agent::extension_process::{ExtensionEvent, ExtensionResourceDiscoveryReason};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut fixture = configured_pi(&root, StartBehavior::Continue);
+    fixture.app.refresh_resource_paths_headless().await.unwrap();
+    assert!(render(&fixture.app, "pi-first-a").is_ok());
+    let old_prompts = fixture.app.prompts.clone();
+    let old_skills = fixture.app.skills.clone();
+    let process = fixture.app.executable_extensions.processes[0].clone();
+    let owner = fixture
+        .app
+        .executable_extensions
+        .resource_owner
+        .clone()
+        .unwrap();
+    let instance = process.extension_instance_id().to_owned();
+    let mut events = process.subscribe();
+
+    // The real generation reload, not mark_resource_paths_reload's read-only
+    // refresh, owns the replacement start. Service its reverse requests through
+    // the actual headless frontend, retaining its refusal (no foreground session).
+    phase(&root, "b", StartBehavior::RefusedWrite);
+    let reload = process.reload();
+    tokio::pin!(reload);
+    let report = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut tick = tokio::time::interval(Duration::from_millis(5));
+        loop {
+            tokio::select! {
+                result = &mut reload => break result,
+                _ = tick.tick() => { fixture.app.executable_extensions.drain_events(); }
+            }
+        }
+    })
+    .await
+    .expect("replacement startup did not settle")
+    .expect("generation cutover committed");
+    assert_eq!(report.generation, 2);
+    assert!(report.previous_shutdown_graceful);
+    let failure = format!(
+        "session_start hook failed (remote_error, code=-32602; owner={owner}, instance={instance}, generation=2)"
+    );
+    let diagnostics = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            ExtensionEvent::Diagnostic { message } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|message| *message == &failure)
+            .count(),
+        1
+    );
+    let refusal = trace(&root)
+        .into_iter()
+        .find(|row| row["kind"] == "start_refused")
+        .expect("the replacement attempted the real tracked mutation");
+    assert_eq!(refusal["code"], -32602);
+    assert!(refusal["message"]
+        .as_str()
+        .unwrap()
+        .contains("no foreground session"));
+    assert_eq!(
+        fixture
+            .app
+            .sessions
+            .load_metadata(&fixture.app.goal_session_id)
+            .unwrap()
+            .name,
+        None,
+        "the refused mutation did not commit",
+    );
+    let blocked = process
+        .discover_resource_paths(&owner, ExtensionResourceDiscoveryReason::Reload)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        blocked.contains(&failure),
+        "retained primary failure: {blocked}"
+    );
+    for public in [&failure, &blocked] {
+        for private in [
+            root.to_str().unwrap(),
+            "refused-start-name",
+            "no foreground session",
+        ] {
+            assert!(
+                !public.contains(private),
+                "private error text was disclosed"
+            );
+        }
+    }
+
+    let other_owner = process
+        .discover_resource_paths("another-owner", ExtensionResourceDiscoveryReason::Reload)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(other_owner.contains("requires successful settled session_start"));
+    assert!(
+        !other_owner.contains(&failure),
+        "no cross-owner failure attribution"
+    );
+
+    // Removing the cause does not authorize replay in the retained generation.
+    phase(&root, "b", StartBehavior::Continue);
+    for _ in 0..2 {
+        fixture.app.mark_resource_paths_reload();
+        fixture.app.refresh_resource_paths_headless().await.unwrap();
+        assert!(!fixture.app.resource_paths_pending());
+    }
+    assert_eq!(
+        process
+            .discover_resource_paths(&owner, ExtensionResourceDiscoveryReason::Reload)
+            .await
+            .unwrap_err()
+            .to_string(),
+        blocked,
+        "resource-only refresh retains the primary failure",
+    );
+    assert!(old_prompts.descriptors().is_empty());
+    assert!(old_skills.descriptors().is_empty());
+    for current in ["a", "b"] {
+        for factory in ["first", "second"] {
+            let name = format!("pi-{factory}-{current}");
+            assert!(!fixture.app.prompts.contains(&name));
+            assert!(fixture.app.skills.load(&name).is_err());
+        }
+    }
+    assert!(render(&fixture.app, "user-proof").is_ok());
+    let rows = trace(&root);
+    assert_eq!(
+        rows.iter().filter(|row| row["kind"] == "load").count(),
+        6,
+        "capture and exactly two runtime generations"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["kind"] == "start_refusal_requested")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["kind"] == "start_refused")
+            .count(),
+        1
+    );
+    let discoveries = rows
+        .iter()
+        .filter(|row| row["kind"] == "discover")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discoveries.len(),
+        2,
+        "only initial successful startup can discover"
+    );
+    assert!(discoveries
+        .iter()
+        .all(|row| row["phase"] == "a" && row["pid"] != refusal["pid"]));
+    assert_unchanged_capture(&root, &fixture);
+    fixture.app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_by_reload() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

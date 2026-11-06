@@ -49,6 +49,12 @@ if [ -z "$binary" ] && command -v octet-codemode >/dev/null 2>&1; then
     binary=$(command -v octet-codemode)
 fi
 
+# A previous run's build is already the resolved executable. Checking it before
+# building keeps every later launch off cargo entirely.
+if [ -z "$binary" ] && [ -x "$cache_root/target/release/octet-codemode" ]; then
+    binary=$cache_root/target/release/octet-codemode
+fi
+
 if [ -z "$binary" ]; then
     if [ ! -f "$extension_dir/Cargo.toml" ]; then
         printf 'octet-codemode: no Rust executable in %s and no crate source to build one\n' "$extension_dir" >&2

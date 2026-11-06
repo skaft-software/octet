@@ -140,7 +140,7 @@ test('unsupported callback fields have a plain reason without echoing a private 
   runtime.events.set('agent_end', [{ factory: 0, handler: event => event[secret] }]);
   await runtime.runEvent('agent_end', strict({ type: 'agent_end' }, 'agent_end event'), store);
   assert.equal(frames.length, 1); assert.ok(issueNotice(frames[0]));
-  assert.match(frames[0].params.message, /agent_end hook uses an event field octet does not support and was skipped/);
+  assert.match(frames[0].params.message, /agent_end hook called an API octet does not support, so the hook was skipped/);
   assert.doesNotMatch(JSON.stringify([frames, diagnostics]), new RegExp(secret + '|unsupported_feature'));
 });
 

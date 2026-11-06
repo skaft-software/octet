@@ -110,7 +110,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_ui_contract_tests` | 14 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
-| `resource_paths::pi_app_tests` | 7 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
+| `resource_paths::pi_app_tests` | 8 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
 | `mcp_native_tests` | 3 | registration/replacement, execution, removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | 1 (ignored) | original `pi-clm`, source unavailable here |
 

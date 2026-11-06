@@ -315,8 +315,8 @@ pub struct Agent {
     cache_retention: CacheRetention,
     cache_warmer: crate::cache_warmer::CacheWarmer,
     tool_inference_resolver: Option<Arc<dyn crate::tool_inference::ToolInferenceModelResolver>>,
-    /// Hard limit for the exact JSON schemas exposed to a provider request.
-    tool_schema_budget_bytes: usize,
+    /// Optional host quota for exact provider-visible tool-definition JSON.
+    tool_schema_budget_bytes: Option<usize>,
     /// Optional provider route used for autonomous context summaries.
     /// Defaults to the active model when unset.
     compaction_model: Option<Model>,
@@ -495,12 +495,11 @@ const MAX_NETWORK_RETRIES: usize = 5;
 /// contributions. A section that would exceed it is truncated on a character
 /// boundary, so no registered tool can enlarge a system prompt without bound.
 const MAX_TOOL_PROMPT_SECTION_BYTES: usize = 8 * 1024;
-/// Hard byte budget for the exact JSON array of provider-visible tool schemas.
+/// Default optional quota for provider-visible tool-definition JSON.
 ///
-/// This is intentionally independent from the prose prompt-section cap: schema
-/// parameters can be arbitrarily large JSON values. A request over the budget
-/// is refused rather than dropping or rewriting any registered tool.
-pub const DEFAULT_TOOL_SCHEMA_BUDGET_BYTES: usize = 128 * 1024;
+/// Without an explicit host quota, the complete request is bounded by model
+/// context admission, not an independent tool-schema byte limit.
+pub const DEFAULT_TOOL_SCHEMA_BUDGET_BYTES: Option<usize> = None;
 /// Maximum number of tools rendered into that section, in registration order.
 const MAX_TOOL_PROMPT_SECTION_TOOLS: usize = 64;
 const TERMINAL_GATE_SYSTEM: &str = r#"You gate control flow for a coding agent. Output R when the candidate is a valid response to return to the user now: a substantiated completion, an answer or plan based on supplied text or general knowledge, a necessary clarification, an honest blocker or uncertainty, or a justified refusal. Output C when autonomous work should continue: promised next action, unsupported claim about current state, or requested repository or external action not substantiated by relevant successful action evidence. Do not treat an irrelevant or failed action as evidence. Respect explicit requests not to use tools or to guess. Output exactly R or C."#;
@@ -1076,13 +1075,18 @@ impl Agent {
 
     /// Sets the maximum serialized JSON bytes for provider-visible tool schemas.
     ///
-    /// The default is [`DEFAULT_TOOL_SCHEMA_BUDGET_BYTES`]. A request that
-    /// would exceed this hard limit is refused; octet never truncates, drops,
-    /// or rewrites tool definitions to make it fit. Zero permits only an empty
-    /// tool list.
+    /// By default there is no independent schema quota; full-request model
+    /// context admission still applies. An explicitly set quota refuses requests
+    /// over the limit without truncating, dropping or rewriting tools. Zero
+    /// permits only an empty tool list.
     pub fn set_tool_schema_budget_bytes(&mut self, max_bytes: usize) {
-        self.tool_schema_budget_bytes = max_bytes;
+        self.tool_schema_budget_bytes = Some(max_bytes);
         self.sync_delegation_runtime_settings();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tool_schema_budget_bytes(&self) -> Option<usize> {
+        self.tool_schema_budget_bytes
     }
 
     /// Provider-advertised output ceiling for the active model.

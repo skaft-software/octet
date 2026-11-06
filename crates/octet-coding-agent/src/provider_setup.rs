@@ -827,7 +827,9 @@ impl fmt::Display for ProviderSetupState {
                 "the selected model has no known effective context; enter an explicit context limit before saving",
             ),
             Self::UnavailableResumedModel { model } => {
-                write!(formatter, "the resumed model {model:?} is unavailable; select a replacement or cancel resume")
+                // The requested model may come from `--model` on a fresh run,
+                // so name the model rather than claiming a resume is in flight.
+                write!(formatter, "the model {model:?} is unavailable; select a replacement or continue without it")
             }
             Self::Offline => formatter.write_str(
                 "setup discovery is disabled by offline mode; provide --manual-model or retry online",

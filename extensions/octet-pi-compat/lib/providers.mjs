@@ -1,6 +1,6 @@
 // Public Pi model facts and process-owned custom streams. Native registry,
 // route authorization, selection and stream assembly remain authoritative.
-import { bounded, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, fields, invalid, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { canonicalToPi } from './provider-context.mjs';
 import { providerPricing } from './provider-pricing.mjs';
 import { streamRegistryModel } from './model-registry-stream.mjs';
@@ -31,13 +31,13 @@ export function checkpointFactoryProviders(runtime) {
 }
 function snapshot(host, key, api) {
   const value = host.pi_models?.[key];
-  if (value === undefined || value === null) unsupported(api, `${key} snapshot not supplied by the host`);
+  if (value === undefined || value === null) unsupportedAPI(api, `${key} snapshot not supplied by the host`);
   return value;
 }
 export function thinkingLevel(host, optional = false) {
   if (levels.has(host.reasoning)) return host.reasoning;
   if (optional) return undefined;
-  unsupported('pi.getThinkingLevel', 'the current native reasoning selection has no portable Pi thinking level');
+  unsupportedAPI('pi.getThinkingLevel', 'the current native reasoning selection has no portable Pi thinking level');
 }
 // An extension-streamed model's own Pi `api` name (e.g. 'claude-bridge'); the
 // host labels such routes 'extension-stream' and the adapter restores the name.

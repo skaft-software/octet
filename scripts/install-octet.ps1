@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string] $Version = '0.10.0',
+    [string] $Version = '0.10.1',
     [string] $InstallDirectory = (Join-Path $env:LOCALAPPDATA 'Programs\octet\bin')
 )
 

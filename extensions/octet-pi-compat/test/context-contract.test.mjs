@@ -60,7 +60,10 @@ test('image replacement uses real canonical image bytes and MIME type', async ()
 test('session directory derives only from the authoritative native session file', () => {
   const { runtime, store } = harness();
   const manager = createContext(runtime, store).sessionManager;
-  assert.throws(() => manager.getSessionDir(), /session_file snapshot not supplied/);
+  // Before the host publishes a session view, Pi's own shape has no file yet;
+  // no directory can be derived from a file that does not exist.
+  assert.equal(manager.getSessionFile(), undefined);
+  assert.throws(() => manager.getSessionDir(), /no persistent session directory/);
   store.state.host.session_file = null;
   assert.throws(() => manager.getSessionDir(), /no persistent session directory/);
   store.state.host.session_file = '/actual/native-sessions/session.jsonl';
@@ -199,7 +202,7 @@ test('observation failures report the factory and continue without weakening vet
   assert.equal(kept, 1);
   assert.equal(errors[0].title, '[Extension issues]');
   assert.ok(errors[0].message.startsWith('Broken: '));
-  assert.match(errors[0].message, /turn_start hook uses an event field octet does not support/);
+  assert.match(errors[0].message, /turn_start hook called an API octet does not support, so the hook was skipped/);
   assert.doesNotMatch(errors[0].message, /private text|ctx\.missing/);
   runtime.events.set('tool_call', handlers);
   await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === failure);
