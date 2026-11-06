@@ -354,7 +354,22 @@ export function createContext(runtime, store, replaced = false) {
     detachedUi(runtime, store, promise, slot);
   };
   const userAnswer = promise => store.userWait?.track(promise) ?? promise;
+  // Pi's noOpUIContext answers dialogs immediately when there is no UI. A
+  // print-mode hook must never wait on a prompt nobody can see: the round trip
+  // times out and the extension's tool call or hook fails with it.
+  // Exactly Pi's hasUI: a Pi UI context exists only while remote_ui is
+  // negotiated, this store is the live foreground owner, and the host has not
+  // declared itself headless.
+  const uiAvailable = () => {
+    const state = current();
+    return runtime.features.has('remote_ui') && state === runtime.foreground
+      && state.alive && state.host.has_ui !== false;
+  };
   const custom = (factory, options = {}) => {
+    // Pi's noOpUIContext.custom() resolves undefined without a UI. Mounting here
+    // would wait for a foreground surface that print/plain runs never create, and
+    // the hook round trip would time out instead of returning Pi's value.
+    if (!uiAvailable()) return Promise.resolve(undefined);
     runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
     if (typeof factory !== 'function') invalid('ui.custom factory');
     if (options.overlay !== undefined && typeof options.overlay !== 'boolean') invalid('ui.custom overlay');
@@ -377,6 +392,7 @@ export function createContext(runtime, store, replaced = false) {
     ...dialogAPI(custom, {
       async confirm(title, message) {
         const state = foreground();
+        if (!uiAvailable()) return false;
         // Hook requests do not have the command-owned confirmation broker. Use
         // the real foreground surface for Pi's own guard question instead; this
         // does not approve or bypass the host's separate tool-effect policy.
@@ -390,6 +406,7 @@ export function createContext(runtime, store, replaced = false) {
       },
       async input(title) {
         foreground();
+        if (!uiAvailable()) return undefined;
         return (await userAnswer(runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store))).value ?? undefined;
       },
     }),

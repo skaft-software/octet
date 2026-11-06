@@ -127,7 +127,7 @@ async fn activation_refusal_categories_reach_agent_and_persistence_without_hook_
         };
         let error = agent.complete("canonical task").await.unwrap_err();
         assert!(
-            matches!(error, crate::AgentError::ProviderContextPreparation(reason) if reason == expected)
+            matches!(&error, crate::AgentError::ProviderContextPreparation(reason) if reason.starts_with(expected))
         );
         assert!(captures.lock().unwrap().is_empty());
         let persisted = std::fs::read_to_string(agent.session().path()).unwrap();
@@ -414,7 +414,7 @@ while True:
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
-async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses_bad_projection_or_cap(
+async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolates_bad_projection(
 ) {
     for case in ["valid", "invalid", "finite", "cancel", "failure", "refusal"] {
         let temp = TempDir::new().unwrap();
@@ -460,12 +460,11 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
                 .await
                 .unwrap();
         match case {
-            "valid" => assert_eq!(result.unwrap().text, "answer"),
-            "failure" => assert_eq!(result.unwrap().text, "answer"),
-            "invalid" | "refusal" => assert!(matches!(
-                result,
-                Err(crate::AgentError::ProviderContextPreparation(_))
-            )),
+            // Pi isolates handler failure: a malformed projection or a validation
+            // refusal skips that extension's changes and keeps the request.
+            "valid" | "failure" | "invalid" | "refusal" => {
+                assert_eq!(result.unwrap().text, "answer")
+            }
             "cancel" => assert!(
                 matches!(result, Ok(output) if matches!(output.reason, crate::FinishReason::Aborted))
             ),
@@ -480,7 +479,10 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
         );
         assert_eq!(
             captures.lock().unwrap().len(),
-            usize::from(matches!(case, "valid" | "failure"))
+            usize::from(matches!(
+                case,
+                "valid" | "failure" | "invalid" | "refusal"
+            ))
         );
         if case == "valid" {
             let request = &captures.lock().unwrap()[0];
@@ -491,17 +493,17 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
             assert!(!serde_json::to_string(&request.messages)
                 .unwrap()
                 .contains("private"));
-        } else if case == "failure" {
+        } else if matches!(case, "failure" | "invalid" | "refusal") {
             let request = &captures.lock().unwrap()[0];
             assert_eq!(request.system.as_deref(), Some("canonical system"));
             let messages = serde_json::to_string(&request.messages).unwrap();
             assert!(messages.contains("canonical task"));
             assert!(!messages.contains("effective leaf context"));
         }
-        if matches!(case, "cancel" | "invalid" | "refusal") {
+        if case == "cancel" {
             assert!(
                 captures.lock().unwrap().is_empty(),
-                "cancelled/refused hook must not dispatch provider"
+                "cancelled hook must not dispatch provider"
             );
             assert!(process.shutdown().await);
             continue;
@@ -681,9 +683,8 @@ async fn append_activation_repro_large_history_fails_before_hook_and_provider_wi
         .unwrap();
     assert!(matches!(
         result,
-        Err(crate::AgentError::ProviderContextPreparation(
-            "session_snapshot_too_large"
-        ))
+        Err(crate::AgentError::ProviderContextPreparation(reason))
+            if reason.starts_with("session_snapshot_too_large")
     ));
     assert!(captures.lock().unwrap().is_empty(), "no inference occurred");
     assert!(
@@ -817,9 +818,8 @@ async fn append_activation_repro_scoped_child_conflicts_with_parent_even_without
         .unwrap();
     assert!(matches!(
         result,
-        Err(crate::AgentError::ProviderContextPreparation(
-            "session_append_lease_busy"
-        ))
+        Err(crate::AgentError::ProviderContextPreparation(reason))
+            if reason.starts_with("session_append_lease_busy")
     ));
     assert!(captures.lock().unwrap().is_empty());
     assert!(!temp.path().join("hook-calls").exists());

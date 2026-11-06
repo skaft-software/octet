@@ -38,6 +38,32 @@
 - Print and plain modes run Pi input hooks before template/skill expansion and
   prompt composition. Transforms retain images; handled input starts no provider
   request and saves no user prompt, matching Pi's print path.
+- A failing Pi context hook no longer ends the run with
+  `provider context preparation refused: hook refused preparation`. Handler
+  failures, malformed projections and remote refusals are isolated the way Pi
+  isolates them: the extension's changes are skipped, one warning is reported per
+  session, and the request proceeds unmodified. Any remaining refusal now names
+  the request shape, for example `40 messages, 40 tools, 118.0 KiB tool schema
+  (largest: mcp_ableton_get_session_info 9.1 KiB), request 214.0 KiB`, instead of
+  an unactionable reason.
+- `/extensions` can switch any extension off again. A mirrored Pi `codemode`
+  preference used to mark activation as overridden and make every row read-only;
+  it is now an ordinary enable, and a Disable is recorded in
+  `disabled_extensions`, which outranks project, environment, CLI and mirrored
+  activation on the next launch. A project layer cannot silence an extension.
+- `--no-extensions` (`-ne`) also covers the mirrored Pi codemode preference. The
+  clear ran before Pi settings were applied, so codemode stayed active; native
+  activation is now applied last.
+- `--model <provider>/<model>` resolves when that provider exposes the model, so
+  the two-column model list can be pasted as one value. An unavailable model no
+  longer claims a resume is in flight when none is.
+- Pi UI dialogs in print and plain modes answer the way Pi's `noOpUIContext`
+  does (`custom`/`select`/`input` → `undefined`, `confirm` → `false`) instead of
+  mounting a surface nobody can see and holding the hook open until the transport
+  timed out.
+- Documented the headless `@gotgenes/pi-permission-system` tool-hook stall, its
+  30 s timeout, and the misleading zero exit status in
+  [docs/pi-compat-deviations.md](docs/pi-compat-deviations.md).
 - Startup failures retain owner/instance/generation attribution and safe remote
   error codes when resource discovery is blocked after process reload. Private
   remote messages remain redacted; discovery still requires successful startup.

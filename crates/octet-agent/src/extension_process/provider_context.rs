@@ -89,29 +89,39 @@ impl ProviderContextSessionWait for ProcessContextWait {
         execution.host.session_id = Some(context.session_id.clone());
         let future = lease.run_hook(ExtensionHook::ProviderContext, payload, execution);
         Some(Box::pin(async move {
+            // Every rejection from the process is a handler failure. Pi isolates
+            // handler errors and keeps the request, so a recoverable hook skips
+            // with a notice instead of failing preparation; host authority is
+            // enforced separately by begin_session_wait/consume_next. Reasons
+            // stay finite and payload-free.
             let output = future.await.map_err(|error| match error {
                 ExtensionRuntimeError::Remote { code: -32800, .. }
                 | ExtensionRuntimeError::Cancelled { .. } => ProviderContextHookError::Cancelled,
-                // Validation and host-owner refusals are not handler failures.
                 ExtensionRuntimeError::Remote {
                     code: -32601 | -32602 | -32002,
                     ..
-                } => ProviderContextHookError::Refused,
+                } => ProviderContextHookError::Failed("process context hook refused".into()),
                 ExtensionRuntimeError::Remote { .. }
                 | ExtensionRuntimeError::Timeout { .. }
                 | ExtensionRuntimeError::Closed(_) => {
                     ProviderContextHookError::Failed("process context hook failed".into())
                 }
-                _ => ProviderContextHookError::Refused,
+                _ => ProviderContextHookError::Failed("process context hook rejected".into()),
             })?;
             if output.disposition != ExtensionHookDisposition::Continue {
-                return Err(ProviderContextHookError::Refused);
+                return Err(ProviderContextHookError::Failed(
+                    "process context hook declined".into(),
+                ));
             }
             output
                 .provider_context
                 .map(serde_json::from_value)
                 .transpose()
-                .map_err(|_| ProviderContextHookError::Refused)
+                .map_err(|_| {
+                    ProviderContextHookError::Failed(
+                        "process context hook returned an invalid projection".into(),
+                    )
+                })
         }))
     }
 

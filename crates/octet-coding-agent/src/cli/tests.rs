@@ -50,6 +50,7 @@ fn base() -> Cli {
         skill_dirs: vec![],
         extension_dirs: vec![],
         enable_extensions: vec![],
+        no_extensions: false,
         trust_extensions: vec![],
         experimental_streamable_http_mcp: false,
         workspace_trusted: false,
@@ -176,8 +177,10 @@ mod pi_codemode_tests {
             assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
             assert!(config.invocation_trusted_extensions.is_empty());
             assert_eq!(config.effect_policy, EffectPolicy::Controlled);
-            assert!(config.extension_activation_overridden);
-            assert!(!extension_activation_menu_authoritative(&config).unwrap());
+            // A mirrored Pi preference is an ordinary enable, not a pinned
+            // activation layer: the menu stays authoritative for codemode too.
+            assert!(!config.extension_activation_overridden);
+            assert!(extension_activation_menu_authoritative(&config).unwrap());
         }
     }
 
@@ -205,13 +208,14 @@ mod pi_codemode_tests {
         let fixture = Fixture::new();
         let manifest = fixture.bundle(&fixture.global.join("extensions"));
         let valid = std::fs::read_to_string(&manifest).unwrap();
+        // Derive the pin from the shipped manifest: a hardcoded version silently
+        // turned this case into a valid manifest after the last release bump.
+        let pinned = format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION"));
+        assert!(valid.contains(&pinned), "bundle pin must match this release");
         for invalid in [
             "not a TOML manifest".to_owned(),
             valid.replace("name = \"octet-codemode\"", "name = \"different-name\""),
-            valid.replace(
-                "requires_octet = \"=0.10.0\"",
-                "requires_octet = \"=999.0.0\"",
-            ),
+            valid.replace(&pinned, "requires_octet = \"=999.0.0\""),
             valid.replace("api_version = \"0.4\"", "api_version = \"9.9\""),
         ] {
             std::fs::write(&manifest, invalid).unwrap();
@@ -548,7 +552,9 @@ mod pi_codemode_tests {
                 3000
             );
             assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
-            assert!(config.extension_activation_overridden);
+            // The mirror is an ordinary enable. The menu stays authoritative and a
+            // saved off entry outranks it, so this must not read as a pinned layer.
+            assert!(!config.extension_activation_overridden);
             assert_eq!(
                 std::fs::read(&config_path).unwrap(),
                 before,
@@ -1488,6 +1494,58 @@ fn environment_effect_policy_layer_overrides_config() {
         policy_value_source(true, values.effect_policy.is_some()),
         PolicyValueSource::Environment
     );
+}
+
+#[test]
+fn native_activation_outranks_saved_and_mirrored_enables() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    let mut config = config_with_empty_global(cli, directory.path()).unwrap();
+    config.enabled_extensions = vec![CODEMODE_EXTENSION.into(), "octet-web-search".into()];
+    config.disabled_extensions = vec![CODEMODE_EXTENSION.into()];
+
+    apply_native_extension_activation(&mut config, false);
+    assert_eq!(config.enabled_extensions, vec!["octet-web-search"]);
+
+    apply_native_extension_activation(&mut config, true);
+    assert!(config.enabled_extensions.is_empty());
+}
+
+#[test]
+fn disabling_records_a_saved_off_entry_and_enabling_clears_it() {
+    let directory = cwd();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "enabled_extensions = [\"octet-web-search\"]\n").unwrap();
+
+    // The mirrored case: the name is not in the saved list at all, so absence
+    // alone cannot express "off". The write still has to record it.
+    persist_extension_enabled_to_path(CODEMODE_EXTENSION, false, &path).unwrap();
+    let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
+    assert_eq!(saved.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
+    assert_eq!(saved.enabled_extensions, Some(vec!["octet-web-search".into()]));
+
+    persist_extension_enabled_to_path(CODEMODE_EXTENSION, true, &path).unwrap();
+    let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
+    assert_eq!(saved.disabled_extensions, None);
+    let mut enabled = saved.enabled_extensions.unwrap();
+    enabled.sort();
+    assert_eq!(enabled, vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]);
+}
+
+#[test]
+fn a_project_layer_cannot_silence_an_extension() {
+    let mut layer = ConfigLayer {
+        disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
+        ..ConfigLayer::default()
+    };
+    layer.merge_project(ConfigLayer {
+        enabled_extensions: Some(vec!["octet-web-search".into()]),
+        disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
+        ..ConfigLayer::default()
+    });
+    assert_eq!(layer.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
+    assert_eq!(layer.enabled_extensions, Some(vec!["octet-web-search".into()]));
 }
 
 #[test]

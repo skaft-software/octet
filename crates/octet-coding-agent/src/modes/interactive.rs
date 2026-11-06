@@ -6577,7 +6577,7 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     colliding_tools.join(", ")
                 ),
                 Some(summary) if toggleable => format!(
-                    "{} · Host authority: {} · {} · API {}",
+                    "{} · Host authority: {} · {} · API {}{}",
                     if summary.running {
                         "running"
                     } else {
@@ -6586,6 +6586,11 @@ fn installed_extension_choices(app: &App) -> anyhow::Result<Vec<InstalledExtensi
                     authority_label(&app.config, summary),
                     bundle.version,
                     summary.api_version,
+                    if bundle.id == crate::cli::CODEMODE_EXTENSION && crate::cli::pi_codemode_mirrored() {
+                        " · also enabled by your Pi settings; Disable here wins"
+                    } else {
+                        ""
+                    },
                 ),
                 Some(summary) => format!(
                     "installed {} · Host authority: {} · shadowed by {:?} source; toggle unavailable",

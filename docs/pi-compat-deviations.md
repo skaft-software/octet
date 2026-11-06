@@ -38,6 +38,7 @@ verified), **deliberate** (Octet differs on purpose; documented and diagnosed),
 | `user_bash` results | Result transformation applied | Observed only; results refused | **in flight** |
 | `ctx.abort` | Aborts the current run | No root-run abort contract | **in flight** |
 | `provider_stream_event` | Delta observation/transformation | Unsupported | **in flight** |
+| `@gotgenes/pi-permission-system` in `--print` | Tool guard runs; Pi has no per-hook timeout | Handler blocks ~30 s inside its own code (no host call in that window), so the host's 30 s request timeout ends the tool call with `extension request hook/run timed out` | **open — third-party headless path**; see [Known limitation: headless permission hook](#known-limitation-headless-permission-hook) |
 | Virtual models | `registerVirtualModel`/`unregisterVirtualModel` | Unsupported | **in flight** |
 | Provider request signing / OAuth | Supported surface | Refused where credential shapes cannot be represented | **open** |
 | Builtin `grep`/`find`/`ls` factories | First-class tools | Wrappers refused; no native equivalents | **in flight** |
@@ -78,3 +79,39 @@ A row moves to **fixed** only when a real-host acceptance path (real `App`, real
 adapter process, real tools/policy/persistence, scripted provider only) proves
 the compat path matches Pi, and the ledger row cites it. Loading, registering, or
 synthetic-host tests never move a row.
+
+## Known limitation: headless permission hook
+
+**Observed, reproducible.** With `@gotgenes/pi-permission-system` installed in the
+mirrored Pi package set, a `--print` run that calls a tool fails that tool call:
+
+```
+extension request `hook/run` timed out
+```
+
+Measured on 2026-11-06 with octet 0.10.1 and the operator's Pi 1.5.0 package set:
+
+| Stage | Duration |
+|---|---|
+| `before_tool_call` hook round trip | 29.1 s then 30.0 s on retry |
+| `after_tool_call` | 0.05 s |
+| `session_start` | 1.9–7.3 s |
+| `before_prompt` | 0.45 s |
+
+Isolation: the same run with `-ne` executes `bash` in 2.4 s, and the interactive
+TUI executes the same tool in 2.8 s. In-process instrumentation attributes the
+stall to that extension's `tool_call` handler and records **no host call** during
+the stall, so the bridge is not waiting on a prompt or any other host round trip;
+the handler is blocked in its own code. The host's
+`DEFAULT_REQUEST_TIMEOUT` (30 s) is what ends the request.
+
+Consequences a script must not ignore:
+
+- The **run still exits 0**. The tool call is reported to the model as an error,
+  the model answers without the tool result, and the process completes normally.
+  Treating exit status as proof that tools ran is wrong in this configuration.
+- Interactive use is unaffected, and the limitation is specific to a Pi package
+  that blocks in a headless session; `octet` does not add a timeout Pi has.
+
+Next step is to determine which Pi API that handler awaits in a headless session
+before deciding whether the bridge or the extension owns the fix.

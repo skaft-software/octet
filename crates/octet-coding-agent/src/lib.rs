@@ -205,15 +205,12 @@ async fn run() -> anyhow::Result<()> {
     };
     let no_extensions = cli.no_extensions;
     let mut config = cli::build_config(cli, &cwd)?;
-    // Clearing here, after every configuration layer and Pi codemode activation
-    // has been applied, makes `-ne` authoritative for this invocation. Nothing
-    // is persisted: the saved list is untouched for the next run.
-    if no_extensions {
-        config.enabled_extensions.clear();
-    }
     app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
     cli::apply_pi_codemode_settings(&mut config, &explicit_extension_flags);
+    // Native activation is last so `-ne` also covers the mirrored Pi codemode
+    // preference, and a `/extensions` Disable outranks it on the next launch.
+    cli::apply_native_extension_activation(&mut config, no_extensions);
     if let Some(search) = parity.list_models.as_deref() {
         return cli::parity::list_models(&config, search);
     }

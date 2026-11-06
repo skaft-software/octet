@@ -49,6 +49,7 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
         skill_paths: vec![],
         extension_paths: vec![],
         enabled_extensions: vec![],
+        disabled_extensions: vec![],
         extension_activation_overridden: false,
         trusted_extensions: vec![],
         invocation_trusted_extensions: vec![],

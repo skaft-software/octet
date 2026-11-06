@@ -303,11 +303,10 @@ pub struct ProviderContextProjection {
 /// ordinary extension failures.
 pub enum ProviderContextHookError {
     /// The callback failed; the message is internal and never shown to users.
+    /// A hook that opts into failure isolation continues with the prior request.
     Failed(String),
     /// The extension returned JSON-RPC request-cancelled (-32800).
     Cancelled,
-    /// Host authority or projection validation failed; never fall back.
-    Refused,
 }
 
 /// Run-owned service for authoritative private session appends while a context

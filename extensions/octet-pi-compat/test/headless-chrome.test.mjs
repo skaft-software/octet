@@ -53,19 +53,26 @@ test('headless chrome setters are inert, not unsupported, and never mount remote
   await peer.close();
 });
 
-test('headless dialogs still refuse: only presentation setters are inert', async t => {
+test('headless custom() resolves undefined like Pi instead of waiting for a surface', async t => {
   const entry = factory(t, `export default pi => {
-    pi.registerCommand('dialog', { handler: async (_args, ctx) => { await ctx.ui.custom(() => ({ render: () => [], invalidate() {} })); } });
-    pi.registerCommand('theme', { handler: (_args, ctx) => ctx.ui.getAllThemes() });
+    pi.registerCommand('dialog', { handler: async (_args, ctx) => {
+      const value = await ctx.ui.custom(() => ({ render: () => [], invalidate() {} }));
+      ctx.ui.notify('custom:' + String(value));
+    } });
+    pi.registerCommand('confirm', { handler: async (_args, ctx) => {
+      ctx.ui.notify('confirm:' + String(await ctx.ui.confirm('t', 'm')));
+    } });
   };`);
   const peer = launch(t, [entry]);
   await peer.init(['session_entries']);
-  const dialog = await peer.command('dialog').response;
-  assert.equal(dialog.error?.code, -32601, JSON.stringify(dialog));
-  assert.match(dialog.error.message, /unsupported_feature remote_ui/);
-  const themes = await peer.command('theme').response;
-  assert.equal(themes.error?.code, -32601, JSON.stringify(themes));
-  assert.match(themes.error.message, /unsupported_feature ctx\.ui\.theme/);
+  // Pi's noOpUIContext.custom() resolves undefined, confirm() resolves false:
+  // a print-mode hook must never wait for a foreground surface, or the whole
+  // hook round trip times out and the tool call fails.
+  await peer.command('dialog').response;
+  await peer.command('confirm').response;
+  assert.equal(peer.seen.some(frame => frame.method === 'ui/open'), false, 'headless mount');
+  const values = peer.seen.filter(frame => frame.method === 'notification').map(frame => frame.params.message);
+  assert.deepEqual(values, ['custom:undefined', 'confirm:false']);
   await peer.close();
 });
 
