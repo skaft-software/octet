@@ -184,8 +184,11 @@ pub(super) fn tool_schema_bytes(tools: &[ToolDef]) -> usize {
 
 pub(super) fn require_tool_schema_budget(
     tools: &[ToolDef],
-    max_bytes: usize,
+    max_bytes: Option<usize>,
 ) -> Result<(), AgentError> {
+    let Some(max_bytes) = max_bytes else {
+        return Ok(());
+    };
     // A zero budget intentionally permits `[]`: it advertises no callable
     // schema, even though JSON's empty-array delimiters occupy two wire bytes.
     if tools.is_empty() {

@@ -6,6 +6,40 @@ auto-mirror mode, against real Pi **1.4.0** (`@earendil-works/pi-coding-agent@1.
 out of scope), both on a PTY, both with the same ~23 real npm Pi packages and the same mock
 provider. Startup is the first metric; parity metrics ride along.
 
+## Prompt/tool comparison loop (no installation)
+
+`prompts.py` runs the actual CLIs with synthetic factories in fresh canonical
+homes/workspaces and a local scripted provider. It never loads the user's
+factories, installs packages, uses ambient credentials or calls a paid provider.
+It tests startup ordering, chained system prompts, input transformation/chaining,
+handled-input suppression (including Octet persistence), a real tool roundtrip,
+and transport of all 117 large tool definitions.
+
+```sh
+python3 -B scripts/pi-eval/prompts_selftest.py
+python3 -B scripts/pi-eval/prompts.py \
+  --octet /absolute/path/to/built/octet \
+  --pi-install /absolute/path/to/existing/.pi/agent/install \
+  --pi-versions 1.0.2,1.5.0 --reps 2 \
+  --out /private/tmp/octet-prompt-comparison
+```
+
+Use `--cases input-transform,input-chain,input-handled` for a narrow retry,
+`--octet-mode plain` to exercise the plain frontend, and a fresh `--out` each run.
+Both reference versions must already exist in the managed install. Pi 1.5 is a
+comparison reference here, **not** a claim that Octet supports its runtime/helper
+routes. The older package/PTY evaluation below remains scoped to Pi 1.4.
+
+Every leg retains raw provider requests, semantic observations and stdout/stderr;
+`results.jsonl` records failed legs and `comparisons.jsonl` records equality.
+Repetitions alternate execution order. The command fails on either an unmet
+case assertion or a cross-CLI mismatch, not on answer wording. Comparisons retain
+assistant tool names/arguments and full fixture tool schemas, normalizing only
+generated IDs, content framing and omitted OpenAI `strict: false`. A common
+extension-owned base removes intentional native default-prompt differences;
+original wire requests remain available. These synthetic prompt/tool receipts
+do not qualify the user's full setup or UI, settings, helper and lifecycle APIs.
+
 ## Run
 
 ```sh

@@ -11,28 +11,43 @@ import { tracePhase, traceEnabled } from './startup-trace.mjs';
 // would otherwise hold that queue forever: the host's own deadline fires, the
 // prompt fails and resource discovery refuses, while the bridge stays wedged.
 //
-// A handler that outlives its budget is detached instead: the hook stops
-// waiting for it, the handler keeps running, the factory is reported once by
-// name, and the next hook proceeds. A detached handler that is still running
-// is skipped on later hooks rather than invoked again, so a stall costs one
-// budget, not one per prompt. Handlers that can veto (tool guards) fail closed:
-// a guard that cannot answer in time blocks the call, never lets it through.
+// Pi itself has no per-handler hook timeout, and this bridge is a Pi
+// compatibility layer: the prompt phases (`input` and `before_agent_start`) run
+// each handler until it settles, however long the dialog, host query or nested
+// call it waits on takes, and its result is applied exactly as Pi applies it. A
+// handler that settles after its run was cancelled can no longer change that
+// prompt, so it is reported once by name (see `late`), never dropped in silence.
+//
+// The budgets that remain cover the phases where a stall has nothing to give:
+// the context phases and resources discovery must fit inside the host's 5 s
+// deadline, and a tool guard that cannot answer in time must fail closed. There a
+// handler that outlives its budget is detached instead: the hook stops waiting
+// for it, the handler keeps running, the factory is reported once by name, and
+// the next hook proceeds. A detached handler that is still running is skipped on
+// later hooks rather than invoked again, so a stall costs one budget, not one per
+// prompt.
 //
 // The callback-wait totals leave time before the host's own deadlines for
 // before_prompt, provider_context and resources_discover (5 s). They do not
 // bound queueing, transport, synchronous JS or a later flush of tracked host
 // operations. Both provider-context phases share the same total wait budget.
 
-const PER_HANDLER_MS = { before_agent_start: 2000, input: 2000, context: 2000, context_with_system: 2000, resources_discover: 4000, tool_call: 10000 };
-const TOTAL_MS = { before_agent_start: 4000, input: 4000, context: 4000, context_with_system: 4000, resources_discover: 4000, tool_call: 10000 };
+const PER_HANDLER_MS = { context: 2000, context_with_system: 2000, resources_discover: 4000, tool_call: 10000 };
+const TOTAL_MS = { context: 4000, context_with_system: 4000, resources_discover: 4000, tool_call: 10000 };
+// Pi runs these hooks until the handler settles, so no handler is detached from
+// them and none is reported as "skipped this time": `input` and
+// `before_agent_start` compose the run, `session_start` announces it. Cancel
+// and preemption still stop the wait at once. The phases below keep a wait
+// because they must answer inside a host deadline, and a tool guard must fail
+// closed; their user-dialog time is excluded separately.
+const UNBUDGETED_EVENTS = new Set(['input', 'before_agent_start', 'session_start']);
 const DEFAULT_PER_HANDLER_MS = 5000;
 const DEFAULT_TOTAL_MS = 15000;
 const MIN_WAIT_MS = 250;
 // A tool guard may ask the user (a permission dialog) and the user takes as long
 // as they take, as in Pi. That time is not charged to the guard, up to a cap kept
 // below the host's 30 s request timeout, so a guard whose dialog never settles
-// still fails closed. before_agent_start is not listed: the host's 5 s prompt
-// deadline applies to it regardless.
+// still fails closed.
 const USER_WAIT_EVENTS = new Set(['tool_call']);
 const USER_WAIT_CAP_MS = 20000;
 const TIMED_OUT = Symbol('handler budget exceeded');
@@ -45,7 +60,9 @@ function forcedBudget() {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+// Undefined for a phase Pi leaves unbudgeted: there is no wait to hand out.
 export function budgetFor(event) {
+  if (UNBUDGETED_EVENTS.has(event)) return undefined;
   const forced = forcedBudget();
   return {
     perHandler: forced ?? PER_HANDLER_MS[event] ?? DEFAULT_PER_HANDLER_MS,
@@ -129,9 +146,12 @@ export class UserWait {
 }
 
 export class HookBudget {
+  // `budget` is undefined for the phases Pi leaves unbudgeted; the runner then
+  // only has to notice a cancelled or preempted run.
   constructor(runtime, store, event, started = performance.now()) {
     this.runtime = runtime; this.store = store; this.event = event;
-    ({ perHandler: this.perHandler, total: this.total } = budgetFor(event));
+    this.budget = budgetFor(event);
+    this.perHandler = this.budget?.perHandler; this.total = this.budget?.total;
     this.started = started;
     this.detached = new Map(); // factory path -> milliseconds actually waited
     this.excluded = 0; // milliseconds the hook's handlers spent awaiting the user
@@ -150,35 +170,70 @@ export class HookBudget {
     return entry.factory === undefined ? entry.label : this.runtime.config.extensions[entry.factory] ?? String(entry.factory);
   }
 
-  // Run one handler. Resolves { ran: true, value } when it settled in time; a
-  // failure rethrows exactly as an unbudgeted handler would. Resolves
-  // { ran: false, busy } when the handler was skipped because an earlier call
-  // is still running, or detached because it outlived its budget.
-  async run(entry, child, call) {
-    if (entry.busy) {
+  // A handler that settled after its hook stopped waiting still answered. Pi
+  // would have applied that answer to the run it was composing; this hook has
+  // already answered the host, so name what was lost — once, by extension.
+  late(entry, what) {
+    const issues = this.runtime.issues, path = this.describe(entry);
+    if (this.runtime.stopping || typeof issues?.publish !== 'function') return;
+    if (typeof issues.firstEventIssue === 'function' && !issues.firstEventIssue(`late:${this.event}`, path)) return;
+    issues.publish([{ path, level: 'warning',
+      reason: `${String(this.event).slice(0, 128)} ${what} arrived after the hook returned and was not applied`,
+      next: 'Update the extension so it answers without a long wait, or disable it.' }]);
+  }
+
+  // An answer that arrived too late for its hook. A quit is shutting the bridge
+  // down, so nothing is reported then; otherwise the error is the callback
+  // failure it would have been, and a result is named by the event's own
+  // `onLateResult` (or generically) instead of vanishing.
+  reportLate(entry, late, started, options) {
+    if (this.store.preempted) return;
+    this.trace(entry, performance.now() - started, late.error ? 'late-failed' : 'late-settled');
+    if (late.error) {
+      if (entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error, this.store.state);
+      return;
+    }
+    if (late.value === undefined) return;
+    let what;
+    try { what = options.onLateResult ? options.onLateResult(entry, late.value) : 'result'; }
+    catch { what = 'result'; }
+    if (what) this.late(entry, what);
+  }
+
+  // Run one handler and hand back its answer. A failure rethrows exactly as the
+  // handler threw, and the caller reports it and continues with the next one, as
+  // Pi does. Resolves { ran: true, value } when the handler answered, or
+  // { ran: false, busy } when a budgeted handler is still running from an earlier
+  // hook (skipped, never re-entered), or the run was preempted by a quit.
+  // `options.onLateResult(entry, value)` names what a value would have changed,
+  // for the answer that can no longer be applied.
+  async run(entry, child, call, options = {}) {
+    const { budget, store } = this;
+    // Only a budgeted handler can be left running by an earlier hook; Pi's own
+    // prompt phases are entered again on the next prompt.
+    if (budget && entry.busy) {
       this.trace(entry, 0, 'skipped-busy');
       return { ran: false, busy: true };
     }
-    const waited = this.wait();
-    if (waited === 0) {
+    const waited = budget ? this.wait() : 0;
+    if (budget && waited === 0) {
       this.trace(entry, 0, 'skipped-budget');
       if (entry.factory !== undefined && ['context', 'context_with_system'].includes(this.event)) {
-        this.runtime.reportCallbackError(this.event, entry.factory, new Error('context budget exhausted'), this.store.state);
+        this.runtime.reportCallbackError(this.event, entry.factory, new Error('context budget exhausted'), store.state);
       }
       return { ran: false, busy: false };
     }
-    const { store } = this;
     const started = performance.now();
     const pendingBefore = new Set(store.pending);
     const userWait = USER_WAIT_EVENTS.has(this.event) ? child.userWait = new UserWait() : undefined;
     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
-    entry.busy = true;
+    if (budget) entry.busy = true;
     settled.then(late => {
-      entry.busy = false;
-      if (child.detached) {
-        this.trace(entry, performance.now() - started, late.error ? 'late-failed' : 'late-settled');
-        if (late.error && entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error, store.state);
-      }
+      if (budget) entry.busy = false;
+      // The hook stopped waiting for this one: detached out of its budget,
+      // preempted by a quit, or a run the host cancelled.
+      if (!child.detached && !store.controller.signal.aborted) return;
+      this.reportLate(entry, late, started, options);
     });
     // A quit aborts the hook still starting up: stop waiting so shutdown handlers run at
     // once, and let the handler finish in the background. Nothing is reported, the
@@ -191,7 +246,8 @@ export class HookBudget {
     });
     let outcome;
     try {
-      for (;;) {
+      if (!budget) outcome = await Promise.race([settled, preempted]);
+      else for (;;) {
         const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
         if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
           outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT), preempted]);
@@ -205,7 +261,7 @@ export class HookBudget {
         if (outcome !== TIMED_OUT) break;
       }
     } finally { signal.removeEventListener('abort', release); }
-    this.excluded += userWait?.spent() ?? 0;
+    if (budget) this.excluded += userWait?.spent() ?? 0;
     if (outcome === PREEMPTED) {
       child.detached = true;
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);

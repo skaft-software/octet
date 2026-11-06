@@ -176,7 +176,7 @@ test('turn observations ignore results and report problems once per extension/ev
   const unavailable = { ...end(), assistant_metadata: null };
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);
   const skipped = await peer.wait(issueNotice);
-  assert.match(skipped.params.message, /^Octet Pi Compat: turn_end hook uses an event field octet does not support and was skipped\./);
+  assert.match(skipped.params.message, /^Octet Pi Compat: turn_end hook called an API octet does not support, so the hook was skipped\./);
   const opaque = structuredClone(assistant); opaque.value.Assistant.content.push({ Reasoning: { text: 'reason', state: { secret: 'opaque' } } });
   assert.deepEqual((await peer.request('hook/run', params(peer, end(opaque))).response).result, expected);
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);

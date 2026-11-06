@@ -117,6 +117,68 @@ hooks = ["session_start", "resources_discover"]
 }
 
 #[tokio::test]
+async fn ignored_untrusted_project_themes_retain_info_severity_without_admitting_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (extensions, mut base) = fixture(&root).await;
+    base.workspace_trusted = false;
+    let project = base.workspace.join(".octet/themes");
+    std::fs::create_dir_all(&project).unwrap();
+    let blocked = project.join("untrusted-theme.toml");
+    std::fs::write(&blocked, "[metadata]\nname = 'Untrusted'\n").unwrap();
+    let batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    let loaded = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    let info = format!(
+        "info: {}: ignored project resources because the workspace is not trusted",
+        project.display()
+    );
+    assert!(
+        loaded.diagnostics.contains(&info),
+        "{:?}",
+        loaded.diagnostics
+    );
+    assert!(crate::tui::reload_summary::reload_failure_text(&[info]).is_none());
+    assert!(!loaded.config.workspace_trusted);
+    assert!(
+        !crate::tui::theme::selectable_file_themes(&loaded.config, TerminalBackground::Dark)
+            .iter()
+            .any(|(name, _)| name == "untrusted-theme")
+    );
+
+    // An extension explicitly attempting the ungranted path is still a real
+    // rejection, not an informational native discovery skip.
+    let mut batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Reload)
+        .unwrap()
+        .await;
+    batch.contributions[0]
+        .paths
+        .theme_paths
+        .push(blocked.to_string_lossy().into_owned());
+    let loaded = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    let rejection = loaded
+        .diagnostics
+        .iter()
+        .find(|message| {
+            message.starts_with("warning:")
+                && message.contains("untrusted workspace resource has no explicit path grant")
+        })
+        .expect("ungranted contributions remain rejected");
+    assert!(
+        crate::tui::reload_summary::reload_failure_text(std::slice::from_ref(rejection)).is_some()
+    );
+    assert!(!loaded.config.theme_paths.contains(&blocked));
+    extensions.processes[0].shutdown().await;
+}
+
+#[tokio::test]
 async fn discovery_reply_feeds_real_skill_prompt_and_theme_loaders_then_replaces_roots() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -279,12 +341,13 @@ fn path_admission_does_not_launder_workspace_trust_links_or_theme_parsing() {
     let config = super::super::tests::executable_extension_config(&root, &root, "paths");
     let path = root.join("prompt.md");
     std::fs::write(&path, "prompt").unwrap();
-    assert!(admit_path(&path, &config, &[], PathKind::Prompt).is_err());
+    assert!(admit_path(&path, &config, &[], PathKind::Prompt, &[]).is_err());
     assert!(admit_path(
         &path,
         &config,
         std::slice::from_ref(&path),
-        PathKind::Prompt
+        PathKind::Prompt,
+        &[]
     )
     .is_ok());
     let link = root.join("linked.md");
@@ -293,16 +356,161 @@ fn path_admission_does_not_launder_workspace_trust_links_or_theme_parsing() {
         &link,
         &config,
         std::slice::from_ref(&root),
-        PathKind::Prompt
+        PathKind::Prompt,
+        &[]
     )
     .is_err());
     let json = root.join("pi.json");
     std::fs::write(&json, "{}").unwrap();
-    assert!(admit_path(&json, &config, &[], PathKind::Theme).is_err());
-    assert!(admit_path(&json, &config, std::slice::from_ref(&root), PathKind::Theme).is_ok());
+    assert!(admit_path(&json, &config, &[], PathKind::Theme, &[]).is_err());
+    assert!(admit_path(
+        &json,
+        &config,
+        std::slice::from_ref(&root),
+        PathKind::Theme,
+        &[]
+    )
+    .is_ok());
     // A supported extension is not a successful parse. Actual native loading
     // still rejects a malformed palette after path/trust admission.
     assert!(crate::tui::theme::load_theme_path(&json, &config).is_err());
+}
+
+#[test]
+fn user_global_pi_palette_needs_no_workspace_grant_but_a_project_palette_still_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    // `octet` started from the home directory: the workspace contains the Pi
+    // agent directory the adapter mirrors palettes from.
+    let home = root.join("home");
+    let agent = home.join(".pi/agent");
+    let palette = agent.join("themes/pi-selected.json");
+    std::fs::create_dir_all(palette.parent().unwrap()).unwrap();
+    std::fs::write(
+        &palette,
+        pi_theme::fixture("Pi Selected", "#00ff88").to_string(),
+    )
+    .unwrap();
+    let config = super::super::tests::executable_extension_config(&home, &root, "octet-pi-compat");
+    assert!(!config.workspace_trusted);
+    let roots = user_global_roots(&home, Some(home.as_path()), [agent.clone()]);
+    assert!(roots.contains(&agent), "{roots:?}");
+    assert!(
+        !roots.iter().any(|root| home.starts_with(root)),
+        "the workspace itself is never a user-global root: {roots:?}"
+    );
+    // A palette from the user's Pi agent directory is admitted as a user-global
+    // resource, so no workspace trust grant is involved.
+    assert_eq!(
+        admit_path(&palette, &config, &[], PathKind::Theme, &roots).unwrap(),
+        palette
+    );
+    // The same palette content inside the untrusted project is still refused:
+    // classification follows the root, not the file.
+    let project = root.join("project");
+    let nested = project.join("themes/pi-selected.json");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::write(
+        &nested,
+        pi_theme::fixture("Pi Selected", "#00ff88").to_string(),
+    )
+    .unwrap();
+    let project_config =
+        super::super::tests::executable_extension_config(&project, &root, "octet-pi-compat");
+    assert_eq!(
+        admit_path(&nested, &project_config, &[], PathKind::Theme, &roots)
+            .unwrap_err()
+            .to_string(),
+        "untrusted workspace resource has no explicit path grant"
+    );
+    let mut trusted = project_config;
+    trusted.workspace_trusted = true;
+    assert!(admit_path(&nested, &trusted, &[], PathKind::Theme, &roots).is_ok());
+    // A workspace inside a user-global root is that root, never a carve-out.
+    let inside = user_global_roots(
+        &agent.join("worktree"),
+        Some(home.as_path()),
+        [agent.clone()],
+    );
+    assert!(!inside.contains(&agent), "{inside:?}");
+}
+
+#[test]
+fn a_default_palette_named_like_a_builtin_loads_its_own_pi_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let config = super::super::tests::executable_extension_config(&root, &root, "octet-pi-compat");
+    // Pi's own built-in palettes are files named after its built-in selectors,
+    // and the picker list reserves those names for octet's compiled palettes.
+    for name in ["dark", "light"] {
+        let path = root.join(format!("{name}.json"));
+        std::fs::write(
+            &path,
+            pi_theme::fixture("Pi Built In", "#123456").to_string(),
+        )
+        .unwrap();
+        assert!(
+            crate::tui::theme::is_reserved_theme_name(name),
+            "{name} must exercise the reserved selector path"
+        );
+        let theme = load_reserved_default_theme(&path, &config).unwrap();
+        assert_eq!(theme.source_path(), Some(path.as_path()));
+    }
+    let broken = root.join("pi.json");
+    std::fs::write(&broken, "{}").unwrap();
+    assert!(load_reserved_default_theme(&broken, &config).is_err());
+}
+
+#[tokio::test]
+async fn refused_project_default_theme_names_the_file_and_the_reason() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (extensions, mut base) = fixture(&root).await;
+    base.workspace_trusted = false;
+    let project = base.workspace.join("themes");
+    std::fs::create_dir_all(&project).unwrap();
+    let refused = project.join("pi-selected.json");
+    std::fs::write(
+        &refused,
+        pi_theme::fixture("Pi Selected", "#00ff88").to_string(),
+    )
+    .unwrap();
+    let mut batch = extensions
+        .prepare_resource_discovery(ExtensionResourceDiscoveryReason::Startup)
+        .unwrap()
+        .await;
+    batch.contributions[0].paths = serde_json::from_value(serde_json::json!({
+        "theme_paths": [refused], "default_theme": refused
+    }))
+    .unwrap();
+    let loaded = extensions
+        .load_resource_discovery(&base, batch, TerminalBackground::Dark)
+        .unwrap();
+    let rejection = loaded
+        .diagnostics
+        .iter()
+        .find(|message| message.contains("rejected resource path"))
+        .expect("an ungranted project palette is still rejected");
+    assert!(
+        rejection.contains(&refused.display().to_string()),
+        "the rejection names the file: {rejection}"
+    );
+    assert!(
+        rejection.contains("untrusted workspace resource has no explicit path grant"),
+        "the rejection names the reason: {rejection}"
+    );
+    let default_refusal = format!(
+        "warning: resource-path-fixture: default theme {} was not an admitted theme file: it is not an admitted theme path",
+        refused.display()
+    );
+    assert!(
+        loaded.diagnostics.contains(&default_refusal),
+        "{:?}",
+        loaded.diagnostics
+    );
+    assert!(!loaded.config.theme_paths.contains(&refused));
+    assert!(crate::tui::reload_summary::reload_failure_text(&loaded.diagnostics).is_some());
+    extensions.processes[0].shutdown().await;
 }
 
 #[tokio::test]

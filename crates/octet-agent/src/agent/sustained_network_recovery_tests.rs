@@ -362,6 +362,7 @@ fn hard_cost_reservation_covers_pricier_anthropic_server_fallbacks() {
         cache_write_5m: TokenRate(1_000_000),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     });
     let base = worst_case_request_cost(&model, 1_000_000, 1_000_000, None).unwrap();
@@ -503,6 +504,7 @@ fn tariff_reservations_bound_exact_cost_across_usage_buckets_and_context_tiers()
             cache_write_5m: TokenRate(3_000_000),
             cache_write_1h: one_hour,
             reasoning: Some(TokenRate(13_000_000)),
+            windows: Default::default(),
             tiers: vec![PricingTier {
                 min_input_tokens: 200_000,
                 input: Some(TokenRate(12_000_000)),
@@ -608,6 +610,7 @@ fn tier_reservations_hold_across_restart_and_bound_the_hard_budget() {
         cache_write_5m: TokenRate(3_000_000),
         cache_write_1h: None,
         reasoning: Some(TokenRate(13_000_000)),
+        windows: Default::default(),
         tiers: Vec::new(),
     };
     let mut model = model;

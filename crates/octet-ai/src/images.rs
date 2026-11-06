@@ -107,6 +107,7 @@ impl ImagePricing {
             cache_write_5m: self.cache_write,
             cache_write_1h: None,
             reasoning: None,
+            windows: Default::default(),
             tiers: Vec::new(),
         }
     }

@@ -19,7 +19,10 @@ native model catalog and invocation scope before releasing deferred
 or spread their context immediately; unavailable or unrepresentable facts still
 refuse rather than becoming fabricated empty snapshots. The dedicated native
 process method pins one connection; the generic `run_hook` method refuses this
-hook.
+hook. A failed startup retains its host-classified error kind and numeric remote
+code, attributed to the owner, instance and dispatch generation. Discovery reports
+that retained failure without retrying startup or exposing remote error text/data.
+A successful process generation cutover does not establish successful startup.
 
 Response (not the generic hook disposition envelope):
 
@@ -86,7 +89,15 @@ or original-profile parity receipt.
 Only an enabled, trusted, admitted extension process can contribute. The feature
 is not an extension sandbox or additional shell/network authority. Local external
 roots are authorized by that process's existing host-authority grant. Workspace
-paths still need workspace trust or an existing explicit path grant. Root and
+paths still need workspace trust or an existing explicit path grant. A path that
+is inside the workspace but also inside a user-global root is classified as a
+user resource, not a workspace one: the Pi agent directory the adapter was
+configured with (`OCTET_PI_AGENT_DIR`, `PI_CODING_AGENT_DIR`, else
+`~/.pi/agent`), `~/.octet` and `~/.agents`. Starting octet from the home
+directory otherwise turned a palette the user selected in Pi into an untrusted
+project resource and refused it, and a user-global theme is not a project
+resource that trust could grant. A workspace inside one of those roots is not
+carved out. Root and
 ancestor symlinks, missing inputs and special files are rejected. Parser reads
 keep the existing bounded/no-follow semantics; admission-time filesystem checks
 are not an OS confinement or transactional tree-snapshot guarantee.
@@ -118,6 +129,13 @@ paths outside the augmented config, remove obsolete roots on reload, and fence
 owner/instance/generation again immediately before publication. Retirement must
 withdraw stale contributions before another provider request or resource command.
 Nothing is written to config, installation metadata or durable sessions.
+Native theme-discovery skips for ignored untrusted project roots retain
+informational severity and do not mark an otherwise successful reload as failed. Explicitly contributed paths refused by trust or validation remain
+reported problems; diagnostic severity never grants resource access. A refused
+default theme names the file and the reason. A default theme whose stem is a
+reserved built-in selector (`dark`, `light`, `pi`, `Cards`, `Still`) still loads
+its own admitted file, because Pi ships its built-in palettes as files named
+after those selectors.
 
 Authorized App frontends now wire startup, reload, retirement, and atomic
 publication. A contributor admitted after the first interactive frame activates

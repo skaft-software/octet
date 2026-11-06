@@ -1283,3 +1283,13 @@ pub(super) fn session_hook_error_kind(error: &ExtensionRuntimeError) -> &'static
         _ => "internal_error",
     }
 }
+
+/// Public lifecycle diagnostics contain only bounded host-classified metadata.
+/// Even a familiar remote code does not authenticate its message or structured data.
+pub(super) fn session_hook_failure_summary(error: &ExtensionRuntimeError) -> String {
+    let kind = session_hook_error_kind(error);
+    match error {
+        ExtensionRuntimeError::Remote { code, .. } => format!("{kind}, code={code}"),
+        _ => kind.to_owned(),
+    }
+}

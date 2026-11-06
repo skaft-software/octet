@@ -101,7 +101,18 @@ fn forward_startup_trace(line: &str) {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let args = std::env::args_os().collect::<Vec<OsString>>();
+    // Pi spells "no extensions" as the multi-character short flag `-ne`, which
+    // clap cannot express directly. Accept it as `--no-extensions` before any
+    // parsing so both spellings behave identically.
+    let args = std::env::args_os()
+        .map(|arg| {
+            if arg == OsString::from("-ne") {
+                OsString::from("--no-extensions")
+            } else {
+                arg
+            }
+        })
+        .collect::<Vec<OsString>>();
     // The internal re-exec probe is answered before clap, provider setup,
     // extension activation, workspace access, networking, or the agent loop.
     // This early return is the whole guarantee: no `App` can be constructed,
@@ -192,7 +203,14 @@ async fn run() -> anyhow::Result<()> {
     } else {
         Default::default()
     };
+    let no_extensions = cli.no_extensions;
     let mut config = cli::build_config(cli, &cwd)?;
+    // Clearing here, after every configuration layer and Pi codemode activation
+    // has been applied, makes `-ne` authoritative for this invocation. Nothing
+    // is persisted: the saved list is untouched for the next run.
+    if no_extensions {
+        config.enabled_extensions.clear();
+    }
     app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
     cli::apply_pi_codemode_settings(&mut config, &explicit_extension_flags);

@@ -205,14 +205,26 @@ impl ExtensionProcess {
             })?;
         if self.declares_session_hooks() {
             let bindings = lock_std_mutex(&self.inner.session_hooks);
-            let ready = bindings.get(session_owner).is_some_and(|binding| {
+            let binding = bindings.get(session_owner).filter(|binding| {
                 binding.endpoint.generation == read_std_lock(&self.inner.connection).generation
-                    && binding.start_outcome.succeeded()
             });
-            if !ready {
-                return Err(ExtensionRuntimeError::Protocol(
-                    "resource discovery requires successful settled session_start".into(),
-                ));
+            if !binding.is_some_and(|binding| binding.start_outcome.succeeded()) {
+                let failure = binding.and_then(|binding| {
+                    binding.start_outcome.failure().map(|failure| {
+                        format!(
+                            "resource discovery blocked: {}",
+                            self.session_hook_failure_message(
+                                "session_start",
+                                &binding.session_id,
+                                binding.endpoint.generation,
+                                &failure,
+                            )
+                        )
+                    })
+                });
+                return Err(ExtensionRuntimeError::Protocol(failure.unwrap_or_else(
+                    || "resource discovery requires successful settled session_start".into(),
+                )));
             }
         }
         if self.api_version() != EXTENSION_API_VERSION_0_4

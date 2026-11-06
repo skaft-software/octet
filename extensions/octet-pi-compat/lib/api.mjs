@@ -1,7 +1,7 @@
 import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, parse, resolve } from 'node:path';
-import { bounded, facade, fields, invalid, plainJSON, rpcError, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, rpcError, unsupported, unsupportedAPI } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
@@ -39,6 +39,11 @@ export const notificationEvents = {
 };
 // Pi events dispatched after another notification's event: the owning run settles once, after agent_end.
 export const followingEvents = { 'turn/settled': 'agent_settled' };
+// Pi events this bridge raises itself, without a native hook behind them.
+// `project_trust` is a notification about the native trust decision, delivered
+// from lib/project-trust.mjs before session_start handlers; subscribing to it
+// never adds a native hook and never changes admission.
+export const localEvents = new Set(['mcp_servers_change', 'project_trust']);
 function name(value, label) {
   bounded(value, label, 128);
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(value)) invalid(label);
@@ -72,9 +77,21 @@ function gitBranch(cwd) {
   } catch { return undefined; }
 }
 function snapshot(host, key, api) {
-  if (!(key in host)) unsupported(api, `${key} snapshot not supplied by the host`);
+  if (!(key in host)) unsupportedAPI(api, `${key} snapshot not supplied by the host`);
   return host[key];
 }
+// The session facts the host has published, or Pi's own shape for a session it
+// has not published yet. The host merges its whole session view into a hook
+// context (or replaces it through a routed owner read); before the first
+// publication — the earliest session_start of a session — no view key is
+// present at all. Pi's session at that moment is a real, *empty* session: no
+// entries, no branch, no session file yet. Refusing there fails every
+// session_start handler of a factory that reads history, which is not a fact
+// about the extension. An explicit null is different: the host published that
+// the native view is unavailable, and every getter keeps refusing (above).
+const SESSION_VIEW_KEYS = ['session_entries', 'session_branch', 'session_leaf_id', 'session_file', 'session_header', 'session_labels'];
+const PUBLISHED_NOTHING = { session_entries: [], session_branch: [], session_leaf_id: null, session_file: undefined, session_header: null, session_labels: {} };
+const presentedSession = host => SESSION_VIEW_KEYS.some(key => Object.hasOwn(host, key)) ? host : { ...host, ...PUBLISHED_NOTHING };
 export function humanizeExtensionName(value) {
   let name = value.trim();
   const parts = name.split('/');
@@ -119,8 +136,8 @@ export function createAPI(runtime, factory) {
     ...runtime.transcript.api(factory),
     registerProvider(name, config) { registerProvider(runtime, factory, name, config); },
     unregisterProvider(name) { unregisterProvider(runtime, factory, name); },
-    registerVirtualModel() { unsupported('pi.registerVirtualModel'); },
-    unregisterVirtualModel() { unsupported('pi.unregisterVirtualModel'); },
+    registerVirtualModel() { unsupportedAPI('pi.registerVirtualModel'); },
+    unregisterVirtualModel() { unsupportedAPI('pi.unregisterVirtualModel'); },
     registerCommand(key, definition) {
       name(key, 'command name');
       if (!definition || typeof definition !== 'object' || Array.isArray(definition)) invalid('command must be an object');
@@ -178,7 +195,7 @@ export function createAPI(runtime, factory) {
       if (runtime.loaded && hookEvents[event] && !runtime.metadata().hooks.includes(hookEvents[event])) unsupported(`event ${event}`, 'native hook was not subscribed; configure again');
       if (typeof handler !== 'function') invalid('event handler');
       // A subscription to an event this host never emits is inert, as in Pi.
-      if (event !== 'mcp_servers_change' && !hookEvents[event] && !Object.values(notificationEvents).includes(event) && !Object.values(followingEvents).includes(event)) {
+      if (!localEvents.has(event) && !hookEvents[event] && !Object.values(notificationEvents).includes(event) && !Object.values(followingEvents).includes(event)) {
         bounded(event, 'event name', 128);
         return () => {};
       }
@@ -258,6 +275,27 @@ export function textOnly(content) {
   });
 }
 
+// Pi presents a footer, header, widget or status line by mutating local state and
+// calling `requestRender()`; the slot is presentation, never hook output
+// (modes/interactive/interactive-mode.ts:2401-2404, 2749-2752). Mounting or
+// refreshing one therefore must not be joined to the hook flush (`store.pending`
+// holds a promise the hook awaits) nor turn a refused or timed-out UI round trip
+// into a hook failure (`store.errors` is thrown by `flush`). Before this, a host
+// that did not answer `ui/open`/`ui/chrome` held `session_start` for the 30 s
+// transport timeout and then failed it, so resource discovery admitted no paths
+// and every later extension burned its own startup budget.
+function detachedUi(runtime, store, promise, slot) {
+  const observed = Promise.resolve(promise);
+  const state = store.state;
+  observed.catch(error => {
+    state.uiFailures ??= new Set();
+    if (runtime.stopping || !state.alive || state.uiFailures.has(slot)) return;
+    state.uiFailures.add(slot);
+    runtime.backgroundError(error);
+  });
+  return observed;
+}
+
 export function createContext(runtime, store, replaced = false) {
   const current = () => { runtime.assertSessionOwner(store); return store.state; };
   const foreground = () => { runtime.assertOwner(store); return store.state; };
@@ -271,8 +309,7 @@ export function createContext(runtime, store, replaced = false) {
       const s = foreground(), bound = () => runtime.scope.run(store, handler); s.branchListeners.add(bound); return () => s.branchListeners.delete(bound);
     },
   }, 'footerData');
-  const setSlot = (slot, placement, factory, options) => {
-    // Headless Pi has no chrome: a requested slot is simply not shown there.
+  const setSlot = (slot, placement, factory, options) => {    // Headless Pi has no chrome: a requested slot is simply not shown there.
     if (!runtime.features.has('remote_ui')) { foreground(); return Promise.resolve(); }
     runtime.require('remote_ui'); foreground();
     if (factory !== undefined && typeof factory !== 'function' && !Array.isArray(factory)) invalid(`${slot} factory`);
@@ -288,7 +325,7 @@ export function createContext(runtime, store, replaced = false) {
     };
     const key = slot, prev = store.state.uiQueues.get(key) || Promise.resolve();
     const promise = prev.then(action); store.state.uiQueues.set(key, promise.catch(() => {}));
-    return runtime.track(promise, store);
+    return detachedUi(runtime, store, promise, slot);
   };
   const syncStatuses = () => {
     if (!runtime.features.has('remote_ui')) return;
@@ -305,9 +342,16 @@ export function createContext(runtime, store, replaced = false) {
         invalidate() {},
       }), { slot });
     };
+    // One queued refresh per burst: N setStatus calls (or a burst of renders)
+    // collapse into a single mount/render attempt, like Pi's single
+    // requestRender(). The flag clears when the queued attempt starts, so a later
+    // status still refreshes and the attempt stays inside the hook's own chain.
+    if (state.statusSyncQueued) return;
+    state.statusSyncQueued = true;
     const previous = state.uiQueues.get(slot) || Promise.resolve();
-    const promise = previous.then(action); state.uiQueues.set(slot, promise.catch(() => {}));
-    return runtime.track(promise, store);
+    const promise = previous.then(() => { state.statusSyncQueued = false; return action(); });
+    state.uiQueues.set(slot, promise.catch(() => {}));
+    detachedUi(runtime, store, promise, slot);
   };
   const userAnswer = promise => store.userWait?.track(promise) ?? promise;
   const custom = (factory, options = {}) => {
@@ -350,7 +394,7 @@ export function createContext(runtime, store, replaced = false) {
       },
     }),
     custom,
-    onTerminalInput() { unsupported('ctx.ui.onTerminalInput', 'raw terminal key listening is not part of the host remote-UI contract'); },
+    onTerminalInput() { unsupportedAPI('ctx.ui.onTerminalInput', 'raw terminal key listening is not part of the host remote-UI contract'); },
 
     async editor(title, prefill = '') {
       bounded(title, 'editor title', 128); bounded(prefill, 'editor prefill', 262144);
@@ -413,11 +457,11 @@ export function createContext(runtime, store, replaced = false) {
   // Lazy translation: a UI/resource-only factory must not fail merely because
   // an unrelated native history contains media this Pi message profile cannot map.
   const sessionState = () => {
-    const state = current(), host = runtime.sessionFacts(store);
+    const state = current(), supplied = runtime.sessionFacts(store);
     // Native invalidation clears the entire mirror. A null history is not an
     // empty session and cannot leave old headers/labels visible after failure.
-    if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager', 'native session view unavailable');
-    return { ...state, host };
+    if (supplied.session_entries === null || supplied.session_branch === null) unsupportedAPI('ctx.sessionManager', 'native session view unavailable');
+    return { ...state, host: presentedSession(supplied) };
   };
   const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopies(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
   const sessionEntry = id => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopy(snapshot(sessionState().host, 'session_entries', 'ctx.sessionManager.session_entries'), runtime.namespace, id));
@@ -425,7 +469,7 @@ export function createContext(runtime, store, replaced = false) {
     ...Object.fromEntries(['setSessionFile', 'newSession', 'appendMessage', 'appendThinkingLevelChange', 'appendModelChange',
       'appendUsage', 'appendCompaction', 'appendCustomEntry', 'appendSessionInfo', 'appendCustomMessageEntry',
       'appendContextEdit', 'appendLabelChange', 'branch', 'resetLeaf', 'branchWithSummary', 'createBranchedSession']
-      .map(method => [method, () => { sessionState(); unsupported(`ctx.sessionManager.${method}`, 'use the host-owned context and Pi action methods'); }])),
+      .map(method => [method, () => { sessionState(); unsupportedAPI(`ctx.sessionManager.${method}`, 'use the host-owned context and Pi action methods'); }])),
     getCwd: () => sessionState().workspace,
     getSessionId: () => sessionState().host.session_id ?? undefined,
     getHeader: () => sessionHeader(sessionState().host) ?? null,
@@ -460,7 +504,7 @@ export function createContext(runtime, store, replaced = false) {
     getSessionFile: () => snapshot(sessionState().host, 'session_file', 'ctx.sessionManager.getSessionFile'),
     getSessionDir: () => {
       const file = snapshot(sessionState().host, 'session_file', 'ctx.sessionManager.getSessionDir');
-      if (file === null) unsupported('ctx.sessionManager.getSessionDir', 'no persistent session directory supplied by the host');
+      if (file === null || file === undefined) unsupportedAPI('ctx.sessionManager.getSessionDir', 'no persistent session directory supplied by the host');
       return dirname(file);
     },
     getEntry: id => sessionEntry(id),
@@ -496,15 +540,15 @@ export function createContext(runtime, store, replaced = false) {
     getSystemPrompt: () => contextFacts(runtime, store).getSystemPrompt(),
     get signal() { return compactionCallbackStore(runtime, store).controller.signal; },
     waitForIdle() {
-      if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');
+      if (store.method !== 'command/execute') unsupportedAPI('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');
       return operation('session/wait_for_idle', { resource_owner: current().owner }, 'session_control_v1').then(result => {
         fields(result, ['session_id'], 'idle receipt'); bounded(result.session_id, 'idle session id', 256);
         if (result.session_id !== current().host.session_id) invalid('idle receipt session changed');
       });
     },
     compact: options => requestCompaction(runtime, store, options),
-    abort() { unsupported('ctx.abort', 'host wire has no root-run abort contract'); },
-    shutdown() { unsupported('ctx.shutdown', 'the extension process is host-owned; request shutdown through the host'); },
+    abort() { unsupportedAPI('ctx.abort', 'host wire has no root-run abort contract'); },
+    shutdown() { unsupportedAPI('ctx.shutdown', 'the extension process is host-owned; request shutdown through the host'); },
     ...sessionMethods(runtime, store, createContext),
     ...(replaced ? {
       sendMessage: (message, options) => operation('session/send_message', customMessageParams(message, options), 'message_injection'),

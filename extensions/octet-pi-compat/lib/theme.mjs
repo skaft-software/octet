@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { bounded, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, fields, invalid, plainJSON, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { backgroundAnsi, colorToOklch, foregroundAnsi, indexedColor, mixColors, oklchColor, parseColor, rgbColor, styleTextWithAnsi } from './theme-colors.mjs';
 import { backgroundTokens, foregroundTokens, parsePiTheme, readPiTheme } from './theme-palette.mjs';
 export { parsePiTheme, piThemeToNativeToml } from './theme-palette.mjs';
@@ -158,7 +158,7 @@ export function createNativeTheme(palette) {
     { name: data.name, sourcePath: palette.path ?? undefined, appearance: data.appearance, dim, capabilities: palette.capabilities });
 }
 export function nativeTheme(palette) {
-  if (!palette || typeof palette !== 'object') unsupported('ctx.ui.theme', 'authoritative palette unavailable');
+  if (!palette || typeof palette !== 'object') unsupportedAPI('ctx.ui.theme', 'authoritative palette unavailable');
   let value = nativeThemes.get(palette);
   if (!value) { value = createNativeTheme(palette); nativeThemes.set(palette, value); }
   return value;

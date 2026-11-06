@@ -451,6 +451,13 @@ pub struct Cli {
         num_args = 1..
     )]
     pub enable_extensions: Vec<String>,
+    /// Ignore every enabled extension for this invocation, like Pi's
+    /// `--no-extensions` (`-ne`). The saved `enabled_extensions` list, project
+    /// layers and Pi codemode activation are all ignored; nothing is written to
+    /// config. Combining it with `--enable-extension` is refused rather than
+    /// silently picking a winner.
+    #[arg(long = "no-extensions", conflicts_with = "enable_extensions")]
+    pub no_extensions: bool,
     /// Explicit invocation-only trust (comma-separated); full access already
     /// trusts selected extensions. Does not enable them; grants host process
     /// authority for the selected source even under safe mode.

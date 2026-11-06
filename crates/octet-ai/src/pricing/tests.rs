@@ -20,6 +20,7 @@ fn service_tier_scales_exact_categories_and_retains_sub_microdollars() {
         cache_write_5m: TokenRate(600_000),
         cache_write_1h: Some(TokenRate(600_000)),
         reasoning: Some(TokenRate(600_000)),
+        windows: Default::default(),
         tiers: vec![],
     };
     let usage = Usage {
@@ -77,6 +78,7 @@ fn service_tier_preserves_long_context_and_disjoint_usage_buckets() {
         cache_write_5m: TokenRate(2_500_000),
         cache_write_1h: Some(TokenRate(4_000_000)),
         reasoning: Some(TokenRate(6_000_000)),
+        windows: Default::default(),
         tiers: vec![PricingTier {
             min_input_tokens: 10,
             input: Some(TokenRate(4_000_000)),
@@ -128,6 +130,7 @@ fn service_tier_unrepresentable_fraction_is_unpriced_not_rounded_down() {
         cache_write_5m: TokenRate(0),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     };
     let usage = Usage {
@@ -162,6 +165,7 @@ fn test_cost_of_simple() {
         cache_write_5m: TokenRate(15),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     };
 
@@ -197,6 +201,7 @@ fn request_total_preserves_the_exact_sum_of_category_costs() {
         cache_write_5m: TokenRate(600_000),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     };
     let usage = Usage {
@@ -222,6 +227,7 @@ fn test_cost_of_tier_boundary() {
         cache_write_5m: TokenRate(150),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![PricingTier {
             min_input_tokens: 100_000,
             input: Some(TokenRate(80)),
@@ -271,6 +277,7 @@ fn one_hour_cache_write_defaults_to_twice_input_rate() {
         cache_write_5m: TokenRate(3_750_000),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     };
     let usage = Usage {
@@ -297,6 +304,7 @@ fn test_cost_inconsistent_subsets() {
         cache_write_5m: TokenRate(15),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     };
 

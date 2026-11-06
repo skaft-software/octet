@@ -449,17 +449,27 @@ pub(super) fn clear_matching_lifecycle_turn(
 pub(super) struct SessionHookStartOutcome {
     finished: AtomicBool,
     succeeded: AtomicBool,
+    // Only host-classified metadata; never retain remote messages or data here.
+    failure: StdMutex<Option<String>>,
 }
 impl SessionHookStartOutcome {
     pub(super) fn succeeded(&self) -> bool {
         self.finished.load(Ordering::Acquire) && self.succeeded.load(Ordering::Relaxed)
     }
+
+    pub(super) fn failure(&self) -> Option<String> {
+        self.finished
+            .load(Ordering::Acquire)
+            .then(|| lock_std_mutex(&self.failure).clone())
+            .flatten()
+    }
 }
 /// Dropping an in-flight host attempt refuses discovery, never implying success.
 pub(super) struct SessionHookStartAttempt(pub(super) Arc<SessionHookStartOutcome>);
 impl SessionHookStartAttempt {
-    pub(super) fn finish(&self, succeeded: bool) {
-        self.0.succeeded.store(succeeded, Ordering::Relaxed);
+    pub(super) fn finish(&self, result: &Result<(), ExtensionRuntimeError>) {
+        *lock_std_mutex(&self.0.failure) = result.as_ref().err().map(session_hook_failure_summary);
+        self.0.succeeded.store(result.is_ok(), Ordering::Relaxed);
     }
 }
 impl Drop for SessionHookStartAttempt {

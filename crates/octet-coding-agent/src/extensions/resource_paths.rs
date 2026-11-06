@@ -263,6 +263,15 @@ impl ResourceLoader {
         let mut default_themes = Vec::new();
         let mut keybindings_paths: Vec<PathBuf> = Vec::new();
         let mut context_paths: Vec<PathBuf> = Vec::new();
+        // Classify once, from the filesystem: a user-global root stays a user
+        // resource even when this workspace happens to contain it.
+        let user_global = user_global_roots(
+            &base.workspace,
+            dirs::home_dir()
+                .filter(|home| home.is_absolute())
+                .as_deref(),
+            pi_agent_dirs(&base.workspace),
+        );
         // Session-only kinds have no persisted configuration to defer to, so
         // nothing outside discovery can grant them a workspace path.
         let no_explicit: Vec<PathBuf> = Vec::new();
@@ -318,7 +327,7 @@ impl ResourceLoader {
                 ),
             ] {
                 for path in paths {
-                    match admit_path(Path::new(path), base, explicit, kind) {
+                    match admit_path(Path::new(path), base, explicit, kind, &user_global) {
                         Ok(path) if !target.contains(&path) => {
                             if let Some(info) = contribution
                                 .paths
@@ -331,8 +340,9 @@ impl ResourceLoader {
                         }
                         Ok(_) => {}
                         Err(error) => diagnostics.push(format!(
-                            "warning: {}: rejected resource path: {error}",
-                            process.descriptor().manifest.name
+                            "warning: {}: rejected resource path {}: {error}",
+                            process.descriptor().manifest.name,
+                            Path::new(path).display()
                         )),
                     }
                 }
@@ -348,13 +358,22 @@ impl ResourceLoader {
             }
             if let Some(preferred) = contribution.paths.default_theme {
                 let path = PathBuf::from(preferred);
-                if config.theme_paths.contains(&path) && path.is_file() {
-                    default_themes.push((path, process.descriptor().manifest.name.clone()));
+                let owner = process.descriptor().manifest.name.clone();
+                // Name the file and the exact reason: this is the palette the
+                // user selected in Pi, so a refusal has to be actionable.
+                let refusal = if !config.theme_paths.contains(&path) {
+                    Some("it is not an admitted theme path")
+                } else if !path.is_file() {
+                    Some("it is not a regular file")
                 } else {
-                    diagnostics.push(format!(
-                        "warning: {}: default theme was not an admitted theme file",
-                        process.descriptor().manifest.name
-                    ));
+                    None
+                };
+                match refusal {
+                    Some(reason) => diagnostics.push(format!(
+                        "warning: {owner}: default theme {} was not an admitted theme file: {reason}",
+                        path.display()
+                    )),
+                    None => default_themes.push((path, owner)),
                 }
             }
             fences.push((process, contribution.generation));
@@ -406,8 +425,29 @@ impl ResourceLoader {
                     preferred_theme = Some(theme.clone());
                     break;
                 }
+                // A built-in selector stems from a reserved name, so the picker
+                // list cannot contain it. Pi's own built-in palettes are files
+                // (`dark.json`, `light.json`) shipped inside the Pi installation,
+                // and a palette the user selected in Pi has to load exactly as
+                // it does there. Load the admitted file instead of reporting a
+                // parse failure for a name that is only reserved.
+                if name.is_some_and(crate::tui::theme::is_reserved_theme_name) {
+                    match load_reserved_default_theme(&path, &config) {
+                        Ok(theme) => {
+                            config.theme = name.map(str::to_owned);
+                            preferred_theme = Some(theme);
+                            break;
+                        }
+                        Err(error) => diagnostics.push(format!(
+                            "warning: {owner}: default theme {} failed bounded native parsing: {error:#}",
+                            path.display()
+                        )),
+                    }
+                    continue;
+                }
                 diagnostics.push(format!(
-                    "warning: {owner}: default theme failed bounded native parsing"
+                    "warning: {owner}: default theme {} failed bounded native parsing",
+                    path.display()
                 ));
             }
         }
@@ -422,12 +462,13 @@ impl ResourceLoader {
             let resolver =
                 ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
             let snapshot = resolver.discover(kind, roots);
-            diagnostics.extend(
-                snapshot
-                    .diagnostics()
-                    .iter()
-                    .map(|d| format!("warning: {}: {}", d.path.display(), d.message)),
-            );
+            diagnostics.extend(snapshot.diagnostics().iter().map(|d| {
+                let label = match d.level {
+                    ResourceDiagnosticLevel::Info => "info",
+                    ResourceDiagnosticLevel::Warning => "warning",
+                };
+                format!("{label}: {}: {}", d.path.display(), d.message)
+            }));
             if kind == ResourceKind::Theme {
                 for resource in snapshot.resources() {
                     if !crate::tui::theme::is_reserved_theme_name(&resource.name)
@@ -537,11 +578,75 @@ impl LoadedResourcePaths {
     }
 }
 
+/// Roots that stay the user's own resources even when the workspace contains
+/// them.
+///
+/// Starting octet from the home directory makes the workspace `~`, so the Pi
+/// agent directory and the user's global octet roots are inside it. Containment
+/// alone then classified a palette the user selected in Pi as an untrusted
+/// project resource and refused it, and no workspace trust grant could be the
+/// right answer: a user-global theme is not a project resource. The same user
+/// and project split already keeps the skill tiers apart (`crate::resources`).
+fn user_global_roots(
+    workspace: &Path,
+    home: Option<&Path>,
+    agent_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_owned());
+    let mut roots: Vec<PathBuf> = agent_dirs.into_iter().collect();
+    if let Some(home) = home {
+        for name in [".pi/agent", ".octet", ".agents"] {
+            roots.push(home.join(name));
+        }
+    }
+    let mut roots: Vec<PathBuf> = roots
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect();
+    // A workspace *inside* a user-global root is that root: carving it out would
+    // exempt every project path instead of one user resource family.
+    roots.retain(|root| !workspace.starts_with(root));
+    roots
+}
+
+/// The Pi agent directories the mirrored adapter may have been configured with,
+/// selected exactly as `pi_mirror::settings_binding` selects them for the bridge
+/// process. An unconfigured bridge mirrors `~/.pi/agent` (a `home` root above).
+fn pi_agent_dirs(workspace: &Path) -> Vec<PathBuf> {
+    ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"]
+        .into_iter()
+        .find_map(|name| std::env::var_os(name))
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Load a contributed default theme whose name the picker list reserves.
+fn load_reserved_default_theme(
+    path: &Path,
+    config: &Config,
+) -> anyhow::Result<crate::tui::theme::OctetTheme> {
+    crate::tui::theme::load_theme_path(path, config)
+}
+
+/// Admission is classification first: a path under a user-global root is the
+/// user's own resource, never a project resource this workspace could grant.
 fn admit_path(
     path: &Path,
     config: &Config,
     explicit: &[PathBuf],
     kind: PathKind,
+    user_global: &[PathBuf],
 ) -> anyhow::Result<PathBuf> {
     // Do not canonicalize a selected symlink into an apparently safe input.
     // The final loader still performs its descriptor-bound, no-follow read.
@@ -570,7 +675,10 @@ fn admit_path(
             .is_ok_and(|root| canonical.starts_with(root))
     });
     anyhow::ensure!(
-        config.workspace_trusted || !canonical.starts_with(workspace) || explicit_grant,
+        config.workspace_trusted
+            || !canonical.starts_with(&workspace)
+            || user_global.iter().any(|root| canonical.starts_with(root))
+            || explicit_grant,
         "untrusted workspace resource has no explicit path grant"
     );
     if metadata.is_file() {

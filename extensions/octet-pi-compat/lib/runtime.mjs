@@ -7,7 +7,7 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, re
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { bounded, facade, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, namedAPI, ownerKey, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { createAPI, createContext, extensionDisplayName, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
@@ -15,7 +15,7 @@ import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
 import { customProviderHttp, customProviderHttpChunk, nativeProviderEvent, nativeProviderPayload, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
 import { transformInput } from './context-api.mjs';
-import { retainPiProjectTrust } from './project-trust.mjs';
+import { projectTrustEvent, retainPiProjectTrust } from './project-trust.mjs';
 import { HookBudget, LoadBudget } from './handler-budget.mjs';
 import { forgetMcpRegistrations, hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
@@ -248,13 +248,21 @@ export class Runtime {
     if (surface) surface.desiredMouseCapture = enabled;
     (surface?.store ?? store).mouseCapture = enabled;
   }
-  require(feature) { if (!this.features.has(feature)) unsupported(feature, 'feature was not negotiated'); }
+  require(feature) { if (!this.features.has(feature)) unsupportedAPI(feature, 'feature was not negotiated'); }
   assertSessionOwner(store) {
     if (!store?.state?.owner || !store.state.alive) throw rpcError(-32002, 'not_foreground_owner retained context is unavailable');
   }
   assertOwner(store) {
     this.assertSessionOwner(store);
-    if (store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+    const foreground = this.foreground;
+    // Pi keeps a captured context valid until the session is replaced or
+    // reloaded. A completed, failed, cancelled or interrupted turn does not
+    // invalidate it, so a live state of the same owner/generation is enough.
+    if (!foreground || store.state === foreground) return;
+    const same = store.state.owner?.extension_instance_id === foreground.owner.extension_instance_id
+      && store.state.owner?.process_generation === foreground.owner.process_generation
+      && store.state.workspace === foreground.workspace;
+    if (!same) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
   }
   assertFactory(factory) {
     if (this.failedFactories.has(factory)) throw rpcError(-32002, 'failed extension factory is unavailable');
@@ -290,6 +298,10 @@ export class Runtime {
       signal: requestOptions.signal ?? store.controller.signal,
       ...(requestOptions.onUpdate === undefined ? {} : { onUpdate: requestOptions.onUpdate }),
       timeout: method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
+    // A host that does not serve this method answers -32601. The method name is
+    // this bridge's own vocabulary, so a diagnostic can name it; the rejection
+    // itself is unchanged and still reaches the caller first.
+    response.catch(error => namedAPI(error, method));
     if (method !== 'session/set_name') return response;
     return response.then(result => {
       // This correlated receipt, not a UI mount or an asynchronous snapshot,
@@ -568,7 +580,7 @@ export class Runtime {
     const notifications = [...Object.values(notificationEvents), ...Object.values(followingEvents)].some(event => this.events.has(event));
     // Commands and notification-only factories need real owner lifecycle
     // bindings even when they have no Pi session_start/session_end callbacks.
-    if (this.commands.size || this.shortcuts.size || this.transcript.factories.size || [...this.tools.values()].some(tool => tool.definition.renderCall || tool.definition.renderResult) || hasMcpRegistrations(this) || this.events.has('mcp_servers_change') || notifications || hooks.length) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
+    if (this.commands.size || this.shortcuts.size || this.transcript.factories.size || [...this.tools.values()].some(tool => tool.definition.renderCall || tool.definition.renderResult) || hasMcpRegistrations(this) || this.events.has('mcp_servers_change') || this.events.has('project_trust') || notifications || hooks.length) for (const name of ['session_start', 'session_end']) if (!hooks.includes(name)) hooks.push(name);
     const completions = [...this.commands].filter(([, command]) => command.definition.getArgumentCompletions).map(([name]) => name);
     return {
       ...(completions.length ? { argument_completions: completions } : {}),
@@ -1015,6 +1027,11 @@ export class Runtime {
         const connect = new HookBudget(this, store, 'session_start'), startStore = { ...store };
         await connect.run(this.mcpStartup ??= { label: 'MCP servers' }, startStore, () => startMcpSession(this, startStore));
         connect.finish();
+        // Pi emits project_trust before session_start and before trusted project
+        // resources load; this is the matching point, and the earliest one where
+        // a real foreground owner and UI exist. The event notifies only: native
+        // trust is already decided and no handler result can change admission.
+        await projectTrustEvent(this, store);
       }
       if (p.hook === 'after_tool_call') {
         const toolResult = await this.runToolResult(payload, store);
