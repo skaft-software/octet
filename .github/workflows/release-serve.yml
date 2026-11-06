@@ -197,7 +197,7 @@ jobs:
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
