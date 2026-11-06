@@ -6,7 +6,7 @@
 
 **A fast, native, Pi-compatible coding agent.**
 
-[![Version: 0.10.0](https://img.shields.io/badge/version-0.10.0-536dfe?style=flat-square)](docs/releases/v0.10.0.md)
+[![Version: 0.10.1](https://img.shields.io/badge/version-0.10.1-536dfe?style=flat-square)](docs/releases/v0.10.1.md)
 
 octet reads code, edits files, and runs commands from your terminal. The core is
 native Rust: one process owns the agent loop, sessions, policy, persistence, the
