@@ -994,6 +994,23 @@ fn colour_policy_resolves_from_cli() {
 }
 
 #[test]
+fn explicit_workspace_outside_cwd_becomes_relative_path_base_without_trust() {
+    let outside = cwd();
+    let workspace = cwd();
+    std::fs::create_dir(workspace.path().join("exts")).unwrap();
+    let mut cli = base();
+    cli.workspace = Some(workspace.path().into());
+    cli.extension_dirs = vec!["exts".into()];
+    cli.telemetry = Some("trace.jsonl".into());
+    let config = config_with_empty_global(cli, outside.path()).unwrap();
+    let root = workspace.path().canonicalize().unwrap();
+    assert_eq!(config.workspace, root);
+    assert_eq!(config.invocation_cwd, root);
+    assert_eq!(config.telemetry, Some(root.join("trace.jsonl")));
+    assert!(!config.workspace_trusted);
+}
+
+#[test]
 fn an_explicit_extension_dir_must_exist() {
     let directory = cwd();
     let mut cli = base();

@@ -1,11 +1,11 @@
 # octet documentation
 
-These docs describe the octet **0.10.0** release source, octet's first
+These docs describe the octet **0.10.2** release source, octet's first
 Pi-compatible release. The optional [Pi adapter](pi-compatibility.md) targets
 Pi's public extension API, not its private internals or complete CLI.
 
 Release source is not proof of publication. The
-[versioned release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+[versioned release page](https://github.com/skaft-software/octet/releases/tag/v0.10.2)
 records available downloads; [installation](installation.md) separates source
 builds from version-pinned publication channels and their qualification.
 
@@ -77,7 +77,7 @@ builds from version-pinned publication channels and their qualification.
 
 - [Security](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
-- Release notes: [0.10.0](releases/v0.10.0.md), [0.9.6](releases/v0.9.6.md), [0.9.5](releases/v0.9.5.md), [0.9.4](releases/v0.9.4.md), [0.9.3](releases/v0.9.3.md), [0.9.2](releases/v0.9.2.md), [0.9.1](releases/v0.9.1.md), [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
+- Release notes: [0.10.2](releases/v0.10.2.md), [0.10.1](releases/v0.10.1.md), [0.10.0](releases/v0.10.0.md), [0.9.6](releases/v0.9.6.md), [0.9.5](releases/v0.9.5.md), [0.9.4](releases/v0.9.4.md), [0.9.3](releases/v0.9.3.md), [0.9.2](releases/v0.9.2.md), [0.9.1](releases/v0.9.1.md), [0.9.0](releases/v0.9.0.md), [0.8.2](releases/v0.8.2.md), [0.8.1](releases/v0.8.1.md),
   [0.8.0](releases/v0.8.0.md), [0.7.6 hotfix](releases/v0.7.6.md),
   [0.7.5](releases/v0.7.5.md), [0.7.4 and its documentation
   correction](releases/v0.7.4.md), [0.7.3](releases/v0.7.3.md),

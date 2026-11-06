@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-06
+
+### Fixed
+
+- `octet update` refused every healthy release with `release metadata exceeds
+  the 65536-byte limit`. The bound was applied to GitHub's whole releases
+  payload, which carries all 30 asset entries plus the release notes: the live
+  v0.10.1 response measured 75,595 bytes. The bound is 256 KiB, with the size
+  limit, timeout and strict response validation retained, and a regression test
+  builds a realistic 30-asset payload. Binaries shipped before this fix cannot
+  inherit it; the v0.10.1 release description is shortened so its payload fits
+  the old bound and those installs can still update.
+- `--workspace` accepts an invocation directory outside the workspace, resolving
+  relative paths against the workspace without changing trust admission or
+  confinement.
+- Terse tool-call previews show 12 input rows before truncating (was 6).
+- The README badge, documentation index and Pi compatibility counts name 0.10.2.
+
+### Known limitations
+
+- Binaries published before 0.10.2 keep the 64 KiB release-response bound and
+  cannot read this fix; update with the version-pinned installer if
+  `octet update` reports a size-limit error.
+- `@gotgenes/pi-permission-system` blocks a `--print` tool call for ~30 seconds
+  before the host request timeout ends it, and the run still exits 0. See
+  [Pi compatibility deviations](docs/pi-compat-deviations.md).
+- Cold startup with a full 23-package Pi mirror can exceed 10 seconds; the
+  startup-phase work is scheduled for 0.10.3.
+
 ## [0.10.1] - 2026-11-06
 
 ### Release tooling

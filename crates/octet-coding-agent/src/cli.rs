@@ -1914,13 +1914,14 @@ fn build_config_with_global_path_and_diagnostics(
 ) -> anyhow::Result<Config> {
     let invocation_cwd = cwd.canonicalize()?;
     let workspace = config::resolve_workspace(cli.workspace.as_deref(), &invocation_cwd)?;
-    if !invocation_cwd.starts_with(&workspace) {
-        anyhow::bail!(
-            "invocation directory {} is outside workspace {}",
-            invocation_cwd.display(),
-            workspace.display()
-        );
-    }
+    // An explicitly selected workspace is also the base for relative paths
+    // when the shell was launched elsewhere. Never scan the outside directory
+    // as project context or grant trust merely because it was selected.
+    let invocation_cwd = if cli.workspace.is_some() && !invocation_cwd.starts_with(&workspace) {
+        workspace.clone()
+    } else {
+        invocation_cwd
+    };
 
     // An explicit --extension-dir that does not exist almost always means a setup
     // step did not complete (for example a Pi mirror that was previewed but never

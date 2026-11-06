@@ -758,7 +758,99 @@ async fn rejects_chunked_release_metadata_over_the_hard_limit() {
     let result = check_url(&format!("http://{address}/latest"), "0.1.1").await;
     server.join().unwrap();
     let error = result.unwrap_err();
-    assert!(error.to_string().contains("65536-byte limit"), "{error:#}");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("{MAX_RELEASE_RESPONSE_BYTES}-byte limit")),
+        "{error:#}"
+    );
+}
+
+/// The live v0.10.1 releases payload measured 75,595 bytes — 30 asset entries
+/// plus a 13.5 KiB notes body — so the previous 64 KiB bound refused a healthy
+/// release and `octet update` failed for every user. Rebuild that payload here:
+/// accepting it is the regression, and the hostile-response tests still prove
+/// the bound holds.
+#[tokio::test]
+async fn accepts_a_realistic_thirty_asset_release_payload() {
+    let uploader = serde_json::json!({
+        "login": "github-actions[bot]",
+        "id": 41_898_282u64,
+        "node_id": "MDM6Qm90NDE4OTgyODI=",
+        "avatar_url": "https://avatars.githubusercontent.com/in/15368?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/github-actions%5Bbot%5D",
+        "html_url": "https://github.com/apps/github-actions",
+        "followers_url": "https://api.github.com/users/github-actions%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/github-actions%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/github-actions%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/github-actions%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/github-actions%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/github-actions%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/github-actions%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/github-actions%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/github-actions%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+    });
+    let assets = (0..30)
+        .map(|index| {
+            let name = format!("octet-0.10.1-target-{index}-very-long-asset-name.tar.gz");
+            serde_json::json!({
+                "url": format!("https://api.github.com/repos/skaft-software/octet/releases/assets/{index}"),
+                "id": index,
+                "node_id": format!("RA_kwDOTT61gM4Abc{index}"),
+                "name": name,
+                "label": "",
+                "uploader": uploader,
+                "content_type": "application/gzip",
+                "state": "uploaded",
+                "size": 38_000_000u64 + index,
+                "digest": format!("sha256:{}", "885fb8fc1bacc1a9809cf92cc22015d3ffe5aae500a7398f91210ec62f12e5b2".repeat(2)),
+                "download_count": index,
+                "created_at": "2026-11-06T21:00:00Z",
+                "updated_at": "2026-11-06T21:00:01Z",
+                "browser_download_url": format!("https://github.com/skaft-software/octet/releases/download/v0.10.1/octet-0.10.1-target-{index}-very-long-asset-name.tar.gz"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "url": "https://api.github.com/repos/skaft-software/octet/releases/1",
+        "assets_url": "https://api.github.com/repos/skaft-software/octet/releases/1/assets",
+        "tag_name": "v0.10.1",
+        "target_commitish": "release/v0.10.0-tooling-followup",
+        "name": "octet 0.10.1",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-11-06T20:25:58Z",
+        "published_at": "2026-11-06T20:25:58Z",
+        "html_url": "https://github.com/skaft-software/octet/releases/tag/v0.10.1",
+        "body": "n".repeat(13_567),
+        "assets": assets,
+    })
+    .to_string();
+    assert!(
+        payload.len() > 64 * 1024,
+        "fixture must exceed the old 64 KiB bound (measured {})",
+        payload.len()
+    );
+    assert!(
+        payload.len() < MAX_RELEASE_RESPONSE_BYTES,
+        "a realistic payload must fit the current bound (measured {})",
+        payload.len()
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(payload))
+        .mount(&server)
+        .await;
+    let status = check_url(&format!("{}/latest", server.uri()), "0.10.0")
+        .await
+        .expect("a realistic 30-asset release payload must be accepted");
+    assert!(matches!(status, UpdateStatus::Available { .. }), "{status:?}");
 }
 
 #[tokio::test]
