@@ -2612,6 +2612,22 @@ fn atomic_config_publish_rejects_a_non_locking_external_edit() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn config_update_lock_releases_even_if_descriptor_is_inherited() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let lock = config_update_lock(&path).unwrap();
+    // A child forked by another thread can temporarily retain the same open
+    // file description, even with close-on-exec set on the descriptor.
+    let inherited = lock.0.try_clone().unwrap();
+    drop(lock);
+
+    let next = config_update_lock(&path).expect("completed update must release its lock");
+    drop(next);
+    drop(inherited);
+}
+
 #[test]
 fn concurrent_config_update_fails_without_rewriting() {
     let dir = tempfile::tempdir().unwrap();

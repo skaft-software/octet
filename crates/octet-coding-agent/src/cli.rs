@@ -1395,7 +1395,18 @@ fn extension_grant_source(grant: &str, config_path: &Path) -> Option<(String, Pa
     Some((name.to_owned(), parent.join("extension.toml")))
 }
 
-fn config_update_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+struct ConfigUpdateLock(std::fs::File);
+
+impl Drop for ConfigUpdateLock {
+    fn drop(&mut self) {
+        // A concurrent fork may retain a duplicate of this open file
+        // description. Explicitly unlock at the end of the transaction rather
+        // than waiting for every inherited descriptor to close.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn config_update_lock(path: &std::path::Path) -> anyhow::Result<ConfigUpdateLock> {
     #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -1418,7 +1429,7 @@ fn config_update_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
             path.display()
         )
     })?;
-    Ok(file)
+    Ok(ConfigUpdateLock(file))
 }
 
 fn write_config_atomically(
