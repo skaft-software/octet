@@ -34,7 +34,7 @@ the implicit authority that would start an enabled extension; an explicit
 tool-effect broker. Safe mode is an approval policy, not a sandbox. See
 [Security](SECURITY.md#permissions).
 
-See the [v0.10.0 release notes](docs/releases/v0.10.0.md) for scope, qualification
+See the [v0.10.1 release notes](docs/releases/v0.10.1.md) for changes, qualification
 boundaries and known limitations.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
@@ -42,13 +42,13 @@ boundaries and known limitations.
 ## Install
 
 **Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js
-required. Use the [v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+required. Use the [v0.10.1 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.1)
 for signed assets and channel availability.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.0/install-octet.sh | sh
-octet --version   # octet 0.10.0
+  https://github.com/skaft-software/octet/releases/download/v0.10.1/install-octet.sh | sh
+octet --version   # octet 0.10.1
 ```
 
 **Windows support is a preview.** Windows x86-64 uses the version-matched `install-octet.ps1` and MSVC archive on
