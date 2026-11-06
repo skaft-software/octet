@@ -1,44 +1,40 @@
-# Optional Pi extension compatibility
+# Pi compatibility
 
-> **Experimental and unstable; not shipped in v0.9.6.** This page documents
-> experimental source-only work. Loading real Pi setups can be slow, and
-> individual extensions can fail to load or render.
-> `octet-pi-compat` is excluded from the official release catalog and assets;
-> these development receipts do not qualify installed-Pi lifecycle or workflow parity.
+**v0.10.0 is octet's first Pi-compatible release.** Use your existing Pi
+extensions, skills, prompt templates, themes and custom UI with a native Rust
+agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
-Octet can load explicitly reviewed Pi extension factories through the optional
-`extensions/octet-pi-compat` Node package. **Rust remains the agent and terminal
-host.** The fallback loads installed Pi helpers in the extension process, not a
-second Pi CLI or agent loop. Ordinary octet use and native executable extensions
-do not need Node.
+We're working toward full compatibility with existing Pi setups. The adapter
+follows **Pi 1.4's public extension API**, works with managed Pi installs from
+1.0.2 through 1.4.x, and needs Node 22.19+. Rust still owns the agent loop,
+sessions, permissions and terminal; the adapter loads extension code, not a
+second Pi agent. Ordinary octet use does not need Node.
 
-**Source preview:** unchanged Doom, drawing, and powerline-footer factories have
-passed actual octet binary/PTY acceptance as well as synthetic-host tests. The
-original rainbow editor now passes paced and immediate-burst rescue on a fresh
-native binary, including retained editable draft, resize and shutdown. Full Pi API
-parity and a startup-speed comparison are not established.
+See the [v0.10.0 release notes](releases/v0.10.0.md) for downloads and launch scope.
+Pi support requires octet 0.10.0 or later; v0.9.6 does not ship the adapter.
 
-The contract is **Pi 1.0.2's public extension API**, replicated under Octet's
-subprocess JSON-RPC protocol. octet 0.9.6 is pinned to exactly Pi 1.0.2: the
-adapter ships the dependency versions Pi 1.0.2 ships (jiti 2.7.0, TypeBox
-1.3.27, pi-tui 1.0.2) and resolves imports through the same module table as Pi
-1.0.2's extension loader. The [27-row ledger](pi-extension-api.md) is the
-bounded scope and distinguishes implementation from real-host acceptance.
-Arbitrary third-party extensions, private Pi internals, the Pi CLI and child SDK
-are not targets. The [package README](../extensions/octet-pi-compat/README.md)
-describes the adapter; historical package acceptance is not public API parity.
+For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
+For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
+The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.4
+ship, and pi-tui 1.0.2's components.
+Compatibility concerns public extensions, not Pi's private internals or complete CLI.
 
 <a id="use-your-pi-setup"></a>
 
 ## Use your Pi setup
 
-Install the adapter and turn it on. That is the whole setup; there is nothing to
-configure and no folder to be in:
+With octet **0.10.0+**, Node **22.19+** and your existing Pi setup:
 
 ```bash
 octet extension install octet-pi-compat
-octet --enable-extension octet-pi-compat   # or choose Enable in /extensions
+# Installation is inert. Enable only after reviewing your Pi factories:
+octet --enable-extension octet-pi-compat
 ```
+
+For source development, install locked adapter dependencies as described below,
+then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
+To install a downloaded bundle explicitly, use
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.0.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
@@ -48,7 +44,9 @@ extension such as `powerline-footer` draws the footer, so it matches the one in
 Pi. Nothing is written to your Pi directory or to octet's saved settings, and
 turning the adapter off returns octet to its own setup. Enabling is the review:
 it lets the adapter run your enabled Pi extensions with your OS permissions, as
-Pi does. Project `.pi` resources load only in a trusted workspace. It needs
+Pi does. Native provider-credential disclosure remains a separate reviewed
+opt-in; enabling the stock bundle does not grant it. Native TOML appearance
+remains independent. Project `.pi` resources load only in a trusted workspace. It needs
 Node 22.19+ on `PATH`.
 
 Because the setup is read at every start, a change you make in Pi shows up the
@@ -62,8 +60,10 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 
 ## Bring your Pi extensions
 
-Requires Node 22.19+ or Bun and an existing managed **Pi 1.0.2** installation. From a
-source checkout, install the adapter's dependencies once:
+Requires Node **22.19.0 or newer** and an existing managed Pi installation,
+**1.0.2 through 1.4.x**. The entrypoints reject older Node versions before loading adapter
+dependencies or factories. Bun's existing execution path remains available but
+is separately unqualified. From a source checkout, install dependencies once:
 
 ```bash
 cd /absolute/path/to/octet/extensions/octet-pi-compat
@@ -88,17 +88,20 @@ receive exact manifest grants and require native `builtin_tool_overrides_v1`
 admission. Unsupported tool-schema constraints cause an explicit skip, not
 constraint removal. Supported patterns are enforced. Loading is not proof that an extension's commands, hooks or UI work.
 Failing lifecycle observation callbacks are reported and isolated; permission/veto
-hooks and failed host mutations still fail closed. Replace `node` with `bun` to
-reuse Bun; generated configuration records the executable.
+hooks and failed host mutations still fail closed. Generated configuration records
+the executable; using Bun does not establish Node or Bun compatibility qualification.
 
 `--reviewed` accepts executing the enabled factories and their imports, including
 installed Pi code on the fallback route, with your OS permissions. Setup does not
 import credentials, change Pi settings, or enable the bridge. It snapshots enabled
 Pi palettes as native `pi-*` themes and makes the selected palette this session's
 startup preference; explicit `--theme`/`OCTET_THEME` wins. Saved settings are not
-rewritten. Pi helper/remote-component colors use the imported snapshot; later
-native theme changes are not yet synchronized to those components. While enabled,
-the bridge also exposes current enabled Pi themes in `/theme` at startup and
+rewritten. Pi helpers and remote components receive the imported palette, and
+native theme selection supplies updated palette snapshots and invalidates their
+render caches. This implemented synchronization is not qualification of composed
+editor/footer lifetimes across theme changes. Native TOML appearance and extension
+surface ownership remain separate; enabling extensions does not disable native
+customization. While enabled, the bridge also exposes current enabled Pi themes in `/theme` at startup and
 `/reload`, even without mirror mode. This read-only palette discovery does not
 expand executable grants or change Pi/Octet settings. Invalid or over-budget
 palettes are diagnosed; disabling the extension withdraws them. The built-in
@@ -106,9 +109,43 @@ palettes are diagnosed; disabling the extension withdraws them. The built-in
 Missing packages are not installed. The Pi install location is recorded, so a different
 HOME at runtime does not hide it. A Pi upgrade requires reconfiguration.
 
+### Pi packages octet replaces
+
+For now, a few Pi packages overlap a first-party octet feature. octet uses its
+own version and does not load the Pi package, printing one line at startup:
+
+| Pi package | octet uses instead | Startup line |
+|---|---|---|
+| `pi-subagents` | the `octet-subagents` bundle | `pi-subagents: replaced by octet-subagents` |
+| `@narumitw/pi-goal` | built-in `/goal` | `pi-goal: octet uses its built-in /goal` |
+| Pi codemode (`"defaultTools": ["+codemode"]`) | the `octet-codemode` bundle, when installed and admitted | — |
+
+Matching is by exact npm package name. Behavior follows octet's feature, not
+the Pi package: for example, codemode's `tools.bash` resolves to octet's
+`stdout`/`stderr`/`exit_code` result, and `/goal` text is handled by octet's
+command. See the [codemode README](../extensions/octet-codemode/README.md).
+
+### Command names and native access
+
+Pi commands retain names such as `/mcp:start`. Commands registered during
+`session_start` become discoverable and callable after the host acknowledges
+the registration. Pi extensions may use octet-only built-in names such as `/goal`;
+`/octet:goal` still invokes octet's native command. Pi 1.0.2 built-in command
+names retain native precedence; conflicting
+extension commands are available as `/<extension-owner>:<command>`.
+
+A Pi tool takes precedence over an optional first-party octet extension's tool
+with the same name, without disabling either process or unrelated tools.
+Overrides of native tools such as `read` and `bash` still require their explicit
+reviewed builtin-override grants.
+
 <a id="mirror-your-pi-setup"></a>
 
 ### Mirror your Pi setup
+
+The stock bundle already uses automatic mirroring on explicit
+enablement. The following generated bridge is a distinct fingerprint-bound
+review mode, not an extra mandatory setup step for the stock bundle.
 
 To have an enabled `octet-pi-compat` activate this machine's Pi setup instead of
 one frozen import, configure the reviewed mirror opt-in once:
@@ -153,19 +190,30 @@ provider/model and `defaultThinkingLevel`, package/resource path lists), user
 `extensions|skills|prompts|themes` directories, installed managed npm package
 resources, `keybindings.json` and the global context file. Project `.pi` resources
 require authoritative host workspace trust; it defaults to false, independently
-of factory review. Scoped/versioned npm references resolve only to an existing
+of factory review. `ctx.isProjectTrusted()` separately applies Pi's plain-repository
+rule to already enabled factories: a newly bound owner can report true without
+native workspace trust when there are no trust-requiring `.pi` entries or
+project/ancestor `.agents/skills` (excluding user-global `~/.agents/skills`).
+Adding a resource can narrow this signal; removing one cannot silently restore it
+within the same owner, and an explicit native trust revocation takes precedence.
+A replacement owner reevaluates it. This conservative lifecycle behavior is not
+identical to Pi's retained trust setting. Enabled factories may start repo tooling
+such as language servers, which can execute project code. The signal does not
+admit project resources, change native trust or grant tool permissions.
+Scoped/versioned npm references resolve only to an existing
 matching installed identity. Supported bounded exact/glob selectors and resource
 empty lists retain their selection semantics; unsupported patterns are diagnosed
 rather than broadened. Explicit invocation model/thinking choices win over these
-session-only defaults; unavailable defaults warn without silently lowering effort
-or changing half the model/thinking pair. Deliberate boundaries: Pi `models.json`
+session-only defaults; an unavailable default model warns once and changes
+nothing, while a default thinking level the model lacks clamps silently to the
+nearest supported level, as in Pi. Deliberate boundaries: Pi `models.json`
 HTTP providers and managed git packages remain unsupported, and `auth.json`,
 sessions and trust state are never read. Mirror mode refuses a
 factory that needs a hook outside the advertised set instead of silently
 leaving it inert.
 
-After matching release assets are published, `octet extension install octet-pi-compat`
-installs the adapter with its locked npm dependencies. Run its
+`octet extension install octet-pi-compat` installs the adapter with its locked
+npm dependencies. Run its
 `~/.octet/extensions/octet-pi-compat/configure.mjs` with the same arguments above.
 Keep the generated output separate from the installed bundle; don't overwrite
 its integrity-checked files.
@@ -193,17 +241,39 @@ the generated manifest references it. Node dependencies are extension-local.
 
 ## Slow or stalled extensions
 
-Every hook the host sends runs on one ordered queue, so a single factory that
-never answers (a network call, a child process, an MCP connection) must not hold
-everything else. Each handler gets a time budget: 5 s for lifecycle,
-notification, provider and discovery callbacks; 2 s each and 4 s in total for the
-prompt hooks (`before_agent_start`, `input`), which share the host's 5 s prompt
-deadline. A handler that outlives its budget keeps running but is no longer
-waited for. It is named once in `[Extension issues]`, and later hooks skip it
-while it is still busy instead of waiting on it again. A tool-call guard that
-cannot answer in time blocks the call rather than letting it through. A prompt
-sent while an extension is still starting waits up to 12 s for it, then
-continues without it. A factory's own setup (the work its default export does
+Automatic-mirror registration capture runs asynchronously without blocking the
+native branded input frame. While the explicitly enabled adapter prepares and
+attaches, the native input pump keeps typing in the draft and handles resize.
+First-frame readiness is not full extension-UI readiness or a claim that cold
+startup matches Pi.
+**Continue without a provider** opens the native session and loads normally enabled,
+admitted extensions, including their commands and UI. The current model and context
+usage remain unavailable. Prompts and model-dependent operations stay disabled;
+configuring or selecting a provider requires restarting with the displayed session
+resume command before chatting.
+
+Handlers on the ordered hook queue have callback-wait budgets. The default is
+5 s per handler and 15 s across its chain. Each prompt phase (`input` and
+`before_agent_start`) instead has 2 s per handler and 4 s across its chain;
+resource discovery has 4 s per handler and 4 s across its chain; tool-call
+guards have 10 s per handler and 10 s total. Input and before-agent-start are
+separate host requests, each with a 5 s native deadline.
+A handler that outlives its share keeps running but is no longer waited for. It
+is named once in `[Extension issues]`, and later hooks skip it while it is still
+busy. A tool-call guard that cannot answer in time blocks the call rather than
+letting it through.
+
+These budgets do not bound the whole request. Queueing, setup, transport and
+tracked host operations can take additional time; a pending host operation can
+hold the hook's flush after its callback returns. Synchronously blocked JavaScript
+cannot be preempted either. The native deadline may therefore still be exceeded.
+A callback returning does not itself certify a host mutation. A later callback
+timeout does not discard host-operation failures already recorded at the live
+boundary, including failures from an earlier callback. A failure arriving after
+that boundary settles cannot retroactively change its response. A prompt sent
+while its extension hooks or Pi setup capture are still starting waits up to
+30 s. If they remain unavailable, the prompt is refused for retry rather than
+running without those hooks. A factory's own setup (the work its default export does
 before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts.
@@ -212,8 +282,18 @@ To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and
 redirect stderr, for example `OCTET_STARTUP_TRACE=1 octet 2>trace.txt`. Each
 handler prints one line, such as
 `octet-startup: pi-compat.handler elapsed=… event=session_start factory=pi-lens/dist/index.js took=99ms outcome=ok`
-(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed` or
-`skipped-busy`).
+(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed`,
+`skipped-busy` or `skipped-budget`).
+
+Explicit provider models retain their full `cost.tiers` rates. The highest
+`inputTokensAbove` threshold strictly exceeded by input plus cache-read/write
+tokens selects the request-wide tariff; native accounting preserves fractional
+costs and the two-times-input rate for one-hour cache writes.
+
+Equivalent selected extension models rebind after a successful provider reload.
+An unrelated model's catalog update does not revoke the selected model's continuous
+authority; selected declaration changes (including change-and-restore), authorization
+revocation and owner retirement still fence the captured selection.
 
 ## Message observations
 
@@ -282,9 +362,9 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Only managed Pi 1.0.2 is accepted.
+Managed Pi 1.0.2 through 1.4.x is accepted.
 
-This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
+This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
 
 - Pi's built-in tool factories run commands and file reads/writes in that
@@ -296,7 +376,7 @@ This runs code from your installed Pi 1.0.2 (`@earendil-works/pi-coding-agent`,
   terminal. Pi functions that would start Pi sessions or agents, call models,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
-- A missing Pi install, or any version other than 1.0.2, fails loudly; nothing
+- A missing Pi install, or a version outside 1.0.2–1.4.x, fails loudly; nothing
   downloads or switches Pi versions silently.
 
 ## Qualification and reproduction
@@ -324,8 +404,10 @@ with `--provider-credentials` only after reviewing the loaded factories and impo
 the generated capability is negotiated explicitly, and the host resolves each
 request against exactly one native provider/model. Values are returned only to the
 requesting factory and omitted from status/diagnostics. OAuth request signers that
-cannot be represented as Pi key/header results remain refused; builtin provider
-inheritance and the original Anthropic-attribution provider remain unsupported.
+cannot be represented as Pi key/header results remain refused. Separately
+negotiated native-provider overrides inherit native model identity and delegate
+through the current host client without disclosing its credentials. That seam is
+not a blanket qualification of OAuth-dependent package behavior.
 See the [adapter README](../extensions/octet-pi-compat/README.md) for configuration
 and security limits.
 

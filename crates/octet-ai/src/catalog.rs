@@ -435,6 +435,11 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
             Protocol::MistralConversations => false,
             // Pi's `thinkingLevel` is an effort control; a token budget has no
             // native field and fails closed in the codec.
+            // The extension's own stream maps Pi thinking levels itself.
+            Protocol::ExtensionStream => matches!(
+                reasoning.control,
+                ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle
+            ),
             Protocol::PiMessages => matches!(
                 reasoning.control,
                 ReasoningControl::Effort | ReasoningControl::AlwaysOn | ReasoningControl::Toggle

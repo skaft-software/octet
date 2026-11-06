@@ -392,6 +392,10 @@ struct HeldApi {
 
 impl HeldApi {
     fn start() -> Self {
+        Self::with_status("200 OK")
+    }
+
+    fn with_status(status: &'static str) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
         listener
             .set_nonblocking(true)
@@ -429,7 +433,7 @@ impl HeldApi {
                     "fixture must not receive credentials"
                 );
                 let response_headers = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     SSE_BODY.len()
                 );
                 if socket.write_all(response_headers.as_bytes()).is_err() {
@@ -1131,4 +1135,172 @@ fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
 
     candidate.shutdown();
     assert_eq!(api.count.load(Ordering::SeqCst), 2);
+}
+
+fn program_status_records(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .split("\x1b]7501;")
+        .skip(1)
+        .filter_map(|part| part.split_once("\x1b\\").map(|(body, _)| body.to_owned()))
+        .collect()
+}
+
+#[test]
+fn real_program_status_success_cancel_dedupe_and_exit_pty_contract() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for cancel in [false, true] {
+        let api = HeldApi::start();
+        let mut candidate = Candidate::spawn(&api.url, "dark", "never", "auto");
+        let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+        let mut consumed = 0;
+        await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+        candidate.wait_for_output(WAIT_TIMEOUT, |out| {
+            program_status_records(out)
+                .last()
+                .is_some_and(|s| s == "state=idle:app=octet")
+        });
+        candidate
+            .pty
+            .write_input(b"private fixture prompt must not be in tab metadata\r");
+        api.wait_for_request(&mut candidate, 1);
+        candidate.wait_for_output(WAIT_TIMEOUT, |out| {
+            program_status_records(out)
+                .last()
+                .is_some_and(|s| s == "state=working:app=octet")
+        });
+        candidate.pty.drain_for(Duration::from_millis(300));
+        assert_eq!(
+            program_status_records(&candidate.pty.output),
+            ["state=idle:app=octet", "state=working:app=octet"]
+        );
+        if cancel {
+            candidate.pty.write_input(&[3]);
+        } else {
+            api.release_response();
+        }
+        let expected = if cancel {
+            "state=idle:app=octet"
+        } else {
+            "state=done:app=octet"
+        };
+        candidate.wait_for_output(WAIT_TIMEOUT, |out| {
+            program_status_records(out)
+                .last()
+                .is_some_and(|s| s == expected)
+        });
+        candidate.pty.write_input(b"/name Status fixture\r");
+        candidate.pty.drain_for(Duration::from_millis(200));
+        assert_eq!(program_status_records(&candidate.pty.output).len(), 3);
+        candidate.pty.write_input(b"/settings tui fullscreen\r");
+        candidate.wait_for_output(WAIT_TIMEOUT, |out| {
+            out.windows(b"\x1b[?1049h".len())
+                .any(|bytes| bytes == b"\x1b[?1049h")
+        });
+        candidate.pty.drain_for(Duration::from_millis(100));
+        assert_eq!(
+            program_status_records(&candidate.pty.output).len(),
+            3,
+            "screen replacement rewrote a settled result"
+        );
+        candidate.pty.write_input(&[4]);
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        loop {
+            candidate.pty.read_available();
+            if let Some(status) = candidate.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "program status fixture exit timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        candidate.pty.read_available();
+        assert_eq!(
+            program_status_records(&candidate.pty.output)
+                .last()
+                .map(String::as_str),
+            Some(expected)
+        );
+        assert_eq!(program_status_records(&candidate.pty.output).len(), 3);
+    }
+}
+
+#[test]
+fn real_program_status_never_pollutes_plain_print_rpc_or_redirected_output() {
+    for args in [
+        vec!["--plain"],
+        vec!["-p", "inert"],
+        vec!["--mode", "rpc"],
+        vec![],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_octet"))
+            .args([
+                "--offline",
+                "--no-context-files",
+                "--no-tools",
+                "--tern",
+                "on",
+            ])
+            .args(&args)
+            .current_dir(root.path())
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "stencil-term")
+            .env("TERM_PROGRAM", "tern")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        for stream in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(stream);
+            assert!(
+                !text.contains("\x1b]7501;")
+                    && !text.contains("\x1b]9;4;")
+                    && !text.contains("\x1b]2;"),
+                "{args:?}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn real_program_status_failure_remains_error_at_exit_pty_contract() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldApi::with_status("400 Bad Request");
+    let mut candidate = Candidate::spawn(&api.url, "dark", "never", "auto");
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    candidate.pty.write_input(b"inert rejected request\r");
+    api.wait_for_request(&mut candidate, 1);
+    api.release_response();
+    candidate.wait_for_output(WAIT_TIMEOUT, |out| {
+        program_status_records(out)
+            .last()
+            .is_some_and(|s| s == "state=error:app=octet")
+    });
+    candidate.pty.write_input(&[4]);
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    loop {
+        candidate.pty.read_available();
+        if candidate.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    candidate.pty.read_available();
+    assert_eq!(
+        program_status_records(&candidate.pty.output)
+            .last()
+            .map(String::as_str),
+        Some("state=error:app=octet")
+    );
 }

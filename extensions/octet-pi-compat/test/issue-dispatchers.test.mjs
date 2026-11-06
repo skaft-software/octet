@@ -42,11 +42,10 @@ for (const event of events) test(`${event}: recoverable failures are private, ac
   }
   const notices = peer.seen.filter(notice);
   assert.equal(notices.length, 2);
-  for (const entry of entries) {
-    const matching = notices.filter(frame => frame.params.message.includes(entry));
+  for (const name of ['Extension 0', 'Extension 1']) {
+    const matching = notices.filter(frame => frame.params.message.startsWith(`${name}: `));
     assert.equal(matching.length, 1);
-    assert.match(matching[0].params.message, new RegExp(event + ' callback failed'));
-    assert.match(matching[0].params.message, /Next:/);
+    assert.match(matching[0].params.message, new RegExp(`${event} hook failed and was skipped\\. Update or disable`));
   }
   assert.equal(peer.seen.filter(frame => frame.method === 'notification' && frame.params.message === 'later callback ran').length, 3);
   assert.doesNotMatch(JSON.stringify(notices) + peer.stderr(), new RegExp(secret));
@@ -85,9 +84,7 @@ test('model-turn projection problems group affected extension paths once without
   }
   const notices = peer.seen.filter(notice);
   assert.equal(notices.length, 1, 'one group, not one notice per affected callback or turn');
-  for (const path of entries) assert.ok(notices[0].params.message.includes(path));
-  assert.match(notices[0].params.message, /turn_end.*octet could not convert/i);
-  assert.match(notices[0].params.message, /Next:/);
+  assert.match(notices[0].params.message, /^Extension 0, Extension 1: turn_end data was unavailable, so some activity was missed\. Update octet if this keeps happening\.$/);
   assert.doesNotMatch(JSON.stringify(notices) + peer.stderr(), new RegExp(secret));
   assert.ok((await peer.request('hook/run', modelEnd(peer, 'open_ai_chat')).response).result);
   assert.equal(peer.seen.filter(frame => frame.method === 'notification' && frame.params.message === 'converted turn delivered').length, 2,

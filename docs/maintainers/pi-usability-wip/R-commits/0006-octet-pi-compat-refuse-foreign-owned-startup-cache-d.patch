@@ -1,0 +1,82 @@
+From ed40e6dd82608e16120bb536194e47dd49ae8616 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:51:33 +0000
+Subject: [PATCH 6/8] octet-pi-compat: refuse foreign-owned startup cache
+ directories and tighten loose modes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../octet-pi-compat/lib/startup-cache.mjs     | 10 +++++++-
+ .../test/startup-cache.test.mjs               | 24 ++++++++++++++++++-
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/startup-cache.mjs b/extensions/octet-pi-compat/lib/startup-cache.mjs
+index eb5cfa45..85706104 100644
+--- a/extensions/octet-pi-compat/lib/startup-cache.mjs
++++ b/extensions/octet-pi-compat/lib/startup-cache.mjs
+@@ -1,4 +1,4 @@
+-import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
++import { accessSync, chmodSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+ import { homedir } from 'node:os';
+ import { join } from 'node:path';
+ import module from 'node:module';
+@@ -38,6 +38,14 @@ export function startupCacheDirectory() {
+ function ensure(directory) {
+   try {
+     mkdirSync(directory, { recursive: true, mode: 0o700 });
++    // Cached transforms and resolutions are executed code, so the directory must
++    // be this user's alone. A pre-existing directory is not trusted just because
++    // it is writable: another owner's is refused and loose modes are tightened.
++    if (typeof process.getuid === 'function') {
++      const info = statSync(directory);
++      if (!info.isDirectory() || info.uid !== process.getuid()) return undefined;
++      if (info.mode & 0o077) chmodSync(directory, 0o700);
++    }
+     accessSync(directory, constants.W_OK | constants.X_OK);
+     return directory;
+   } catch {
+diff --git a/extensions/octet-pi-compat/test/startup-cache.test.mjs b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+index 746f20ad..72fa99d9 100644
+--- a/extensions/octet-pi-compat/test/startup-cache.test.mjs
++++ b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
++import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+ import { spawnSync } from 'node:child_process';
+ import { fileURLToPath, pathToFileURL } from 'node:url';
+ import { tmpdir } from 'node:os';
+@@ -19,6 +19,28 @@ test('the startup cache directory is owner-only and reused', () => {
+   assert.equal(startupCacheDirectory(), directory);
+ });
+ 
++test('a pre-existing group/world-writable directory is tightened, not trusted', () => {
++  const previous = process.env.OCTET_PI_COMPAT_CACHE;
++  const loose = mkdtempSync(join(tmpdir(), 'octet-pi-loose-'));
++  try {
++    chmodSync(loose, 0o777);
++    process.env.OCTET_PI_COMPAT_CACHE = loose;
++    assert.equal(startupCacheDirectory(), loose);
++    assert.equal(statSync(loose).mode & 0o777, 0o700);
++  } finally { process.env.OCTET_PI_COMPAT_CACHE = previous; rmSync(loose, { recursive: true, force: true }); }
++});
++
++test('a directory owned by another user is never used', { skip: process.getuid?.() !== 0 }, () => {
++  const previous = process.env.OCTET_PI_COMPAT_CACHE;
++  const foreign = mkdtempSync(join(tmpdir(), 'octet-pi-foreign-'));
++  try {
++    chownSync(foreign, 65534, 65534);
++    process.env.OCTET_PI_COMPAT_CACHE = foreign;
++    assert.equal(startupCacheDirectory(), undefined);
++    assert.deepEqual(jitiCacheOptions(), {});
++  } finally { process.env.OCTET_PI_COMPAT_CACHE = previous; rmSync(foreign, { recursive: true, force: true }); }
++});
++
+ test('a failed persisted write leaves no temporary file behind', () => {
+   const directory = startupCacheDirectory();
+   mkdirSync(join(directory, 'blocked.json')); // renaming a file over a directory fails after the write
+-- 
+2.43.0
+

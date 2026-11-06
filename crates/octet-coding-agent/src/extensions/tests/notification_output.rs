@@ -134,25 +134,15 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group() 
             "{stderr}\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
-        assert_eq!(stderr.matches("[Extension issues]").count(), 1, "{stderr}");
-        let rows = stderr.lines().collect::<Vec<_>>();
-        let header = rows
-            .iter()
-            .position(|line| line.contains("[Extension issues]"))
-            .unwrap();
-        assert!(rows[header].ends_with("[Extension issues]:"), "{stderr}");
-        for (offset, name) in [(1, "first.mjs"), (4, "second.mjs")] {
-            assert!(rows[header + offset].starts_with("    "), "{stderr}");
-            assert!(rows[header + offset].ends_with(name), "{stderr}");
-            assert!(
-                rows[header + offset + 1].contains("failed while loading"),
-                "{stderr}"
-            );
-            assert!(
-                rows[header + offset + 2].starts_with("      Next:"),
-                "{stderr}"
-            );
-        }
+        assert_eq!(stderr.trim(), "[Pi extensions Error] First, Second: skipped: failed while loading. Check dependencies and settings, or disable.");
+        assert!(
+            !stderr.contains("first.mjs"),
+            "no factory paths in public notices"
+        );
+        assert!(
+            !stderr.contains("second.mjs"),
+            "no factory paths in public notices"
+        );
         assert!(!stderr.contains("<U+000A>"), "{stderr}");
         assert!(!stderr.contains(PRIVATE), "{stderr}");
         assert!(!String::from_utf8_lossy(&output.stdout).contains(PRIVATE));
@@ -208,4 +198,25 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group() 
     .unwrap()
     .unwrap();
     app.executable_extensions.shutdown().await;
+}
+
+#[test]
+fn a_failed_start_is_one_short_line_without_stack_or_directories() {
+    let node = "node:internal/modules/esm/resolve:275\n      throw new ERR_MODULE_NOT_FOUND(\n            ^\n\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/me/.octet/ext/node_modules/pkg/keys.js' imported from /home/me/.octet/ext/lib/api.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:275:11)\n  code: 'ERR_MODULE_NOT_FOUND'\n  Node.js v22.23.4";
+    assert_eq!(
+        startup_failure_notice("octet-pi-compat", node),
+        "extension octet-pi-compat did not start: Error [ERR_MODULE_NOT_FOUND]: Cannot find module keys.js imported from api.mjs (see /extensions)"
+    );
+    assert_eq!(
+        startup_failure_notice("x", "spawn failed\u{1b}[31m\nsecond line"),
+        "extension x did not start: spawn failed [31m (see /extensions)"
+    );
+    let long = startup_failure_notice("x", &"界".repeat(500));
+    assert_eq!(long.lines().count(), 1);
+    assert!(long.chars().count() < 220, "{long}");
+    assert!(long.contains('…'));
+    assert_eq!(
+        startup_failure_notice("x", ""),
+        "extension x did not start: no reason given (see /extensions)"
+    );
 }

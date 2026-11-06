@@ -15,6 +15,7 @@ import tomllib
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "package-octet-extension-release.sh"
+VERSION = tomllib.loads((SCRIPT.parent.parent / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 
 
 class ExtensionBundleTests(unittest.TestCase):
@@ -198,12 +199,12 @@ class PiCompatBundleTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(original, target)
         self.output = self.root / "output"
-        self.archive = self.output / "octet-pi-compat-0.9.6.tar.gz"
+        self.archive = self.output / f"octet-pi-compat-{VERSION}.tar.gz"
         self.env = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
 
     def package(self):
         return subprocess.run(
-            ["bash", str(SCRIPT), "octet-pi-compat", str(self.output), "v0.9.6", str(self.source)],
+            ["bash", str(SCRIPT), "octet-pi-compat", str(self.output), f"v{VERSION}", str(self.source)],
             env=self.env, capture_output=True, text=True, timeout=90,
         )
 
@@ -236,20 +237,22 @@ class PiCompatBundleTests(unittest.TestCase):
             capture_output=True, text=True, timeout=90,
         )
 
-    def test_source_only_manifest_is_excluded_from_official_catalog_with_exact_host_pin(self):
+    def test_official_catalog_bundle_has_exact_host_pin(self):
         catalog = (self.repository / "extensions/release-catalog.txt").read_text().splitlines()
-        self.assertNotIn("octet-pi-compat", catalog)
+        self.assertEqual(catalog.count("octet-pi-compat"), 1)
         result = subprocess.run(
-            ["bash", str(SCRIPT), "octet-pi-compat", str(self.output), "v0.9.6"],
-            env=self.env, capture_output=True, text=True, timeout=15,
+            ["bash", str(SCRIPT), "octet-pi-compat", str(self.output), f"v{VERSION}"],
+            env=self.env, capture_output=True, text=True, timeout=90,
         )
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("not in the official release catalog", result.stderr)
-        self.assertFalse(self.archive.exists())
-        manifest = tomllib.loads((self.source / "extension.toml").read_text())
-        self.assertEqual(manifest["version"], "0.9.6")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.archive.is_file())
+        manifest_bytes = (self.source / "extension.toml").read_bytes()
+        with tarfile.open(self.archive) as archive:
+            self.assertEqual(archive.extractfile("octet-pi-compat/extension.toml").read(), manifest_bytes)
+        manifest = tomllib.loads(manifest_bytes.decode())
+        self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(manifest["api_version"], "0.4")
-        self.assertEqual(manifest["requires_octet"], "=0.9.6")
+        self.assertEqual(manifest["requires_octet"], f"={VERSION}")
 
     def test_configured_factories_and_missing_lockfile_are_refused_before_npm(self):
         self.fake_npm("raise RuntimeError('npm must not run')\n")

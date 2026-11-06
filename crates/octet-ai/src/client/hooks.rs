@@ -103,14 +103,14 @@ fn encode_hook_body(payload: &serde_json::Value) -> Result<bytes::Bytes, AiError
 
 /// Exists only when an async subscriber is installed. One identity and ordered
 /// chain survive all three phases; no wire hooks run on opaque host transports.
-pub(super) struct ProviderRequestAttempt {
+pub(crate) struct ProviderRequestAttempt {
     context: ProviderRequestContext,
     hooks: Vec<Arc<dyn ProviderRequestHook>>,
     timeout: std::time::Duration,
 }
 
 impl ProviderRequestAttempt {
-    pub(super) fn new(
+    pub(crate) fn new(
         model: &Model,
         client_hooks: &[Arc<dyn ProviderRequestHook>],
         request_hooks: &[Arc<dyn ProviderRequestHook>],
@@ -133,7 +133,7 @@ impl ProviderRequestAttempt {
         })
     }
 
-    pub(super) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
+    pub(crate) async fn payload(&self, mut body: bytes::Bytes) -> Result<bytes::Bytes, AiError> {
         tokio::time::timeout(self.timeout, async {
             for hook in &self.hooks {
                 if let Some(payload) = hook
@@ -149,7 +149,7 @@ impl ProviderRequestAttempt {
         .map_err(|_| hook_deadline())?
     }
 
-    pub(super) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
+    pub(crate) async fn headers(&self, headers: &mut http::HeaderMap) -> Result<(), AiError> {
         tokio::time::timeout(self.timeout, async {
             for hook in &self.hooks {
                 let before = headers.clone();
@@ -162,7 +162,7 @@ impl ProviderRequestAttempt {
         .map_err(|_| hook_deadline())?
     }
 
-    pub(super) async fn response(
+    pub(crate) async fn response(
         &self,
         status: http::StatusCode,
         headers: &http::HeaderMap,
@@ -204,4 +204,62 @@ pub(super) fn prepare_host_request(
         crate::CompatibilityMode::Strict,
     )?;
     Ok((request, diagnostics))
+}
+
+pub(super) fn open_native_continuation(
+    client: super::AiClient,
+    model: Model,
+    request: Request,
+    overrides: crate::RequestOverrides,
+    options: crate::HostRequestOptions,
+    sender: Option<Arc<dyn crate::HostHttpSender>>,
+    custom_openai_chat: Option<crate::CustomOpenAiChatProfile>,
+) -> futures_util::future::BoxFuture<'static, Result<crate::ResponseStream, AiError>> {
+    Box::pin(async move {
+        if custom_openai_chat.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "native request continuation cannot accept a custom Chat profile".into(),
+            )
+            .into());
+        }
+        if sender.is_some() {
+            return Err(crate::ConfigError::Parse(
+                "native request continuation cannot accept a custom HTTP sender".into(),
+            )
+            .into());
+        }
+        client
+            .stream_with_host_options(&model, request, overrides, options)
+            .await
+    })
+}
+
+pub(super) fn open_custom_http_continuation(
+    client: super::AiClient,
+    mut model: Model,
+    request: Request,
+    overrides: crate::RequestOverrides,
+    options: crate::HostRequestOptions,
+    sender: Option<Arc<dyn crate::HostHttpSender>>,
+    custom_openai_chat: Option<crate::CustomOpenAiChatProfile>,
+) -> futures_util::future::BoxFuture<'static, Result<crate::ResponseStream, AiError>> {
+    Box::pin(async move {
+        let sender = sender.ok_or_else(|| {
+            crate::ConfigError::Parse("custom HTTP continuation requires its sender".into())
+        })?;
+        if let Some(profile) = custom_openai_chat {
+            if model.spec.protocol != crate::Protocol::OpenAiChat {
+                return Err(crate::ConfigError::Parse(
+                    "custom Chat profile requires Chat Completions".into(),
+                )
+                .into());
+            }
+            Arc::make_mut(&mut model.endpoint)
+                .runtime
+                .openai_chat_profile = crate::OpenAiChatRuntimeProfile::PiCustom(profile);
+        }
+        client
+            .stream_custom_http_with_host_options(&model, request, overrides, options, sender)
+            .await
+    })
 }

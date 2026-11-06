@@ -28,8 +28,10 @@ use crate::tui::theme_schema::{self, ParsedTheme, RoleStyleSpec, ThemeSurface};
 mod discovery;
 mod pi;
 mod terminal_colors;
+mod transcript;
 use crate::tui::terminal::TerminalThemeColors;
 use pi::{pi_theme_for, pi_theme_with_colors};
+use transcript::TranscriptRole;
 
 pub use discovery::compiled_file_theme_names;
 pub(crate) use discovery::{
@@ -394,6 +396,7 @@ pub struct OctetTheme {
     background: TerminalBackground,
     shimmer: ShimmerMode,
     semantic_styles: BTreeMap<String, TextStyle>,
+    transcript_specs: BTreeMap<String, RoleStyleSpec>,
     glyphs: BTreeMap<String, String>,
     ascii_glyphs: BTreeMap<String, String>,
     surfaces: BTreeMap<String, ThemeSurface>,
@@ -442,6 +445,7 @@ fn unicode_glyph(name: &str) -> &'static str {
         "separator" => " · ",
         "ellipsis" => "…",
         "bullet" => "•",
+        "list_bullet" => "—",
         "wordmark" => "octet",
         _ => "*",
     }
@@ -466,6 +470,7 @@ fn ascii_glyph(name: &str) -> &'static str {
         "separator" => " - ",
         "ellipsis" => "...",
         "bullet" => "*",
+        "list_bullet" => "-",
         "wordmark" => "octet",
         _ => "*",
     }
@@ -496,6 +501,7 @@ fn default_glyphs() -> BTreeMap<String, String> {
         "separator",
         "ellipsis",
         "bullet",
+        "list_bullet",
         "wordmark",
     ]
     .into_iter()
@@ -653,6 +659,7 @@ impl OctetTheme {
             background,
             shimmer: ShimmerMode::from_environment(),
             semantic_styles: BTreeMap::new(),
+            transcript_specs: BTreeMap::new(),
             glyphs: default_glyphs(),
             ascii_glyphs: default_ascii_glyphs(),
             surfaces: default_surfaces(),
@@ -712,6 +719,11 @@ impl OctetTheme {
         self.semantic_styles.contains_key("extension.pi.accent")
     }
 
+    pub(crate) fn activity_shimmer_enabled(&self) -> bool {
+        self.resolve::<bool>("activity_shimmer")
+            .unwrap_or_else(|| !self.is_pi_theme())
+    }
+
     #[allow(dead_code)]
     pub fn source(&self) -> &ThemeSource {
         &self.source
@@ -741,8 +753,9 @@ impl OctetTheme {
         let narrow = self.layout_for_width(width).narrow;
         self.surfaces
             .get(kind)
+            .or_else(|| (kind == "activity").then(|| &self.surfaces["reasoning"]))
             .expect("built-in transcript surface kind")
-            .resolve(narrow)
+            .resolve(narrow, self.layout.block_padding_x)
     }
 
     #[allow(dead_code)]
@@ -776,10 +789,15 @@ impl OctetTheme {
         self.semantic_styles.keys().map(String::as_str)
     }
 
+    pub(crate) fn has_semantic_style(&self, role: &str) -> bool {
+        self.semantic_styles.contains_key(role)
+    }
+
     pub fn semantic_style(&self, role: &str) -> TextStyle {
         self.semantic_styles
             .get(role)
             .copied()
+            .or_else(|| TranscriptRole::from_name(role).map(|role| role.default_style(self)))
             .or_else(|| semantic_text_role(role).map(|(role, _)| self.inner.style(role)))
             .unwrap_or_else(|| {
                 TextStyle::plain()
@@ -795,6 +813,64 @@ impl OctetTheme {
             return text.to_owned();
         }
         self.inner.apply_style(self.semantic_style(role), text)
+    }
+
+    /// Apply a transcript role inside a surface, honoring explicit `false`
+    /// attributes and terminal-default colors without losing the outer fill
+    /// for properties the role did not override.
+    pub(crate) fn apply_transcript_role_on_surface(
+        &self,
+        role: &str,
+        surface: &str,
+        text: &str,
+    ) -> String {
+        let Some(spec) = self.transcript_specs.get(role) else {
+            return self.apply_semantic_role(role, text);
+        };
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
+        let inner = self.semantic_style(role);
+        let outer = self.semantic_style(surface);
+        let mut reset = String::new();
+        if spec.bold == Some(false) || spec.dim == Some(false) {
+            reset.push_str("\x1b[22m");
+            if spec.bold != Some(false) && outer.attributes.bold {
+                reset.push_str("\x1b[1m");
+            }
+            if spec.dim != Some(false) && outer.attributes.dim {
+                reset.push_str("\x1b[2m");
+            }
+        }
+        for (disabled, sequence) in [
+            (spec.italic == Some(false), "\x1b[23m"),
+            (spec.underline == Some(false), "\x1b[24m"),
+            (spec.strikethrough == Some(false), "\x1b[29m"),
+            (spec.inverse == Some(false), "\x1b[27m"),
+            (
+                spec.foreground.is_some() && inner.foreground == Color::Default,
+                "\x1b[39m",
+            ),
+            (
+                spec.background.is_some() && inner.background == Color::Default,
+                "\x1b[49m",
+            ),
+        ] {
+            if disabled {
+                reset.push_str(sequence);
+            }
+        }
+        let styled = self.inner.apply_style(inner, text);
+        if reset.is_empty() {
+            return styled;
+        }
+        // A completely plain inner style has no reset of its own. Add one so
+        // the enclosing surface reopens for the rest of the row.
+        if styled.ends_with("\x1b[0m") {
+            format!("{reset}{styled}")
+        } else {
+            format!("{reset}{styled}\x1b[0m")
+        }
     }
 
     /// Apply an outer semantic layer while preserving it across trusted ANSI
@@ -1236,22 +1312,35 @@ impl OctetTheme {
     }
 
     /// Build the renderer used for model reasoning. Every semantic role keeps
-    /// its own colour while prose receives a muted foreground, so the stream
-    /// recedes behind the final response without changing font shape.
+    /// its own colour while prose receives the configured thinking style.
+    /// With no override it stays upright, using the terminal foreground when
+    /// the background is unknown and a muted gray on known profiles.
     pub fn reasoning_renderer(&self) -> RichRenderer {
         let mut theme = self.inner.clone();
-        let reasoning_foreground = balance_foreground("#777777", self.background);
-        let reasoning_foreground = parse_hex_color(&reasoning_foreground)
-            .map(|color| Color::Rgb(color.red, color.green, color.blue));
+        let thinking = self.semantic_style("thinking");
+        let spec = self.transcript_specs.get("thinking");
         for role in REASONING_PROSE_ROLES {
             let mut style = theme.style(*role);
-            if let Some(foreground) = reasoning_foreground {
-                style.foreground = foreground;
+            style.foreground = thinking.foreground;
+            style.attributes.dim = thinking.attributes.dim;
+            style.attributes.italic = thinking.attributes.italic;
+            if let Some(spec) = spec {
+                if spec.background.is_some() {
+                    style.background = thinking.background;
+                }
+                if spec.bold.is_some() {
+                    style.attributes.bold = thinking.attributes.bold;
+                }
+                if spec.underline.is_some() {
+                    style.attributes.underline = thinking.attributes.underline;
+                }
+                if spec.strikethrough.is_some() {
+                    style.attributes.strikethrough = thinking.attributes.strikethrough;
+                }
+                if spec.inverse.is_some() {
+                    style.attributes.inverse = thinking.attributes.inverse;
+                }
             }
-            // Do not use SGR faint here. A muted foreground gives the desired
-            // hierarchy without changing the terminal's font weight/shape.
-            style.attributes.dim = false;
-            style.attributes.italic = false;
             theme.override_style(*role, style);
         }
         // Muted/subtle roles are used by code-frame labels and ellipses. Keep
@@ -1259,9 +1348,7 @@ impl OctetTheme {
         // inherits the thinking prose treatment.
         for role in [TextRole::Muted, TextRole::Subtle] {
             let mut style = theme.style(role);
-            if let Some(foreground) = reasoning_foreground {
-                style.foreground = foreground;
-            }
+            style.foreground = thinking.foreground;
             style.attributes.dim = false;
             style.attributes.italic = false;
             style.attributes.underline = false;
@@ -1271,7 +1358,11 @@ impl OctetTheme {
     }
 
     fn rich_renderer_with_inner(&self, mut theme: SexyTheme) -> RichRenderer {
-        let capabilities = rich_capabilities(self.capabilities);
+        let mut capabilities = rich_capabilities(self.capabilities);
+        // Retained rows also carry application-owned link hit targets. Keep
+        // their zero-width metadata even when the terminal cannot render OSC 8;
+        // OctetTerminal suppresses unsupported envelopes at the output boundary.
+        capabilities.hyperlinks = self.capabilities.interactive;
         theme.set_capabilities(capabilities);
         RichRenderer::new(
             theme,
@@ -1286,7 +1377,16 @@ impl OctetTheme {
                 tables: true,
                 stable_block_geometry: true,
                 prose_width: None,
-                unordered_list_marker: UnorderedListMarker::Dash,
+                unordered_list_marker: UnorderedListMarker::Custom {
+                    unicode: self.glyphs["list_bullet"]
+                        .chars()
+                        .next()
+                        .expect("validated glyph"),
+                    ascii: self.ascii_glyphs["list_bullet"]
+                        .chars()
+                        .next()
+                        .expect("validated glyph"),
+                },
                 ..RenderOptions::default()
             },
         )
@@ -1495,8 +1595,28 @@ fn apply_role_style(
 
     let mut style = mapped.map_or_else(
         || {
-            TextStyle::plain()
-                .foreground(theme.inner.resolve_color(token).unwrap_or(Color::Default))
+            TranscriptRole::from_name(name).map_or_else(
+                || {
+                    let parent = match name {
+                        "surface.tool.pending" | "surface.tool.success" | "surface.tool.error" => {
+                            Some("surface.tool")
+                        }
+                        "surface.shell.pending"
+                        | "surface.shell.success"
+                        | "surface.shell.error" => Some("surface.shell"),
+                        _ => None,
+                    };
+                    parent.map_or_else(
+                        || {
+                            TextStyle::plain().foreground(
+                                theme.inner.resolve_color(token).unwrap_or(Color::Default),
+                            )
+                        },
+                        |parent| theme.semantic_style(parent),
+                    )
+                },
+                |role| role.default_style(theme),
+            )
         },
         |(role, _)| theme.inner.style(role),
     );
@@ -1546,6 +1666,9 @@ fn build_parsed_theme(
         background,
     );
     let adaptive = parsed.metadata.adaptive;
+    // Transcript role defaults depend on the selected profile while roles are
+    // compiled; preserve it before resolving any semantic style inheritance.
+    theme.metadata = parsed.metadata.clone();
     for (token, value) in &parsed.tokens {
         let value = if adaptive {
             adaptive_color_value(token, value, background)
@@ -1555,12 +1678,29 @@ fn build_parsed_theme(
         theme.override_token(token, &value);
     }
     apply_required_surfaces(&mut theme, background);
+    theme.transcript_specs = parsed
+        .roles
+        .iter()
+        .filter(|(name, _)| TranscriptRole::from_name(name).is_some())
+        .map(|(name, spec)| (name.clone(), spec.clone()))
+        .collect();
     for (name, style) in &parsed.roles {
         apply_role_style(&mut theme, name, style, adaptive)?;
+    }
+    // Reapply transcript overrides after their legacy semantic parents, including
+    // aliases such as `text`, have been compiled. The first pass keeps existing
+    // role-token references available in their original order.
+    for (name, style) in &parsed.roles {
+        if TranscriptRole::from_name(name).is_some() {
+            apply_role_style(&mut theme, name, style, adaptive)?;
+        }
     }
     theme.glyphs.extend(parsed.glyphs);
     theme.ascii_glyphs.extend(parsed.ascii_glyphs);
     theme.surfaces.extend(parsed.surfaces);
+    if parsed.legacy_pi_presentation {
+        transcript::apply_legacy_pi_presentation(&mut theme, &parsed.roles);
+    }
     theme.layout = parsed.layout;
     theme.metadata = parsed.metadata;
     if theme.metadata.name.trim().is_empty() {
@@ -1844,6 +1984,49 @@ pub(crate) fn load_theme_for_background(
             background,
             TerminalCapabilities::detect(config.color, config.plain),
         ),
+    }
+}
+
+/// Retain a validated active file when a reload fell back because its current
+/// contents are invalid. Discovery must still select the same source: a missing,
+/// withdrawn or shadowed resource cannot keep a retired palette alive.
+pub(crate) fn retain_invalid_file_theme(
+    config: &Config,
+    current: &OctetTheme,
+    candidate: OctetTheme,
+) -> (OctetTheme, Option<String>) {
+    let Some(path) = current.source_path() else {
+        return (candidate, None);
+    };
+    if !candidate.is_compiled_default() {
+        return (candidate, None);
+    }
+    let Some(name) = config.theme.as_deref() else {
+        return (candidate, None);
+    };
+    let Ok((resolver, resource)) = resolved_theme_resource(name, config) else {
+        return (candidate, None);
+    };
+    if resource.path != path {
+        return (candidate, None);
+    }
+    match resolver.read_text(&resource).and_then(|source| {
+        load_resolved_theme_for(
+            &resource.path,
+            &source,
+            current.capabilities(),
+            current.background(),
+        )
+    }) {
+        Ok(theme) => (theme, None),
+        Err(error) => {
+            let diagnostic = format!("theme {name:?}: {error:#}; previous theme retained")
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(4096)
+                .collect();
+            (current.clone(), Some(diagnostic))
+        }
     }
 }
 

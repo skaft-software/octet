@@ -18,7 +18,7 @@ const suppliedSource = process.env.PI_FLEET_HASHLINE_PATH;
 const suppliedPi = process.env.PI_FLEET_AGENT_DIR;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const moduleTree = path => path.includes(`${sep}node_modules${sep}`)
-  ? path.slice(0, path.lastIndexOf(`${sep}node_modules${sep}`) + '/node_modules'.length) : path;
+  ? path.slice(0, path.lastIndexOf(`${sep}node_modules${sep}`) + '/node_modules'.length) : dirname(path);
 
 async function isolated(t, source, pi) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'octet-hashline-original-')));
@@ -83,7 +83,7 @@ syncBuiltinESMExports();
   return { dir, env, audit };
 }
 
-test('original hashline: reviewed installed route executes hashed text, anchored edit and image reads under guards', {
+test('original hashline: brokered route executes hashed text, anchored edit and native-delegated image reads under guards', {
   skip: !suppliedSource || !suppliedPi ? 'explicit PI_FLEET_HASHLINE_PATH and PI_FLEET_AGENT_DIR required' : false,
   timeout: 45000,
 }, async t => {
@@ -92,7 +92,7 @@ test('original hashline: reviewed installed route executes hashed text, anchored
   const before = await Promise.all(unchanged.map(async path => digest(await readFile(path))));
   const { dir, env, audit } = await isolated(t, source, pi);
   const routed = await routeExtensions([source], { cwd: dir, env });
-  assert.deepEqual(routed.map(route => route.route), ['installed'], JSON.stringify(routed));
+  assert.deepEqual(routed.map(route => route.route), ['shims'], JSON.stringify(routed));
   const configured = configure({ output: join(dir, 'octet-pi-compat'), extensions: [source], reviewed: true,
     routes: Object.fromEntries(routed.map(route => [route.entry, route.route])), piAgentDir: pi, env, cwd: dir });
   const manifest = await readFile(join(configured.output, 'extension.toml'), 'utf8');
@@ -104,7 +104,7 @@ test('original hashline: reviewed installed route executes hashed text, anchored
   assert.ok(metadata.tools.some(tool => tool.name === 'read'));
   assert.ok(metadata.tools.some(tool => tool.name === 'replace'));
   const h = launch(t, [source], { metadata, config: configPath, env, cwd: dir, auto: false });
-  const features = ['builtin_tool_overrides_v1', 'dynamic_tools', 'tool_prompt_metadata_v1', 'artifacts', 'session_entries', 'active_tools', 'lifecycle_events', 'input_transform_v1', 'before_prompt_state_v1', 'resource_paths_v1'];
+  const features = ['tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'builtin_tool_overrides_v1', 'dynamic_tools', 'tool_prompt_metadata_v1', 'artifacts', 'session_entries', 'active_tools', 'lifecycle_events', 'input_transform_v1', 'before_prompt_state_v1', 'resource_paths_v1'];
   const initialized = await h.request('initialize', { api_version: '0.4', workspace: dir, host,
     extension: { name: 'octet-pi-compat' }, capabilities: { builtin_tool_overrides: grants },
     contributes: { tools: metadata.tools.map(tool => tool.name), commands: metadata.commands.map(command => command.name),
@@ -141,6 +141,17 @@ test('original hashline: reviewed installed route executes hashed text, anchored
   assert.ok(edited.result && !edited.result.is_error, JSON.stringify(edited));
   assert.equal(await readFile(textPath, 'utf8'), 'alpha\nBETA\ngamma\n');
   const image = h.request('tool/call', { name: 'read', arguments: { path: imagePath }, context });
+  const delegated = await h.wait(frame => frame.method === 'composition/call');
+  assert.equal(delegated.params.parent_request_id, image.id);
+  assert.equal(delegated.params.name, 'read');
+  assert.equal(delegated.params.builtin, true);
+  assert.equal(delegated.params.full_outcome, true);
+  assert.equal(delegated.params.arguments.path, imagePath);
+  assert.equal(delegated.params.arguments.limit, 2000);
+  h.send({ jsonrpc: '2.0', id: delegated.id, result: { value: {
+    tool_call: { id: `${image.id}/1`, name: 'read', arguments: delegated.params.arguments },
+    content: [{ Media: { Image: { source: { Inline: (await readFile(imagePath)).toString('base64') }, media_type: 'image/png' } } }], is_error: false,
+  } } });
   const published = await h.wait(frame => frame.method === 'artifact/publish');
   const upload = published.params;
   assert.equal(upload.mime_type, 'image/png'); assert.equal(upload.data.encoding, 'base64');

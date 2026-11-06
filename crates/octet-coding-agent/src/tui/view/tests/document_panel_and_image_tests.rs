@@ -480,6 +480,32 @@ fn finish_transcript_block_preserves_trailing_image_reservation_rows() {
 }
 
 #[test]
+fn clipped_nested_tool_image_keeps_its_two_cell_destination_gutter() {
+    use sexy_tui_rs::images::crop_anchors_to_window;
+    use sexy_tui_rs::{ImageAnchor, ImageId, ImageLayout, ImageProtocol};
+
+    let anchor = ImageAnchor::new(
+        ImageProtocol::Kitty,
+        ImageId::new(42).unwrap(),
+        ImageLayout::new(30, 4).unwrap(),
+    )
+    .marker();
+    // Tool output nests its image anchor after `└ `; the blank reservation rows
+    // must not repaint that glyph when the viewport starts inside the image.
+    let mut rows = vec!["Read screenshot.png".to_owned(), format!("└ {anchor}")];
+    rows.extend(vec![String::new(); 3]);
+    let finished = super::finish_transcript_block(rows);
+
+    let clipped = crop_anchors_to_window(&finished, 2, 5);
+
+    assert_eq!(visible_width(&clipped[0]), 0, "{clipped:?}");
+    assert!(
+        clipped[0].contains(",t=1,n=3,x=2\x1b\\"),
+        "the carried placement must retain the tool gutter: {clipped:?}"
+    );
+}
+
+#[test]
 fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     use sexy_tui_rs::{ImageDimensions, ImageLayout, ImageProtocol};
 

@@ -398,6 +398,30 @@ pub fn supported_levels_with_subagents(
         .collect()
 }
 
+/// Pi keeps a configured default the model cannot honour by moving it to the
+/// nearest supported level above it, else the nearest below, never an error.
+pub(crate) fn clamp_thinking_level(
+    level: ThinkingLevel,
+    supported: &[ThinkingLevel],
+) -> ThinkingLevel {
+    if supported.contains(&level) {
+        return level;
+    }
+    let rank = thinking_level_order(level);
+    supported
+        .iter()
+        .copied()
+        .filter(|candidate| thinking_level_order(*candidate) >= rank)
+        .min_by_key(|candidate| thinking_level_order(*candidate))
+        .or_else(|| {
+            supported
+                .iter()
+                .copied()
+                .max_by_key(|candidate| thinking_level_order(*candidate))
+        })
+        .unwrap_or(level)
+}
+
 /// Explicit interactive choices must not silently normalize an unsupported effort.
 /// Startup/configuration normalization intentionally retains its separate policy.
 pub fn requested_thinking_to_reasoning(
@@ -445,17 +469,14 @@ pub enum Reconfig {
 }
 
 /// Apply one consuming configuration transition at an idle boundary.
-pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
+pub fn apply_reconfig(mut app: App, reconfig: Reconfig) -> anyhow::Result<App> {
     match reconfig {
         Reconfig::Model(id) => {
+            if try_apply_model_reconfig(&mut app, &id)? {
+                return Ok(app);
+            }
             let model = app.catalog.resolve(&id)?;
-            let reasoning = app
-                .model_scope
-                .as_ref()
-                .and_then(|scope| scope.iter().find(|entry| entry.id == id))
-                .and_then(|entry| entry.reasoning.as_deref())
-                .map(crate::config::parse_reasoning)
-                .transpose()?;
+            let reasoning = scoped_model_reasoning(&app, &id)?;
             bootstrap::rebuild_app(app, Some(model), reasoning, None, None)
         }
         Reconfig::Thinking(reasoning) => {
@@ -489,6 +510,24 @@ pub fn apply_reconfig(app: App, reconfig: Reconfig) -> anyhow::Result<App> {
             Some(bootstrap::SessionSelection::Forked(path)),
         ),
     }
+}
+
+fn scoped_model_reasoning(app: &App, id: &ModelId) -> anyhow::Result<Option<ReasoningConfig>> {
+    app.model_scope
+        .as_ref()
+        .and_then(|scope| scope.iter().find(|entry| &entry.id == id))
+        .and_then(|entry| entry.reasoning.as_deref())
+        .map(crate::config::parse_reasoning)
+        .transpose()
+}
+
+/// Commit a compatible idle selection without replacing the App or its fleet.
+/// False leaves the selection to the existing blocking rebuild path.
+pub(crate) fn try_apply_model_reconfig(app: &mut App, id: &ModelId) -> anyhow::Result<bool> {
+    app.synchronize_extension_provider_catalog();
+    let model = app.catalog.resolve(id)?;
+    let reasoning = scoped_model_reasoning(app, id)?;
+    bootstrap::try_select_model_at_idle(app, model, reasoning)
 }
 
 /// Mode-agnostic application state. TUI state and themes stay outside this type.
@@ -538,8 +577,12 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
         return false;
     };
     current.endpoint.id == active.endpoint.id
-        && current.spec.id == active.spec.id
         && current.spec.endpoint == active.spec.endpoint
+        && same_model_facts(&current, active)
+}
+
+fn same_model_facts(current: &Model, active: &Model) -> bool {
+    current.spec.id == active.spec.id
         && current.spec.api_name == active.spec.api_name
         && current.spec.display_name == active.spec.display_name
         && current.spec.protocol == active.spec.protocol
@@ -549,7 +592,61 @@ fn catalog_route_matches_active_model(catalog: &ModelCatalog, active: &Model) ->
         && current.spec.cache == active.spec.cache
 }
 
+pub(crate) enum PreparedAppSubmission {
+    Ordinary(octet_agent::UserInput),
+    Host(Box<octet_agent::PreparedHostPrompt>),
+}
+
+impl PreparedAppSubmission {
+    pub(crate) async fn start(
+        self,
+        agent: &mut Agent,
+        mode: octet_agent::PreparedPromptMode,
+    ) -> Result<octet_agent::Run<'_>, Box<octet_agent::AgentError>> {
+        match self {
+            Self::Host(prepared) => agent.prompt_prepared(*prepared, mode).await,
+            Self::Ordinary(input) => match mode {
+                octet_agent::PreparedPromptMode::Normal => agent.prompt(input).await,
+                octet_agent::PreparedPromptMode::ResponsesPrewarm => {
+                    agent.prompt_with_responses_prewarm(input).await
+                }
+                octet_agent::PreparedPromptMode::WithoutTools => {
+                    agent.prompt_without_tools(input).await
+                }
+            },
+        }
+        .map_err(Box::new)
+    }
+}
+
 impl App {
+    pub(crate) fn prepare_submission(
+        &mut self,
+        input: octet_agent::UserInput,
+    ) -> anyhow::Result<(PreparedAppSubmission, Vec<String>)> {
+        let notices = self.synchronize_extension_provider_catalog_for_request()?;
+        self.agent.set_tool_inference_resolver(Some(
+            self.executable_extensions
+                .tool_inference_model_resolver(&self.catalog),
+        ));
+        if !catalog_route_matches_active_model(&self.catalog, self.agent.model())
+            || !same_model_facts(&self.model, self.agent.model())
+            || self.model.endpoint.id != self.agent.model().endpoint.id
+        {
+            anyhow::bail!("App and Agent selected models differ at prompt preparation");
+        }
+        let transport = self
+            .executable_extensions
+            .prepare_selected_provider_transport(self.agent.model())?;
+        let prepared = match transport {
+            Some(fetch) => {
+                PreparedAppSubmission::Host(Box::new(self.agent.prepare_host_prompt(input, fetch)))
+            }
+            None => PreparedAppSubmission::Ordinary(input),
+        };
+        Ok((prepared, notices))
+    }
+
     /// Attaches every extension process whose handshake has settled.
     ///
     /// The first interactive frame is drawn before the extension host is ready
@@ -850,13 +947,29 @@ impl App {
                 self.model.spec.id.0
             )
         })?;
-        if !catalog_route_matches_active_model(&self.catalog, &self.model) {
+        if !catalog_route_matches_active_model(&self.catalog, &self.model)
+            && !self.rebind_reloaded_extension_provider_model()?
+        {
             anyhow::bail!(
                 "the active model {} route changed after an extension provider update; select it again before prompting",
                 self.model.spec.id.0
             );
         }
         Ok(diagnostics)
+    }
+
+    fn rebind_reloaded_extension_provider_model(&mut self) -> anyhow::Result<bool> {
+        let Some(model) = self
+            .executable_extensions
+            .reloaded_provider_model(&self.catalog, &self.model)
+        else {
+            return Ok(false);
+        };
+        if !same_model_facts(&model, &self.model) {
+            return Ok(false);
+        }
+        Ok(bootstrap::try_select_model_at_idle(self, model, None)?
+            && catalog_route_matches_active_model(&self.catalog, &self.model))
     }
 }
 
@@ -874,6 +987,19 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pi_default_thinking_clamps_up_first_then_down() {
+        use ThinkingLevel::*;
+        let supported = [Off, Low, High];
+        assert_eq!(clamp_thinking_level(Max, &supported), High);
+        assert_eq!(clamp_thinking_level(Medium, &supported), High);
+        assert_eq!(clamp_thinking_level(Minimal, &supported), Low);
+        assert_eq!(clamp_thinking_level(Low, &supported), Low);
+        assert_eq!(clamp_thinking_level(Medium, &[Off]), Off);
+        assert_eq!(clamp_thinking_level(Off, &[On]), On);
+        assert_eq!(clamp_thinking_level(Medium, &[]), Medium);
+    }
+
     use octet_ai::OpenAiChatReasoningMode;
     use std::sync::Arc;
 

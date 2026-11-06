@@ -48,7 +48,7 @@ test('known unimplemented Pi API members remain explicit refusing methods', () =
   }
 });
 
-test('portable bounded pattern profile preserves schemas and agrees with pinned TypeBox', () => {
+test('bounded ECMAScript pattern admission preserves schemas and agrees with pinned TypeBox', () => {
   for (const entry of cases) {
     const parameters = schema(entry.pattern), before = JSON.stringify(parameters);
     if (entry.accepted) {
@@ -57,7 +57,7 @@ test('portable bounded pattern profile preserves schemas and agrees with pinned 
       const oracle = Compile(parameters);
       for (const [key, matches] of entry.values) assert.equal(oracle.Check({ key }), matches, `${entry.pattern}: ${JSON.stringify(key)}`);
     } else {
-      assert.throws(() => validateTool(definition(parameters)), /pattern.*not supported/, entry.pattern);
+      assert.throws(() => validateTool(definition(parameters)), /pattern/, entry.pattern);
     }
     assert.equal(JSON.stringify(parameters), before, 'no constraint is stripped or rewritten');
   }
@@ -66,7 +66,8 @@ test('portable bounded pattern profile preserves schemas and agrees with pinned 
 test('pattern admission validates types and bounds without weakening other constraints', () => {
   for (const pattern of [null, 3, {}, true]) assert.throws(() => validateTool(definition(schema(pattern))), /pattern/);
   assert.throws(() => validateTool(definition(schema('^' + 'a'.repeat(1023) + '$'))), /pattern/);
-  assert.throws(() => validateTool(definition({ type: 'string', format: 'email' })), /format.*not supported/);
+  validateTool(definition({ type: 'string', format: 'email' }));
+  assert.equal(Compile({ type: 'string', format: 'email' }).Check('not-an-email'), false);
   const parameters = schema('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$');
   const oracle = Compile(parameters);
   assert.equal(oracle.Check({ key: 'a'.repeat(128) }), true);

@@ -1,0 +1,90 @@
+From 48ed8e9a406a3f9cae4c3816c3b80e78663ac8dd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:57:07 +0000
+Subject: [PATCH 8/8] octet-pi-compat: sweep persisted-cache temporaries
+ abandoned by killed processes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../octet-pi-compat/lib/startup-cache.mjs      | 18 +++++++++++++++++-
+ .../test/startup-cache.test.mjs                | 17 ++++++++++++++++-
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/startup-cache.mjs b/extensions/octet-pi-compat/lib/startup-cache.mjs
+index 85706104..54b58b33 100644
+--- a/extensions/octet-pi-compat/lib/startup-cache.mjs
++++ b/extensions/octet-pi-compat/lib/startup-cache.mjs
+@@ -1,4 +1,4 @@
+-import { accessSync, chmodSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
++import { accessSync, chmodSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+ import { homedir } from 'node:os';
+ import { join } from 'node:path';
+ import module from 'node:module';
+@@ -79,6 +79,21 @@ export function jitiCacheOptions() {
+   return directory ? { fsCache: join(directory, 'jiti') } : {};
+ }
+ 
++// A process killed between the write and the rename leaves `<name>.<pid>.tmp`
++// behind, and because the name carries the pid nothing would ever reuse it.
++// Temporaries of this document older than a write could plausibly take go.
++const STALE_TEMPORARY_MS = 10 * 60 * 1000;
++function sweepStaleTemporaries(directory, name) {
++  try {
++    const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.tmp$`);
++    for (const entry of readdirSync(directory)) {
++      if (!pattern.test(entry)) continue;
++      const file = join(directory, entry);
++      try { if (Date.now() - statSync(file).mtimeMs > STALE_TEMPORARY_MS) unlinkSync(file); } catch { /* raced with its owner */ }
++    }
++  } catch { /* housekeeping only */ }
++}
++
+ /// Reads one persisted JSON document from the startup cache directory.
+ ///
+ /// Persisted maps are optimizations: a missing, oversized, unreadable or
+@@ -110,6 +125,7 @@ export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
+       try { unlinkSync(temporary); } catch { /* nothing was written */ }
+       throw error;
+     }
++    sweepStaleTemporaries(directory, name);
+     return true;
+   } catch { return false; }
+ }
+diff --git a/extensions/octet-pi-compat/test/startup-cache.test.mjs b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+index 72fa99d9..4978bf6b 100644
+--- a/extensions/octet-pi-compat/test/startup-cache.test.mjs
++++ b/extensions/octet-pi-compat/test/startup-cache.test.mjs
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
++import { chmodSync, chownSync, existsSync, mkdirSync, utimesSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+ import { spawnSync } from 'node:child_process';
+ import { fileURLToPath, pathToFileURL } from 'node:url';
+ import { tmpdir } from 'node:os';
+@@ -19,6 +19,21 @@ test('the startup cache directory is owner-only and reused', () => {
+   assert.equal(startupCacheDirectory(), directory);
+ });
+ 
++test('temporaries abandoned by killed processes are swept, fresh ones are left alone', () => {
++  const directory = startupCacheDirectory();
++  const stale = join(directory, 'sweep.json.99999.tmp'), fresh = join(directory, 'sweep.json.99998.tmp'), other = join(directory, 'other.json.99999.tmp');
++  for (const file of [stale, fresh, other]) writeFileSync(file, 'x');
++  const old = new Date(Date.now() - 3600_000);
++  utimesSync(stale, old, old);
++  utimesSync(other, old, old);
++  try {
++    assert.equal(writePersisted('sweep.json', { value: 1 }), true);
++    assert.equal(existsSync(stale), false);
++    assert.equal(existsSync(fresh), true);
++    assert.equal(existsSync(other), true); // another document's temporary is not this write's business
++  } finally { for (const file of [stale, fresh, other, join(directory, 'sweep.json')]) rmSync(file, { force: true }); }
++});
++
+ test('a pre-existing group/world-writable directory is tightened, not trusted', () => {
+   const previous = process.env.OCTET_PI_COMPAT_CACHE;
+   const loose = mkdtempSync(join(tmpdir(), 'octet-pi-loose-'));
+-- 
+2.43.0
+

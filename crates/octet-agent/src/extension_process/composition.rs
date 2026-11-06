@@ -24,6 +24,8 @@ enum CompositionMethod {
     Context,
     #[serde(rename = "composition/call")]
     Call,
+    #[serde(rename = "composition/prepare")]
+    Prepare,
     #[serde(rename = "composition/store")]
     Store,
 }
@@ -44,6 +46,19 @@ struct CompositionCallRequest {
     full_outcome: bool,
     #[serde(default)]
     updates: bool,
+    #[serde(default)]
+    builtin: bool,
+    prepared_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompositionPrepareRequest {
+    parent_request_id: u64,
+    name: String,
+    arguments: serde_json::Value,
+    #[serde(default)]
+    builtin: bool,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +76,13 @@ enum CompositionOperation {
         arguments: serde_json::Value,
         full_outcome: bool,
         updates: bool,
+        builtin: bool,
+        prepared_id: Option<String>,
+    },
+    Prepare {
+        name: String,
+        arguments: serde_json::Value,
+        builtin: bool,
     },
     Store {
         set: serde_json::Map<String, serde_json::Value>,
@@ -90,6 +112,14 @@ fn parse_composition_operation(
             if request.name.is_empty() || request.name.len() > 128 {
                 return Err("composition tool name must be 1..=128 UTF-8 bytes".into());
             }
+            if let Some(prepared_id) = &request.prepared_id {
+                if prepared_id.is_empty() || prepared_id.len() > 512 {
+                    return Err("composition prepared_id must be 1..=512 UTF-8 bytes".into());
+                }
+                if !request.full_outcome {
+                    return Err("prepared composition calls require full_outcome".into());
+                }
+            }
             if request.updates && !request.full_outcome {
                 return Err("composition updates require full_outcome".into());
             }
@@ -105,6 +135,24 @@ fn parse_composition_operation(
                     arguments,
                     full_outcome: request.full_outcome,
                     updates: request.updates,
+                    builtin: request.builtin,
+                    prepared_id: request.prepared_id,
+                },
+            ))
+        }
+        CompositionMethod::Prepare => {
+            let request: CompositionPrepareRequest =
+                serde_json::from_value(params).map_err(|error| error.to_string())?;
+            if request.name.is_empty() || request.name.len() > 128 {
+                return Err("composition tool name must be 1..=128 UTF-8 bytes".into());
+            }
+            validate_composition_json(&request.arguments, MAX_COMPOSITION_ARGUMENT_BYTES)?;
+            Ok((
+                request.parent_request_id,
+                CompositionOperation::Prepare {
+                    name: request.name,
+                    arguments: request.arguments,
+                    builtin: request.builtin,
                 },
             ))
         }
@@ -315,6 +363,39 @@ pub(super) fn dispatch_composition_request(
         }
     };
 
+    {
+        let protocol = read_std_lock(&state.protocol);
+        let builtin = matches!(
+            &operation,
+            CompositionOperation::Call { builtin: true, .. }
+                | CompositionOperation::Prepare { builtin: true, .. }
+        );
+        let preflight = matches!(
+            &operation,
+            CompositionOperation::Prepare { .. }
+                | CompositionOperation::Call {
+                    prepared_id: Some(_),
+                    ..
+                }
+        );
+        if builtin && !protocol.supports("composition_builtin_tools_v1") {
+            return refuse_composition(
+                state,
+                id,
+                -32601,
+                "builtin composition requires negotiated composition_builtin_tools_v1",
+            );
+        }
+        if preflight && !protocol.supports("composition_preflight_v1") {
+            return refuse_composition(
+                state,
+                id,
+                -32601,
+                "composition preflight requires negotiated composition_preflight_v1",
+            );
+        }
+    }
+
     // Like register_child_request, hold pending through child insertion so
     // settlement cannot miss the child. Composition is stricter than legacy
     // reverse services: only a LIVE model-tool with an issued owner and a
@@ -422,8 +503,31 @@ pub(super) fn dispatch_composition_request(
                     arguments,
                     full_outcome,
                     updates: _,
+                    builtin,
+                    prepared_id,
                 } => {
-                    if full_outcome {
+                    if let Some(prepared_id) = prepared_id {
+                        service
+                            .call_prepared(
+                                prepared_id,
+                                name,
+                                arguments,
+                                builtin,
+                                cancellation.clone(),
+                                wants_updates.then_some(update_tx),
+                            )
+                            .await
+                    } else if builtin {
+                        service
+                            .call_builtin(
+                                name,
+                                arguments,
+                                cancellation.clone(),
+                                full_outcome,
+                                wants_updates.then_some(update_tx),
+                            )
+                            .await
+                    } else if full_outcome {
                         service
                             .call_outcome_with_updates(
                                 name,
@@ -437,6 +541,14 @@ pub(super) fn dispatch_composition_request(
                     }
                 }
                 .map(CompositionResult::Call),
+                CompositionOperation::Prepare {
+                    name,
+                    arguments,
+                    builtin,
+                } => service
+                    .prepare(name, arguments, builtin, cancellation.clone())
+                    .await
+                    .map(CompositionResult::Call),
                 CompositionOperation::Store { set, delete } => service
                     .store(set, delete)
                     .await
@@ -700,3 +812,7 @@ fn encode_composition_response(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "composition/preflight_tests.rs"]
+mod preflight_tests;

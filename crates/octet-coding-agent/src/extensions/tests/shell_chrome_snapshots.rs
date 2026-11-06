@@ -162,3 +162,138 @@ fn bounded_surface_text_truncates_on_a_character_boundary() {
     assert!(bounded.is_char_boundary(bounded.len()));
     assert_eq!(bounded.chars().count(), 4096);
 }
+
+#[test]
+fn pending_messages_snapshot_tracks_real_shell_queues_and_clears_after_delivery() {
+    let mut extensions = ExecutableExtensions::default();
+    let mut shell = InteractiveShell::test_shell();
+    assert!(extensions
+        .host_state
+        .lock()
+        .unwrap()
+        .has_pending_messages
+        .is_none());
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+    shell.queue_follow_up(ComposedInput::from_text("follow-up".into()));
+    extensions.drain_events_for_shell(&mut shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(true)
+    );
+    shell.settle_queued_follow_ups(true);
+    assert!(shell.take_ready_follow_up(false).is_some());
+    extensions.drain_events_for_shell(&mut shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+    let (prepared, receipt) = octet_agent::PreparedSteering::new("steer");
+    shell.queue_retractable_steering(receipt.clone(), "steer".into(), "steer".into(), vec![]);
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(true)
+    );
+    assert!(receipt.try_retract());
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+    drop(prepared);
+    use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
+    for (delivery, context_only, expected) in [
+        (Delivery::NextTurn, false, false),
+        (Delivery::Steer, true, false),
+        (Delivery::Steer, false, true),
+        (Delivery::FollowUp, false, true),
+    ] {
+        shell.queue_extension_message(crate::tui::view::PendingExtensionMessage {
+            input: ComposedInput::from_text("injected".into()),
+            delivery,
+            wake: true,
+            context_only,
+        });
+        extensions.refresh_frontend_pending_messages(&shell);
+        assert_eq!(
+            extensions.host_state.lock().unwrap().has_pending_messages,
+            Some(expected)
+        );
+        assert_eq!(shell.take_extension_messages().len(), 1);
+    }
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn pending_messages_snapshot_includes_native_run_queue_and_fences_its_owner() {
+    use octet_agent::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
+    use octet_ai::{AiClient, CacheRetention};
+    let temp = tempfile::tempdir().unwrap();
+    let session = Session::create(temp.path().join("queue.jsonl")).unwrap();
+    let owner = session.resource_owner_key();
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model,
+        session,
+        system: "queue fixture".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        extensions: ExtensionHost::new(),
+        max_turns: None,
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    let run = agent.prompt("initial").await.unwrap();
+    let control = run.control();
+    let mut extensions = ExecutableExtensions::default();
+    extensions.resource_owner = Some(owner.clone());
+    extensions.bind_pending_message_control(&control);
+    let shell = InteractiveShell::test_shell();
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+    control
+        .try_follow_up("native follow-up not in shell queue")
+        .unwrap();
+    assert_eq!(shell.queued_follow_up_len(), 0);
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(true)
+    );
+    extensions.resource_owner = Some("replacement-owner".into());
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+    extensions.resource_owner = Some(owner);
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(true)
+    );
+    drop(run);
+    extensions.refresh_frontend_pending_messages(&shell);
+    assert_eq!(
+        extensions.host_state.lock().unwrap().has_pending_messages,
+        Some(false)
+    );
+}

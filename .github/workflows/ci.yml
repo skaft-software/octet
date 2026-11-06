@@ -34,6 +34,10 @@ jobs:
       - run: cargo deny check
 
   quality:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -46,12 +50,15 @@ jobs:
         run: |
           python3 scripts/test_refresh_models_dev_metadata.py
           python3 scripts/test_release_model_metadata_gate.py
-      # Check before reviewed release source is frozen, not in build.rs or the
-      # signed-release workflows (which use frozen model snapshots).
+      # PR version changes and manual dispatch check live metadata. Main may
+      # reuse only an API-proven exact-PR-head dispatch run with identical trees;
+      # missing proof falls back to live. Signed-release/build inputs stay frozen.
       - name: Check pre-release model metadata freshness
         timeout-minutes: 2
         env:
           MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
+          MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"
+          MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 scripts/check-release-model-metadata.py
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
@@ -210,6 +217,13 @@ jobs:
           node-version: "22.19.0"
       - name: Install reviewed Pi adapter test dependencies
         run: npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
+      - name: Provide the pinned Pi provider package that installed-Pi acceptance tests resolve
+        run: |
+          set -euo pipefail
+          npm ci --prefix scripts/fixtures/pi-reference --ignore-scripts --no-audit --no-fund
+          mkdir -p extensions/octet-pi-compat/node_modules/@earendil-works
+          ln -s "$PWD/scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-ai" \
+            extensions/octet-pi-compat/node_modules/@earendil-works/pi-ai
       - name: Install ripgrep for the search tool
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
@@ -226,7 +240,7 @@ jobs:
         run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
       - name: Run workspace tests
         timeout-minutes: 15
-        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked
+        run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-fail-fast
         env:
           OCTET_PTY_TRACE: "1"
       # `cargo test --all-targets` builds examples only as test harnesses.
@@ -240,7 +254,11 @@ jobs:
           while IFS= read -r extension; do
             root="extensions/$extension"
             [[ -f "$root/package.json" && ! -d "$root/tests" ]] || continue
-            npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            # Pi was installed before the Rust tests; reinstalling removes its
+            # pinned provider fixture link, which the Node tests also require.
+            if [[ "$extension" != octet-pi-compat ]]; then
+              npm ci --prefix "$root" --ignore-scripts --no-audit --no-fund
+            fi
             npm test --prefix "$root"
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
       - run: cargo check --workspace --all-targets --no-default-features --locked
@@ -359,6 +377,11 @@ jobs:
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test agent_run partial_assistant_journal -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --target $env:WINDOWS_TARGET -p octet-agent --test windows_process_current
+      - name: Test managed extension updates and interrupted-update recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cargo test --locked --target $env:WINDOWS_TARGET -p octet-coding-agent --lib -- extension_bundle::tests extension_package:: resource_resolver::tests
+          if ($LASTEXITCODE -ne 0) { throw 'Windows extension package qualification failed' }
       - name: Test the Python SDK, computer-use extension, and Windows release tooling
         if: ${{ !cancelled() }}
         run: |

@@ -2,6 +2,14 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+#[path = "startup_catalog_tests.rs"]
+mod startup_catalog_tests;
+
+#[cfg(all(test, unix))]
+#[path = "registered_shortcut_tests.rs"]
+mod registered_shortcut_tests;
+
 impl ExtensionProcess {
     /// Launches, initializes, and validates an explicitly enabled and trusted
     /// executable extension.
@@ -124,6 +132,13 @@ impl ExtensionProcess {
         &self.inner.contributions
     }
 
+    /// Returns the active generation's complete live command catalog.
+    pub fn command_definitions(&self) -> Vec<CommandDefinition> {
+        let connection = read_std_lock(&self.inner.connection);
+        let commands = read_std_lock(&connection.command_catalog).clone();
+        commands
+    }
+
     /// Returns the active generation's complete live tool catalog.
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let connection = read_std_lock(&self.inner.connection);
@@ -224,12 +239,14 @@ impl ExtensionProcess {
         mut retired_owner: Option<String>,
     ) {
         let replaced_session;
+        let pending_messages_changed;
         {
             let mut current = write_std_lock(&self.inner.host_state);
             if *current == state && !mirror_changed {
                 return;
             }
             replaced_session = current.session_id != state.session_id || retired_owner.is_some();
+            pending_messages_changed = current.has_pending_messages != state.has_pending_messages;
             if replaced_session && !mirror_refreshed {
                 if let Some(previous) = lock_std_mutex(&connection.session_leaf.mirror).take() {
                     retired_owner = Some(previous.owner.session_id);
@@ -254,6 +271,25 @@ impl ExtensionProcess {
             connection.resource_cleanup_changed.notify_one();
         }
         let protocol = read_std_lock(&connection.protocol);
+        if pending_messages_changed
+            && !replaced_session
+            && session_leaf::owner_routes_enabled(&protocol)
+            && connection_is_usable(&connection)
+            && !connection.draining.load(Ordering::Acquire)
+        {
+            let owner = lock_std_mutex(&connection.session_leaf.mirror)
+                .as_ref()
+                .map(|mirror| mirror.owner.clone());
+            if let (Some(owner), Some(pending)) = (owner, state.has_pending_messages) {
+                if lock_std_mutex(&connection.issued_resource_owners).contains(&owner)
+                    && !connection.queue_notification(methods::CONTEXT_UPDATED,
+                        serde_json::json!({"resource_owner":owner,"host":{"has_pending_messages":pending}}))
+                {
+                    connection.begin_drain();
+                    connection.kill_process_group();
+                }
+            }
+        }
         if protocol.version != EXTENSION_API_VERSION_0_4
             || !protocol.supports(EXTENSION_FEATURE_REMOTE_UI)
             || !connection_is_usable(&connection)
@@ -318,14 +354,78 @@ impl ExtensionProcess {
     /// headers, or credentials through this handle.
     pub fn provider_stream_transport(
         &self,
-        provider_id: impl Into<String>,
-        model_id: impl Into<String>,
+        route: crate::extension_provider::ExtensionProviderRoute,
     ) -> Arc<dyn HostStreamTransport> {
         Arc::new(ExtensionProviderStreamTransport {
             process: Arc::downgrade(&self.inner),
-            provider_id: provider_id.into(),
-            model_id: model_id.into(),
+            binding: provider_stream::ProviderRouteBinding::Projected(route),
         })
+    }
+
+    #[allow(missing_docs)]
+    pub fn prepare_provider_stream_transport(
+        &self,
+        projected: &crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+    ) -> Result<Arc<dyn HostStreamTransport>, AiError> {
+        self.prepare_provider_stream_transport_inner(
+            projected,
+            selected,
+            #[cfg(test)]
+            || {},
+        )
+    }
+
+    pub(super) fn prepare_provider_stream_transport_inner(
+        &self,
+        projected: &crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+        #[cfg(test)] after_resolve: impl FnOnce(),
+    ) -> Result<Arc<dyn HostStreamTransport>, AiError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        {
+            let protocol = read_std_lock(&connection.protocol);
+            if protocol.version != EXTENSION_API_VERSION_0_3
+                && (protocol.version != EXTENSION_API_VERSION_0_4
+                    || !protocol.supports("provider_proxy_v1"))
+            {
+                return Err(provider_unavailable_error());
+            }
+        }
+        if !connection_is_usable(&connection)
+            || connection
+                .require_api_v03_host_method(methods::PROVIDER_STREAM)
+                .is_err()
+            || projected.owner != connection.provider_owner
+        {
+            return Err(provider_unavailable_error());
+        }
+        let registry = connection
+            .provider_registry
+            .as_ref()
+            .ok_or_else(provider_unavailable_error)?;
+        let captured = registry
+            .resolve(&projected.provider.id, &projected.model.id)
+            .ok_or_else(provider_unavailable_error)?;
+        #[cfg(test)]
+        after_resolve();
+        if captured.owner != projected.owner
+            || captured.provider != projected.provider
+            || captured.model != projected.model
+            || captured.model_metadata != projected.model_metadata
+            || provider_protocol_name(selected.protocol) != Some(captured.model.protocol.as_str())
+            || selected.pricing
+                != captured
+                    .model_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.pricing.clone())
+        {
+            return Err(provider_unavailable_error());
+        }
+        Ok(Arc::new(ExtensionProviderStreamTransport {
+            process: Arc::downgrade(&self.inner),
+            binding: provider_stream::ProviderRouteBinding::Prepared { captured, selected },
+        }))
     }
 
     /// Builds the current ambient execution context for command, hook,
@@ -446,6 +546,22 @@ impl ExtensionProcess {
         session_id: &str,
         outcome: ExtensionLifecycleOutcome,
     ) -> Result<(), ExtensionRuntimeError> {
+        self.settle_session_hook_binding_with_reason(
+            session_id,
+            outcome,
+            session_hook_shutdown_reason(outcome),
+        )
+        .await
+    }
+
+    /// Settles a binding with the actual host transition. A product resource
+    /// reload releases its binding without calling process-generation reload.
+    pub async fn settle_session_hook_binding_with_reason(
+        &self,
+        session_id: &str,
+        outcome: ExtensionLifecycleOutcome,
+        reason: &'static str,
+    ) -> Result<(), ExtensionRuntimeError> {
         if !self.declares_session_hooks() {
             return Err(self.undeclared("session hook", "session_start/session_end".to_owned()));
         }
@@ -454,13 +570,8 @@ impl ExtensionProcess {
         let Some(binding) = binding else {
             return Ok(());
         };
-        self.dispatch_session_hook_end(
-            &binding,
-            &binding.endpoint,
-            outcome,
-            session_hook_shutdown_reason(outcome),
-        )
-        .await
+        self.dispatch_session_hook_end(&binding, &binding.endpoint, outcome, reason)
+            .await
     }
 
     pub(super) async fn settle_all_session_hook_bindings_locked(
@@ -503,6 +614,7 @@ impl ExtensionProcess {
         &self,
         settled_bindings: Vec<ActiveSessionHookBinding>,
         endpoint: LifecycleEndpoint,
+        start_reason: &'static str,
     ) -> Vec<ActiveSessionHookBinding> {
         let mut bindings = lock_std_mutex(&self.inner.session_hooks);
         settled_bindings
@@ -511,7 +623,7 @@ impl ExtensionProcess {
                 let replacement = ActiveSessionHookBinding {
                     start_outcome: Arc::new(SessionHookStartOutcome::default()),
                     session_id: binding.session_id,
-                    start_reason: "resume",
+                    start_reason,
                     started_at: Instant::now(),
                     endpoint: endpoint.clone(),
                 };
@@ -639,6 +751,7 @@ impl ExtensionProcess {
         // Pi awaits session_start, and it runs off the startup path here, so it
         // gets the ordinary request deadline. Only the end finalizer keeps the
         // short cap, so exit and reload never wait on an extension.
+        let ending = matches!(&params, api_v03::SessionHookParams::SessionEnd { .. });
         let deadline = match params {
             api_v03::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
             api_v03::SessionHookParams::SessionEnd { .. } => {
@@ -663,6 +776,11 @@ impl ExtensionProcess {
             }
             let mut context = self.execution_context();
             context.resource_owner = Some(resource_owner.clone());
+            if ending {
+                // The end finalizer has no foreground UI pump. Keep that fact
+                // request-local without changing the frontend mode or start state.
+                context.host.has_ui = Some(false);
+            }
             params["context"] = serde_json::to_value(context)
                 .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
             session_leaf::attach_request_session_mirror(
@@ -746,7 +864,7 @@ impl ExtensionProcess {
             .request_tool(
                 definition,
                 params,
-                self.inner.config.request_timeout,
+                self.inner.config.tool_call_timeout,
                 resource_owner,
                 None,
                 None,
@@ -778,31 +896,57 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
-            let params = api_v03::ToolCallParams {
-                name: definition.name.clone(),
-                arguments,
-                context: serde_json::to_value(context)
-                    .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+        let mut params =
+            if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
+                let params = api_v03::ToolCallParams {
+                    name: definition.name.clone(),
+                    arguments,
+                    context: serde_json::to_value(context)
+                        .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+                };
+                api_v03::validate_tool_call_params(&params).map_err(api_v03_protocol_error)?;
+                serde_json::to_value(params)
+            } else {
+                serde_json::to_value(ToolCallRequest {
+                    name: definition.name.clone(),
+                    arguments,
+                    catalog_revision,
+                    context,
+                })
+            }
+            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        // A routed tool body appends under the grant of the operation's own
+        // driver lease (the one `before_tool_call` already bound), never
+        // grant-less: the host's leaf fences stay exactly as for hooks. Without
+        // the causal driver (parallel waves, probes) the request is unchanged.
+        let _linked_views =
+            if session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+                match (progress.session_driver(), resource_owner.as_ref()) {
+                    (Some(route), Some(owner)) => {
+                        let linked =
+                            route.prepare(self, &owner.session_id).await.map_err(|_| {
+                                ExtensionRuntimeError::Protocol(
+                                    "tool session causal driver unavailable".into(),
+                                )
+                            })?;
+                        linked.attach_to_tool_call(
+                            &connection,
+                            resource_owner.as_ref(),
+                            &mut params,
+                        )?
+                    }
+                    _ => None,
+                }
+            } else {
+                None
             };
-            api_v03::validate_tool_call_params(&params).map_err(api_v03_protocol_error)?;
-            serde_json::to_value(params)
-        } else {
-            serde_json::to_value(ToolCallRequest {
-                name: definition.name.clone(),
-                arguments,
-                catalog_revision,
-                context,
-            })
-        }
-        .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let _artifact_lease = connection.acquire_artifact_lease();
         let policy = lock_std_mutex(&self.inner.dynamic_tool_registration).clone();
         connection
             .request_tool(
                 definition,
                 params,
-                self.inner.config.request_timeout,
+                self.inner.config.tool_call_timeout,
                 resource_owner,
                 Some(cancellation),
                 Some(progress),
@@ -918,16 +1062,13 @@ impl ExtensionProcess {
         progress: Option<ToolProgressSink>,
         timeout: Duration,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
-        if !self
-            .inner
-            .contributions
-            .commands
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if !read_std_lock(&connection.command_catalog)
             .iter()
             .any(|command| command.name == name)
         {
             return Err(self.undeclared("command", name));
         }
-        let connection = read_std_lock(&self.inner.connection).clone();
         connection.require_api_v03_host_method(methods::COMMAND_EXECUTE)?;
         let mut context = context;
         context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
@@ -1015,22 +1156,33 @@ impl ExtensionProcess {
         mut context: ExtensionExecutionContext,
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
     ) -> Result<CommandOutput, ExtensionRuntimeError> {
-        if !self
+        let connection = read_std_lock(&self.inner.connection).clone();
+        let declared = self
             .inner
             .contributions
             .shortcuts
             .iter()
-            .any(|shortcut| shortcut.name == name)
-        {
-            return Err(self.undeclared("shortcut", name));
+            .any(|shortcut| shortcut.name == name);
+        if !declared {
+            if !lock_std_mutex(&connection.registered_shortcuts).contains(&name) {
+                return Err(self.undeclared("shortcut", name));
+            }
+            if context.resource_owner.as_ref().is_none_or(|owner| {
+                owner.extension_instance_id != self.inner.instance_id
+                    || owner.process_generation != connection.generation
+            }) {
+                return Err(resource_error(
+                    "runtime shortcut registration generation is stale",
+                ));
+            }
+        } else {
+            context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
+                session_id: owner.session_id,
+                extension_instance_id: self.inner.instance_id.clone(),
+                process_generation: connection.generation,
+            });
         }
-        let connection = read_std_lock(&self.inner.connection).clone();
         connection.require_api_v03_host_method(methods::SHORTCUT_EXECUTE)?;
-        context.resource_owner = context.resource_owner.map(|owner| ExtensionResourceOwner {
-            session_id: owner.session_id,
-            extension_instance_id: self.inner.instance_id.clone(),
-            process_generation: connection.generation,
-        });
         let resource_owner = context.resource_owner.clone();
         let params = serde_json::to_value(ShortcutRequest { name, context })
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
@@ -1730,6 +1882,28 @@ impl ExtensionProcess {
                     .await
             }
         }
+    }
+
+    /// Answer a process request only while its host-issued resource owner is
+    /// live at writer admission. Unlike a generation-only response, this fences
+    /// foreground retirement/replacement during asynchronous host resolution.
+    pub async fn respond_to_extension_request_for_owner(
+        &self,
+        request_id: ExtensionRequestId,
+        generation: u64,
+        owner: &ExtensionResourceOwner,
+        result: serde_json::Value,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if generation != connection.generation {
+            return Err(ExtensionRuntimeError::Closed(format!(
+                "extension request belongs to stale generation {generation}; current generation is {}",
+                connection.generation
+            )));
+        }
+        connection
+            .send_child_response_for_owner(request_id, &result, owner)
+            .await
     }
 
     /// Coalesces one observed assistant delta. A `message/updated` notification
@@ -2807,6 +2981,23 @@ impl ExtensionProcess {
             // failed candidates never receive or alter the active mirror.
             let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
             if let Some(mirror) = &mut mirror {
+                if session_leaf::owner_routes_enabled(&read_std_lock(&replacement.protocol)) {
+                    let result = replacement.session_profile().and_then(|profile| {
+                        lock_std_mutex(&replacement.session_leaf.transport).rebind_current(
+                            &lock_std_mutex(&previous.session_leaf.transport),
+                            &mirror.owner,
+                            generation,
+                            &profile,
+                        )
+                    });
+                    if let Err(error) = result {
+                        let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                            message: format!(
+                                "session history unavailable after process reload: {error}"
+                            ),
+                        });
+                    }
+                }
                 mirror.rebind_generation(generation);
             }
             *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;
@@ -2872,6 +3063,7 @@ impl ExtensionProcess {
         let replacement_session_hook_bindings = self.install_replacement_session_hook_bindings(
             settled_session_hook_bindings,
             replacement_endpoint,
+            if previous_crashed { "resume" } else { "reload" },
         );
         let session_hook_starts = futures_util::future::join_all(
             replacement_session_hook_bindings

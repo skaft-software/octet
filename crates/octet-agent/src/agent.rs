@@ -102,11 +102,14 @@ mod live_output;
 mod model_control;
 mod model_turn;
 mod parallel_reads;
+#[allow(missing_docs)]
+mod prepared_prompt;
 mod provider_context;
 mod recovery;
 mod run_handle;
 mod terminal_gate;
 mod tool_admission;
+mod tool_inference;
 mod tool_results;
 mod turn_loop;
 
@@ -133,6 +136,8 @@ use self::images::*;
 pub use self::live_output::PartialOutputCheckpointStats;
 use self::live_output::*;
 use self::parallel_reads::*;
+use self::prepared_prompt::PreparedHostAuthority;
+pub use self::prepared_prompt::{PreparedHostPrompt, PreparedPromptMode};
 use self::provider_context::*;
 use self::recovery::*;
 pub use self::run_handle::RequestContextEstimate;
@@ -253,6 +258,7 @@ pub struct AgentConfig {
 struct RunLifecycle {
     finished: AtomicBool,
     dropped: AtomicBool,
+    trailing_inference: Mutex<(Usage, u64)>,
 }
 
 /// Owns the session borrow inside the generated run stream. Rust drops stream
@@ -308,6 +314,7 @@ pub struct Agent {
     reasoning_mode: ReasoningMode,
     cache_retention: CacheRetention,
     cache_warmer: crate::cache_warmer::CacheWarmer,
+    tool_inference_resolver: Option<Arc<dyn crate::tool_inference::ToolInferenceModelResolver>>,
     /// Hard limit for the exact JSON schemas exposed to a provider request.
     tool_schema_budget_bytes: usize,
     /// Optional provider route used for autonomous context summaries.
@@ -640,6 +647,7 @@ impl Agent {
             reasoning_mode: config.reasoning_mode,
             cache_retention: config.cache_retention,
             cache_warmer: crate::cache_warmer::CacheWarmer::default(),
+            tool_inference_resolver: None,
             tool_schema_budget_bytes: DEFAULT_TOOL_SCHEMA_BUDGET_BYTES,
             compaction_model: None,
             auto_compaction_mode: AgentCompactionMode::Local,
@@ -1410,7 +1418,8 @@ impl Agent {
     /// [`AgentEvent::RunFinished`].
     pub async fn prompt(&mut self, input: impl Into<UserInput>) -> Result<Run<'_>, AgentError> {
         self.cache_warmer.cancel(&mut self.session, "new prompt")?;
-        self.prompt_with_tools(input.into(), true, false).await
+        self.prompt_with_tools(input.into(), true, false, None)
+            .await
     }
 
     /// Begins a run with best-effort Responses WebSocket prewarming before
@@ -1426,7 +1435,7 @@ impl Agent {
         input: impl Into<UserInput>,
     ) -> Result<Run<'_>, AgentError> {
         self.cache_warmer.cancel(&mut self.session, "new prompt")?;
-        self.prompt_with_tools(input.into(), true, true).await
+        self.prompt_with_tools(input.into(), true, true, None).await
     }
 
     /// Begins a run whose provider requests expose no tools. This is used for
@@ -1436,7 +1445,8 @@ impl Agent {
         input: impl Into<UserInput>,
     ) -> Result<Run<'_>, AgentError> {
         self.cache_warmer.cancel(&mut self.session, "new prompt")?;
-        self.prompt_with_tools(input.into(), false, false).await
+        self.prompt_with_tools(input.into(), false, false, None)
+            .await
     }
 
     /// Declares the Agent's static tool overlay complete and releases queued
@@ -1490,6 +1500,7 @@ impl Agent {
                     media.truncate(committed_media_len);
                     usage = total;
                     trailing_tool_usage = Usage::default();
+                    *run.lifecycle.trailing_inference.lock().unwrap() = (Usage::default(), 0);
                     run_cost = cost;
                 }
                 AgentEvent::SteeringDelivered { .. }
@@ -1512,6 +1523,7 @@ impl Agent {
                     committed_media_len = media.len();
                     usage = total;
                     trailing_tool_usage = Usage::default();
+                    *run.lifecycle.trailing_inference.lock().unwrap() = (Usage::default(), 0);
                     run_cost = cost;
                 }
                 AgentEvent::RunFinished { head, reason } => {
@@ -1520,6 +1532,10 @@ impl Agent {
                         reason => {
                             let mut total_usage = usage;
                             add_usage(&mut total_usage, &trailing_tool_usage);
+                            let (inference_usage, inference_cost) =
+                                *run.lifecycle.trailing_inference.lock().unwrap();
+                            add_usage(&mut total_usage, &inference_usage);
+                            run_cost = run_cost.max(inference_cost);
                             Ok(RunOutput {
                                 text,
                                 media,

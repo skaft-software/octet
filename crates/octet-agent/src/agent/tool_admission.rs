@@ -21,14 +21,12 @@ pub(super) struct CompletedToolExecution {
 
 /// Synthetic, secret-safe result for a normalized call rejected by the exact
 /// request schema. Keep this static: provider arguments may contain secrets.
-pub(super) const SCHEMA_MISMATCH_TOOL_ERROR: &str =
-    "tool call was not executed because its arguments do not satisfy the advertised schema; correct the arguments and try again";
+pub(super) const SCHEMA_MISMATCH_TOOL_ERROR: &str = "tool call was not executed because its arguments do not satisfy the advertised schema; correct the arguments and try again";
 
 /// Synthetic, secret-safe result for a call whose streamed arguments were not
 /// valid JSON that conservative repair could recover. Keep this static:
 /// unparseable provider arguments may contain secrets.
-pub(super) const MALFORMED_ARGUMENTS_TOOL_ERROR: &str =
-    "tool call was not executed because its streamed arguments were not valid JSON and could not be repaired; re-issue the call with one complete JSON object";
+pub(super) const MALFORMED_ARGUMENTS_TOOL_ERROR: &str = "tool call was not executed because its streamed arguments were not valid JSON and could not be repaired; re-issue the call with one complete JSON object";
 
 pub(super) fn rejected_argument_tool_error(error: ToolCallArgumentError) -> ToolError {
     let message = match error {
@@ -164,11 +162,6 @@ pub(super) async fn transform_tool_arguments(
 /// Settle a resolved tool call's hooks: result replacements in order, then
 /// observers on the final result. Returns the result the model sees.
 ///
-/// Result replacement runs for every resolved call, including one denied at an
-/// admission boundary: Pi observes a blocked call as an error result and its
-/// `tool_result` hook may redact it. Execution observers run only when the tool
-/// actually reached execution (`executed`), because a call denied before
-/// dispatch has no execution to observe.
 pub(super) async fn settle_tool_result_hooks(
     hooks: &[Arc<dyn ToolCallHook>],
     name: &str,
@@ -177,6 +170,10 @@ pub(super) async fn settle_tool_result_hooks(
     context: &ToolContext<'_>,
     executed: bool,
 ) -> Result<ToolOutput, ToolError> {
+    if matches!(&result, Err(error) if error.policy_denial_code() == Some(ToolPolicyDenialCode::SecondaryHookDenied))
+    {
+        return result;
+    }
     let mut result = result;
     for hook in hooks {
         result = hook

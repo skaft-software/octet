@@ -26,7 +26,7 @@ pub(crate) fn cache_compatibility(
             cache.supports_explicit_prompt_cache_mode = protocol == Protocol::OpenAiResponses
                 && matches!(
                     model_id,
-                    "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+                    "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna"
                 );
         }
         // OpenRouter forwards Anthropic's explicit cache-control blocks only
@@ -222,7 +222,13 @@ mod tests {
 
     #[test]
     fn explicit_cache_mode_requires_verified_public_openai_responses_model() {
-        for id in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+        for id in [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+        ] {
             assert!(
                 cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
                     .supports_explicit_prompt_cache_mode
@@ -240,7 +246,13 @@ mod tests {
                     .supports_explicit_prompt_cache_mode
             );
         }
-        for id in ["gpt-6-unverified", "openai/gpt-6-astra", "gpt-5.4"] {
+        for id in [
+            "gpt-6-unverified",
+            "openai/gpt-6-astra",
+            "openai/gpt-6.1-terra",
+            "gpt-6.1-terra-pro",
+            "gpt-5.4",
+        ] {
             assert!(
                 !cache_compatibility(OPENAI.compatibility, id, Protocol::OpenAiResponses)
                     .supports_explicit_prompt_cache_mode

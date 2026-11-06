@@ -43,10 +43,13 @@ pub mod deferred;
 pub mod discovery;
 pub mod error;
 pub mod faux;
+#[allow(missing_docs)]
+pub mod host_http;
 pub mod host_transport;
 pub mod images;
 pub mod inference;
 mod json_repair;
+pub use json_repair::{validate_json_schema_definition, validate_json_schema_value};
 pub mod media;
 pub mod model_metadata;
 pub mod pricing;
@@ -104,7 +107,10 @@ pub use faux::{
     FauxDeferredStatus, FauxMessage, FauxOptions, FauxProvider, FauxResponse, FauxState,
     FauxToolCall,
 };
-pub use host_transport::{HostStreamModel, HostStreamTransport};
+pub use host_http::{HostHttpRequest, HostHttpResponse, HostHttpSender};
+pub use host_transport::{
+    HostProviderRequestHooks, HostStreamModel, HostStreamTransport, NativeRequestContinuation,
+};
 pub use inference::{
     ClientInferenceMetrics, ClientTimingScope, DecodeEstimate, DecodeEstimateUnavailable,
     InferenceMetrics, OutputRateSample, ReportedTimingUnit, ServerGenerationMetrics,
@@ -147,16 +153,16 @@ pub use types::{
     AgentDelegation, AssistantMessage, AssistantPart, AudioCapabilities, AudioFormat, AudioMedia,
     AudioOutputDelivery, AudioOutputOptions, AudioPayload, AudioVoice, CacheCompatibility,
     CacheControlFormat, CacheRetention, Capabilities, ConstrainedSampling,
-    ConstrainedSamplingStrict, DocumentMedia, Endpoint, EndpointId, EndpointTransport,
-    GrammarVariants, ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat, Media, Message,
-    Modality, ModalitySet, ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode,
-    OpenAiChatRuntimeProfile, OutputFormat, OutputModalities, PromptCacheLifetimes, Protocol,
-    ProviderMediaRef, ProviderPartMetadata, ReasoningCapability, ReasoningConfig, ReasoningControl,
-    ReasoningEffort, ReasoningEffortBudgets, ReasoningMode, ReasoningPart, ReasoningState,
-    ReasoningStateKind, Request, RequestBodyEncoding, RequestRuntime, Response, ResponsesFeatures,
-    ResponsesRuntimeProfile, ServiceTier, SessionAffinityFormat, StopReason,
-    ToolArgumentValidation, ToolCall, ToolCallArgumentError, ToolCallId, ToolChoice, ToolDef,
-    ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    ConstrainedSamplingStrict, CustomOpenAiChatProfile, DocumentMedia, Endpoint, EndpointId,
+    EndpointTransport, GrammarVariants, ImageDetail, ImageMedia, ImageSource, JsonSchemaFormat,
+    Media, Message, Modality, ModalitySet, ModelId, ModelLimits, ModelSpec,
+    OpenAiChatReasoningMode, OpenAiChatRuntimeProfile, OutputFormat, OutputModalities,
+    PromptCacheLifetimes, Protocol, ProviderMediaRef, ProviderPartMetadata, ReasoningCapability,
+    ReasoningConfig, ReasoningControl, ReasoningEffort, ReasoningEffortBudgets, ReasoningMode,
+    ReasoningPart, ReasoningState, ReasoningStateKind, Request, RequestBodyEncoding,
+    RequestRuntime, Response, ResponsesFeatures, ResponsesRuntimeProfile, ServiceTier,
+    SessionAffinityFormat, StopReason, ToolArgumentValidation, ToolCall, ToolCallArgumentError,
+    ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
 };
 
 /// Selects reasoning for a host-generated auxiliary request.

@@ -1027,3 +1027,50 @@ fn opencode_gemini_4_argon_offers_its_thinking_levels_from_an_id_only_inventory(
         );
     }
 }
+
+#[test]
+fn declared_endpoint_hosts_are_lowercase_domains() {
+    // `same_endpoint_base` skips a declaration whose base URL does not spell
+    // the candidate host; that is exact only for lowercase domain hosts.
+    for declaration in crate::providers::BUILTIN_PROVIDER_DECLARATIONS {
+        if declaration.base_url.is_empty() {
+            continue;
+        }
+        let url = url::Url::parse(declaration.base_url).unwrap();
+        assert!(
+            matches!(url.host(), Some(url::Host::Domain(_))),
+            "{}",
+            declaration.base_url
+        );
+        assert!(
+            declaration.base_url.contains(url.host_str().unwrap()),
+            "{}",
+            declaration.base_url
+        );
+    }
+}
+
+#[test]
+fn declared_endpoint_match_ignores_case_and_trailing_slash() {
+    let declared = crate::providers::BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|declaration| {
+            declaration.base_url_environment.is_empty() && !declaration.base_url.is_empty()
+        })
+        .unwrap();
+    let host = url::Url::parse(declared.base_url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_owned();
+    let shouted = url::Url::parse(&format!(
+        "{}/",
+        declared
+            .base_url
+            .replacen(&host, &host.to_ascii_uppercase(), 1)
+    ))
+    .unwrap();
+    assert!(same_endpoint_base(declared.base_url, &shouted));
+    let local = url::Url::parse("http://127.0.0.1:11434/v1").unwrap();
+    assert!(!same_endpoint_base(declared.base_url, &local));
+}

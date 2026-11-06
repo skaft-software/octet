@@ -1,0 +1,461 @@
+From 605e07060f9f40cda4c6fa1861d7d6563264f938 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:42:58 +0000
+Subject: [PATCH 4/8] eval: jank recorder (frame-level PTY capture of octet and
+ Pi on one scripted timeline)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ scripts/pi-eval/jank.py | 440 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 440 insertions(+)
+ create mode 100644 scripts/pi-eval/jank.py
+
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+new file mode 100644
+index 00000000..6edab3a9
+--- /dev/null
++++ b/scripts/pi-eval/jank.py
+@@ -0,0 +1,440 @@
++#!/usr/bin/env python3
++"""Record octet and Pi 1.4.0 on the same scripted input timeline, then diff what each drew.
++
++    python3 scripts/pi-eval/jank.py record --target octet --scenario prompt_ready --out DIR
++    python3 scripts/pi-eval/jank.py diff DIR_octet DIR_pi [--at SECONDS]
++
++`record` writes `frames.jsonl` (every PTY write and every input, with timestamps), `requests.json`
++(provider request bodies) and `meta.json`. `diff` replays the writes through the VT model after
++each chunk and reports first-visible times, input echo latency and the bottom rows over time.
++Both products run the same scenario (SCENARIOS) on the maintainer fixture.
++"""
++
++from __future__ import annotations
++
++import argparse
++import base64
++import errno
++import json
++import os
++import select
++import shutil
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++REPO = HERE.parent.parent
++sys.path.insert(0, str(REPO / "scripts" / "e2e"))
++sys.path.insert(0, str(HERE))
++
++import core  # noqa: E402
++import fixture as fx  # noqa: E402
++import run  # noqa: E402
++from octet_e2e.provider import MockProvider, Reply  # noqa: E402
++from octet_e2e.vt import Screen  # noqa: E402
++
++MODEL_ID, MODEL_NAME, CONTEXT = "gpt-5.6-luna", "GPT-5.6 Luna", 272000
++DEFAULT_FIXTURE = Path(os.environ.get("PI_EVAL_CACHE", fx.default_cache())) / "03dc02b6ce9f3a89"
++
++
++class FrameSession(run.EvalSession):
++    """EvalSession that keeps (seconds since spawn, bytes) for every PTY read and every write."""
++
++    def __init__(self, *args, **kwargs):
++        self.chunks: list[tuple[float, bytes]] = []
++        self.inputs: list[tuple[float, bytes]] = []
++        super().__init__(*args, **kwargs)
++
++    def _read_loop(self) -> None:
++        while True:
++            try:
++                ready, _, _ = select.select([self.master], [], [], 0.005)
++            except (OSError, ValueError):
++                return
++            if not ready:
++                if self.process.poll() is not None:
++                    self._drain()
++                    return
++                continue
++            try:
++                data = os.read(self.master, 65536)
++            except OSError as error:
++                if error.errno == errno.EIO:
++                    return
++                raise
++            if not data:
++                return
++            with self._lock:
++                self.chunks.append((self.now(), data))
++                self._transcript.extend(data)
++                self._screen.feed(data)
++                pending, self._screen.responses = self._screen.responses, []
++            for response in pending:
++                self.write(response)
++
++    def write(self, data) -> None:
++        payload = data.encode() if isinstance(data, str) else data
++        self.inputs.append((self.now(), payload))
++        super().write(payload)
++
++    def now(self) -> float:
++        return time.monotonic() - self.started_at
++
++    def wait_text(self, needle: str, timeout: float = 60.0) -> float | None:
++        end = time.monotonic() + timeout
++        while time.monotonic() < end:
++            if needle in self.screen_text():
++                return self.now()
++            if self.process.poll() is not None:
++                return None
++            time.sleep(0.01)
++        return None
++
++
++# --------------------------------------------------------------------------- scenarios
++# Each takes (session, provider, notes) and drives the session; `notes` collects named timestamps.
++
++def _typed(s: FrameSession, text: str, gap: float) -> None:
++    for char in text:
++        s.write(char)
++        time.sleep(gap)
++
++
++def _script(p, reply: Reply) -> None:
++    """Replace the provider's scripted reply (rules are first-match, so earlier ones must go)."""
++    with p._lock:
++        p._rules.clear()
++    p.reply_with(lambda request: True, reply)
++
++
++def _prompt(s, p, n, text, name):
++    _script(p, Reply(text="REPLY-OK " + name))
++    n[f"{name}_sent"] = s.now()
++    s.write(text)
++    time.sleep(0.05)
++    s.write("\r")
++    n[f"{name}_reply"] = s.wait_text("REPLY-OK " + name, 40)
++
++
++def sc_start(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(3)
++
++
++def sc_prompt_early(s, p, n):
++    time.sleep(0.6)
++    _prompt(s, p, n, "early prompt", "early")
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++
++
++def sc_prompt_ready(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    _prompt(s, p, n, "ready prompt", "ready")
++    time.sleep(2)
++
++
++def sc_prompt_idle(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(5)
++    _prompt(s, p, n, "idle prompt", "idle")
++    time.sleep(2)
++
++
++def sc_back_to_back(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    _script(p, Reply(text="REPLY-OK one two three four five six seven eight", chunk_delay=0.25))
++    s.write("first\r")
++    time.sleep(0.5)
++    s.write("second\r")
++    n["second_sent"] = s.now()
++    time.sleep(8)
++
++
++def sc_stream(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    text = "\n".join(f"line {i} of a streamed reply with `code` and **bold**" for i in range(30))
++    _script(p, Reply(text=text, chunk_delay=0.05))
++    n["sent"] = s.now()
++    s.write("stream please\r")
++    n["first_line"] = s.wait_text("line 0 of", 20)
++    time.sleep(0.8)
++    n["type_start"] = s.now()
++    _typed(s, "typing during stream", 0.05)
++    n["done"] = s.wait_text("line 29 of", 30)
++    time.sleep(1.5)
++
++
++def sc_type_load(s, p, n):
++    time.sleep(0.3)
++    n["type_start"] = s.now()
++    _typed(s, "typed while loading", 0.1)
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++
++
++def sc_slash(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(1)
++    n["slash"] = s.now()
++    s.write("/")
++    time.sleep(1.5)
++    n["type_start"] = s.now()
++    _typed(s, "re", 0.2)
++    time.sleep(1)
++    s.write("\x1b")
++    time.sleep(0.5)
++
++
++def sc_reload(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++    n["reload_sent"] = s.now()
++    s.write("/reload\r")
++    time.sleep(8)
++
++
++def sc_reload_busy(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(1)
++    _script(p, Reply(text="REPLY-OK slow slow slow slow slow slow slow slow", chunk_delay=0.5))
++    s.write("busy\r")
++    time.sleep(1.2)
++    n["reload_sent"] = s.now()
++    s.write("/reload\r")
++    time.sleep(10)
++
++
++def sc_resize(s, p, n):
++    n["ready"] = s.wait_text(core.READY_MARKER)
++    time.sleep(2)
++    for cols, rows in ((100, 30), (140, 45), (120, 40)):
++        n[f"resize_{cols}x{rows}"] = s.now()
++        s.resize(cols, rows)
++        time.sleep(1.5)
++
++
++SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith("sc_")}
++
++
++# --------------------------------------------------------------------------- recording
++
++def write_provider_config(home: Path, port: int) -> None:
++    """The maintainer's model shape: id gpt-5.6-luna, display name GPT-5.6 Luna, 272K, zero cost."""
++    agent = home / ".pi" / "agent"
++    model = {"id": MODEL_ID, "name": MODEL_NAME, "contextWindow": CONTEXT, "maxTokens": 4096, "reasoning": True,
++             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
++    (agent / "models.json").write_text(json.dumps({"providers": {fx.PROVIDER: {
++        "baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "mock-key", "models": [model]}}}, indent=2))
++    settings = json.loads((agent / "settings.json").read_text())
++    settings["defaultModel"] = MODEL_ID
++    (agent / "settings.json").write_text(json.dumps(settings, indent=2))
++    credentials = home / ".octet" / "credentials"
++    credentials.mkdir(parents=True, exist_ok=True)
++    path = credentials / "custom.json"
++    path.write_text(json.dumps({"base_url": f"http://127.0.0.1:{port}/v1/", "api_key": "", "api_name": MODEL_ID, "headers": [], "auto_discover": False,
++                                "models": [{"api_name": MODEL_ID, "display_name": MODEL_NAME, "context_window": CONTEXT, "max_output_tokens": 4096}]}))
++    path.chmod(0o600)
++
++
++def prepare_home(fixture: fx.Fixture, env) -> None:
++    """Hardlink the fixture home (the install and npm trees are never written at run time), then give
++    the small mutable files directly under the agent dir their own inodes."""
++    if env.root.exists():
++        shutil.rmtree(env.root)
++    env.root.mkdir(parents=True)
++    subprocess.run(["cp", "-al", str(fixture.home), str(env.home)], check=True)
++    agent = env.home / ".pi" / "agent"
++    for path in [*agent.glob("*.json"), *(agent / "pi-eval").glob("*")]:
++        data = path.read_bytes()
++        path.unlink()
++        path.write_bytes(data)
++
++
++def load_fixture(root: Path) -> fx.Fixture:
++    return fx.Fixture(root=root, lock={"pi": {"version": json.loads((root / "fixture.json").read_text())["pi_version"]}})
++
++
++def record(args) -> dict:
++    fixture = load_fixture(args.fixture)
++    out = Path(args.out)
++    shutil.rmtree(out, ignore_errors=True)
++    out.mkdir(parents=True)
++    provider = MockProvider(model_id=MODEL_ID)
++    provider.default_reply("REPLY-OK default")
++    fx.MODEL = MODEL_ID
++    env = run.make_env(out / "homes", args.target, 0, provider.port)
++    prepare_home(fixture, env)
++    write_provider_config(env.home, provider.port)
++    tmp = run.leg_tmp(env)
++    tmp.mkdir(parents=True, exist_ok=True)
++    env.workspace.mkdir(parents=True, exist_ok=True)
++    env.sessions.mkdir(parents=True, exist_ok=True)
++    cwd = env.home if args.cwd == "home" else env.workspace
++    if args.target == "octet":
++        if not args.warm:
++            run.reset_adapter_cache(args.extensions_dir)
++        argv = run.octet_args(env, name=None, agent=False, extension_dirs=[args.extensions_dir], enable_extensions=["octet-pi-compat"])
++        argv[argv.index("--workspace") + 1] = str(cwd)
++        argv[argv.index("--model") + 1] = f"custom/{MODEL_ID}"
++        binary = args.octet
++        extra = {"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp), **dict(kv.split("=", 1) for kv in args.env)}
++        child = env.child_env(REPO, extra=extra)
++    else:
++        binary = Path("node")
++        argv = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{MODEL_ID}"]
++        if args.preload:
++            argv = ["--import", args.preload, *argv]
++        child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
++        child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
++                     PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp),
++                     JANK_TRACE=str(out / "api-trace.jsonl"))
++    session = FrameSession(binary, args=argv, env=child, cwd=cwd, columns=run.COLUMNS, rows=run.ROWS,
++                           log_path=out / "transcript.ansi", stderr_path=out / "stderr.log")
++    notes: dict = {}
++    try:
++        SCENARIOS[args.scenario](session, provider, notes)
++        before = time.monotonic()
++        notes["ctrl_d"] = session.now()
++        notes["exit_code"] = session.close(timeout=run.EXIT_GRACE_S)
++        notes["exit_s"] = time.monotonic() - before
++    except BaseException:
++        session.kill()
++        raise
++    finally:
++        with open(out / "frames.jsonl", "w") as handle:
++            for t, data in session.chunks:
++                handle.write(json.dumps({"t": round(t, 4), "o": base64.b64encode(data).decode()}) + "\n")
++            for t, data in session.inputs:
++                handle.write(json.dumps({"t": round(t, 4), "i": base64.b64encode(data).decode()}) + "\n")
++        (out / "requests.json").write_text(json.dumps([{"t": r.received_at, "body": r.body} for r in provider.requests], indent=1))
++        provider.close()
++        shutil.rmtree(out / "homes", ignore_errors=True)
++    notes.update(target=args.target, scenario=args.scenario, cwd=args.cwd)
++    (out / "meta.json").write_text(json.dumps(notes, indent=1))
++    return notes
++
++
++# --------------------------------------------------------------------------- analysis
++
++def load_frames(directory: Path):
++    outs, ins = [], []
++    for line in (directory / "frames.jsonl").read_text().splitlines():
++        row = json.loads(line)
++        if "o" in row:
++            outs.append((row["t"], base64.b64decode(row["o"])))
++        else:
++            ins.append((row["t"], base64.b64decode(row["i"])))
++    return outs, ins
++
++
++def replay(directory: Path):
++    """Yield (t, rows_text, screen) after every PTY write, applying recorded resizes."""
++    screen = Screen(run.COLUMNS, run.ROWS)
++    meta = json.loads((directory / "meta.json").read_text())
++    resizes = sorted((meta[k], k) for k in meta if k.startswith("resize_"))
++    for t, data in load_frames(directory)[0]:
++        while resizes and resizes[0][0] <= t:
++            cols, rows = resizes.pop(0)[1][len("resize_"):].split("x")
++            screen.resize(int(cols), int(rows))
++        screen.feed(data)
++        screen.responses = []
++        yield t, [line.rstrip() for line in screen.text().split("\n")], screen
++
++
++def summarize(directory: Path) -> dict:
++    first: dict[str, float] = {}
++    writes, changes, last = 0, 0, None
++    bottoms: list[tuple[float, str]] = []
++    for t, text, _ in replay(directory):
++        writes += 1
++        changes += text != last
++        last = text
++        joined = "\n".join(text)
++        for key, needle in (("model_label", "GPT-5.6 Luna"), ("model_id", MODEL_ID), ("context_segment", "/272K"), ("ready", core.READY_MARKER)):
++            if key not in first and needle in joined:
++                first[key] = t
++        bottom = " / ".join(line for line in text[-4:] if line)
++        if not bottoms or bottoms[-1][1] != bottom:
++            bottoms.append((t, bottom))
++    return {"first_visible": first, "pty_writes": writes, "screen_changes": changes, "bottom_states": bottoms,
++            "bytes": sum(len(d) for _, d in load_frames(directory)[0])}
++
++
++def echo_latency(directory: Path) -> list[float | None]:
++    """For each typed letter: seconds until the screen next changed (None: never)."""
++    outs, ins = load_frames(directory)
++    screen = Screen(run.COLUMNS, run.ROWS)
++    states = []
++    for t, data in outs:
++        screen.feed(data)
++        screen.responses = []
++        states.append((t, screen.text()))
++    results = []
++    for t_in, data in ins:
++        if len(data) != 1 or not (data.isalpha() or data == b" "):
++            continue
++        before = next((text for t, text in reversed(states) if t <= t_in), "")
++        results.append(next((t - t_in for t, text in states if t > t_in and text != before), None))
++    return results
++
++
++def show_at(directory: Path, at: float) -> str:
++    last = ""
++    for t, text, _ in replay(directory):
++        if t > at:
++            break
++        last = "\n".join(text)
++    return last
++
++
++def diff(args) -> None:
++    for name in args.dirs:
++        directory = Path(name)
++        summary = summarize(directory)
++        print(f"== {directory}")
++        print(json.dumps({k: v for k, v in summary.items() if k != "bottom_states"}, indent=1))
++        print("meta:", json.loads((directory / "meta.json").read_text()))
++        echo = echo_latency(directory)
++        seen = sorted(v for v in echo if v is not None)
++        if seen:
++            print(f"echo: n={len(echo)} missing={echo.count(None)} median={seen[len(seen) // 2] * 1000:.0f}ms max={seen[-1] * 1000:.0f}ms")
++        print(f"bottom-4-row states: {len(summary['bottom_states'])}")
++        for t, bottom in summary["bottom_states"][: args.max_footers]:
++            print(f"  t={t:6.2f}s | {bottom[:200]}")
++    if args.at is not None:
++        for name in args.dirs:
++            print(f"--- {name} at t={args.at}s")
++            print(show_at(Path(name), args.at))
++
++
++def main(argv=None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = parser.add_subparsers(dest="cmd", required=True)
++    r = sub.add_parser("record")
++    r.add_argument("--target", choices=["octet", "pi"], required=True)
++    r.add_argument("--scenario", choices=sorted(SCENARIOS), required=True)
++    r.add_argument("--out", required=True)
++    r.add_argument("--cwd", choices=["workspace", "home"], default="workspace")
++    r.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
++    r.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
++    r.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
++    r.add_argument("--warm", action="store_true", help="keep the adapter cache (octet)")
++    r.add_argument("--preload", default=None, help="Node --import module for Pi (API traffic capture)")
++    r.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for octet")
++    d = sub.add_parser("diff")
++    d.add_argument("dirs", nargs="+")
++    d.add_argument("--at", type=float, default=None)
++    d.add_argument("--max-footers", type=int, default=40)
++    args = parser.parse_args(argv)
++    if args.cmd == "record":
++        print(json.dumps(record(args), indent=1))
++    else:
++        diff(args)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.43.0
+

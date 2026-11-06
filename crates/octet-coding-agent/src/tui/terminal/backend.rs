@@ -179,6 +179,102 @@ fn normalize_line_endings<'a>(data: &'a str, last_was_cr: &mut bool) -> Cow<'a, 
     Cow::Owned(normalized)
 }
 
+// Renderer chunks can split any ASCII escape boundary. Retain at most the
+// three-byte OSC 8 prefix, then discard only that envelope through BEL or ST.
+// Other OSC controls (titles, clipboard, etc.) pass through byte-for-byte.
+#[derive(Default)]
+struct Osc8Filter {
+    state: Osc8State,
+}
+
+#[derive(Default)]
+enum Osc8State {
+    #[default]
+    Text,
+    Escape,
+    Osc,
+    Osc8,
+    OtherOsc {
+        escaped: bool,
+    },
+    Hyperlink {
+        escaped: bool,
+    },
+}
+
+impl Osc8Filter {
+    fn filter<'a>(&mut self, data: &'a str) -> Cow<'a, str> {
+        if matches!(self.state, Osc8State::Text) && !data.contains('\x1b') {
+            return Cow::Borrowed(data);
+        }
+        let mut output = Vec::with_capacity(data.len());
+        for byte in data.bytes() {
+            self.state = match self.state {
+                Osc8State::Text => {
+                    if byte == 0x1b {
+                        Osc8State::Escape
+                    } else {
+                        output.push(byte);
+                        Osc8State::Text
+                    }
+                }
+                Osc8State::Escape => {
+                    if byte == b']' {
+                        Osc8State::Osc
+                    } else {
+                        output.push(0x1b);
+                        if byte == 0x1b {
+                            Osc8State::Escape
+                        } else {
+                            output.push(byte);
+                            Osc8State::Text
+                        }
+                    }
+                }
+                Osc8State::Osc => {
+                    if byte == b'8' {
+                        Osc8State::Osc8
+                    } else {
+                        output.extend_from_slice(b"\x1b]");
+                        output.push(byte);
+                        Self::osc_state(byte, false, false)
+                    }
+                }
+                Osc8State::Osc8 => {
+                    if byte == b';' {
+                        Osc8State::Hyperlink { escaped: false }
+                    } else {
+                        output.extend_from_slice(b"\x1b]8");
+                        output.push(byte);
+                        Self::osc_state(byte, false, false)
+                    }
+                }
+                Osc8State::OtherOsc { escaped } => {
+                    output.push(byte);
+                    Self::osc_state(byte, escaped, false)
+                }
+                Osc8State::Hyperlink { escaped } => Self::osc_state(byte, escaped, true),
+            };
+        }
+        // Only complete ASCII controls were removed, never UTF-8 source bytes.
+        Cow::Owned(String::from_utf8(output).expect("OSC 8 filtering preserves UTF-8"))
+    }
+
+    fn osc_state(byte: u8, escaped: bool, hyperlink: bool) -> Osc8State {
+        if byte == 7 || (escaped && byte == b'\\') {
+            Osc8State::Text
+        } else if hyperlink {
+            Osc8State::Hyperlink {
+                escaped: byte == 0x1b,
+            }
+        } else {
+            Osc8State::OtherOsc {
+                escaped: byte == 0x1b,
+            }
+        }
+    }
+}
+
 /// Destination for complete terminal frames.
 ///
 /// The backend hands every flushed batch, normally one synchronized frame, to
@@ -233,6 +329,7 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
     out: W,
     size: TerminalSize,
     last_was_cr: bool,
+    hyperlink_filter: Option<Osc8Filter>,
     pending: Vec<u8>,
     /// Backend diagnostics mirror terminal control bytes but replace opaque
     /// image protocol payloads with a fixed marker.
@@ -316,6 +413,7 @@ impl OctetTerminal<Stdout> {
         image_store: TerminalImageStore,
     ) -> Result<Self> {
         crate::output::begin_tui_diagnostics();
+        lifecycle::save_original_termios();
         if let Err(error) = terminal::enable_raw_mode() {
             crate::output::end_tui_diagnostics();
             return Err(error.into());
@@ -398,6 +496,8 @@ impl OctetTerminal<Stdout> {
             out,
             size,
             last_was_cr: false,
+            hyperlink_filter: (!TerminalCapabilities::detect(ColorMode::Auto, false).hyperlinks)
+                .then(Osc8Filter::default),
             pending: Vec::with_capacity(16 * 1024),
             pending_log: Vec::with_capacity(16 * 1024),
             image_store,
@@ -434,7 +534,11 @@ impl<W: FrameSink> OctetTerminal<W> {
     }
 
     fn append_text(&mut self, text: &str) {
-        let normalized = normalize_line_endings(text, &mut self.last_was_cr);
+        let filtered = self
+            .hyperlink_filter
+            .as_mut()
+            .map_or_else(|| Cow::Borrowed(text), |filter| filter.filter(text));
+        let normalized = normalize_line_endings(&filtered, &mut self.last_was_cr);
         self.append_backend_bytes(normalized.as_bytes());
     }
 
@@ -453,18 +557,41 @@ impl<W: FrameSink> OctetTerminal<W> {
                 .map(|crop| (crop.skip_rows(), crop.shown_rows())),
         };
         const LOG_MARKER: &[u8] = b"[terminal image omitted]";
+        // A carried anchor has no visible prefix to advance the terminal cursor.
+        // Bound its saved zero-based column to the current canvas before placing
+        // the image; restore the text cursor afterward because anchors are zero-width.
+        // The image payload/cache remains independent of position.
+        let column = anchor.column().map(|column| {
+            let width = self.size.lock().expect("terminal size mutex poisoned").0;
+            let column = column.min(width.saturating_sub(1));
+            format!("\x1b7\x1b[{}G", u32::from(column) + 1)
+        });
+        let placement_len = |encoded_len: usize| {
+            column.as_ref().map_or(Some(encoded_len), |column| {
+                column.len().checked_add(encoded_len)?.checked_add(2)
+            })
+        };
         // A visible image is re-emitted on every frame that touches its row, and
         // a shimmer or dot tick touches many rows. Re-encoding means re-running
         // base64 over the whole payload in bounded chunks per frame, so reuse
         // the bytes once this exact placement has been written.
         if let Some(encoded) = self.image_store.encoded(&key) {
-            if self.pending.try_reserve(encoded.len()).is_err()
+            let Some(placement_len) = placement_len(encoded.len()) else {
+                return;
+            };
+            if self.pending.try_reserve(placement_len).is_err()
                 || (self.write_log.is_some()
                     && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
             {
                 return;
             }
+            if let Some(column) = &column {
+                self.pending.extend_from_slice(column.as_bytes());
+            }
             self.pending.extend_from_slice(&encoded);
+            if column.is_some() {
+                self.pending.extend_from_slice(b"\x1b8");
+            }
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }
@@ -484,14 +611,23 @@ impl<W: FrameSink> OctetTerminal<W> {
         // before emitting either. An allocation failure therefore cannot leave
         // a partial graphics sequence in a synchronized frame or an image
         // write without its payload-free log replacement.
-        if self.pending.try_reserve(command.encoded_len()).is_err()
+        let Some(placement_len) = placement_len(command.encoded_len()) else {
+            return;
+        };
+        if self.pending.try_reserve(placement_len).is_err()
             || (self.write_log.is_some() && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
         {
             return;
         }
         let mut encoded = Vec::with_capacity(command.encoded_len());
         if command.write_to(&mut encoded).is_ok() {
+            if let Some(column) = &column {
+                self.pending.extend_from_slice(column.as_bytes());
+            }
             self.pending.extend_from_slice(&encoded);
+            if column.is_some() {
+                self.pending.extend_from_slice(b"\x1b8");
+            }
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }

@@ -1001,14 +1001,12 @@ async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
                 assert!(shell.debug_error().unwrap().contains("not supported"));
             } else {
                 assert!(shell.debug_error().is_none());
-                assert!(shell.debug_snapshot().contains("next idle boundary"));
+                assert!(shell.debug_snapshot().contains("next turn"));
             }
             continue;
         }
         if requested != "cycle" {
-            assert!(shell
-                .debug_snapshot()
-                .contains("not provider acknowledgement"));
+            assert!(shell.debug_snapshot().contains("thinking:"));
         }
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0]["reasoning"]["effort"], "none");
@@ -1504,6 +1502,10 @@ async fn ordinary_chat_idle_thinking_is_durable_and_controls_the_next_request() 
     let owner = app.agent.session().resource_owner_key();
     let high = ReasoningConfig::Effort(octet_ai::ReasoningEffort::High);
     select_idle_thinking(&mut app, high.clone()).unwrap();
+    assert!(
+        !app.config.accepts_extension_reasoning(),
+        "a chosen effort must outrank Pi's default on reload"
+    );
     assert_eq!(app.agent.session().path(), session);
     assert_eq!(app.agent.session().resource_owner_key(), owner);
     assert_eq!(app.agent.reasoning(), &high);

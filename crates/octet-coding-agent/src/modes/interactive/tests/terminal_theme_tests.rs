@@ -148,7 +148,7 @@ async fn terminal_theme_file_preview_cancel_and_onboarding_keep_the_original() {
     events.push(theme_picker_key(KeyCode::Esc));
     let mut input = EventStream::from_stream(tokio_stream::iter(events));
     assert_eq!(
-        configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None)
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None, None)
             .await
             .unwrap(),
         None
@@ -252,6 +252,7 @@ async fn direct_builtin_theme_selection_matches_picker_and_startup() {
                 Some(name.to_owned()),
                 false,
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -344,6 +345,7 @@ async fn invalid_direct_theme_selection_keeps_current_config_and_appearance() {
             Some("missing-theme".into()),
             false,
             None,
+            None,
         )
         .await
         .unwrap(),
@@ -384,7 +386,8 @@ async fn terminal_theme_preview_restores_on_cancel_eof_error_and_close() {
         // Exercise the configuration boundary too: none of these /theme
         // outcomes may reach its persistence branch or mutate the config.
         let result =
-            configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None).await;
+            configure_terminal_theme(&mut shell, &mut input, &mut config, None, false, None, None)
+                .await;
         if exit == "error" {
             assert_eq!(result.unwrap_err().to_string(), "preview input failed");
         } else {
@@ -405,6 +408,95 @@ async fn terminal_theme_preview_restores_on_cancel_eof_error_and_close() {
         assert_eq!(shell.close_requested(), exit == "close");
         assert!(!shell.has_panel());
     }
+}
+
+#[tokio::test]
+async fn resource_reload_retains_invalid_active_theme_and_recovers() {
+    let (_directory, mut app) = fast_test_app(scripted_model("http://127.0.0.1:9"));
+    let themes = app.config.workspace.join(".octet/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    let path = themes.join("reload-retention.toml");
+    std::fs::write(&path, "accent = '#123456'\n").unwrap();
+    app.config.theme = Some("reload-retention".into());
+    app.config.theme_explicit = true;
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_theme(load_theme_for_background(
+        &app.config,
+        TerminalBackground::Dark,
+    ));
+    shell.set_runtime_config(app.config.clone());
+    shell.extension_set_editor_at("retained native 雪 draft".into(), Some(8));
+    let draft = shell.extension_editor_snapshot();
+    let mut input = tokio_stream::pending::<std::io::Result<Event>>();
+    for (source, expected) in [
+        ("accent = '#abcdef'\n", "#abcdef"),
+        (
+            "accent = '#ba6819'\n[unknown_section]\ninvalid = true\n",
+            "#abcdef",
+        ),
+        ("[invalid TOML", "#abcdef"),
+        ("accent = '#654321'\n", "#654321"),
+    ] {
+        std::fs::write(&path, source).unwrap();
+        let (next, applied) = reload_resources_announcing(app, &mut shell, &mut input, true)
+            .await
+            .unwrap();
+        app = next;
+        assert!(applied);
+        assert_eq!(
+            shell.theme().resolve::<String>("accent").as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            shell.theme().source_path(),
+            Some(path.canonicalize().unwrap().as_path())
+        );
+        let retained = shell.extension_editor_snapshot();
+        assert_eq!(retained.text, draft.text);
+        assert_eq!(retained.cursor, draft.cursor);
+        assert_eq!(app.config.theme.as_deref(), Some("reload-retention"));
+    }
+    std::fs::remove_file(&path).unwrap();
+    let (_app, applied) = reload_resources_announcing(app, &mut shell, &mut input, true)
+        .await
+        .unwrap();
+    assert!(applied);
+    assert!(
+        shell.theme().is_compiled_default(),
+        "missing source must not retain a stale file theme"
+    );
+}
+
+#[test]
+fn resource_reload_does_not_retain_withdrawn_or_shadowed_theme() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let root = directory.path().join("themes");
+    let shadow = directory.path().join("shadow");
+    for path in [&workspace, &root, &shadow] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(root.join("retention-admission.toml"), "accent = '#123456'").unwrap();
+    std::fs::write(shadow.join("retention-admission.toml"), "[invalid TOML").unwrap();
+    let mut config = terminal_theme_test_config(workspace);
+    config.theme_paths = vec![root.clone()];
+    config.theme = Some("retention-admission".into());
+    let current = load_theme_for_background(&config, TerminalBackground::Dark);
+    assert!(current.source_path().is_some());
+    for paths in [vec![], vec![root, shadow]] {
+        config.theme_paths = paths;
+        let candidate = load_theme_for_background(&config, TerminalBackground::Dark);
+        let (theme, diagnostic) =
+            crate::tui::theme::retain_invalid_file_theme(&config, &current, candidate);
+        assert!(theme.is_compiled_default());
+        assert!(diagnostic.is_none());
+    }
+    config.theme = Some("Cards".into());
+    let candidate = load_theme_for_background(&config, TerminalBackground::Dark);
+    let (theme, diagnostic) =
+        crate::tui::theme::retain_invalid_file_theme(&config, &current, candidate);
+    assert_eq!(theme.source(), &ThemeSource::CompiledCards);
+    assert!(diagnostic.is_none());
 }
 
 #[tokio::test]

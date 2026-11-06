@@ -61,7 +61,7 @@ without assistant-message or turn events. Its usage is session-only.
 
 | Option | What it does |
 | --- | --- |
-| `--tools NAMES`, `--exclude-tools NAMES` | Final comma-separated allowlist or exclusions, such as `read,bash`. |
+| `--tools NAMES`, `--exclude-tools NAMES` | Final case-sensitive, comma-separated allowlist or exclusions, such as `read,bash`. Extension names retain their exact spelling, such as `mcpScript`. |
 | `--powershell` | Add the Windows `powershell` tool. It is already the default Windows shell; the flag keeps it beside `bash` when `--shell-path` selects Bash. It never removes `bash`, can't be combined with an exclusive `--tools` or `--no-tools` list, and reports itself inert on hosts without PowerShell. |
 | `--models PATTERNS` | Ordered, comma-separated model scope for selection and Ctrl+P cycling: `provider/*`, a literal `provider/model`, or a bare-id glob, each with an optional real `:level` suffix. The first requested match is the default for a new session, and a miss warns without discarding the rest. `/scoped-models` saves the same ordered patterns. |
 | `--no-tools` | Disable all tools. Can't be combined with `--tools`. |
@@ -72,7 +72,7 @@ without assistant-message or turn events. Its usage is session-only.
 | `--effect-policy controlled_bash_approval\|controlled\|unsafe_host` | Set [effect admission](tools.md#authority-profiles). Default `unsafe_host`. |
 | `--safe-mode` | Approval for every bash call and file change. Forces external paths off and removes the implicit authority that starts enabled extensions, so an ungranted extension stays stopped while an explicitly granted one still starts. Can't be combined with `--effect-policy`. |
 | `--shell-path PATH` | Use this Bash-compatible shell. `$SHELL` isn't read. On Windows it also selects `bash` instead of the default `powershell` tool. |
-| `--bash-timeout-secs N`, `--exec-timeout-secs N` | Command timeout in seconds. The example config uses `120`. |
+| `--bash-timeout-secs N`, `--exec-timeout-secs N` | Optional command-timeout ceiling in seconds. No deadline by default; cancellation still applies. |
 | `--max-output-bytes N` | Output capture limit. The example config uses `1048576`. |
 | `--allow-remote-read` | Allow HTTPS image and audio reads. Off by default. Can't be combined with `--offline`. |
 | `--telemetry PATH` | Opt in to owner-only telemetry, kept apart from sessions, with no raw prompts or tool payloads. |
@@ -281,9 +281,9 @@ octet extension update --path ARCHIVE
 octet extension list
 ```
 
-The five executable bundles are pinned exactly to the
-running host: the published 0.9.6 bundles require `=0.9.6`. See the
-[0.9.6 release notes](releases/v0.9.6.md) and the version-pinned GitHub release
+The six executable bundles are pinned exactly to the
+running host: 0.10.0 bundles require `=0.10.0`. See the
+[0.10.0 release notes](releases/v0.10.0.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
 match the running host version:
 
@@ -295,11 +295,16 @@ octet extension remove NAME
 ```
 
 The executable catalog is `octet-codemode`, `octet-computer-use`, `octet-mcp`,
-`octet-subagents` and `octet-web-search`. The experimental `octet-pi-compat`
-adapter does not ship in the catalog. Checksummed bundles install atomically
-under `~/.octet/extensions/<id>`, and a local update must match the managed
-package ID. `--all` (or `/extensions install` in the TUI) installs every catalog
-bundle that is not installed yet and leaves installed ones untouched. Nothing runs at install: no hook, dependency setup, activation,
+`octet-pi-compat`, `octet-subagents` and `octet-web-search`. See
+[Pi compatibility](pi-compatibility.md) for adapter setup. Checksummed bundles are validated in staging
+before publication under `~/.octet/extensions/<id>`, and a local update must match
+the managed package ID. Linux/macOS updates use atomic directory exchange;
+Windows uses locked, recoverable replacement, not an atomic swap. Close programs
+using a Windows bundle before updating; after an interruption, `octet extension
+list` or global managed discovery recovers the pending update. See
+[Windows update recovery](windows.md#managed-extension-updates-unreleased).
+`--all` (or `/extensions install` in the TUI) installs every catalog bundle that
+is not installed yet and leaves installed ones untouched. Nothing runs at install: no hook, dependency setup, activation,
 trust or launch. Packaged skills must be loaded explicitly. See
 [Extensions](extensions.md).
 

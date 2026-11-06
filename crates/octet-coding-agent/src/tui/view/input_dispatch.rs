@@ -63,11 +63,16 @@ impl InteractiveShell {
         }
     }
 
-    /// Capture at most one ordinary submission. Later typing stays a new draft;
+    pub(crate) fn thinking_submission_pending(&self) -> bool {
+        self.input_dispatch.thinking_submission.is_some()
+    }
+
+    /// Capture at most one ordinary submission during any cancellable wait, so
+    /// Enter never has to be repeated. It is sent when the wait ends only if the
+    /// session, route and reasoning still match. Later typing stays a new draft;
     /// duplicate Enter cannot create a second request or grow an unbounded queue.
     pub(crate) fn queue_thinking_submission(&mut self) -> bool {
-        if !self.input_dispatch.thinking_wait
-            || self.input_dispatch.thinking_submission.is_some()
+        if self.input_dispatch.thinking_submission.is_some()
             || self.pending().trim_start().starts_with(['/', '!'])
         {
             return false;
@@ -84,7 +89,7 @@ impl InteractiveShell {
                 reasoning,
                 composed,
             });
-            self.notice("prompt queued until thinking change completes");
+            self.notice("queued");
         }
         true
     }
@@ -917,17 +922,26 @@ mod tests {
     }
 
     #[test]
-    fn thinking_submission_never_admits_commands_shell_escapes_or_unowned_waits() {
+    fn thinking_submission_never_admits_commands_or_shell_escapes_and_latches_in_any_wait() {
         let mut shell = thinking_shell();
         for command in ["/new", "!rm -rf example"] {
             shell.prefill_editor(command.into());
             assert!(!shell.queue_thinking_submission());
             assert_eq!(shell.pending(), command);
         }
+        // Any other cancellable wait latches an ordinary prompt too; the
+        // owner and reasoning fence at dispatch still guards stale sessions.
         shell.end_thinking_wait(false);
         shell.prefill_editor("ordinary draft".into());
+        assert!(shell.queue_thinking_submission());
+        assert!(shell.pending().is_empty());
+        assert!(shell.thinking_submission_pending());
         assert!(!shell.queue_thinking_submission());
-        assert_eq!(shell.pending(), "ordinary draft");
+        let composed = shell
+            .take_thinking_submission("session:route:model", &octet_ai::ReasoningConfig::Off)
+            .unwrap();
+        assert_eq!(composed.transcript_text, "ordinary draft");
+        assert!(!shell.thinking_submission_pending());
     }
 
     #[test]

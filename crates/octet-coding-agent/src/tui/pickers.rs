@@ -1279,41 +1279,47 @@ async fn confirmation_prompt_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    loop {
-        let (mut items, decisions) = if default {
-            (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
-        } else {
-            (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
-        };
-        if technical_detail.is_some() {
-            items.push("Technical details".into());
-        }
-        let descriptions = vec![detail.map(str::to_owned); items.len()];
-        let selected = pick_list(
-            shell,
-            input,
-            OrdinarySurfaceMetadata::new(prompt),
-            items,
-            descriptions,
-            0,
-            PanelAction::Confirmation,
-        )
-        .await?;
-        if selected == Some(2) {
-            read_only_document(
+    shell.set_terminal_permission_pending(true);
+    let result = async {
+        loop {
+            let (mut items, decisions) = if default {
+                (vec!["Approve".to_owned(), "Deny".to_owned()], [true, false])
+            } else {
+                (vec!["Deny".to_owned(), "Approve".to_owned()], [false, true])
+            };
+            if technical_detail.is_some() {
+                items.push("Technical details".into());
+            }
+            let descriptions = vec![detail.map(str::to_owned); items.len()];
+            let selected = pick_list(
                 shell,
                 input,
-                "Technical details · Esc to return",
-                technical_detail.unwrap().into(),
+                OrdinarySurfaceMetadata::new(prompt),
+                items,
+                descriptions,
+                0,
+                PanelAction::Confirmation,
             )
             .await?;
-            if shell.close_requested() {
-                return Ok(false);
+            if selected == Some(2) {
+                read_only_document(
+                    shell,
+                    input,
+                    "Technical details · Esc to return",
+                    technical_detail.unwrap().into(),
+                )
+                .await?;
+                if shell.close_requested() {
+                    return Ok(false);
+                }
+                continue;
             }
-            continue;
+            return Ok(selected.map(|index| decisions[index]).unwrap_or(false));
         }
-        return Ok(selected.map(|index| decisions[index]).unwrap_or(false));
     }
+    .await;
+    shell.set_terminal_permission_pending(false);
+    result
 }
 
 /// Build a human-facing label from the same cached metadata boundary used by
@@ -1515,16 +1521,36 @@ fn pad_visible_left(value: &str, width: usize) -> String {
     )
 }
 
+// Custom endpoint labels can be arbitrary configured display names. Include
+// the actual wire ID and endpoint so otherwise indistinguishable choices remain
+// identifiable; keep the friendly name separately and leave routing untouched.
+fn model_picker_identity(model: &octet_ai::ModelSpec) -> (String, Option<String>) {
+    let name = model_label(model);
+    if model.id.0.starts_with("custom/")
+        && !model.api_name.trim().is_empty()
+        && model.api_name != name
+    {
+        (
+            format!("{} [{}]", model.api_name, model.endpoint.0),
+            Some(name),
+        )
+    } else {
+        (name, None)
+    }
+}
+
 pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
     let mut rows = catalog
         .models()
         .map(|model| {
+            let (label, name) = model_picker_identity(model);
             (
                 model_provider_heading(catalog, model),
-                model_label(model),
+                label,
                 model.id.clone(),
                 model_picker_metadata(model),
                 native_model_detail(model),
+                name,
             )
         })
         .collect::<Vec<_>>();
@@ -1561,7 +1587,7 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
         labels: Vec::with_capacity(rows.len()),
         descriptions: Vec::with_capacity(rows.len()),
     };
-    for (provider, label, id, metadata, detail) in rows {
+    for (provider, label, id, metadata, detail, name) in rows {
         presentation.details.push(detail);
         let media = if metadata.media.is_empty() {
             String::new()
@@ -1585,6 +1611,10 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
                 pad_visible_right(&metadata.output_cost, output_width),
                 pad_visible_left(&metadata.context, context_width),
             )
+        };
+        let description = match name {
+            Some(name) => format!("{description}  Model Name: {name}"),
+            None => description,
         };
         presentation.ids.push(id);
         presentation.providers.push(provider);

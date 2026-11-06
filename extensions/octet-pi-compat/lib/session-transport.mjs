@@ -117,9 +117,10 @@ export class SessionTransport {
     exact(params, ['resource_owner', 'snapshot', 'host'], 'session snapshot prepare');
     const d = descriptor(params.snapshot, params.resource_owner, 'history');
     if (d.preparation !== null) invalid('read-only snapshot preparation');
-    this.runtime.bind({ context: { resource_owner: params.resource_owner, host: params.host } }, store);
     const key = ownerKey(d.owner), previous = this.current.get(key);
     if (previous && previous.revision > d.view_revision) throw unavailable();
+    const host = { ...params.host, ...this.runtime.states.get(key)?.host };
+    this.runtime.bind({ context: { resource_owner: params.resource_owner, host } }, store);
     const barrier = this.invalidate(d.owner, d.view_revision);
     store.preparationBarrier = barrier; store.preparationOwner = key;
     let view;
@@ -217,22 +218,38 @@ export class SessionTransport {
   }
   retire(state) { const current = this.current.get(state.key); this.current.delete(state.key); current?.resolve?.(); this.drop(current?.view); }
   append(store, receipt, grant, successor) {
-    const view = store.activation?.view ?? store.sessionView, d = view?.descriptor;
+    // Validate against the view this owner actually reads (its own pinned view,
+    // else its current publication), never a retired owner's lease.
+    const view = this.publishedView(store), d = view?.descriptor;
+    // Host config writes since this view's head (the parent's own model or
+    // thinking selections) arrive as an exact parent chain before the entry.
+    const gap = receipt.gap ?? [];
+    if (!Array.isArray(gap) || gap.length > 16 || receipt.gap !== undefined && !gap.length) invalid('session append view receipt gap');
+    let parent = receipt.previous_head;
+    const ids = new Set(view?.document?.entries.map(entry => entry.id));
+    for (const entry of gap) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || ids.has(entry.id)
+          || entry.parent !== parent || !entry.value || entry.value.type !== 'config' || entry.metadata?.extension_metadata !== undefined && Object.keys(entry.metadata.extension_metadata).length) invalid('session append view receipt gap');
+      ids.add(entry.id); parent = entry.id;
+    }
     if (!d || receipt.previous_revision !== d.view_revision || receipt.previous_head !== d.head
         || !integer(receipt.view_revision, 1) || receipt.view_revision <= d.view_revision
-        || receipt.entry?.id !== receipt.entry_id || receipt.entry?.parent !== receipt.previous_head) invalid('session append view receipt');
-    const h = view.document, p = this.profile;
+        || receipt.entry?.id !== receipt.entry_id || ids.has(receipt.entry_id) || receipt.entry?.parent !== parent) invalid('session append view receipt');
+    const h = view.document, p = this.profile, added = [...gap, receipt.entry];
     // These are the exact changes to the compact six-field history document.
-    const delta = jsonBytes(receipt.entry, p.snapshot_bytes) + (h.entries.length ? 1 : 0)
-      + jsonBytes(receipt.entry_id, p.snapshot_bytes) + (h.branch_ids.length ? 1 : 0)
-      + jsonBytes(receipt.head, p.snapshot_bytes) - jsonBytes(h.head, p.snapshot_bytes);
+    let delta = jsonBytes(receipt.head, p.snapshot_bytes) - jsonBytes(h.head, p.snapshot_bytes);
+    added.forEach((entry, index) => {
+      delta += jsonBytes(entry, p.snapshot_bytes) + (h.entries.length + index ? 1 : 0)
+        + jsonBytes(entry.id, p.snapshot_bytes) + (h.branch_ids.length + index ? 1 : 0);
+    });
+    const records = 2 * added.length;
     if (delta < 0 || d.bytes + delta > p.snapshot_bytes || this.bytes + delta > p.generation_bytes
-        || d.entry_count + 1 > p.view_entries || d.branch_count + 1 > p.view_entries || this.records + 2 > p.generation_entries) throw unavailable();
-    this.bytes += delta; this.records += 2;
-    const release = view.release; view.release = () => { this.bytes -= delta; this.records -= 2; release(); };
-    h.entries.push(receipt.entry); h.branch_ids.push(receipt.entry_id); h.head = receipt.head;
-    view.host.session_branch.push(receipt.entry); view.host.session_leaf_id = receipt.head;
-    view.descriptor = { ...d, bytes: d.bytes + delta, entry_count: d.entry_count + 1, branch_count: d.branch_count + 1, head: receipt.head, view_revision: receipt.view_revision };
+        || d.entry_count + added.length > p.view_entries || d.branch_count + added.length > p.view_entries || this.records + records > p.generation_entries) throw unavailable();
+    this.bytes += delta; this.records += records;
+    const release = view.release; view.release = () => { this.bytes -= delta; this.records -= records; release(); };
+    for (const entry of added) { h.entries.push(entry); h.branch_ids.push(entry.id); view.host.session_branch.push(entry); }
+    h.head = receipt.head; view.host.session_leaf_id = receipt.head;
+    view.descriptor = { ...d, bytes: d.bytes + delta, entry_count: d.entry_count + added.length, branch_count: d.branch_count + added.length, head: receipt.head, view_revision: receipt.view_revision };
     // Parent and child linked by the native driver share this receipt chain.
     if (store.activation) store.activation.leaf.grant = successor;
   }

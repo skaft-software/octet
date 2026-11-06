@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { configure, configureMirror, MIRROR_SUBSCRIBED_HOOKS, mirrorReviewPrompt, preparePiMirror } from '../configure.mjs';
 import { discoverPiSetup, resolveThemeFile } from '../lib/pi-setup.mjs';
 import { foregroundTokens, backgroundTokens } from '../lib/theme-palette.mjs';
-import { launch } from './helper.mjs';
+import { jsLiteral, launch } from './helper.mjs';
 
 function temporary(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'octet-pi-setup-')));
@@ -337,9 +337,10 @@ test('pi setup: a factory whose setup never settles is left out of the mirror, n
   assert.deepEqual(bridge.mirror_excluded.map(item => item.entry), [realpathSync(stalled)]);
   const peer = launch(t, [], { config: join(output, 'bridge.json'), env, cwd: root, metadata });
   await peer.init(['resource_paths_v1', 'session_entries']);
-  const issue = await peer.wait(frame => frame.method === 'notification' && /stalled\.mjs/.test(frame.params?.message ?? ''));
-  assert.match(issue.params.message, /setup did not finish within/);
-  assert.match(issue.params.message, /left out of the mirror/);
+  const issue = await peer.wait(frame => frame.method === 'notification' && /^Stalled:/.test(frame.params?.message ?? ''));
+  assert.equal(issue.params.message, 'Stalled: left out: setup did not finish within 0.3 s. Update or disable; octet tries again at the next start.');
+  assert.ok(!issue.params.message.includes(root));
+  assert.ok(!issue.params.message.includes('stalled.mjs'));
   await peer.close();
 });
 
@@ -382,7 +383,7 @@ test('pi setup: non-mirror palette discovery respects package deltas and live pr
   // The malformed later same-stem file must reach native winner resolution;
   // the adapter must not remove it and revive the earlier valid palette.
   const factory = join(root, 'manual.mjs');
-  put(factory, `export default pi => pi.on('resources_discover', () => ({themePaths:[${JSON.stringify(later)}]}));`);
+  put(factory, `export default pi => pi.on('resources_discover', () => ({themePaths:[${jsLiteral(later)}]}));`);
   const { registrations: metadata } = configure({ output, reviewed: true, extensions: [factory], piAgentDir: agent, cwd: root });
   const peer = launch(t, [factory], { config: join(output, 'bridge.json'), metadata, cwd: root });
   await peer.init(['resource_paths_v1', 'session_entries']); await peer.start();
@@ -395,4 +396,23 @@ test('pi setup: non-mirror palette discovery respects package deltas and live pr
     assert.ok(!response.result.resource_paths.theme_paths.some(path => /excluded|disabled|empty/.test(path)));
   }
   await peer.close();
+});
+
+test('pi setup: from the home directory the user agent dir is user scope, not an untrusted project path', async t => {
+  const root = temporary(t);
+  const agent = piHome(root);
+  const home = join(root, 'home');
+  // `<home>/.pi` is both Pi's project root and the parent of the agent dir.
+  put(join(home, '.pi/extensions/project.js'), 'export default pi => pi.registerCommand("project", {handler(){}});');
+  const setup = discoverPiSetup({ agentDir: agent, cwd: home, projectTrusted: false });
+  assert.deepEqual(setup.extensions, [
+    join(agent, 'elsewhere/extra.ts'),
+    join(agent, 'extensions/one.mjs'),
+    join(agent, 'extensions/two.js'),
+  ]);
+  assert.deepEqual(setup.themesPaths, [join(agent, 'themes/pi-setup-theme.json')]);
+  assert.equal(setup.keybindingsPath, join(agent, 'keybindings.json'));
+  assert.equal(setup.defaultTheme, 'pi-setup-theme');
+  assert.ok(!setup.diagnostics.some(message => message.includes(agent)), setup.diagnostics.join('\n'));
+  assert.ok(setup.diagnostics.some(message => message.includes('untrusted project .pi paths') && message.includes('project.js')) || !setup.extensions.includes(join(home, '.pi/extensions/project.js')));
 });

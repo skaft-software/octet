@@ -589,13 +589,20 @@ async fn direct_model_selection_enriches_and_unknown_models_preserve_the_app() {
     let target_model = app.catalog.resolve(&target).unwrap();
     app.catalog
         .remove_model_if_endpoint(&target, &target_model.endpoint.id);
+    let skills = std::sync::Arc::clone(&app.skills);
+    let prompts = std::sync::Arc::clone(&app.prompts);
     let mut shell = InteractiveShell::test_shell();
+    shell.extension_set_editor("unfinished model-switch draft".into());
     let mut input = futures_util::stream::pending();
     let mut app = transition(app, &mut shell, &mut input, Reconfig::Model(target.clone()))
         .await
         .unwrap();
     assert!(app.readiness.is_fleet());
     assert_eq!(app.model.spec.id, target);
+    assert!(app.config.model_explicit);
+    assert!(std::sync::Arc::ptr_eq(&skills, &app.skills));
+    assert!(std::sync::Arc::ptr_eq(&prompts, &app.prompts));
+    assert_eq!(shell.pending(), "unfinished model-switch draft");
     let path = app.agent.session().path().to_owned();
     app = transition(
         app,

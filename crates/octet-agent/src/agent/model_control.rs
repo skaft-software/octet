@@ -3,21 +3,14 @@ use super::*;
 
 impl Agent {
     /// Select a resolved host route between runs, preserving the session and tools.
-    /// Delegation's model template is currently immutable; refuse rather than
-    /// leave children silently inheriting the previous route.
+    /// A bound delegation template follows the selection, so new inherited
+    /// workers use the new route.
     pub fn select_model_at_idle(
         &mut self,
         model: Model,
         reasoning: ReasoningConfig,
         reasoning_label: String,
     ) -> Result<(), AgentError> {
-        if self.delegation.is_some()
-            && (model.spec.id != self.model.spec.id || model.endpoint.id != self.model.endpoint.id)
-        {
-            return Err(AgentError::Delegation(
-                "model selection requires an updated delegation model template".into(),
-            ));
-        }
         require_ultra_observation(
             &reasoning,
             self.delegation.is_some() || self.ultra_observation_managed,
@@ -61,6 +54,9 @@ impl Agent {
         self.model = model;
         self.reasoning = reasoning;
         if let Some(binding) = &self.delegation {
+            // Only a new inherited worker reads the template; existing workers
+            // keep the route and effort their host policy pinned.
+            binding.update_model(self.model.clone());
             binding.update_reasoning(self.reasoning.clone());
         }
         self.sync_delegation_runtime_settings();

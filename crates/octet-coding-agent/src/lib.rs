@@ -54,7 +54,7 @@ mod session_tree;
 mod tui;
 mod update;
 
-use clap::Parser;
+use std::ffi::OsString;
 
 /// Build the multi-thread runtime that the `octet` and `octet-host` binaries run on.
 ///
@@ -71,6 +71,10 @@ pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .worker_threads(workers)
         .enable_all()
         .build()
+}
+
+pub fn restore_starting_terminal_attributes() {
+    tui::terminal::restore_starting_attributes();
 }
 
 /// With no arguments, exit once startup has dispatched to the interactive
@@ -97,7 +101,7 @@ fn forward_startup_trace(line: &str) {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let args = std::env::args_os().collect::<Vec<_>>();
+    let args = std::env::args_os().collect::<Vec<OsString>>();
     // The internal re-exec probe is answered before clap, provider setup,
     // extension activation, workspace access, networking, or the agent loop.
     // This early return is the whole guarantee: no `App` can be constructed,
@@ -115,13 +119,22 @@ async fn run() -> anyhow::Result<()> {
     octet_agent::extension_process::set_startup_trace_sink(forward_startup_trace);
     app::bootstrap::startup_phase("process.enter");
     let bench = args.len() <= 1 && std::env::var_os(STARTUP_BENCH_ENV).is_some();
-    let (mut cli, extension_flag_values, parsed_cwd) =
-        if cli::uses_runtime_extension_flag_parser(&args) {
-            let cwd = std::env::current_dir()?;
-            let (cli, extension_flag_values) = cli::parse_with_extension_flags(args, &cwd)?;
-            (cli, extension_flag_values, Some(cwd))
-        } else {
-            (cli::Cli::parse(), Default::default(), None)
+    let (mut cli, extension_flag_values, explicit_extension_flags, parsed_cwd) =
+        match cli::parse_static_invocation(&args) {
+            cli::StaticInvocation::Parsed(cli) => {
+                (*cli, Default::default(), Default::default(), None)
+            }
+            cli::StaticInvocation::Runtime(command) => {
+                let cwd = std::env::current_dir()?;
+                let (cli, extension_flag_values, explicit_extension_flags) =
+                    cli::parse_with_extension_flags(args, &cwd, command.map(|command| *command))?;
+                (
+                    cli,
+                    extension_flag_values,
+                    explicit_extension_flags,
+                    Some(cwd),
+                )
+            }
         };
     let top_level_command = cli.command.clone();
     let parity = cli.parity.clone();
@@ -182,6 +195,7 @@ async fn run() -> anyhow::Result<()> {
     let mut config = cli::build_config(cli, &cwd)?;
     app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
+    cli::apply_pi_codemode_settings(&mut config, &explicit_extension_flags);
     if let Some(search) = parity.list_models.as_deref() {
         return cli::parity::list_models(&config, search);
     }

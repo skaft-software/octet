@@ -167,6 +167,7 @@ pub(super) fn host_request_operation_name(operation: &HostRequestOperation) -> &
             ExtensionContextOperation::PendingMessages => "pending_messages",
             ExtensionContextOperation::SystemPrompt => "system_prompt",
             ExtensionContextOperation::Tools => "active_tools",
+            ExtensionContextOperation::Commands => "command_catalog",
         },
     }
 }
@@ -181,6 +182,9 @@ pub(super) fn host_request_feature(operation: &HostRequestOperation) -> &'static
         HostRequestOperation::ActiveTools { .. } => EXTENSION_FEATURE_ACTIVE_TOOLS,
         HostRequestOperation::Terminal(_) => EXTENSION_FEATURE_TERMINAL_HANDOFF,
         HostRequestOperation::RemoteUi { .. } => EXTENSION_FEATURE_REMOTE_UI,
+        HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Commands) => {
+            octet_agent::extension_process::EXTENSION_FEATURE_COMMAND_CATALOG
+        }
         HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools) => {
             EXTENSION_FEATURE_ACTIVE_TOOLS
         }
@@ -335,7 +339,8 @@ pub(super) fn validate_host_request(
                 Ok(())
             }
             ExtensionSessionEntryOperation::SetName { name } => {
-                bounded_host_request_name("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
+                // Empty names are the documented clear operation, not identifiers.
+                bounded_host_request_text("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
             }
             ExtensionSessionEntryOperation::SetLabel { entry_id, label } => {
                 bounded_host_request_name("entry id", entry_id, MAX_EXTENSION_UI_KEY_BYTES)?;

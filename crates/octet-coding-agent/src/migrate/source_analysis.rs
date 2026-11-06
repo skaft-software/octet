@@ -648,7 +648,7 @@ fn is_private_pi_import(module: &str) -> bool {
         || module.starts_with("@earendil-works/pi-tui/src/")
 }
 
-/// Every `pi.on(...)` event in Pi 1.0.2.
+/// Every `pi.on(...)` event in Pi 1.0.2, unchanged through Pi 1.4.0.
 const PI_1_0_2_EVENTS: &[&str] = &[
     "after_provider_response",
     "agent_before_settle",
@@ -693,7 +693,7 @@ const PI_1_0_2_EVENTS: &[&str] = &[
     "user_bash",
 ];
 
-/// Every `ExtensionUIContext` member in Pi 1.0.2.
+/// Every `ExtensionUIContext` member in Pi 1.0.2, unchanged through Pi 1.4.0.
 const PI_1_0_2_UI_METHODS: &[&str] = &[
     "addAutocompleteProvider",
     "confirm",
@@ -729,7 +729,7 @@ const PI_1_0_2_UI_METHODS: &[&str] = &[
 const PI_1_0_2_RENDERER_FIELDS: &[&str] =
     &["renderCall", "renderResult", "renderShell", "renderMessage"];
 
-/// Every `ExtensionAPI` registration method in Pi 1.0.2.
+/// Every `ExtensionAPI` registration method in Pi 1.0.2, unchanged through Pi 1.4.0.
 const PI_1_0_2_REGISTRATIONS: &[&str] = &[
     "registerCommand",
     "registerEntryRenderer",
@@ -747,7 +747,7 @@ const PI_1_0_2_REGISTRATIONS: &[&str] = &[
     "unregisterVirtualModel",
 ];
 
-/// Every `ExtensionAPI` member in Pi 1.0.2.
+/// Every `ExtensionAPI` member in Pi 1.0.2, unchanged through Pi 1.4.0.
 const PI_1_0_2_API_METHODS: &[&str] = &[
     "appendEntry",
     "events",
@@ -834,25 +834,25 @@ fn classify_extension(accumulator: &AnalysisAccumulator) -> (MigrationPath, Vec<
     {
         if !unknown_events.is_empty() {
             reasons.push(format!(
-                "uses event names outside the pinned Pi 1.0.2 compatibility profile: {}",
+                "uses event names outside the Pi 1.4 compatibility profile: {}",
                 unknown_events.join(", ")
             ));
         }
         if !unknown_ui.is_empty() {
             reasons.push(format!(
-                "uses UI methods outside the pinned Pi 1.0.2 compatibility profile: {}",
+                "uses UI methods outside the Pi 1.4 compatibility profile: {}",
                 unknown_ui.join(", ")
             ));
         }
         if !unknown_registrations.is_empty() {
             reasons.push(format!(
-                "uses registrations outside the pinned Pi 1.0.2 compatibility profile: {}",
+                "uses registrations outside the Pi 1.4 compatibility profile: {}",
                 unknown_registrations.join(", ")
             ));
         }
         if !unknown_actions.is_empty() {
             reasons.push(format!(
-                "uses ExtensionAPI methods outside the pinned Pi 1.0.2 compatibility profile: {}",
+                "uses ExtensionAPI methods outside the Pi 1.4 compatibility profile: {}",
                 unknown_actions.join(", ")
             ));
         }

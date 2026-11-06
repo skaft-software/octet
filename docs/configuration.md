@@ -57,7 +57,7 @@ Defaults are marked. Other values are examples.
 | `allow_process`, `allow_shell` | `true` for both | Separate process and shell gates. Enabling one doesn't override an effect denial. |
 | `allow_remote_read` | default `false` | Allow HTTPS image and audio reads. `--offline` always disables it. |
 | `shell_path` | optional | Explicit Bash-compatible shell. [Selection order](tools.md#shell-selection). On Windows, setting it selects the `bash` tool instead of `powershell` ([Windows](windows.md#powershell)). |
-| `bash_timeout_secs` | `120` | Command timeout in seconds. |
+| `bash_timeout_secs` | default unset | Optional command-timeout ceiling in seconds. Unset means no deadline; cancellation and process cleanup still apply. |
 | `max_output_bytes` | `1048576` | Command output capture limit. |
 | `context_files` | `true` | Include instruction and context files. Project files still need trust. |
 | `offline` | `false` | `true` skips optional model discovery and remote reads, not inference. |

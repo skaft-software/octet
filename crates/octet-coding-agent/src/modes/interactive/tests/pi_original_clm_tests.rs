@@ -123,7 +123,7 @@ async fn native_original_clm_restores_branch_settings_before_first_command() {
         &app.config,
         &app.skills,
         &app.prompts,
-        &extensions,
+        &mut extensions,
         &mut host,
         capability,
     );

@@ -102,6 +102,24 @@ impl ExecutableExtensions {
             self.refuse_host_request(process, request_id, generation, failure, message);
             return;
         }
+        if self.modeless
+            && matches!(
+                &operation,
+                HostRequestOperation::MessageInjection(_)
+                    | HostRequestOperation::ContextSnapshot(
+                        ExtensionContextOperation::SystemPrompt
+                    )
+            )
+        {
+            self.refuse_host_request(
+                process,
+                request_id,
+                generation,
+                ExtensionRequestFailure::UnsupportedFeature,
+                "no configured model; prompts and system-prompt operations are disabled",
+            );
+            return;
+        }
         if !foreground.services_later() {
             // Tool reads and policy-bounded selection need no editor lease.
             // Re-fence the live instance; selection can only narrow the shared
@@ -109,8 +127,9 @@ impl ExecutableExtensions {
             // foreground consumer exists to service them.
             if matches!(
                 &operation,
-                HostRequestOperation::ContextSnapshot(ExtensionContextOperation::Tools)
-                    | HostRequestOperation::ActiveTools { .. }
+                HostRequestOperation::ContextSnapshot(
+                    ExtensionContextOperation::Tools | ExtensionContextOperation::Commands
+                ) | HostRequestOperation::ActiveTools { .. }
             ) {
                 let outcome = if process.is_running()
                     && process.health_snapshot().generation == generation
@@ -134,6 +153,9 @@ impl ExecutableExtensions {
                                 "live tool registry is not bound".into(),
                             ),
                         },
+                        HostRequestOperation::ContextSnapshot(
+                            ExtensionContextOperation::Commands,
+                        ) => self.command_catalog_outcome(),
                         _ => self.tool_snapshot_outcome(),
                     }
                 } else {
@@ -226,6 +248,17 @@ impl ExecutableExtensions {
                 return outcome;
             }
         };
+        if process
+            .contributions()
+            .shortcuts
+            .iter()
+            .any(|shortcut| shortcut.name == shortcut_id)
+        {
+            return ExtensionRequestOutcome::Failed(
+                ExtensionRequestFailure::InvalidRequest,
+                format!("shortcut id {shortcut_id:?} is declared by the static manifest"),
+            );
+        }
         if self.shortcuts.iter().any(|existing| existing.key == parsed) {
             return ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
@@ -453,6 +486,7 @@ impl ExecutableExtensions {
                         }
                     };
                     shell.queue_extension_message(message);
+                    self.refresh_frontend_pending_messages(shell);
                     ExtensionRequestOutcome::Ok(serde_json::json!({}))
                 }
                 HostRequestOperation::SessionEntry(_) => {
@@ -540,6 +574,7 @@ impl ExecutableExtensions {
                 Self::context_pending_messages_outcome(shell)
             }
             ExtensionContextOperation::Tools => self.tool_snapshot_outcome(),
+            ExtensionContextOperation::Commands => self.command_catalog_outcome(),
             ExtensionContextOperation::SystemPrompt => ExtensionRequestOutcome::Failed(
                 ExtensionRequestFailure::InvalidRequest,
                 "the system prompt is resolved by the session owner".to_owned(),
@@ -749,6 +784,23 @@ impl ExecutableExtensions {
         agent: &mut Agent,
         sessions: &SessionStore,
     ) -> bool {
+        self.apply_session_host_requests_for_owner(Some(agent), None, sessions)
+    }
+
+    pub(crate) fn apply_modeless_session_host_requests(
+        &mut self,
+        session: &mut Session,
+        sessions: &SessionStore,
+    ) -> bool {
+        self.apply_session_host_requests_for_owner(None, Some(session), sessions)
+    }
+
+    fn apply_session_host_requests_for_owner(
+        &mut self,
+        mut agent: Option<&mut Agent>,
+        mut session: Option<&mut Session>,
+        sessions: &SessionStore,
+    ) -> bool {
         let mut changed = false;
         while let Some(pending) = self.pending_session_requests.pop_front() {
             if !pending.process.is_running()
@@ -764,10 +816,23 @@ impl ExecutableExtensions {
             if let HostRequestOperation::ActiveTools { names } = pending.operation {
                 // Narrowing only: the agent refuses unknown or policy-excluded
                 // names and can never widen the host-policed tool surface.
-                let outcome =
-                    Self::active_tools_outcome(agent.set_active_tool_names(Some(
+                let outcome = match agent.as_deref_mut() {
+                    Some(agent) => Self::active_tools_outcome(agent.set_active_tool_names(Some(
                         names.iter().cloned().collect::<BTreeSet<_>>(),
-                    )));
+                    ))),
+                    None => match self
+                        .tool_host
+                        .as_ref()
+                        .expect("bound model-less tool host")
+                        .set_active_tools(Some(&names.into_iter().collect()))
+                    {
+                        Ok(()) => ExtensionRequestOutcome::Ok(serde_json::json!({})),
+                        Err(error) => ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::InvalidRequest,
+                            error,
+                        ),
+                    },
+                };
                 self.queue_host_request_response(
                     pending.process,
                     pending.request_id,
@@ -778,12 +843,15 @@ impl ExecutableExtensions {
             }
             if let HostRequestOperation::ContextSnapshot(operation) = pending.operation {
                 let outcome = match operation {
-                    ExtensionContextOperation::SystemPrompt => {
-                        Self::context_system_prompt_outcome(agent)
-                    }
-                    ExtensionContextOperation::Tools => {
-                        ExtensionRequestOutcome::Ok(agent.extension_tool_snapshot())
-                    }
+                    ExtensionContextOperation::SystemPrompt => match agent.as_deref() {
+                        Some(agent) => Self::context_system_prompt_outcome(agent),
+                        None => ExtensionRequestOutcome::Failed(
+                            ExtensionRequestFailure::UnsupportedFeature,
+                            "no configured model; system prompt unavailable".into(),
+                        ),
+                    },
+                    ExtensionContextOperation::Commands => self.command_catalog_outcome(),
+                    ExtensionContextOperation::Tools => self.tool_snapshot_outcome(),
                     // The two session-context reads resolve against the shell
                     // drain, never this agent-owning loop.
                     ExtensionContextOperation::SessionManager
@@ -797,13 +865,17 @@ impl ExecutableExtensions {
                 );
                 continue;
             }
-            let session = agent.session_mut();
+            let session = match agent.as_deref_mut() {
+                Some(agent) => agent.session_mut(),
+                None => session.as_deref_mut().expect("model-less session owner"),
+            };
             // The extension's own manifest name is the durable metadata
             // namespace; the admitting generation is the provenance value.
             let namespace = pending.process.descriptor().manifest.name.clone();
             let HostRequestOperation::SessionEntry(operation) = pending.operation else {
                 continue;
             };
+            let mut replied = false;
             let outcome = match operation {
                 ExtensionSessionEntryOperation::SetName { name } => match self.session_id.clone() {
                     None => ExtensionRequestOutcome::Failed(
@@ -811,7 +883,25 @@ impl ExecutableExtensions {
                         "no foreground session is available".to_owned(),
                     ),
                     Some(session_id) => match sessions.rename(&session_id, &name) {
-                        Ok(_) => {
+                        Ok(metadata) => {
+                            // Refresh mounted views before the notification. The
+                            // correlated receipt below also commits the normalized
+                            // name for callers with no mounted UI, without waiting
+                            // for asynchronous snapshot preparation or a shell pump.
+                            let state = {
+                                let mut state = self
+                                    .host_state
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                state.session_name = metadata.name;
+                                state.clone()
+                            };
+                            super::turns::publish_host_state(
+                                &self.processes,
+                                &state,
+                                session,
+                                &mut self.diagnostics,
+                            );
                             if pending
                                 .process
                                 .supports_feature(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2)
@@ -824,7 +914,16 @@ impl ExecutableExtensions {
                                 }
                             }
                             changed = true;
-                            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                            // API 0.4 setters receive the durable value even without
+                            // a mounted UI. Retained API 0.2 keeps its empty reply.
+                            let result = if pending.process.api_version()
+                                == octet_agent::extension_process::EXTENSION_API_VERSION_0_4
+                            {
+                                serde_json::json!({ "name": state.session_name })
+                            } else {
+                                serde_json::json!({})
+                            };
+                            ExtensionRequestOutcome::Ok(result)
                         }
                         Err(error) => ExtensionRequestOutcome::Failed(
                             ExtensionRequestFailure::InvalidRequest,
@@ -833,13 +932,47 @@ impl ExecutableExtensions {
                     },
                 },
                 ExtensionSessionEntryOperation::Append { entry_type, data } => {
-                    let outcome = Self::apply_extension_entry_append(
-                        session,
-                        &namespace,
-                        pending.generation,
-                        &entry_type,
-                        data,
-                    );
+                    let outcome = if pending
+                        .process
+                        .supports_feature("session_append_receipts_v1")
+                    {
+                        match pending.process.append_session_entry_request(
+                            &pending.request_id,
+                            pending.generation,
+                            session,
+                            &entry_type,
+                            data,
+                        ) {
+                            Ok(value) => {
+                                replied = true;
+                                ExtensionRequestOutcome::Ok(value)
+                            }
+                            Err((failure, detail)) => {
+                                ExtensionRequestOutcome::Failed(failure, detail)
+                            }
+                        }
+                    } else {
+                        Self::apply_extension_entry_append(
+                            session,
+                            &namespace,
+                            pending.generation,
+                            &entry_type,
+                            data,
+                        )
+                    };
+                    if matches!(&outcome, ExtensionRequestOutcome::Ok(_)) {
+                        let state = self
+                            .host_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone();
+                        super::turns::publish_host_state(
+                            &self.processes,
+                            &state,
+                            session,
+                            &mut self.diagnostics,
+                        );
+                    }
                     if pending.process.supports_feature(
                         octet_agent::extension_process::EXTENSION_FEATURE_TRANSCRIPT_RENDER,
                     ) {
@@ -877,12 +1010,14 @@ impl ExecutableExtensions {
                     Self::apply_extension_entry_label(session, &entry_id, &label)
                 }
             };
-            self.queue_host_request_response(
-                pending.process,
-                pending.request_id,
-                pending.generation,
-                outcome,
-            );
+            if !replied {
+                self.queue_host_request_response(
+                    pending.process,
+                    pending.request_id,
+                    pending.generation,
+                    outcome,
+                );
+            }
         }
         changed
     }

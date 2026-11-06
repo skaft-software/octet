@@ -29,7 +29,9 @@ pub(crate) struct DelegationRuntimeSettings {
 pub(crate) struct DelegationTemplate {
     pub(crate) model_resolver: RwLock<Option<Arc<dyn AgentModelResolver>>>,
     pub(crate) client: octet_ai::AiClient,
-    pub(crate) model: octet_ai::Model,
+    /// The parent's current route. A new inherited worker reads it at spawn;
+    /// existing workers keep the route their host policy pinned.
+    pub(crate) model: RwLock<octet_ai::Model>,
     pub(crate) base_system: RwLock<String>,
     pub(crate) sandbox: crate::SandboxConfig,
     pub(crate) effect_broker: crate::EffectBroker,
@@ -68,6 +70,10 @@ pub(super) fn lower_child_reasoning(mut resolved: ResolvedAgentModel) -> Resolve
 }
 
 impl DelegationTemplate {
+    pub(crate) fn model(&self) -> octet_ai::Model {
+        self.model.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     pub(super) fn resolve_model(
         &self,
         policy: Option<&ExtensionAgentSessionPolicy>,
@@ -94,6 +100,7 @@ impl DelegationTemplate {
         {
             return Err("unsupported_reasoning: saved worker reasoning changed".into());
         }
+        let model = self.model();
         let mut selection = policy
             .and_then(|p| p.resolved_model.as_ref().or(p.model_selection.as_ref()))
             .cloned()
@@ -106,7 +113,7 @@ impl DelegationTemplate {
                 .is_none_or(|s| s == &AgentModelSelection::default())
                 && p.resolved_model
                     .as_ref()
-                    .is_some_and(|m| m.model == self.model.spec.id.0)
+                    .is_some_and(|m| m.model == model.spec.id.0)
                 && p.resolved_reasoning.as_ref() == Some(&reasoning)
         }) {
             selection = AgentModelSelection::default();
@@ -117,8 +124,7 @@ impl DelegationTemplate {
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
         {
-            let resolved =
-                lower_child_reasoning(resolver.resolve(&selection, &self.model, &reasoning)?);
+            let resolved = lower_child_reasoning(resolver.resolve(&selection, &model, &reasoning)?);
             if let Some(policy) = policy {
                 if policy
                     .resolved_model
@@ -138,12 +144,12 @@ impl DelegationTemplate {
             return Ok(resolved);
         }
         let metadata = AgentModelSelection {
-            provider: self.model.spec.endpoint.0.clone(),
-            model: self.model.spec.id.0.clone(),
+            provider: model.spec.endpoint.0.clone(),
+            model: model.spec.id.0.clone(),
             reasoning: reasoning_label,
         };
         let resolved = lower_child_reasoning(ResolvedAgentModel {
-            model: self.model.clone(),
+            model,
             reasoning: reasoning.clone(),
             metadata,
         });

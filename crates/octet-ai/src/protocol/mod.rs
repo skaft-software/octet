@@ -117,6 +117,13 @@ pub(crate) mod sse;
 /// preset may override the route default in either direction.
 pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
     use crate::types::Protocol;
+    if model.spec.protocol == Protocol::OpenAiChat {
+        if let crate::OpenAiChatRuntimeProfile::PiCustom(profile) =
+            model.endpoint.runtime.openai_chat_profile
+        {
+            return profile.supports_strict_mode;
+        }
+    }
     if let Some(declared) = model.spec.preset.supports_strict_mode {
         return declared;
     }

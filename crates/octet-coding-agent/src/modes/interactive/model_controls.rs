@@ -26,7 +26,8 @@ pub(super) fn queue_labels(queue: &VecDeque<PendingIdleAction>) -> Vec<String> {
                 }
                 PendingIdleAction::PersistThinkingPreference(_)
                 | PendingIdleAction::SyncTheme(_)
-                | PendingIdleAction::SyncImages(_) => return None,
+                | PendingIdleAction::SyncImages(_)
+                | PendingIdleAction::AcknowledgeTuiPreference(_) => return None,
                 PendingIdleAction::NewSession => "new session · idle".into(),
                 PendingIdleAction::ResumeSession(_) => "resume session · idle".into(),
                 PendingIdleAction::Fork => "fork session · idle".into(),
@@ -222,6 +223,7 @@ pub(super) fn can_apply_reasoning_at_response(queue: &VecDeque<PendingIdleAction
                 PendingIdleAction::SyncTheme(_)
                     | PendingIdleAction::SyncImages(_)
                     | PendingIdleAction::PersistThinkingPreference(_)
+                    | PendingIdleAction::AcknowledgeTuiPreference(_)
             )
     })
 }

@@ -484,6 +484,8 @@ pub enum ExtensionContextOperation {
     PendingMessages,
     /// Return the host-owned composed system prompt text.
     SystemPrompt,
+    /// Return native-admitted available commands, prompts and skills (API 0.4).
+    Commands,
     /// Return authoritative active names and the registered tool catalog.
     Tools,
 }

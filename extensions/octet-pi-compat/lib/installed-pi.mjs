@@ -11,36 +11,36 @@
 // refused, and real names this build has not classified are refused too, so a
 // export from another Pi release cannot silently become live. This is a guard against
 // silent takeover, not a sandbox: a trusted factory keeps normal OS authority.
-import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { invalid, rpcError } from './errors.mjs';
-import { PI_MODULES, PI_PREFIXES, PI_VERSION, piModule } from './pi-modules.mjs';
+import { PI_MODULES, PI_PREFIXES, PI_SUPPORTED_RANGE, piModule, piReleaseSupported } from './pi-modules.mjs';
 
 export const FALLBACK_ELIGIBLE = -32030;
 export const INSTALLED_PI_UNAVAILABLE = -32031;
-// octet 0.8.2 is pinned to exactly the Pi release its shims and module table
-// were built from; another installed Pi version is refused, not guessed at.
-export const SUPPORTED_RANGE = PI_VERSION;
-const SUPPORTED = { test: version => version === PI_VERSION };
+// The Pi releases the shims and module table were checked against; any other
+// installed Pi version is refused, not guessed at.
+export const SUPPORTED_RANGE = PI_SUPPORTED_RANGE;
+const SUPPORTED = { test: piReleaseSupported };
 const REGISTRY = Symbol.for('octet.pi-compat.installed-pi');
 const PREFIXES = PI_PREFIXES;
 // shim file key -> real package directory name
-export const PACKAGES = { 'coding-agent': 'pi-coding-agent', ai: 'pi-ai', tui: 'pi-tui' };
+export const PACKAGES = { 'coding-agent': 'pi-coding-agent', ai: 'pi-ai', tui: 'pi-tui', 'agent-core': 'pi-agent-core' };
 // Pi modules octet does not emulate: the fallback serves the installed files
-// as they are, with the export Pi 1.0.2's loader resolves them to.
+// as they are, with the export Pi's loader resolves them to.
 const DIRECT_MODULES = Object.fromEntries(Object.entries(PI_MODULES).filter(([, module]) => !module.shim));
 // The export each emulated package's real namespace is read from (Pi resolves
 // the pi-ai root to its compat entry, a strict superset of the core entry).
-const REAL_EXPORT = { 'coding-agent': '.', ai: './compat', tui: '.' };
+const REAL_EXPORT = { 'coding-agent': '.', ai: './compat', tui: '.', 'agent-core': '.' };
 const words = text => text.trim().split(/\s+/);
 
 // Real-only names (absent from the shims) refused in path B, with the seam each
-// one would open. Keep in sync with NOTES/docs; pinned to Pi 1.0.2.
+// one would open. Keep in sync with NOTES/docs; classified for Pi 1.0.2-1.4.0.
 const DENIED = {
+  'agent-core': [['Agent agentLoop agentLoopContinue runAgentLoop runAgentLoopContinue runToolCall setDefaultStreamFn streamProxy', 'agent loops and proxy inference remain host-owned']],
   'coding-agent': [
     ['AgentSessionRuntime createAgentSessionFromServices createAgentSessionRuntime createAgentSessionServices createExtensionRuntime ExtensionRunner discoverAndLoadExtensions InteractiveMode main runPrintMode runRpcMode RpcClient wrapRegisteredTool wrapRegisteredTools',
       'Pi sessions, agent runtimes and extension runners would bypass the Octet-owned agent loop and session persistence'],
@@ -63,6 +63,7 @@ const DENIED = {
 // Real-only names admitted in path B: pure helpers, data, and components that
 // render into the host-mediated remote UI.
 const ALLOWED = {
+  'agent-core': [],
   'coding-agent': words(`ArminComponent AssistantMessageComponent BashExecutionComponent BranchSummaryMessageComponent CURRENT_SESSION_VERSION
     CompactionSummaryMessageComponent CredentialSynchronizationError CustomMessageComponent DEFAULT_COMPACTION_SETTINGS ExtensionEditorComponent
     ExtensionInputComponent ExtensionSelectorComponent FooterComponent ModelSelectorComponent SessionSelectorComponent SettingsSelectorComponent
@@ -73,7 +74,7 @@ const ALLOWED = {
     getLanguageFromPath getLastAssistantUsage getLatestCompactionEntry getPackageDir getPowerShellConfig getReadmePath getShellConfig
     hasTrustRequiringProjectResources highlightCode keyText loadProjectContextFiles loadSkills loadSkillsFromDir migrateSessionEntries parseArgs
     parseSessionEntries parseSkillBlock prepareBranchEntries rawKeyHint renderDiff resizeImage resolveCliModel resolveModelScopeWithDiagnostics
-    sessionEntryToContextMessages shouldCompact truncateToVisualLines`),
+    sessionEntryToContextMessages shouldCompact truncateToVisualLines formatReadLineRange`),
   ai: words(`AssistantMessageEventStream AssistantMessageFrameEncoder DEFAULT_MAX_AGENT_RETRY_DELAY_MS EventStream ModelsError
     appendAssistantMessageDiagnostic clampThinkingLevel cleanupSessionResources contentText createAssistantMessageDiagnostic createFauxCore
     createInitialSystemMessage declarationsEqual extractDiagnosticError fauxAssistantMessage fauxProvider fauxText fauxThinking fauxToolCall
@@ -81,23 +82,13 @@ const ALLOWED = {
     getSystemMessageText getToolStateChanges hasApi hasNonAdditiveToolChanges hasToolRedefinitions isContextOverflow isModelType isRecoverableLength
     isRetryableAssistantError modelsAreEqual normalizeContext parseJsonWithRepair parseStreamingJson reduceAssistantMessageFrames
     registerSessionResourceCleanup renderSystemMessageUpdate repairJson resolveTranscript resolveTranscriptTools retryDelayMs toToolDeclaration
-    validateToolArguments validateToolCall withoutInitialSystemMessage`),
+    validateToolArguments validateToolCall withoutInitialSystemMessage parseToolCallArguments AI_TELEMETRY_SCHEMA PI_AI_VERSION`),
   tui: words(`CombinedAutocompleteProvider HStack Marked MouseRegion ScrollView VStack allocateImageId backgroundAnsi calculateImageRows colorToHex
     colorToOkhsl colorToOklch colorToRgb compositeTuiLine deleteAllKittyImages deleteKittyImage detectCapabilities encodeITerm2 encodeKitty
     foregroundAnsi getCapabilities getCellDimensions getGifDimensions getImageDimensions getJpegDimensions getOsc8LinkAtColumn getPngDimensions
     getTerminalColorMode getWebpDimensions hyperlink imageFallback indexedColor isAppleTerminalSession isViewportTUI mixColors okhslColor
     oklabToOkhslLightness oklchColor parseColor parseTerminalColorSchemeReport renderImage renderLatex resetCapabilitiesCache rgbColor
     setCapabilities setCapabilityOverrides setCellDimensions setImageTranscoder styleText styleTextWithAnsi`),
-};
-// Pi built-in tool factories run commands and file I/O inside the extension
-// process, outside Octet's per-command tool policy. Path A refuses them; the
-// user-approved fallback exists for exactly this, so real Pi wins over the shim.
-const REAL_OVERRIDES = {
-  'coding-agent': new Set(words(`createBashTool createBashToolDefinition createCodingTools createEditTool createEditToolDefinition createFindTool
-    createFindToolDefinition createGrepTool createGrepToolDefinition createLocalBashOperations createLocalPowerShellOperations createLsTool
-    createLsToolDefinition createPowerShellTool createPowerShellToolDefinition createReadOnlyTools createReadTool createReadToolDefinition
-    createWriteTool createWriteToolDefinition`)),
-  ai: new Set(), tui: new Set(),
 };
 // A Pi specifier the emulated path cannot serve: a module octet does not
 // emulate (agent core, OAuth, provider registry) or an unmapped subpath.
@@ -187,14 +178,17 @@ export function installedPiAliases(env = process.env) {
   const aliases = {};
   for (const prefix of PREFIXES) {
     for (const [specifier, module] of Object.entries(PI_MODULES)) {
-      aliases[`${prefix}/${specifier}`] = module.shim ? overlayPath(module.shim) : install.direct[specifier];
+      aliases[`${prefix}/${specifier}`] = module.shim
+        ? Object.hasOwn(PACKAGES, module.shim) ? overlayPath(module.shim) : shimPath(module.shim)
+        : install.direct[specifier];
     }
   }
   return { aliases, install };
 }
 // Installs the overlay registry. Shim namespaces are preloaded through the
 // runtime's jiti so they are the same module instances path A would use; real
-// Pi loads lazily, natively (outside jiti aliases), and only when imported.
+// Pi loads natively (outside jiti aliases) before publishing synchronous
+// overlays. require() cannot safely observe a pending native ESM graph.
 // The managed Pi package directory the overlay actually serves, or null on the
 // emulated path. Used by the Pi config helpers so a factory sees real Pi's own
 // package root whenever real Pi provides the module.
@@ -204,23 +198,27 @@ export async function activateInstalledPi(jiti, install) {
   activePackageDir = install.packages['coding-agent'].dir;
   const shims = {};
   for (const key of Object.keys(PACKAGES)) shims[key] = await jiti.import(shimPath(key));
-  const nativeRequire = createRequire(import.meta.url), cache = new Map();
+  const native = new Map(), cache = new Map();
+  // Complete each import sequentially: Pi's packages share an ESM graph that
+  // a factory's native dependency may already be evaluating. The CommonJS
+  // overlay must expose settled namespaces, not require() that in-flight graph.
+  for (const [key, pkg] of Object.entries(install.packages)) {
+    try { native.set(key, await import(pathToFileURL(pkg.entry).href)); }
+    catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+  }
   const namespace = key => {
     if (cache.has(key)) return cache.get(key);
-    const pkg = install.packages[key], shim = shims[key];
-    let real;
-    try { real = nativeRequire(pkg.entry); } catch (error) { throw unavailable(`loading ${pkg.name}@${pkg.version} failed: ${String(error?.message || error).slice(0, 1024)}`); }
+    const pkg = install.packages[key], shim = shims[key], real = native.get(key);
     const merged = { __esModule: true };
     for (const name of Object.keys(real)) {
       if (name === 'default') continue;
-      if (REAL_OVERRIDES[key].has(name)) { merged[name] = real[name]; continue; }
       if (Object.hasOwn(shim, name)) continue;
       const reason = deniedReason[key].get(name);
       merged[name] = reason ? refusal(key, name, `${reason} (installed-Pi fallback)`)
         : allowed[key].has(name) ? real[name]
         : refusal(key, name, `not classified for the installed-Pi fallback in this octet build (Pi ${install.version})`);
     }
-    for (const name of Object.keys(shim)) if (name !== 'default' && !(REAL_OVERRIDES[key].has(name) && Object.hasOwn(real, name))) merged[name] = shim[name];
+    for (const name of Object.keys(shim)) if (name !== 'default') merged[name] = shim[name];
     const view = new Proxy(merged, { get(target, name, receiver) {
       if (Reflect.has(target, name) || typeof name === 'symbol' || name === 'then' || name === 'toJSON' || name === 'default') return Reflect.get(target, name, receiver);
       throw rpcError(-32601, `unsupported_feature ${pkg.name}.${String(name)}: exported by neither installed Pi ${install.version} nor the octet shims`);
@@ -248,20 +246,6 @@ function resolveRelative(from, specifier) {
   }
   return null;
 }
-const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-// Detect direct execution as well as a saved execute callback. These factories
-// can load successfully with child-only shims until a later branch runs. This is
-// a bounded source heuristic, not execution qualification or a sandbox.
-function directlyUsesToolExecution(text, binding) {
-  const escaped = escapeRegExp(binding);
-  if (new RegExp(`\\b${escaped}\\s*\\([^;]*?\\)\\s*\\.\\s*execute\\b`).test(text)) return true;
-  const assigned = new RegExp(`\\b(?:const|let|var)\\s+([\\w$]+)(?:\\s*:[^=;\\n]+)?\\s*=\\s*${escaped}\\s*\\(`, 'g');
-  for (const [, name] of text.matchAll(assigned)) {
-    if (new RegExp(`\\b${escapeRegExp(name)}\\s*\\.\\s*execute\\b`).test(text)) return true;
-  }
-  return false;
-}
-
 // The exported names of every shim module are process-constant: cache them per
 // jiti instance so a scan (and a failed-load classification, which scans again)
 // does not re-import the whole shim table for every factory.
@@ -271,7 +255,8 @@ async function shimNamesFor(jiti) {
   const cached = shimNameCache.get(jiti);
   if (cached) return cached;
   const names = {};
-  for (const key of Object.keys(PACKAGES)) names[key] = new Set(Object.keys(await jiti.import(shimPath(key))));
+  const keys = new Set(Object.values(PI_MODULES).filter(module => module.shim).map(module => module.shim));
+  for (const key of keys) names[key] = new Set(Object.keys(await jiti.import(shimPath(key))));
   shimNameCache.set(jiti, names);
   return names;
 }
@@ -281,7 +266,7 @@ async function shimNamesFor(jiti) {
 // Used before shim factory activation and to classify other load failures.
 export async function scanPiImportGaps(entry, jiti) {
   const shimNames = await shimNamesFor(jiti);
-  const missing = [], subpaths = [], directTools = [], seen = new Set(), queue = [entry];
+  const missing = [], subpaths = [], seen = new Set(), queue = [entry];
   while (queue.length && seen.size < MAX_FILES) {
     const file = queue.shift(); if (seen.has(file)) continue; seen.add(file);
     let text;
@@ -296,12 +281,10 @@ export async function scanPiImportGaps(entry, jiti) {
       if (!braces) continue;
       for (let item of braces[1].split(',')) {
         item = item.trim(); if (!item || /^type\s/.test(item)) continue;
-        const [name, local = name] = item.split(/\s+as\s+/).map(value => value.trim());
-        if (/^[\w$]+$/.test(name) && name !== 'default' && (!shimNames[pi.key].has(name) || REAL_OVERRIDES[pi.key].has(name))) {
+        const [name] = item.split(/\s+as\s+/).map(value => value.trim());
+        if (/^[\w$]+$/.test(name) && name !== 'default' && !shimNames[pi.key].has(name)) {
           const gap = { specifier: m[4], name, file };
           missing.push(gap);
-          if (m[1] === 'import' && REAL_OVERRIDES[pi.key].has(name) && /^[\w$]+$/.test(local)
-              && directlyUsesToolExecution(text, local)) directTools.push(gap);
         }
       }
     }
@@ -313,7 +296,7 @@ export async function scanPiImportGaps(entry, jiti) {
     }
   }
   const unique = list => [...new Map(list.map(x => [JSON.stringify(x), x])).values()].slice(0, MAX_REPORTED);
-  return { missing: unique(missing), subpaths: unique(subpaths), direct_tools: unique(directTools) };
+  return { missing: unique(missing), subpaths: unique(subpaths), direct_tools: [] };
 }
 // Returns the error to throw for a path A load failure: the original error
 // unchanged unless the scan found Pi exports the shims lack.

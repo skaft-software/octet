@@ -140,6 +140,14 @@ test('shared events preserve synchronous object/function identity across multipl
   const peer = launch(t, [a, b]); await peer.init(); await peer.command('identity').response;
   await peer.wait(f => f.method === 'notification' && f.params.message === 'true');
 });
+for (const [hostReason, piReason] of [['shutdown', 'quit'], ['cancelled', 'quit'], ['crash', 'quit'], ['reload', 'reload']]) test(`session_shutdown reports Pi reason ${piReason} for host session_end reason ${hostReason}`, async t => {
+  const dir = await temporary(t), file = join(dir, 'reasons.ts'), log = join(dir, 'reasons.log');
+  await writeFile(file, `import { appendFileSync } from 'node:fs'; export default pi => { pi.on('session_shutdown', event => { appendFileSync(${JSON.stringify(log)}, event.reason + '\\n'); }); };`);
+  const peer = launch(t, [file]); await peer.init(); await peer.start();
+  const ended = await peer.request('hook/run', { hook: 'session_end', payload: { binding: owner, reason: hostReason, outcome: 'completed', duration_ms: 1 }, context: peer.context() }).response;
+  assert.ok(ended.result, JSON.stringify(ended));
+  assert.equal(await readFile(log, 'utf8'), `${piReason}\n`);
+});
 test('complete owner fencing rejects foreign updates and closes retained surfaces at session end', async t => {
   const peer = launch(t); await peer.init(); const cmd = peer.command('surface'); await cmd.response; await peer.wait(frame('tick='));
   peer.notify('context/updated', { resource_owner: { ...owner, process_generation: 9 }, host: { model: 'foreign' } });

@@ -1016,6 +1016,9 @@ fn scripted_model_for_protocol(uri: &str, protocol: Protocol) -> Model {
         Protocol::PiMessages => {
             panic!("{protocol:?} is the native host codec and has no scripted fixture")
         }
+        Protocol::ExtensionStream => {
+            panic!("{protocol:?} requires an extension-owned stream fixture")
+        }
     }
 }
 
@@ -6337,10 +6340,25 @@ async fn assert_secondary_hook_denials(parallel: bool) {
             .position(|event| matches!(event, AgentEvent::ToolFinished { id: event_id, .. } if event_id.0 == *id))
             .unwrap();
         assert!(started < decided && decided < finished);
+        let persisted = Session::open_read_only(agent.session().path()).unwrap();
+        assert!(persisted.entries().iter().any(|entry| matches!(
+            &entry.value,
+            EntryValue::Message(Message::User(user))
+                if user.content.iter().any(|part| matches!(
+                    part,
+                    UserPart::ToolResult(result)
+                        if result.tool_call_id.0 == *id
+                            && result.is_error
+                            && matches!(result.content.as_slice(),
+                                [octet_ai::ToolResultPart::Text(text)]
+                                    if text == "tool call denied by host policy")
+                ))
+        )));
     }
-    // Result transformations observe policy denials, but execution observers
-    // must not invent tool executions for calls rejected at admission.
-    assert_eq!(transformed_results.load(Ordering::SeqCst), calls.len());
+    assert!(!std::fs::read_to_string(agent.session().path())
+        .unwrap()
+        .contains(HOOK_DENIAL_SECRET));
+    assert_eq!(transformed_results.load(Ordering::SeqCst), 0);
     assert_eq!(before.load(Ordering::SeqCst), calls.len());
     assert_eq!(after.load(Ordering::SeqCst), 0);
     assert_eq!(executions.load(Ordering::SeqCst), 0);

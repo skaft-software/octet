@@ -77,6 +77,15 @@ pub(super) async fn settle_session_hooks_all(
     resource_owner: &str,
     outcome: ExtensionLifecycleOutcome,
 ) -> Vec<String> {
+    settle_session_hooks_all_with_reason(processes, resource_owner, outcome, None).await
+}
+
+pub(super) async fn settle_session_hooks_all_with_reason(
+    processes: &[ExtensionProcess],
+    resource_owner: &str,
+    outcome: ExtensionLifecycleOutcome,
+    reason: Option<&'static str>,
+) -> Vec<String> {
     futures_util::future::join_all(
         processes
             .iter()
@@ -85,10 +94,23 @@ pub(super) async fn settle_session_hooks_all(
                 let process = process.clone();
                 let resource_owner = resource_owner.to_owned();
                 async move {
-                    match process
-                        .settle_session_hook_binding(&resource_owner, outcome)
-                        .await
-                    {
+                    let result = match reason {
+                        Some(reason) => {
+                            process
+                                .settle_session_hook_binding_with_reason(
+                                    &resource_owner,
+                                    outcome,
+                                    reason,
+                                )
+                                .await
+                        }
+                        None => {
+                            process
+                                .settle_session_hook_binding(&resource_owner, outcome)
+                                .await
+                        }
+                    };
+                    match result {
                         Ok(()) => None,
                         Err(_) => Some(format!(
                             "warning: extension {:?} session_end hook failed",
@@ -118,6 +140,45 @@ pub(super) fn clip_lifecycle_reason(reason: &str, limit: usize) -> String {
         end = end.saturating_sub(1);
     }
     format!("{}{marker}", &reason[..end])
+}
+
+/// The chat line for an extension that did not start. `reason` is whatever the
+/// process or its runtime printed, often a stack: only its most informative
+/// line stays, directories are dropped and the length is bounded. `/extensions`
+/// keeps the full text.
+pub(super) fn startup_failure_notice(name: &str, reason: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let lines = reason
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("at "));
+    let line = lines
+        .clone()
+        .find(|line| line.to_ascii_lowercase().contains("error"))
+        .or_else(|| lines.clone().next())
+        .unwrap_or("no reason given");
+    let compact = line
+        .split_whitespace()
+        .map(|word| {
+            let path = word.trim_matches(|ch| matches!(ch, '\'' | '"' | '(' | ')' | ',' | ';'));
+            let looks_like_path = path.starts_with('/') || path.starts_with("file://");
+            match path.rsplit(['/', '\\']).next() {
+                Some(base) if looks_like_path && !base.is_empty() => base.to_owned(),
+                _ => word.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let compact = if compact.chars().count() > MAX_CHARS {
+        let kept = compact.chars().take(MAX_CHARS - 1).collect::<String>();
+        format!("{kept}…")
+    } else {
+        compact
+    };
+    format!("extension {name} did not start: {compact} (see /extensions)")
 }
 
 pub struct ExtensionPromptComposition {
@@ -421,10 +482,19 @@ pub(super) fn extension_execution_context(
     )
 }
 
+#[cfg(test)]
 pub(super) fn host_state(
     session: &Session,
     model: &Model,
     reasoning: &ReasoningConfig,
+    sessions: &SessionStore,
+) -> ExtensionHostState {
+    host_state_for_selection(session, Some((model, reasoning)), sessions)
+}
+
+pub(super) fn host_state_for_selection(
+    session: &Session,
+    selection: Option<(&Model, &ReasoningConfig)>,
     sessions: &SessionStore,
 ) -> ExtensionHostState {
     let session_id = session
@@ -458,15 +528,24 @@ pub(super) fn host_state(
         theme: None,
         // This coding host supplies the usage query even when no current
         // measurement exists. Explicit null clears retained prior facts.
-        context_usage: Some(model_control::context_usage(session, model).unwrap_or(Value::Null)),
+        context_usage: Some(
+            selection
+                .and_then(|(model, _)| model_control::context_usage(session, model))
+                .unwrap_or(Value::Null),
+        ),
         project_trusted: None,
+        has_pending_messages: None,
         has_ui: None,
         mode: None,
         session_id,
         session_name,
-        model: Some(model.spec.id.0.clone()),
-        model_view: extension_model_view(model),
-        reasoning: pi_thinking_level(model, reasoning).map(serde_json::Value::String),
+        model: selection.map(|(model, _)| model.spec.id.0.clone()),
+        model_view: selection.and_then(|(model, _)| extension_model_view(model)),
+        reasoning: match selection {
+            Some((model, reasoning)) => pi_thinking_level(model, reasoning),
+            None => Some("off".into()),
+        }
+        .map(serde_json::Value::String),
         pi_models: None,
         active_skills,
     }
@@ -485,6 +564,8 @@ pub(super) fn pi_api_name(protocol: &Protocol) -> &'static str {
         Protocol::GoogleGenerativeAi => "google-generative-ai",
         Protocol::MistralConversations => "mistral-conversations",
         Protocol::PiMessages => "pi-messages",
+        // The adapter restores the extension's own `api` name from its record.
+        Protocol::ExtensionStream => "extension-stream",
     }
 }
 

@@ -1,0 +1,244 @@
+From d92a8f356b7c9ccf7cf75e94c3105dbcef5dceba Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:59:59 +0000
+Subject: [PATCH 5/8] eval: extension API traffic capture for Pi (preload) and
+ octet (flag-gated adapter recorder)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/api-trace.mjs | 71 ++++++++++++++++++++
+ extensions/octet-pi-compat/lib/runtime.mjs   |  3 +-
+ scripts/pi-eval/jank-trace.mjs               | 23 +++++++
+ scripts/pi-eval/jank.py                      | 41 ++++++++---
+ 4 files changed, 126 insertions(+), 12 deletions(-)
+ create mode 100644 extensions/octet-pi-compat/lib/api-trace.mjs
+ create mode 100644 scripts/pi-eval/jank-trace.mjs
+
+diff --git a/extensions/octet-pi-compat/lib/api-trace.mjs b/extensions/octet-pi-compat/lib/api-trace.mjs
+new file mode 100644
+index 00000000..6d2900d4
+--- /dev/null
++++ b/extensions/octet-pi-compat/lib/api-trace.mjs
+@@ -0,0 +1,71 @@
++import { appendFileSync } from 'node:fs';
++
++// Opt-in recorder of the traffic between a Pi host and its extensions, for side-by-side comparison
++// (scripts/pi-eval/jank.py). It logs every call an extension makes on the API, every event delivered
++// to a handler, and every call a handler makes on the context it received, with the time each took
++// (settled time for promises). Off unless OCTET_PI_API_TRACE names the output file.
++const out = process.env.OCTET_PI_API_TRACE;
++export const apiTraceEnabled = Boolean(out);
++const started = performance.now();
++
++const clip = (value) => {
++  try {
++    const text = typeof value === 'string' ? value : JSON.stringify(value, (_, v) => (typeof v === 'function' ? '[fn]' : v));
++    return text === undefined ? String(value) : text.length > 160 ? `${text.slice(0, 160)}...` : text;
++  } catch {
++    return '[unserialisable]';
++  }
++};
++const log = (row) => appendFileSync(out, `${JSON.stringify({ t: +((performance.now() - started) / 1000).toFixed(4), w: Date.now() / 1000, ...row })}\n`);
++export const extensionLabel = (entry) => String(entry).split('node_modules/').pop().split('/').slice(-4).join('/');
++
++function timed(kind, ext, name, args, run) {
++  const begin = performance.now();
++  const finish = (note) => log({ k: kind, ext, n: name, a: args.map(clip), d: +(performance.now() - begin).toFixed(1), ...note });
++  try {
++    const result = run();
++    if (result && typeof result.then === 'function') {
++      return result.then((value) => (finish({ async: true }), value), (error) => (finish({ async: true, err: String(error?.message ?? error).slice(0, 120) }), Promise.reject(error)));
++    }
++    finish({});
++    return result;
++  } catch (error) {
++    finish({ err: String(error?.message ?? error).slice(0, 120) });
++    throw error;
++  }
++}
++
++export function traceContext(target, ext, path = 'ctx') {
++  if (!apiTraceEnabled || !target || typeof target !== 'object') return target;
++  return new Proxy(target, {
++    get(object, key) {
++      const value = Reflect.get(object, key, object);
++      if (typeof key !== 'string') return value;
++      if (typeof value === 'function') return (...args) => timed('ctx', ext, `${path}.${key}`, args, () => value.apply(object, args));
++      if (value && typeof value === 'object' && !Array.isArray(value)) return traceContext(value, ext, `${path}.${key}`);
++      return value;
++    },
++  });
++}
++
++export const traceHandler = (ext, event, handler) => (payload, ctx) => timed('event', ext, event, [payload], () => handler(payload, traceContext(ctx, ext)));
++
++export function traceAPI(api, ext) {
++  if (!apiTraceEnabled) return api;
++  return new Proxy(api, {
++    get(object, key) {
++      const value = Reflect.get(object, key, object);
++      if (typeof key !== 'string' || typeof value !== 'function') return value;
++      if (key === 'on') return (event, handler, ...rest) => (log({ k: 'api', ext, n: `on:${event}` }), value.call(object, event, traceHandler(ext, event, handler), ...rest));
++      if (key === 'registerCommand') {
++        return (name, def) => (log({ k: 'api', ext, n: `registerCommand:${name}` }),
++          value.call(object, name, typeof def?.handler === 'function' ? { ...def, handler: (args, ctx) => timed('command', ext, name, [args], () => def.handler(args, traceContext(ctx, ext))) } : def));
++      }
++      if (key === 'registerTool') {
++        return (def) => (log({ k: 'api', ext, n: `registerTool:${def?.name}` }),
++          value.call(object, typeof def?.execute === 'function' ? { ...def, execute: (...args) => timed('tool', ext, def.name, [args[1]], () => def.execute(...args)) } : def));
++      }
++      return (...args) => timed('api', ext, key, args, () => value.apply(object, args));
++    },
++  });
++}
+diff --git a/extensions/octet-pi-compat/lib/runtime.mjs b/extensions/octet-pi-compat/lib/runtime.mjs
+index af8b33aa..324013f5 100644
+--- a/extensions/octet-pi-compat/lib/runtime.mjs
++++ b/extensions/octet-pi-compat/lib/runtime.mjs
+@@ -26,6 +26,7 @@ import { toolLifecyclePayload } from './tool-events.mjs';
+ import { registryInferenceEvent } from './model-registry-stream.mjs';
+ import { compactionCallbackStore, settleCompactions, retireCompactions, cancelCompactions } from './compaction.mjs';
+ import { beforeAgentStart } from './before-agent-start.mjs';
++import { extensionLabel, traceAPI } from './api-trace.mjs';
+ import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
+ import { appendReply, entryPayload, leafGrant, replacementStore } from './session-leaf.mjs';
+ import { RemoteUI } from './remote-ui.mjs';
+@@ -474,7 +475,7 @@ export class Runtime {
+               return register(...args);
+             };
+           }
+-          try { await setupBudget.settle(() => this.scope.run(s, () => fn(api))); }
++          try { await setupBudget.settle(() => this.scope.run(s, () => fn(traceAPI(api, extensionLabel(entry))))); }
+           catch (error) { if (error?.name === 'FactoryStalled') s.controller.abort(error); throw error; }
+           tracePhase(`adapter.factory.registered.${factory}`);
+           // Mirror mode advertises one fixed hook set recorded at configure time.
+diff --git a/scripts/pi-eval/jank-trace.mjs b/scripts/pi-eval/jank-trace.mjs
+new file mode 100644
+index 00000000..7d43f8da
+--- /dev/null
++++ b/scripts/pi-eval/jank-trace.mjs
+@@ -0,0 +1,23 @@
++// Node `--import` preload for the jank recorder: logs the traffic between Pi 1.4.0 and its extensions
++// into $OCTET_PI_API_TRACE, in the same format octet's adapter writes (lib/api-trace.mjs).
++//
++// Pi's bundle is minified, so the seam is a source rewrite in memory (Pi's files are never touched):
++// `await factory(load.api)` becomes `await factory(globalThis.__jankApi(load.api, extensionPath))`.
++import { register } from "node:module";
++import { isMainThread } from "node:worker_threads";
++
++const SEAM = "await factory(load.api)";
++
++if (isMainThread && !globalThis.__jankApi) {
++  const { extensionLabel, traceAPI } = await import("../../extensions/octet-pi-compat/lib/api-trace.mjs");
++  globalThis.__jankApi = (api, path) => traceAPI(api, extensionLabel(path));
++  register(import.meta.url);
++}
++
++export async function load(url, context, nextLoad) {
++  const result = await nextLoad(url, context);
++  if (!url.includes("/dist/bundle/chunks/") || result.format !== "module") return result;
++  const source = String(result.source);
++  if (!source.includes(SEAM)) return result;
++  return { ...result, source: source.replace(SEAM, "await factory(globalThis.__jankApi(load.api,extensionPath))") };
++}
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 6edab3a9..4ce86a47 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -82,7 +82,7 @@ class FrameSession(run.EvalSession):
+     def now(self) -> float:
+         return time.monotonic() - self.started_at
+ 
+-    def wait_text(self, needle: str, timeout: float = 60.0) -> float | None:
++    def wait_text(self, needle: str, timeout: float = 150.0) -> float | None:
+         end = time.monotonic() + timeout
+         while time.monotonic() < end:
+             if needle in self.screen_text():
+@@ -253,6 +253,22 @@ def prepare_home(fixture: fx.Fixture, env) -> None:
+         path.write_bytes(data)
+ 
+ 
++def traced_extensions(source: Path, into: Path, trace: Path) -> Path:
++    """A hardlinked copy of the extensions dir whose adapter manifest sets OCTET_PI_API_TRACE.
++
++    The host hands an extension only the environment its manifest declares, so the flag has to be
++    in the copy's extension.toml. Reused when it exists (a warm start keeps the adapter caches)."""
++    target = into / "extensions"
++    if not target.exists():
++        into.mkdir(parents=True, exist_ok=True)
++        subprocess.run(["cp", "-al", str(source), str(target)], check=True)
++    manifest = target / "octet-pi-compat" / "extension.toml"
++    text = manifest.read_text().split("\nOCTET_PI_API_TRACE")[0].rstrip("\n")
++    manifest.unlink()
++    manifest.write_text(text.replace("OCTET_PI_AUTO_MIRROR = \"1\"", f"OCTET_PI_AUTO_MIRROR = \"1\"\nOCTET_PI_API_TRACE = \"{trace}\"", 1) + "\n")
++    return target
++
++
+ def load_fixture(root: Path) -> fx.Fixture:
+     return fx.Fixture(root=root, lock={"pi": {"version": json.loads((root / "fixture.json").read_text())["pi_version"]}})
+ 
+@@ -265,8 +281,9 @@ def record(args) -> dict:
+     provider = MockProvider(model_id=MODEL_ID)
+     provider.default_reply("REPLY-OK default")
+     fx.MODEL = MODEL_ID
+-    env = run.make_env(out / "homes", args.target, 0, provider.port)
+-    prepare_home(fixture, env)
++    env = run.make_env(Path(args.keep_home) if args.keep_home else out / "homes", args.target, 0, provider.port)
++    if not (args.keep_home and env.home.exists()):
++        prepare_home(fixture, env)
+     write_provider_config(env.home, provider.port)
+     tmp = run.leg_tmp(env)
+     tmp.mkdir(parents=True, exist_ok=True)
+@@ -274,23 +291,24 @@ def record(args) -> dict:
+     env.sessions.mkdir(parents=True, exist_ok=True)
+     cwd = env.home if args.cwd == "home" else env.workspace
+     if args.target == "octet":
+-        if not args.warm:
++        if not args.keep_home:
+             run.reset_adapter_cache(args.extensions_dir)
+-        argv = run.octet_args(env, name=None, agent=False, extension_dirs=[args.extensions_dir], enable_extensions=["octet-pi-compat"])
++        extensions_dir = traced_extensions(args.extensions_dir, Path(args.keep_home or out), out / "api-trace.jsonl") if args.trace else args.extensions_dir
++        argv = run.octet_args(env, name=None, agent=False, extension_dirs=[extensions_dir], enable_extensions=["octet-pi-compat"])
+         argv[argv.index("--workspace") + 1] = str(cwd)
+-        argv[argv.index("--model") + 1] = f"custom/{MODEL_ID}"
++        argv[argv.index("--model") + 1] = f"custom/{MODEL_NAME}"
+         binary = args.octet
+         extra = {"OCTET_STARTUP_TRACE": "1", "TMPDIR": str(tmp), **dict(kv.split("=", 1) for kv in args.env)}
+         child = env.child_env(REPO, extra=extra)
+     else:
+         binary = Path("node")
+         argv = [str(fixture.pi_cli), "--model", f"{fx.PROVIDER}/{MODEL_ID}"]
+-        if args.preload:
+-            argv = ["--import", args.preload, *argv]
++        if args.trace:
++            argv = ["--import", str(HERE / "jank-trace.mjs"), *argv]
+         child = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "OCTET_"))}
+         child.update(HOME=str(env.home), TERM="xterm-256color", COLORTERM="truecolor", LANG="C.UTF-8", LC_ALL="C.UTF-8",
+                      PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", TMPDIR=str(tmp),
+-                     JANK_TRACE=str(out / "api-trace.jsonl"))
++                     OCTET_PI_API_TRACE=str(out / "api-trace.jsonl"))
+     session = FrameSession(binary, args=argv, env=child, cwd=cwd, columns=run.COLUMNS, rows=run.ROWS,
+                            log_path=out / "transcript.ansi", stderr_path=out / "stderr.log")
+     notes: dict = {}
+@@ -312,6 +330,7 @@ def record(args) -> dict:
+         (out / "requests.json").write_text(json.dumps([{"t": r.received_at, "body": r.body} for r in provider.requests], indent=1))
+         provider.close()
+         shutil.rmtree(out / "homes", ignore_errors=True)
++        shutil.rmtree(out / "extensions", ignore_errors=True)
+     notes.update(target=args.target, scenario=args.scenario, cwd=args.cwd)
+     (out / "meta.json").write_text(json.dumps(notes, indent=1))
+     return notes
+@@ -421,8 +440,8 @@ def main(argv=None) -> int:
+     r.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+     r.add_argument("--octet", type=Path, default=REPO / "target" / "release" / "octet")
+     r.add_argument("--extensions-dir", type=Path, default=REPO / "extensions")
+-    r.add_argument("--warm", action="store_true", help="keep the adapter cache (octet)")
+-    r.add_argument("--preload", default=None, help="Node --import module for Pi (API traffic capture)")
++    r.add_argument("--keep-home", default=None, help="reuse (or create) this home dir across runs: a warm start; it is not deleted")
++    r.add_argument("--trace", action="store_true", help="record extension API traffic into api-trace.jsonl (Pi: --import jank-trace.mjs; octet: lib/api-trace.mjs)")
+     r.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for octet")
+     d = sub.add_parser("diff")
+     d.add_argument("dirs", nargs="+")
+-- 
+2.43.0
+

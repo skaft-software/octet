@@ -1,9 +1,9 @@
 # octet-subagents
 
-**Source candidate distribution: 0.9.6.** This bundle needs exactly octet 0.9.6.
+**Source candidate distribution: 0.10.0.** This bundle needs exactly octet 0.10.0.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.9.6 candidate record](../../docs/releases/v0.9.6.md) for availability and
-remaining qualification. 0.9.6 assets are not published; use the reviewed
+[0.10.0 candidate record](../../docs/releases/v0.10.0.md) for availability and
+remaining qualification. 0.10.0 assets are not published; use the reviewed
 source-checkout route below until publication is approved.
 
 Hand a bounded task to a background worker while the main session carries on.
@@ -57,7 +57,7 @@ are kept across restoration and continuation. Credentials are never returned.
 
 ## Install and enable
 
-With [octet 0.9.6](../../docs/installation.md) and verified matching published
+With [octet 0.10.0](../../docs/installation.md) and verified matching published
 assets, install the bundle, then explicitly enable it:
 
 ```console
@@ -65,13 +65,13 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For local testing with the `0.9.6` source tree, run from the repository root:
+For local testing with the `0.10.0` source tree, run from the repository root:
 
 ```console
 octet --extension-dir ./extensions --enable-extension octet-subagents
 ```
 
-Don't install a `0.8.1` bundle into the 0.9.6 host. You need Python 3.9+.
+Don't install a `0.8.1` bundle into the 0.10.0 host. You need Python 3.9+.
 Installing has no hook or third-party dependency and starts nothing, and the
 bundle stays disabled until explicitly enabled. Default full access
 (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -112,7 +112,9 @@ or queue until idle during a turn. `/extensions` only enables, disables and
 configures the extension; runtime worker controls are not in its options menu.
 
 A bounded, tool-like **Subagents** transcript block updates in place while
-workers are active, including between root turns. Its heading counts worker
+workers are active, including between root turns without another prompt or
+keypress. Background roster refresh failures keep the last accepted view and
+stay in `/extensions status` diagnostics, not transcript notices. Its heading counts worker
 states, and up to four active child lines show the task and input and output
 tokens. Ctrl+O keeps disclosure. Once the block settles, the worker list shows
 all retained workers (up to 32), exact outcomes, models, tool-call counts (not
@@ -183,8 +185,8 @@ attachment.
 
 ## Reference
 
-This bundle has distribution version `0.9.6` and uses API `0.4`, with an exact
-runtime requirement of octet `0.9.6`. The detailed contract is a bundled-runtime
+This bundle has distribution version `0.10.0` and uses API `0.4`, with an exact
+runtime requirement of octet `0.10.0`. The detailed contract is a bundled-runtime
 reference, not a general extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact

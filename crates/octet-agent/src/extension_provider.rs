@@ -139,6 +139,7 @@ struct ProviderRecord {
     owner: ExtensionProviderOwner,
     provider: api_v03::ProviderDefinition,
     models: BTreeMap<String, api_v03::ProviderModelDefinition>,
+    model_admission_revisions: BTreeMap<String, usize>,
     model_metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
     authorization: ExtensionProviderAuthorizationStatus,
 }
@@ -157,6 +158,7 @@ struct RegistryState {
 /// only the current owner generation can mutate or remove an entry.
 #[derive(Clone)]
 pub struct ExtensionProviderRegistry {
+    native_catalog: Arc<std::sync::RwLock<Option<crate::extension_process::NativeProviderCatalog>>>,
     state: Arc<Mutex<RegistryState>>,
     changed: Arc<Condvar>,
     async_changed: Arc<tokio::sync::Notify>,
@@ -194,6 +196,7 @@ impl ExtensionProviderRegistry {
     /// their status; they never fall back to extension-owned credentials.
     pub fn new() -> Self {
         Self {
+            native_catalog: Arc::new(std::sync::RwLock::new(None)),
             state: Arc::new(Mutex::new(RegistryState::default())),
             changed: Arc::new(Condvar::new()),
             async_changed: Arc::new(tokio::sync::Notify::new()),
@@ -206,11 +209,30 @@ impl ExtensionProviderRegistry {
         authorization_policy: Arc<dyn ExtensionProviderAuthorizationPolicy>,
     ) -> Self {
         Self {
+            native_catalog: Arc::new(std::sync::RwLock::new(None)),
             state: Arc::new(Mutex::new(RegistryState::default())),
             changed: Arc::new(Condvar::new()),
             async_changed: Arc::new(tokio::sync::Notify::new()),
             authorization_policy: Some(authorization_policy),
         }
+    }
+
+    #[allow(missing_docs)]
+    pub fn set_native_provider_catalog(
+        &self,
+        catalog: crate::extension_process::NativeProviderCatalog,
+    ) {
+        *self
+            .native_catalog
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(catalog);
+    }
+
+    pub(crate) fn native_catalog(&self) -> Option<crate::extension_process::NativeProviderCatalog> {
+        self.native_catalog
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Atomically registers a previously absent provider declaration.
@@ -443,6 +465,39 @@ impl ExtensionProviderRegistry {
             })?
     }
 
+    pub(crate) fn admit_route(
+        &self,
+        expected: &ExtensionProviderRoute,
+        enqueue: impl FnOnce(),
+    ) -> Option<ExtensionProviderRoute> {
+        let state = lock_registry(&self.state);
+        let record = state.providers.get(&expected.provider.id)?;
+        if !state.initial_catalog_complete.contains(&expected.owner)
+            || record.owner != expected.owner
+            || record.authorization != ExtensionProviderAuthorizationStatus::Ready
+            || record.provider != expected.provider
+            || record.models.get(&expected.model.id) != Some(&expected.model)
+            || record.model_metadata.get(&expected.model.id) != expected.model_metadata.as_ref()
+            || record.model_admission_revisions[&expected.model.id] > expected.registration_revision
+        {
+            return None;
+        }
+        let route = ExtensionProviderRoute {
+            registration_revision: record.revision,
+            owner: record.owner.clone(),
+            provider: record.provider.clone(),
+            model: expected.model.clone(),
+            model_metadata: expected.model_metadata.clone(),
+        };
+        enqueue();
+        Some(route)
+    }
+
+    #[allow(missing_docs)]
+    pub fn route_has_continuous_authority(&self, route: &ExtensionProviderRoute) -> bool {
+        self.admit_route(route, || {}).is_some()
+    }
+
     /// Returns whether this exact route is still current and callable.
     ///
     /// Stream transports use this immediately before accepting a request and
@@ -506,6 +561,10 @@ impl ExtensionProviderRegistry {
         if changed {
             record.authorization = status;
             record.revision = revision;
+            record
+                .model_admission_revisions
+                .values_mut()
+                .for_each(|value| *value = revision);
             state.revision = revision;
         }
         drop(state);
@@ -636,6 +695,24 @@ impl ExtensionProviderRegistry {
             ));
         }
         let revision = state.revision.saturating_add(1);
+        let previous = state.providers.get(&provider_id).filter(|record| {
+            record.owner == owner
+                && record.provider == provider
+                && record.authorization == authorization
+        });
+        let model_admission_revisions = model_map
+            .iter()
+            .map(|(id, model)| {
+                let unchanged = previous.filter(|record| {
+                    record.models.get(id) == Some(model)
+                        && record.model_metadata.get(id) == model_metadata.get(id)
+                });
+                let admission_revision = unchanged
+                    .map(|record| record.model_admission_revisions[id])
+                    .unwrap_or(revision);
+                (id.clone(), admission_revision)
+            })
+            .collect();
         state.providers.insert(
             provider_id.clone(),
             ProviderRecord {
@@ -643,6 +720,7 @@ impl ExtensionProviderRegistry {
                 owner,
                 provider,
                 models: model_map,
+                model_admission_revisions,
                 model_metadata,
                 authorization,
             },
@@ -963,6 +1041,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn route_admission_orders_registry_mutation_with_enqueue() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(owner(1), register_params("alpha", "alpha-model"))
+            .unwrap();
+        registry.complete_initial_catalog(&owner(1));
+        let route = registry.resolve("alpha", "alpha-model").unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let admitting = registry.clone();
+        let expected = route.clone();
+        let admission = std::thread::spawn(move || {
+            admitting
+                .admit_route(&expected, || {
+                    assert!(matches!(
+                        admitting.state.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                })
+                .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mutating = registry.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let mutation = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let mut request = register_params("alpha", "alpha-model");
+            request.models[0].context_window += 1;
+            mutating
+                .update(
+                    owner(1),
+                    api_v03::ProviderUpdateParams {
+                        provider: request.provider,
+                        models: request.models,
+                    },
+                )
+                .unwrap();
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let admitted = admission.join().unwrap();
+        mutation.join().unwrap();
+        assert_eq!(admitted, route);
+        assert!(!registry.route_is_active(&admitted));
+        assert!(registry
+            .admit_route(&route, || panic!("stale route enqueued"))
+            .is_none());
+        let current = registry.resolve("alpha", "alpha-model").unwrap();
+        assert_eq!(registry.admit_route(&current, || {}), Some(current));
+    }
+
     #[tokio::test]
     async fn idle_route_waiters_wake_on_every_authoritative_invalidation() {
         for mutation in ["unregister", "replace", "owner", "authorization"] {
@@ -1157,6 +1292,76 @@ mod tests {
             .unwrap();
         assert!(!registry.route_is_active(&authorized));
         assert!(registry.route_is_active(&registry.resolve("fixture", "model").unwrap()));
+    }
+
+    #[test]
+    fn selected_route_continuity_ignores_unrelated_changes_but_fences_aba_and_owner_retirement() {
+        let registry = ExtensionProviderRegistry::new();
+        registry
+            .register(
+                owner(1),
+                api_v03::ProviderRegisterParams {
+                    provider: provider(),
+                    models: vec![model()],
+                },
+            )
+            .unwrap();
+        registry.complete_initial_catalog(&owner(1));
+        let original = registry.resolve("fixture", "model").unwrap();
+        assert!(registry.route_has_continuous_authority(&original));
+        let mut other = model();
+        other.id = "other".into();
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![model(), other],
+                },
+            )
+            .unwrap();
+        assert!(!registry.route_is_active(&original));
+        assert!(registry.route_has_continuous_authority(&original));
+        let mut changed = model();
+        changed.context_window += 1;
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![changed],
+                },
+            )
+            .unwrap();
+        registry
+            .update(
+                owner(1),
+                api_v03::ProviderUpdateParams {
+                    provider: provider(),
+                    models: vec![model()],
+                },
+            )
+            .unwrap();
+        assert!(!registry.route_has_continuous_authority(&original));
+        let restored = registry.resolve("fixture", "model").unwrap();
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Revoked,
+            )
+            .unwrap();
+        registry
+            .set_authorization_status(
+                &owner(1),
+                "fixture",
+                ExtensionProviderAuthorizationStatus::Ready,
+            )
+            .unwrap();
+        assert!(!registry.route_has_continuous_authority(&restored));
+        let authorized = registry.resolve("fixture", "model").unwrap();
+        registry.remove_owner(&owner(1));
+        assert!(!registry.route_has_continuous_authority(&authorized));
     }
 
     #[test]

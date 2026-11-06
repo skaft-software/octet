@@ -7,10 +7,12 @@ import importlib.util
 import json
 import pathlib
 import tempfile
+import tomllib
 import unittest
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 TARGET = "x86_64-pc-windows-msvc"
 PACKAGER_PATH = ROOT / "scripts/package-octet-windows-zip.py"
 SPEC = importlib.util.spec_from_file_location("windows_zip_packager", PACKAGER_PATH)
@@ -106,9 +108,9 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("install-octet.ps1", docs)
         self.assertIn("Windows x86-64", docs)
         self.assertIn("not yet published", docs)
-        self.assertIn("v0.9.6 is not yet published to npm", docs)
+        self.assertIn(f"v{VERSION} is not yet published to npm", docs)
         windows = (ROOT / "docs/windows.md").read_text()
-        self.assertIn("/releases/tag/v0.9.6", windows)
+        self.assertIn(f"/releases/tag/v{VERSION}", windows)
         self.assertIn("these do not qualify the\nMSVC release archive", windows)
 
 

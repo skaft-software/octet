@@ -101,6 +101,7 @@ _ARGUMENTS.update({
 # Ceilings applied to forwarded arguments.
 MAX_TEXT_BYTES = 4096
 MAX_INTEGER = 1 << 31
+MAX_WINDOW_ID = (1 << 53) - 1
 MAX_ELEMENTS = 2000
 MAX_DEPTH = 25
 MAX_CANDIDATES = 64
@@ -203,7 +204,9 @@ def sanitize(driver_tool: str, values: Mapping[str, Any]) -> Dict[str, Any]:
         if name not in values or values[name] is None:
             continue
         value = values[name]
-        if name in {"pid", "window_id", "element_index", "count", "amount"}:
+        if name == "window_id":
+            forwarded[name] = _bounded_int(value, name, maximum=MAX_WINDOW_ID)
+        elif name in {"pid", "element_index", "count", "amount"}:
             forwarded[name] = _bounded_int(value, name)
         elif name in {"max_elements"}:
             forwarded[name] = _bounded_int(value, name, maximum=MAX_ELEMENTS)

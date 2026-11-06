@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 // Identifies the pinned Pi compatibility target, not the native Octet binary.
-export const VERSION = '1.0.2';
+export const VERSION = '1.4.0';
 export const CONFIG_DIR_NAME = '.pi';
 // Native ESM and jiti helpers share one recorded bridge root. HOME/env changes
 // after relocation must not redirect factories to a different private setup.

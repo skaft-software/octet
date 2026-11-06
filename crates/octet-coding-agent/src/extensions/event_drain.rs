@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// Resolve credentials asynchronously, then re-check the host-issued owner
+/// fence before a credential-bearing value is eligible for a process response.
+/// Foreground replacement retires the old owner on each process; checking the
+/// live issued-owner token here closes the resolver-time race.
+pub(super) async fn provider_credential_result_for_live_owner<F>(
+    process: &ExtensionProcess,
+    owner: &ExtensionResourceOwner,
+    generation: u64,
+    resolution: F,
+) -> Option<serde_json::Value>
+where
+    F: std::future::Future<Output = serde_json::Value>,
+{
+    let value = resolution.await;
+    let current = owner.extension_instance_id == process.extension_instance_id()
+        && owner.process_generation == generation
+        && process.health_snapshot().generation == generation
+        && process.is_running()
+        && process.resource_owner_is_live(owner);
+    current.then_some(value)
+}
+
 impl ExecutableExtensions {
     /// Drain completed renderer and autocomplete work without waiting.
     pub fn drain_background_updates(&mut self) -> ExtensionBackgroundUpdates {
@@ -91,15 +113,26 @@ impl ExecutableExtensions {
         consumed
     }
 
+    /// Observe the actual negotiated process in real-frontend acceptance tests.
+    #[cfg(test)]
+    pub(crate) fn test_process(&self, name: &str) -> Option<ExtensionProcess> {
+        self.processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == name)
+            .cloned()
+    }
+
     /// Drain extension events while an interactive shell owns the editor. This
     /// is deliberately separate from the generic event drain so headless hosts
     /// never accidentally grant an editor lease.
     pub fn drain_events_for_shell(&mut self, shell: &mut InteractiveShell) -> Vec<String> {
+        self.refresh_frontend_pending_messages(shell);
         self.schedule_session_hook_starts();
         let mut messages = std::mem::take(&mut self.held_messages);
         messages.extend(self.drain_events_inner(ForegroundAdmission::Shell));
         self.drain_editor_requests_into_shell(shell);
         self.drain_host_requests_into_shell(shell);
+        self.refresh_frontend_pending_messages(shell);
         self.reconcile_terminal_grant_for_shell(shell);
         self.sync_remote_ui(shell);
         self.diagnostics.extend(
@@ -505,23 +538,41 @@ impl ExecutableExtensions {
                             // shaped by the Pi provider runtime: no failure path
                             // can echo a credential or widen the identity.
                             let runtime = self.provider_runtime.clone();
+                            let owner = owner.clone();
                             if let Ok(handle) = Handle::try_current() {
                                 handle.spawn(async move {
-                                    let value = tokio::time::timeout(
-                                        PROVIDER_CREDENTIAL_RESOLUTION_DEADLINE,
-                                        runtime.pi_provider_credentials_response(&provider, &model),
+                                    let resolution = async {
+                                        tokio::time::timeout(
+                                            PROVIDER_CREDENTIAL_RESOLUTION_DEADLINE,
+                                            runtime.pi_provider_credentials_response(&provider, &model),
+                                        )
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            ExtensionProviderRuntime::pi_credentials_unavailable(
+                                                &provider,
+                                            )
+                                        })
+                                    };
+                                    // This token was minted by the host for the
+                                    // admitted request. Owner retirement/replacement
+                                    // during resolution means no credential is sent.
+                                    let value = provider_credential_result_for_live_owner(
+                                        &process, &owner, generation, resolution,
                                     )
                                     .await
-                                    .unwrap_or_else(|_| {
+                                    .unwrap_or_else(|| {
                                         ExtensionProviderRuntime::pi_credentials_unavailable(
                                             &provider,
                                         )
                                     });
+                                    // No await or unrelated work between the final
+                                    // live-owner check and attempting disclosure.
                                     let _ = process
-                                        .respond_to_extension_request(
+                                        .respond_to_extension_request_for_owner(
                                             request_id,
                                             generation,
-                                            ExtensionRequestOutcome::Ok(value),
+                                            &owner,
+                                            value,
                                         )
                                         .await;
                                 });

@@ -120,6 +120,8 @@ pub const EXTENSION_FEATURE_MESSAGE_INJECTION: &str = "message_injection";
 
 /// API `0.2` coalesced message, compaction, dialog, model, and bash fan-out.
 pub const EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2: &str = "lifecycle_events_v2";
+#[doc(hidden)]
+pub const EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1: &str = "committed_message_events_v1";
 
 /// API `0.2` host-owned active tool selection.
 pub const EXTENSION_FEATURE_ACTIVE_TOOLS: &str = "active_tools";
@@ -259,6 +261,9 @@ pub const DEFAULT_EXTENSION_MESSAGE_BYTES: usize = 1024 * 1024;
 
 pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+// A tool may wait on a person answering a dialog; Esc still cancels the call.
+pub(super) const DEFAULT_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) const CONFIRMATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -353,6 +358,7 @@ pub const MAX_EXTENSION_RESULT_CONTENT_PARTS: usize = 256;
 /// each occurrence.
 pub const MAX_EXTENSION_RESULT_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
+#[cfg(test)]
 pub(super) const MAX_SCHEMA_VALIDATION_STEPS: usize = 65_536;
 
 pub(super) const EXTENSION_EVENT_CAPACITY: usize = 128;
@@ -600,7 +606,7 @@ impl ProcessSnapshot {
 
 #[cfg(unix)]
 pub(super) struct DetachedBashSupervision {
-    pub(super) deadline: Instant,
+    pub(super) deadline: Option<Instant>,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -964,17 +970,34 @@ impl ProcessGroupGuard {
         refresh_registered_descendants();
     }
 
+    /// Whether this exact detached Bash registration still owns its descendants.
+    #[cfg(unix)]
+    pub(crate) fn bash_supervision_registered(key: (u64, u64)) -> bool {
+        valid_process_group_id(key.0).is_some_and(|id| {
+            lock_std_mutex(&REGISTERED_PROCESS_GROUPS)
+                .get(&id)
+                .is_some_and(|entry| {
+                    entry.registration_id == key.1 && entry.detached_bash.is_some()
+                })
+        })
+    }
+
     /// Transfers a successfully reaped direct `bash` child to the centralized
     /// descendant supervisor. The registry entry remains live until the group
     /// disappears naturally, the run is cancelled, the original execution
-    /// deadline expires, or host shutdown begins.
-    pub fn supervise_bash_descendants(self, lifetime: Duration, cancellation: CancellationToken) {
+    /// deadline expires, or host shutdown begins. `None` preserves supervision
+    /// without imposing a deadline; it must not be encoded as `Duration::MAX`.
+    pub fn supervise_bash_descendants(
+        self,
+        lifetime: Option<Duration>,
+        cancellation: CancellationToken,
+    ) -> Option<(u64, u64)> {
         #[cfg(unix)]
         {
             let process_group_id = self.process_group_id.load(Ordering::Acquire);
             let Some(process_group_id_i32) = valid_process_group_id(process_group_id) else {
                 self.disarm();
-                return;
+                return None;
             };
             // A whole-process-table scan can race the shell's final exit and
             // miss a background child that has already inherited its group.
@@ -999,34 +1022,37 @@ impl ProcessGroupGuard {
             }
             if !descendants_found {
                 self.disarm();
-                return;
+                return None;
             }
-            if lifetime.is_zero()
+            if lifetime.is_some_and(|lifetime| lifetime.is_zero())
                 || cancellation.is_cancelled()
                 || HOST_SHUTDOWN_REQUESTED.load(Ordering::Acquire)
             {
                 self.terminate_now();
-                return;
+                return None;
             }
-            let now = Instant::now();
-            let Some(deadline) = now.checked_add(lifetime) else {
-                self.terminate_now();
-                return;
+            let deadline = match lifetime {
+                Some(lifetime) => {
+                    let Some(deadline) = Instant::now().checked_add(lifetime) else {
+                        self.terminate_now();
+                        return None;
+                    };
+                    Some(deadline)
+                }
+                None => None,
             };
             let Some(reaper) = LazyLock::force(&PROCESS_REAPER) else {
                 self.terminate_now();
-                return;
+                return None;
             };
 
             let transferred = {
                 let mut registered = lock_std_mutex(&REGISTERED_PROCESS_GROUPS);
-                let Some(entry) = registered.get_mut(&process_group_id_i32) else {
-                    return;
-                };
+                let entry = registered.get_mut(&process_group_id_i32)?;
                 if entry.registration_id != self.registration_id
                     || entry.kind != RegisteredProcessKind::Bash
                 {
-                    return;
+                    return None;
                 }
                 entry.detached_bash = Some(DetachedBashSupervision {
                     deadline,
@@ -1041,11 +1067,13 @@ impl ProcessGroupGuard {
             if transferred {
                 reaper.unpark();
             }
+            Some((process_group_id, self.registration_id))
         }
         #[cfg(not(unix))]
         {
             let _ = (lifetime, cancellation);
             self.disarm();
+            None
         }
     }
 }
@@ -1748,7 +1776,8 @@ pub(super) fn registered_targets(
 }
 
 #[cfg(unix)]
-pub(super) fn detached_bash_process_groups() -> Vec<(i32, u64, Instant, CancellationToken)> {
+pub(super) fn detached_bash_process_groups() -> Vec<(i32, u64, Option<Instant>, CancellationToken)>
+{
     lock_std_mutex(&REGISTERED_PROCESS_GROUPS)
         .iter()
         .filter_map(|(process_group_id, registered)| {
@@ -1876,7 +1905,9 @@ pub(super) fn process_reaper_loop() {
             detached_bash_process_groups()
         {
             let alive = registered_process_is_alive(process_group_id, registration_id);
-            let terminate = host_shutdown || cancellation.is_cancelled() || now >= deadline;
+            let terminate = host_shutdown
+                || cancellation.is_cancelled()
+                || deadline.is_some_and(|deadline| now >= deadline);
             if !alive {
                 unregister_process_group(process_group_id as u64, registration_id);
                 continue;
@@ -1889,7 +1920,9 @@ pub(super) fn process_reaper_loop() {
                 );
                 continue;
             }
-            next_poll = next_poll.min(deadline.saturating_duration_since(now));
+            if let Some(deadline) = deadline {
+                next_poll = next_poll.min(deadline.saturating_duration_since(now));
+            }
         }
         if next_poll.is_zero() {
             std::thread::yield_now();

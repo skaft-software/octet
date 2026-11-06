@@ -626,9 +626,13 @@ fn finished(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblings() {
-    let factory = r#"export default pi => {
+    let factory = r#"import { appendFileSync } from 'node:fs';
+    export default pi => {
       pi.on('tool_call', e => ({block:true, reason:'TERMINATED_' + e.toolCallId, terminate:true}));
-      pi.on('tool_result', () => ({isError:false, details:{stillDenied:true}}));
+      pi.on('tool_result', e => {
+        appendFileSync(TRACE, JSON.stringify({id:e.toolCallId}) + '\n');
+        return {isError:false, details:{stillDenied:true}};
+      });
     };"#;
     let acceptance = exercise_mode(
         factory,
@@ -645,11 +649,17 @@ async fn native_pi_tool_hooks_block_termination_is_unanimous_and_persists_siblin
         let error = result.as_ref().unwrap_err();
         assert!(error.output().unwrap().terminates_run());
         assert!(error.output().unwrap().is_error());
-        assert_eq!(
-            error.output().unwrap().metadata().unwrap()["pi_details"]["stillDenied"],
-            true
-        );
+        assert!(error
+            .output()
+            .unwrap()
+            .metadata()
+            .and_then(|metadata| metadata.get("pi_details"))
+            .is_none());
     }
+    assert!(
+        acceptance.trace.is_empty(),
+        "hook-blocked calls skip tool_result"
+    );
     assert!(acceptance.durable.contains("TERMINATED_call-0"));
     assert!(acceptance.durable.contains("TERMINATED_call-1"));
     assert!(!acceptance.durable.contains("ORIGINAL_PRIVATE_CONTENT"));

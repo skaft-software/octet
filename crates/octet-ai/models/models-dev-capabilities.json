@@ -764,6 +764,26 @@
     "structured_output": true,
     "tool_call": true
   },
+  "baseten/moonshotai/Kimi-K3.1-Pro": {
+    "limit": {
+      "context": 1000000,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": true,
+    "tool_call": true
+  },
   "baseten/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B": {
     "interleaved": {
       "field": "reasoning_content"
@@ -780,7 +800,7 @@
         "text"
       ]
     },
-    "name": "Nemotron Ultra",
+    "name": "Nemotron 3 Ultra",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -1475,6 +1495,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/models/minimax-m3p1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 512000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M3.1-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/models/muse-spark-open": {
     "limit": {
       "context": 1048576,
@@ -1573,6 +1627,7 @@
       {
         "type": "effort",
         "values": [
+          "none",
           "low",
           "medium",
           "xhigh"
@@ -1600,7 +1655,13 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ]
       }
     ],
     "structured_output": true,
@@ -1641,6 +1702,76 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash 1017 Spot",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/deepseek-v4p1-flash-spot": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 384000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash Spot",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/routers/glm-5p3-fast": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1658,6 +1789,37 @@
       ]
     },
     "name": "GLM 5.3 Fast",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "fireworks/accounts/fireworks/routers/glm-5p3-spot": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048573,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 Spot",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -1846,6 +2008,46 @@
     "structured_output": true,
     "tool_call": true
   },
+  "fireworks/accounts/fireworks/routers/kimi-k3-spot": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3 Spot",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      },
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "min": 1024,
+        "type": "budget_tokens"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "fireworks/accounts/fireworks/routers/kimi-latest": {
     "interleaved": {
       "field": "reasoning_content"
@@ -1935,7 +2137,13 @@
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ]
       }
     ],
     "structured_output": true,
@@ -1989,40 +2197,6 @@
       ]
     },
     "name": "Canopy Labs Orpheus V1 English",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "groq/groq/compound": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Compound",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "groq/groq/compound-mini": {
-    "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Compound Mini",
     "reasoning": false,
     "tool_call": false
   },
@@ -2391,6 +2565,39 @@
     "structured_output": true,
     "tool_call": true
   },
+  "huggingface/MiniMaxAI/MiniMax-M3.1-Flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 512000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax-M3.1-Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "huggingface/Qwen/Qwen2.5-Coder-32B-Instruct": {
     "limit": {
       "context": 131072,
@@ -2632,24 +2839,6 @@
     },
     "name": "Qwen3-Next-80B-A3B-Instruct",
     "reasoning": false,
-    "tool_call": true
-  },
-  "huggingface/Qwen/Qwen3-Next-80B-A3B-Thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3-Next-80B-A3B-Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
     "tool_call": true
   },
   "huggingface/Qwen/Qwen3-VL-235B-A22B-Instruct": {
@@ -2926,24 +3115,6 @@
       }
     ],
     "structured_output": true,
-    "tool_call": true
-  },
-  "huggingface/XiaomiMiMo/MiMo-V2-Flash": {
-    "limit": {
-      "context": 262144,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiMo-V2-Flash",
-    "reasoning": true,
-    "reasoning_options": [],
     "tool_call": true
   },
   "huggingface/XiaomiMiMo/MiMo-V2.5": {
@@ -3837,24 +4008,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "huggingface/zai-org/GLM-4.5": {
-    "limit": {
-      "context": 131072,
-      "output": 98304
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GLM-4.5",
-    "reasoning": true,
-    "reasoning_options": [],
-    "tool_call": true
-  },
   "huggingface/zai-org/GLM-4.5-Air": {
     "limit": {
       "context": 131072,
@@ -4363,39 +4516,71 @@
     "structured_output": true,
     "tool_call": true
   },
-  "nvidia/abacusai/dracarys-llama-3.1-70b-instruct": {
+  "moonshotai/kimi-k3.1-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
     "limit": {
-      "context": 128000,
-      "output": 8192
+      "context": 1048576,
+      "output": 1048576
     },
     "modalities": {
       "input": [
-        "text"
+        "text",
+        "image",
+        "video"
       ],
       "output": [
         "text"
       ]
     },
-    "name": "dracarys-llama-3.1-70b-instruct",
-    "reasoning": false,
-    "tool_call": false
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
-  "nvidia/baai/bge-m3": {
+  "moonshotai/kimi-k3.1-pro-highspeed": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
     "limit": {
-      "context": 8192,
-      "output": 0
+      "context": 1048576,
+      "output": 1048576
     },
     "modalities": {
       "input": [
-        "text"
+        "text",
+        "image",
+        "video"
       ],
       "output": [
         "text"
       ]
     },
-    "name": "BGE M3",
-    "reasoning": false,
-    "tool_call": false
+    "name": "Kimi K3.1 Pro Highspeed",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
   "nvidia/black-forest-labs/flux.1-dev": {
     "limit": {
@@ -4468,148 +4653,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "nvidia/bytedance/seed-oss-36b-instruct": {
-    "limit": {
-      "context": 262000,
-      "output": 262000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "ByteDance-Seed/Seed-OSS-36B-Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/deepseek-ai/deepseek-v4-flash": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048576,
-      "output": 393216
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/deepseek-ai/deepseek-v4-flash-0731": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Flash 0731",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/deepseek-ai/deepseek-v4-pro": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048576,
-      "output": 393216
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Pro",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/deepseek-ai/deepseek-v4-pro-0813": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 384000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "DeepSeek V4 Pro 0813",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "nvidia/deepseek-ai/deepseek-v4.1-flash": {
     "interleaved": {
       "field": "reasoning_content"
@@ -4676,24 +4719,6 @@
     ],
     "tool_call": true
   },
-  "nvidia/google/gemma-2-2b-it": {
-    "limit": {
-      "context": 8192,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Gemma 2 2b It",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
   "nvidia/google/gemma-3-12b-it": {
     "limit": {
       "context": 131072,
@@ -4728,44 +4753,6 @@
     },
     "name": "Gemma 3 4B IT",
     "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/google/gemma-3n-e2b-it": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Gemma 3n E2b It",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/google/gemma-3n-e4b-it": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Gemma 3n E4b It",
-    "reasoning": false,
-    "structured_output": true,
     "tool_call": true
   },
   "nvidia/google/gemma-4-31b-it": {
@@ -4810,75 +4797,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "nvidia/meta/esm2-650m": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "esm2-650m",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "nvidia/meta/esmfold": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "esmfold",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "nvidia/meta/llama-3.1-70b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.1 70b Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/meta/llama-3.1-8b-instruct": {
-    "limit": {
-      "context": 16000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.1 8B Instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
   "nvidia/meta/llama-3.2-11b-vision-instruct": {
     "limit": {
       "context": 128000,
@@ -4894,42 +4812,6 @@
       ]
     },
     "name": "Llama 3.2 11b Vision Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/meta/llama-3.2-1b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.2 1b Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/meta/llama-3.2-3b-instruct": {
-    "limit": {
-      "context": 131072,
-      "output": 32000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.2 3B Instruct",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -4950,43 +4832,6 @@
     },
     "name": "Llama-3.2-90B-Vision-Instruct",
     "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/meta/llama-3.3-70b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.3 70b Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/meta/llama-4-maverick-17b-128e-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 4 Maverick 17b 128e Instruct",
-    "reasoning": false,
-    "structured_output": true,
     "tool_call": true
   },
   "nvidia/meta/llama-guard-4-12b": {
@@ -5042,64 +4887,13 @@
     "structured_output": true,
     "tool_call": true
   },
-  "nvidia/microsoft/phi-4-mini-instruct": {
+  "nvidia/minimaxai/minimax-m3.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
     "limit": {
-      "context": 131072,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Phi-4-Mini",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/microsoft/phi-4-multimodal-instruct": {
-    "limit": {
-      "context": 128000,
-      "input": 128000,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Phi 4 Multimodal",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
-  "nvidia/minimaxai/minimax-m2.7": {
-    "limit": {
-      "context": 204800,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2.7",
-    "reasoning": true,
-    "reasoning_options": [],
-    "tool_call": true
-  },
-  "nvidia/minimaxai/minimax-m3": {
-    "limit": {
-      "context": 1000000,
-      "output": 16384
+      "context": 262144,
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -5111,13 +4905,21 @@
         "text"
       ]
     },
-    "name": "MiniMax-M3",
+    "name": "MiniMax-M3.1-Flash",
     "reasoning": true,
     "reasoning_options": [
       {
-        "type": "toggle"
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
+    "structured_output": true,
     "tool_call": true
   },
   "nvidia/mistralai/magistral-small-2506": {
@@ -5139,24 +4941,6 @@
     "structured_output": false,
     "tool_call": false
   },
-  "nvidia/mistralai/ministral-14b-instruct-2512": {
-    "limit": {
-      "context": 262144,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Ministral 3 14B Instruct 2512",
-    "reasoning": false,
-    "tool_call": true
-  },
   "nvidia/mistralai/mistral-7b-instruct-v0.3": {
     "limit": {
       "context": 65536,
@@ -5171,25 +4955,6 @@
       ]
     },
     "name": "Mistral-7B-Instruct-v0.3",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/mistralai/mistral-large-3-675b-instruct-2512": {
-    "limit": {
-      "context": 262144,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral Large 3 675B Instruct 2512",
     "reasoning": false,
     "structured_output": true,
     "tool_call": true
@@ -5212,113 +4977,6 @@
     "name": "Mistral Medium 3",
     "reasoning": false,
     "structured_output": false,
-    "tool_call": false
-  },
-  "nvidia/mistralai/mistral-medium-3.5-128b": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral Medium 3.5",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/mistralai/mistral-nemotron": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "mistral-nemotron",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/mistralai/mistral-small-4-119b-2603": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "mistral-small-4-119b-2603",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/mistralai/mixtral-8x22b-instruct": {
-    "limit": {
-      "context": 65536,
-      "output": 13108
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral: Mixtral 8x22B Instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/mistralai/mixtral-8x7b-instruct": {
-    "limit": {
-      "context": 32768,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Mistral: Mixtral 8x7B Instruct",
-    "reasoning": false,
     "tool_call": false
   },
   "nvidia/moonshotai/kimi-k2.6": {
@@ -5428,25 +5086,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "nvidia/nvidia/cosmos-predict1-5b": {
-    "limit": {
-      "context": 0,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "video"
-      ]
-    },
-    "name": "cosmos-predict1-5b",
-    "reasoning": false,
-    "tool_call": false
-  },
   "nvidia/nvidia/cosmos-reason2-8b": {
     "limit": {
       "context": 131072,
@@ -5467,25 +5106,6 @@
     "reasoning_options": [],
     "tool_call": true
   },
-  "nvidia/nvidia/cosmos-transfer1-7b": {
-    "limit": {
-      "context": 0,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "video"
-      ]
-    },
-    "name": "cosmos-transfer1-7b",
-    "reasoning": false,
-    "tool_call": false
-  },
   "nvidia/nvidia/cosmos-transfer2_5-2b": {
     "limit": {
       "context": 0,
@@ -5505,23 +5125,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "nvidia/nvidia/gliner-pii": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "gliner-pii",
-    "reasoning": false,
-    "tool_call": false
-  },
   "nvidia/nvidia/llama-3.1-nemotron-70b-instruct": {
     "limit": {
       "context": 128000,
@@ -5537,47 +5140,6 @@
     },
     "name": "Llama 3.1 Nemotron 70B Instruct",
     "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.1 Nemotron Nano 8B v1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "nvidia/nvidia/llama-3.1-nemotron-nano-vl-8b-v1": {
-    "limit": {
-      "context": 32768,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.1 Nemotron Nano VL 8B v1",
-    "reasoning": true,
-    "reasoning_options": [],
     "tool_call": true
   },
   "nvidia/nvidia/llama-3.1-nemotron-safety-guard-8b-v3": {
@@ -5618,67 +5180,6 @@
       }
     ],
     "tool_call": true
-  },
-  "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1": {
-    "limit": {
-      "context": 131072,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.3 Nemotron Super 49B v1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5": {
-    "limit": {
-      "context": 131072,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.3 Nemotron Super 49B v1.5",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "nvidia/nvidia/llama-3_2-nemoretriever-300m-embed-v1": {
-    "limit": {
-      "context": 32768,
-      "output": 2048
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "llama-3_2-nemoretriever-300m-embed-v1",
-    "reasoning": false,
-    "tool_call": false
   },
   "nvidia/nvidia/llama-nemotron-embed-vl-1b-v2": {
     "limit": {
@@ -5733,45 +5234,6 @@
     "name": "magpie-tts-zeroshot",
     "reasoning": false,
     "tool_call": false
-  },
-  "nvidia/nvidia/nemotron-3-content-safety": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nemotron-3-content-safety",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "nvidia/nvidia/nemotron-3-nano-30b-a3b": {
-    "limit": {
-      "context": 131072,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nemotron-3-nano-30b-a3b",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
   },
   "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
     "limit": {
@@ -5913,61 +5375,6 @@
     ],
     "tool_call": true
   },
-  "nvidia/nvidia/nemotron-content-safety-reasoning-4b": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nemotron-content-safety-reasoning-4b",
-    "reasoning": true,
-    "reasoning_options": [],
-    "tool_call": false
-  },
-  "nvidia/nvidia/nemotron-mini-4b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nemotron-mini-4b-instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/nvidia/nemotron-nano-12b-v2-vl": {
-    "limit": {
-      "context": 128000,
-      "output": 128000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nemotron Nano 12B v2 VL",
-    "reasoning": true,
-    "reasoning_options": [],
-    "tool_call": true
-  },
   "nvidia/nvidia/nemotron-voicechat": {
     "limit": {
       "context": 128000,
@@ -5984,62 +5391,6 @@
     },
     "name": "nemotron-voicechat",
     "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/nvidia/nv-embed-v1": {
-    "limit": {
-      "context": 32768,
-      "output": 2048
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nv-embed-v1",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "nvidia/nvidia/nv-embedcode-7b-v1": {
-    "limit": {
-      "context": 32768,
-      "output": 2048
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nv-embedcode-7b-v1",
-    "reasoning": false,
-    "tool_call": false
-  },
-  "nvidia/nvidia/nvidia-nemotron-nano-9b-v2": {
-    "limit": {
-      "context": 131072,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "nvidia-nemotron-nano-9b-v2",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
     "tool_call": true
   },
   "nvidia/nvidia/rerank-qa-mistral-4b": {
@@ -6249,8 +5600,7 @@
     },
     "modalities": {
       "input": [
-        "text",
-        "image"
+        "text"
       ],
       "output": [
         "image"
@@ -6279,184 +5629,6 @@
     "reasoning": false,
     "structured_output": false,
     "tool_call": false
-  },
-  "nvidia/qwen/qwen2.5-coder-32b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen2.5 Coder 32b Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/qwen/qwen3-coder-480b-a35b-instruct": {
-    "limit": {
-      "context": 262144,
-      "output": 66536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3 Coder 480B A35B Instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/qwen/qwen3-next-80b-a3b-instruct": {
-    "limit": {
-      "context": 262144,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3-Next-80B-A3B-Instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/qwen/qwen3.5-122b-a10b": {
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.5 122B-A10B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/qwen/qwen3.5-397b-a17b": {
-    "limit": {
-      "context": 262144,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.5-397B-A17B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "nvidia/sarvamai/sarvam-m": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "sarvam-m",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/stepfun-ai/step-3.5-flash": {
-    "limit": {
-      "context": 256000,
-      "input": 256000,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Step 3.5 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "tool_call": true
-  },
-  "nvidia/stepfun-ai/step-3.7-flash": {
-    "limit": {
-      "context": 256000,
-      "input": 256000,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Step 3.7 Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    ],
-    "tool_call": true
   },
   "nvidia/stepfun-ai/step-5-preview": {
     "interleaved": {
@@ -6493,69 +5665,6 @@
       }
     ],
     "structured_output": false,
-    "tool_call": true
-  },
-  "nvidia/thinkingmachines/inkling": {
-    "limit": {
-      "context": 1048576,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Inkling",
-    "reasoning": true,
-    "reasoning_options": [],
-    "tool_call": true
-  },
-  "nvidia/upstage/solar-10.7b-instruct": {
-    "limit": {
-      "context": 128000,
-      "output": 8192
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "solar-10.7b-instruct",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "nvidia/z-ai/glm-5.2": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1000000,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GLM-5.2",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
     "tool_call": true
   },
   "nvidia/z-ai/glm-5.3": {
@@ -7559,6 +6668,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openai/gpt-6.1-terra": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openai/gpt-daybreak-blue-latest": {
     "limit": {
       "context": 1050000,
@@ -7625,25 +6768,6 @@
     ],
     "structured_output": true,
     "tool_call": true
-  },
-  "openai/gpt-image-1": {
-    "limit": {
-      "context": 0,
-      "input": 0,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "image"
-      ]
-    },
-    "name": "gpt-image-1",
-    "reasoning": false,
-    "tool_call": false
   },
   "openai/gpt-image-1-mini": {
     "limit": {
@@ -8081,7 +7205,7 @@
         "text"
       ]
     },
-    "name": "DeepSeek V4 Pro (New)",
+    "name": "DeepSeek V4 Pro",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -8121,6 +7245,38 @@
           "low",
           "high",
           "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "opencode-go/gemini-4-argon": {
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "audio",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Gemini 4 Argon",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
         ]
       }
     ],
@@ -8232,8 +7388,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"
@@ -8381,6 +7536,34 @@
     ],
     "tool_call": true
   },
+  "opencode-go/hy4": {
+    "limit": {
+      "context": 1048576,
+      "input": 983010,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Hy4",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "opencode-go/hy4-preview": {
     "limit": {
       "context": 1024000,
@@ -8405,6 +7588,24 @@
         ]
       }
     ],
+    "tool_call": true
+  },
+  "opencode-go/iceman-contributor-free": {
+    "limit": {
+      "context": 262144,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Iceman Contributor Free",
+    "reasoning": true,
+    "reasoning_options": [],
     "tool_call": true
   },
   "opencode-go/kimi-k2.7-code": {
@@ -8455,6 +7656,39 @@
       {
         "type": "effort",
         "values": [
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "opencode-go/kimi-k3.1-pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
           "max"
         ]
       }
@@ -8644,6 +7878,40 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "opencode-go/minimax-m3.1-flash": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 512000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiniMax M3.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
       }
     ],
     "tool_call": true
@@ -9548,6 +8816,40 @@
     ],
     "tool_call": true
   },
+  "opencode/crouton-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 270000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "opencode/deepseek-v4-flash": {
     "interleaved": {
       "field": "reasoning_content"
@@ -10349,8 +9651,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"
@@ -10383,8 +9684,7 @@
       "input": [
         "text",
         "image",
-        "video",
-        "pdf"
+        "video"
       ],
       "output": [
         "text"
@@ -12385,6 +11685,34 @@
     "structured_output": false,
     "tool_call": true
   },
+  "opencode/pulse-alpha-free": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Pulse Alpha Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "opencode/qwen3-coder": {
     "limit": {
       "context": 262144,
@@ -13404,25 +12732,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/arcee-ai/trinity-large-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 80000
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Trinity Large Thinking",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/bytedance-seed/seed-1.6": {
     "limit": {
       "context": 262144,
@@ -13788,7 +13097,7 @@
   "openrouter/deepseek/deepseek-chat-v3.1": {
     "limit": {
       "context": 163840,
-      "output": 32768
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -13853,7 +13162,7 @@
   "openrouter/deepseek/deepseek-v3.2": {
     "limit": {
       "context": 163840,
-      "output": 65536
+      "output": 147456
     },
     "modalities": {
       "input": [
@@ -13930,7 +13239,7 @@
   "openrouter/deepseek/deepseek-v4-flash-0731": {
     "limit": {
       "context": 1048576,
-      "output": 131072
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -13959,7 +13268,7 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "limit": {
       "context": 1048576,
-      "output": 262144
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -14020,7 +13329,7 @@
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "limit": {
       "context": 1048576,
-      "output": 393216
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -14848,6 +14157,66 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/google/gemini-omni-1.1-flash": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text",
+        "video"
+      ]
+    },
+    "name": "Gemini Omni 1.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": false
+  },
+  "openrouter/google/gemini-omni-1.2-flash": {
+    "limit": {
+      "context": 131072,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text",
+        "video"
+      ]
+    },
+    "name": "Gemini Omni 1.2 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": false,
+    "tool_call": false
+  },
   "openrouter/google/gemma-2-27b-it": {
     "limit": {
       "context": 8192,
@@ -14907,7 +14276,7 @@
   "openrouter/google/gemma-3-4b-it": {
     "limit": {
       "context": 131072,
-      "output": 117964
+      "output": 16384
     },
     "modalities": {
       "input": [
@@ -15081,24 +14450,6 @@
     "structured_output": true,
     "tool_call": false
   },
-  "openrouter/ibm-granite/granite-4.0-h-micro": {
-    "limit": {
-      "context": 131000,
-      "output": 117900
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Granite 4.0 Micro",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/ibm-granite/granite-4.2-8b": {
     "limit": {
       "context": 131072,
@@ -15262,10 +14613,33 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/inclusionai/ling-3.1-flash": {
+  "openrouter/inclusionai/ling-3.0-tiny": {
     "limit": {
       "context": 262144,
-      "output": 235929
+      "output": 250000
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ling 3.0 Tiny",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/inclusionai/ling-3.1-flash": {
+    "limit": {
+      "context": 1000000,
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -15288,7 +14662,7 @@
   "openrouter/inference-net/schematron-v2-small": {
     "limit": {
       "context": 128000,
-      "output": 4096
+      "output": 8192
     },
     "modalities": {
       "input": [
@@ -15320,6 +14694,25 @@
     "reasoning": false,
     "structured_output": true,
     "tool_call": false
+  },
+  "openrouter/liquid/lfm-2.5-2.6b": {
+    "limit": {
+      "context": 128000,
+      "output": 8192
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "LFM2.5-2.6B",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": true,
+    "tool_call": true
   },
   "openrouter/liquid/lfm-2.5-2.6b:free": {
     "limit": {
@@ -15406,7 +14799,7 @@
   "openrouter/meta-llama/llama-3.1-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 8192
     },
     "modalities": {
       "input": [
@@ -15418,8 +14811,8 @@
     },
     "name": "Llama-3.1-70B-Instruct",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
+    "structured_output": false,
+    "tool_call": false
   },
   "openrouter/meta-llama/llama-3.1-8b-instruct": {
     "limit": {
@@ -15478,7 +14871,7 @@
   "openrouter/meta-llama/llama-3.3-70b-instruct": {
     "limit": {
       "context": 131072,
-      "output": 16384
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -15496,7 +14889,7 @@
   "openrouter/meta-llama/llama-4-maverick": {
     "limit": {
       "context": 524288,
-      "output": 16384
+      "output": 32768
     },
     "modalities": {
       "input": [
@@ -15514,7 +14907,7 @@
   },
   "openrouter/meta-llama/llama-4-scout": {
     "limit": {
-      "context": 1310720,
+      "context": 327680,
       "output": 16384
     },
     "modalities": {
@@ -15833,25 +15226,6 @@
     "structured_output": true,
     "tool_call": false
   },
-  "openrouter/minimax/minimax-01": {
-    "limit": {
-      "context": 1000192,
-      "output": 40000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-01",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
   "openrouter/minimax/minimax-m1": {
     "limit": {
       "context": 1000000,
@@ -15872,68 +15246,6 @@
         "type": "toggle"
       }
     ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/minimax/minimax-m2": {
-    "interleaved": {
-      "field": "reasoning_details"
-    },
-    "limit": {
-      "context": 204800,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/minimax/minimax-m2-her": {
-    "limit": {
-      "context": 65536,
-      "output": 2048
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2 Her",
-    "reasoning": false,
-    "structured_output": false,
-    "tool_call": false
-  },
-  "openrouter/minimax/minimax-m2.1": {
-    "interleaved": {
-      "field": "reasoning_details"
-    },
-    "limit": {
-      "context": 204800,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiniMax-M2.1",
-    "reasoning": true,
-    "reasoning_options": [],
     "structured_output": false,
     "tool_call": true
   },
@@ -15962,7 +15274,7 @@
   "openrouter/minimax/minimax-m2.7": {
     "limit": {
       "context": 204800,
-      "output": 131072
+      "output": 176947
     },
     "modalities": {
       "input": [
@@ -16003,9 +15315,9 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/minimax/minimax-m3.1-flash:free": {
+  "openrouter/minimax/minimax-m3.1-flash": {
     "limit": {
-      "context": 1000000,
+      "context": 1048576,
       "output": 524288
     },
     "modalities": {
@@ -16018,7 +15330,7 @@
         "text"
       ]
     },
-    "name": "MiniMax M3.1 Flash (free)",
+    "name": "MiniMax-M3.1-Flash",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -16032,7 +15344,7 @@
         ]
       }
     ],
-    "structured_output": false,
+    "structured_output": true,
     "tool_call": true
   },
   "openrouter/mistralai/codestral-2508": {
@@ -16208,7 +15520,8 @@
       {
         "type": "effort",
         "values": [
-          "none",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -16656,6 +15969,37 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/moonshotai/kimi-k3.1-pro": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/morph/morph-v3-fast": {
     "limit": {
       "context": 262144,
@@ -16750,42 +16094,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Hermes 3 405B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
-  "openrouter/nousresearch/hermes-3-llama-3.1-70b": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Hermes 3 70B Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
   "openrouter/nousresearch/hermes-4-405b": {
     "limit": {
       "context": 131072,
@@ -16863,8 +16171,8 @@
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "limit": {
-      "context": 262144,
-      "output": 235929
+      "context": 1048576,
+      "output": 262144
     },
     "modalities": {
       "input": [
@@ -16875,37 +16183,6 @@
       ]
     },
     "name": "Nemotron 3 Super 120B A12B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "low",
-          "medium"
-        ]
-      },
-      {
-        "type": "budget_tokens"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/nvidia/nemotron-3-super-120b-a12b:free": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Nemotron 3 Super (free)",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -17082,7 +16359,7 @@
   "openrouter/nvidia/nemotron-3.5-super-vl": {
     "limit": {
       "context": 1048576,
-      "output": 235929
+      "output": 943718
     },
     "modalities": {
       "input": [
@@ -17129,24 +16406,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/gpt-3.5-turbo": {
-    "limit": {
-      "context": 16385,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-3.5-turbo",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/openai/gpt-3.5-turbo-0613": {
     "limit": {
       "context": 4095,
@@ -17183,24 +16442,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/gpt-3.5-turbo-instruct": {
-    "limit": {
-      "context": 4095,
-      "output": 3685
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-3.5 Turbo Instruct",
-    "reasoning": false,
-    "structured_output": true,
-    "tool_call": false
-  },
   "openrouter/openai/gpt-4": {
     "limit": {
       "context": 8191,
@@ -17216,26 +16457,7 @@
     },
     "name": "GPT-4",
     "reasoning": false,
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/gpt-4-turbo": {
-    "limit": {
-      "context": 128000,
-      "output": 4096
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-4 Turbo",
-    "reasoning": false,
-    "structured_output": true,
+    "structured_output": false,
     "tool_call": true
   },
   "openrouter/openai/gpt-4.1": {
@@ -17281,7 +16503,7 @@
   "openrouter/openai/gpt-4.1-nano": {
     "limit": {
       "context": 1047576,
-      "output": 32768
+      "output": 942818
     },
     "modalities": {
       "input": [
@@ -17740,26 +16962,6 @@
         ]
       }
     ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/gpt-5.2-chat": {
-    "limit": {
-      "context": 128000,
-      "output": 32000
-    },
-    "modalities": {
-      "input": [
-        "pdf",
-        "image",
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "GPT-5.2 Chat",
-    "reasoning": false,
     "structured_output": true,
     "tool_call": true
   },
@@ -18553,6 +17755,72 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/openai/gpt-6.1-terra": {
+    "limit": {
+      "context": 1050000,
+      "input": 922000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/openai/gpt-6.1-terra-pro": {
+    "limit": {
+      "context": 1050000,
+      "output": 128000
+    },
+    "modalities": {
+      "input": [
+        "pdf",
+        "image",
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GPT-6.1 Terra Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/openai/gpt-audio": {
     "limit": {
       "context": 128000,
@@ -18644,7 +17912,7 @@
   "openrouter/openai/gpt-oss-20b": {
     "limit": {
       "context": 131072,
-      "output": 32768
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -18697,56 +17965,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/o1": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o1-pro": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o1-pro",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": false
-  },
   "openrouter/openai/o3": {
     "limit": {
       "context": 200000,
@@ -18772,57 +17990,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/openai/o3-mini": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o3-mini",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o3-mini-high": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o3 Mini High",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/openai/o3-pro": {
     "limit": {
       "context": 200000,
@@ -18843,59 +18010,6 @@
     "reasoning_options": [
       {
         "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o4-mini": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o4-mini",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/openai/o4-mini-high": {
-    "limit": {
-      "context": 200000,
-      "output": 100000
-    },
-    "modalities": {
-      "input": [
-        "image",
-        "text",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "o4 Mini High",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "high"
-        ]
       }
     ],
     "structured_output": true,
@@ -18999,6 +18113,39 @@
     "reasoning": false,
     "structured_output": false,
     "tool_call": false
+  },
+  "openrouter/particle-ai/particle-1": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Particle-1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
   "openrouter/perceptron/perceptron-mk1": {
     "limit": {
@@ -19163,98 +18310,6 @@
     "structured_output": false,
     "tool_call": false
   },
-  "openrouter/poolside/laguna-s-2.1": {
-    "limit": {
-      "context": 1048576,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna S 2.1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-s-2.1:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna S 2.1 (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-xs-2.1": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna XS 2.1",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/poolside/laguna-xs-2.1:free": {
-    "limit": {
-      "context": 262144,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Laguna XS 2.1 (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/prism-ml/ternary-bonsai-2-27b": {
     "limit": {
       "context": 262144,
@@ -19279,6 +18334,30 @@
           "medium",
           "xhigh"
         ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
+  "openrouter/prism-ml/ternary-bonsai-2-9b": {
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ternary Bonsai 2 9B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
       }
     ],
     "structured_output": true,
@@ -19401,7 +18480,7 @@
   "openrouter/qwen/qwen3-235b-a22b-2507": {
     "limit": {
       "context": 262144,
-      "output": 16384
+      "output": 117964
     },
     "modalities": {
       "input": [
@@ -19589,25 +18668,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
-    "limit": {
-      "context": 262144,
-      "output": 235929
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3-Next 80B-A3B (Thinking)",
-    "reasoning": true,
-    "reasoning_options": [],
-    "structured_output": true,
-    "tool_call": true
-  },
   "openrouter/qwen/qwen3-vl-235b-a22b-instruct": {
     "limit": {
       "context": 262144,
@@ -19713,7 +18773,7 @@
   "openrouter/qwen/qwen3.5-27b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 81920
     },
     "modalities": {
       "input": [
@@ -19763,7 +18823,7 @@
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -19788,7 +18848,7 @@
   "openrouter/qwen/qwen3.5-9b": {
     "limit": {
       "context": 262144,
-      "output": 65536
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -20064,7 +19124,7 @@
   "openrouter/qwen/qwen3.8-2.4t-a95b": {
     "limit": {
       "context": 1048576,
-      "output": 909000
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -20091,8 +19151,8 @@
   },
   "openrouter/qwen/qwen3.8-27b": {
     "limit": {
-      "context": 1000000,
-      "output": 65536
+      "context": 1024000,
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -20241,6 +19301,25 @@
     "structured_output": true,
     "tool_call": true
   },
+  "openrouter/recursive/flint-v1.0:free": {
+    "limit": {
+      "context": 262144,
+      "output": 235929
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Flint (free)",
+    "reasoning": true,
+    "reasoning_options": [],
+    "structured_output": false,
+    "tool_call": true
+  },
   "openrouter/reflection/beam-1.0-501b-a23b": {
     "limit": {
       "context": 1048576,
@@ -20342,6 +19421,24 @@
       ]
     },
     "name": "Relace Search",
+    "reasoning": false,
+    "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/ricursiveai/ripple-65b-preview": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "ricursiveAI/Ripple-65B-Preview",
     "reasoning": false,
     "structured_output": false,
     "tool_call": true
@@ -20539,6 +19636,41 @@
     "reasoning": false,
     "structured_output": false,
     "tool_call": false
+  },
+  "openrouter/stealth/crouton-alpha": {
+    "limit": {
+      "context": 1048576,
+      "output": 943718
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video",
+        "pdf",
+        "audio"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
   },
   "openrouter/stepfun/step-3.5-flash": {
     "limit": {
@@ -20755,6 +19887,36 @@
     "structured_output": false,
     "tool_call": true
   },
+  "openrouter/tencent/hy4": {
+    "limit": {
+      "context": 1048576,
+      "input": 983010,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Hy4",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "high"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "openrouter/tencent/hy4-preview": {
     "limit": {
       "context": 1048576,
@@ -20903,72 +20065,6 @@
     "structured_output": false,
     "tool_call": true
   },
-  "openrouter/thinkingmachines/inkling-small:free": {
-    "limit": {
-      "context": 1048576,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Inkling Small (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
-  "openrouter/thinkingmachines/inkling:free": {
-    "limit": {
-      "context": 1048576,
-      "output": 262144
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Inkling (free)",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": false,
-    "tool_call": true
-  },
   "openrouter/unbiased/pareto-26.10": {
     "limit": {
       "context": 1048576,
@@ -21051,36 +20147,6 @@
           "high",
           "xhigh",
           "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "openrouter/upstage/solar-pro-3": {
-    "limit": {
-      "context": 131072,
-      "output": 117964
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Solar Pro 3",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "minimal",
-          "low",
-          "medium",
-          "high"
         ]
       }
     ],
@@ -21342,8 +20408,8 @@
       "field": "reasoning_details"
     },
     "limit": {
-      "context": 1050000,
-      "output": 945000
+      "context": 1000000,
+      "output": 65536
     },
     "modalities": {
       "input": [
@@ -21372,7 +20438,7 @@
     },
     "limit": {
       "context": 1050000,
-      "output": 945000
+      "output": 235929
     },
     "modalities": {
       "input": [
@@ -21803,7 +20869,7 @@
   "openrouter/z-ai/glm-5.3-flash": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 943717
     },
     "modalities": {
       "input": [
@@ -21858,6 +20924,36 @@
       }
     ],
     "structured_output": false,
+    "tool_call": true
+  },
+  "openrouter/z-ai/glm-5.3-flashx-legal": {
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM 5.3 FlashX Legal",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
     "tool_call": true
   },
   "openrouter/z-ai/glm-5.3-prime": {
@@ -22440,7 +21536,7 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "limit": {
       "context": 1048576,
-      "output": 943718
+      "output": 131072
     },
     "modalities": {
       "input": [
@@ -24612,6 +23708,40 @@
     "structured_output": true,
     "tool_call": true
   },
+  "together/moonshotai/Kimi-K3.1-Pro": {
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 131072
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K3.1 Pro",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      }
+    ],
+    "structured_output": true,
+    "tool_call": true
+  },
   "together/nvidia/NVIDIA-Nemotron-3.5-Super-VL": {
     "interleaved": {
       "field": "reasoning_content"
@@ -25141,24 +24271,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "xai/grok-imagine-image-quality": {
-    "limit": {
-      "context": 16000,
-      "output": 0
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "image"
-      ]
-    },
-    "name": "Grok Imagine Image Quality",
-    "reasoning": false,
-    "tool_call": false
-  },
   "xai/grok-imagine-video": {
     "limit": {
       "context": 1024,
@@ -25214,85 +24326,6 @@
     "name": "Grok Imagine Video 1.5 Lite",
     "reasoning": false,
     "tool_call": false
-  },
-  "xiaomi/mimo-v2-flash": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 262144,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiMo-V2-Flash",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "xiaomi/mimo-v2-omni": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 262144,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "audio",
-        "video",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiMo-V2-Omni",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
-  },
-  "xiaomi/mimo-v2-pro": {
-    "interleaved": {
-      "field": "reasoning_content"
-    },
-    "limit": {
-      "context": 1048576,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "MiMo-V2-Pro",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "toggle"
-      }
-    ],
-    "tool_call": true
   },
   "xiaomi/mimo-v2.5": {
     "interleaved": {

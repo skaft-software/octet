@@ -707,6 +707,35 @@ fn terminal_subagent_snapshots_hide_the_activity_strip() {
 }
 
 #[test]
+fn repeated_identical_spawn_failure_shows_one_transcript_row() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(120, 120);
+    let failure = |revision: u64, reason: &str| octet_agent::AgentEvent::DelegationUpdated {
+        snapshot: octet_agent::DelegationTelemetrySnapshot {
+            revision,
+            captured_at_ms: 1_700_000_000_000 + revision,
+            children: Vec::new(),
+            total_cost_microdollars: None,
+            failure_reason: Some(reason.into()),
+            failure_class: Some("spawn_rejected".into()),
+        },
+    };
+    let rows = |shell: &InteractiveShell| {
+        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(120).join("\n"))
+            .matches("Subagents · 1 failed · /subagents")
+            .count()
+    };
+    // The same rejection arriving again is the same state, not a new event.
+    for revision in 1..=6 {
+        shell.on_agent_event(&failure(revision, "spawn rejected: worker limit reached"));
+    }
+    assert_eq!(rows(&shell), 1);
+    // A different failure is new information and still gets its own row.
+    shell.on_agent_event(&failure(7, "spawn rejected: policy denied the profile"));
+    assert_eq!(rows(&shell), 2);
+}
+
+#[test]
 fn subagent_activity_renders_complete_roster_in_both_disclosure_modes() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(120, 120);

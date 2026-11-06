@@ -30,6 +30,7 @@ mod fast_commands_and_compaction_tests;
 mod goal_command_tests;
 mod held_input_and_manual_compaction_tests;
 mod idle_shell_and_clipboard_tests;
+mod modeless_extensions_tests;
 mod pi_background_chrome_tests;
 mod pi_baseline_contract_tests;
 mod pi_busy_controls_tests;

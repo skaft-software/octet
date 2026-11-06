@@ -3,11 +3,16 @@ use std::time::Duration;
 
 use sexy_tui_rs::{strip_terminal_sequences, visible_width};
 
-use super::super::{render_block_planned, AssistantBlock, NoticeTone, OutcomeBlock, ToolPanel};
+use super::super::{
+    render_block_planned, AssistantBlock, NoticeTone, OutcomeBlock, SubagentTranscript, ToolPanel,
+};
 use super::*;
 use crate::presentation::{summarize_tool, RunOutcome, RunSummary};
 use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
-use crate::tui::theme::{test_theme, test_theme_for, test_theme_from_source, TerminalBackground};
+use crate::tui::theme::{
+    compiled_theme_for_selector, test_theme, test_theme_for, test_theme_from_source,
+    test_theme_source_with, TerminalBackground,
+};
 
 fn themes() -> Vec<(String, OctetTheme)> {
     let mut themes = vec![
@@ -201,8 +206,8 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
 }
 
 /// A filled cushion row is part of its own card. Host event spacing stays a
-/// separate, unpainted row on both sides of it; only unpainted cushions (a band
-/// with padding but no fill) merge with that spacing.
+/// separate, unpainted row on both sides of it; unpainted cushions can share
+/// their blank row with host spacing.
 #[test]
 fn filled_neighbor_cushions_never_merge_with_host_event_spacing() {
     let theme = test_theme_from_source(
@@ -465,6 +470,38 @@ fn every_filled_prompt_card_keeps_its_own_top_and_bottom_padding_rows() {
 }
 
 #[test]
+fn goal_set_notice_is_separated_from_a_filled_user_band() {
+    for (name, theme) in themes() {
+        let prompt = prompt_with("/goal set objective");
+        let notice = TranscriptBlock::Notice("goal set · Active goal: objective".into());
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&prompt, &notice], &theme, width);
+            // The prompt also contains "goal set", and the notice can wrap.
+            // Measure around the entire notice, not the prompt or its first row.
+            let first = visible_position(&rows, "goal set ·").expect("goal notice");
+            let last = rows
+                .iter()
+                .rposition(|row| strip_terminal_sequences(row).contains("objective"))
+                .expect("notice body ending");
+            let before = rows[..first]
+                .iter()
+                .rev()
+                .take_while(|row| neutral_blank_row(row))
+                .count();
+            let after = rows[last + 1..]
+                .iter()
+                .take_while(|row| neutral_blank_row(row))
+                .count();
+            assert_eq!(
+                (before, after),
+                (1, 1),
+                "{name}/{width}: the notice needs its own breathing rows around the complete body: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
     for (name, theme) in painted_card_themes() {
         let prompt = prompt_with("Ready for work");
@@ -478,8 +515,181 @@ fn working_indicator_is_separated_from_a_filled_prompt_card_by_a_neutral_row() {
             );
             let at = visible_position(&rows, "Working").expect("working row");
             assert!(
+                neutral_blank_row(&rows[at - 1]),
+                "{name}/{width}: a host-owned breathing row must precede the event: {rows:?}"
+            );
+            assert!(
                 at >= 2 && painted_row(&rows[at - 2]),
-                "{name}/{width}: the card's bottom padding row must sit above the gap: {rows:?}"
+                "{name}/{width}: the filled card cushion must remain above its gap: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn subagent_lifecycle_rows_keep_neutral_host_gaps_after_bash_output() {
+    let bash = tool();
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    let summaries = [
+        (
+            "active",
+            SubagentTranscript {
+                queued: 0,
+                running: 2,
+                succeeded: 0,
+                failed: 0,
+                stopped: 0,
+                live_workers: Vec::new(),
+                hydrated: false,
+                worker_ids: vec!["worker-a".into(), "worker-b".into()],
+            },
+            "Subagents",
+        ),
+        (
+            "settled",
+            SubagentTranscript {
+                queued: 0,
+                running: 0,
+                succeeded: 0,
+                failed: 2,
+                stopped: 0,
+                live_workers: Vec::new(),
+                hydrated: false,
+                worker_ids: vec!["worker-a".into(), "worker-b".into()],
+            },
+            "Subagents",
+        ),
+    ];
+    for density in ["compact", "comfortable", "airy"] {
+        let source = format!("[metadata]\nprofile = \"pi\"\n[layout]\ndensity = \"{density}\"\n");
+        for background in [
+            TerminalBackground::Unknown,
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+        ] {
+            let theme = test_theme_source_with(
+                &source,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                background,
+            );
+            for width in [32, 120] {
+                for (state, summary, label) in &summaries {
+                    let subagents = TranscriptBlock::Subagents(summary.clone());
+                    let rows = raw_rows(&[&bash, &subagents, &prose], &theme, width);
+                    assert_eq!(
+                        neutral_runs(&rows, label),
+                        (1, 1),
+                        "{state}/{density}/{background:?}/{width}: {rows:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn every_notice_status_tone_keeps_neutral_host_gaps() {
+    let before = TranscriptBlock::Notice("Notice before status".into());
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    for density in ["compact", "comfortable", "airy"] {
+        let source = format!(
+            "[metadata]\nprofile = \"pi\"\n[colors]\nquiet_tool_summaries = true\n[layout]\ndensity = \"{density}\"\n"
+        );
+        for background in [
+            TerminalBackground::Unknown,
+            TerminalBackground::Dark,
+            TerminalBackground::Light,
+        ] {
+            let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+            let themes = [
+                (
+                    "pi-toml",
+                    test_theme_source_with(&source, capabilities, background),
+                ),
+                (
+                    "pi",
+                    compiled_theme_for_selector("pi", capabilities, background)
+                        .expect("built-in pi selector")
+                        .expect("valid built-in pi theme"),
+                ),
+            ];
+            for (name, theme) in themes {
+                for width in [32, 120] {
+                    for (tone, label) in [
+                        (NoticeTone::Success, "success status"),
+                        (NoticeTone::Error, "error status"),
+                        (NoticeTone::ToolActive, "active tool status"),
+                        (NoticeTone::ToolSuccess, "success tool status"),
+                        (NoticeTone::ToolError, "error tool status"),
+                    ] {
+                        let status = TranscriptBlock::NoticeStatus {
+                            text: label.into(),
+                            tone,
+                            reserved_rows: 0,
+                        };
+                        let rows = raw_rows(&[&before, &status, &prose], &theme, width);
+                        if matches!(
+                            tone,
+                            NoticeTone::ToolActive
+                                | NoticeTone::ToolSuccess
+                                | NoticeTone::ToolError
+                        ) && !theme
+                            .resolve::<bool>("quiet_tool_summaries")
+                            .unwrap_or(false)
+                        {
+                            // Ordinary tool themes omit grouped summaries entirely;
+                            // hidden statuses must not introduce empty spacer rows.
+                            assert!(raw_rows(&[&status], &theme, width).is_empty());
+                            assert!(visible_position(&rows, label).is_none());
+                            continue;
+                        }
+                        assert_eq!(
+                            neutral_runs(&rows, label),
+                            (1, 1),
+                            "{name}/{tone:?}/{density}/{background:?}/{width}: {rows:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn notice_after_completed_bash_output_keeps_a_breathing_row() {
+    let args = serde_json::json!({"command": "python3 - <<'PY'\nprint('x')\nPY"});
+    let output = (0..40)
+        .map(|index| format!("output line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tool = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+        octet_ai::ToolCallId("notice-after-bash".into()),
+        "bash".into(),
+        args.to_string(),
+        summarize_tool("bash", &args),
+        output,
+        true,
+        false,
+        None,
+        None,
+    )));
+    let notice = TranscriptBlock::Notice("interactive terminal mode saved as fullscreen".into());
+    let mut all = themes();
+    all.push((
+        "pi-profile".into(),
+        test_theme_from_source(include_str!(
+            "../../../../../../examples/themes/pi-profile.toml"
+        )),
+    ));
+    for (name, theme) in all {
+        for width in [32, 80, 120] {
+            let rows = raw_rows(&[&tool, &notice], &theme, width);
+            let (before, _) = neutral_runs(&rows, "interactive terminal mode");
+            assert_eq!(
+                before, 1,
+                "{name}/{width}: a notice after tool output needs one breathing row: {rows:?}"
             );
         }
     }

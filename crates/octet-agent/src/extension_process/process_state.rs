@@ -316,6 +316,7 @@ pub(super) struct ActiveLifecycleTurn {
 
 pub(super) struct ActiveLifecycleTool {
     pub(super) name: String,
+    pub(super) arguments: serde_json::Value,
     pub(super) started_at: Instant,
     pub(super) context: ExtensionLifecycleTurnContext,
     pub(super) endpoint: LifecycleEndpoint,

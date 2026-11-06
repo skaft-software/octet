@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './lib/runtime-prerequisites.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -6,15 +7,24 @@ import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { hookEvents } from './lib/api.mjs';
-import { BUILTIN_TOOL_NAMES } from './lib/tools.mjs';
-import { locateInstalledPi } from './lib/installed-pi.mjs';
-import { PI_VERSION } from './lib/pi-modules.mjs';
-import { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } from './lib/pi-setup.mjs';
-import { readPiTheme } from './lib/theme-palette.mjs';
-import { reviewedSourceHashes } from './lib/runtime.mjs';
-import { startupCacheDirectory } from './lib/startup-cache.mjs';
-import { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } from './lib/theme-import.mjs';
+// Delay linking adapter dependencies until the runtime prerequisite has passed.
+const { startupCacheDirectory, enableModuleCompileCache } = await import('./lib/startup-cache.mjs');
+enableModuleCompileCache();
+const { hookEvents } = await import('./lib/api.mjs');
+const { BUILTIN_TOOL_NAMES } = await import('./lib/tools.mjs');
+const { locateInstalledPi, scanPiImportGaps } = await import('./lib/installed-pi.mjs');
+const { createJiti } = await import('./lib/jiti-resolve-cache.mjs');
+const { emulatedPiAliases, typeboxAliases } = await import('./lib/pi-modules.mjs');
+const { discoverPiSetup, MAX_RESOURCE_PATHS, MAX_RESOURCE_PATH_BYTES, resolveThemeFile } = await import('./lib/pi-setup.mjs');
+const { readPiTheme } = await import('./lib/theme-palette.mjs');
+const { tracePhase } = await import('./lib/startup-trace.mjs');
+const { startTransformWarmup } = await import('./lib/transform-warmup.mjs');
+const { nativeEsmAvailable, nativeIneligibleReason, nativeLikelyDeclines } = await import('./lib/native-esm.mjs');
+const { reviewedSourceHashes: hashReviewedSources } = await import('./lib/runtime.mjs');
+const { sharedSourceFingerprints } = await import('./lib/source-fingerprints.mjs');
+// Unchanged files are not re-read (persisted stat fingerprints); see source-fingerprints.mjs.
+const reviewedSourceHashes = entry => hashReviewedSources(entry, { fingerprints: sharedSourceFingerprints() });
+const { checkThemeImportOutput, planThemeImport, themeImportLaunchHint, writeThemeImport } = await import('./lib/theme-import.mjs');
 
 // Importing a factory executes arbitrary user code. Never perform implicit
 // discovery or change host trust/enablement. The caller must explicitly review
@@ -23,25 +33,28 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 // Runs the review-only registration capture for explicit entrypoints, each on
 // its recorded route ('shims' = octet's emulated path, 'installed' = the
 // installed Pi). Bounded by time and output; never touches host state.
-function captureConfig(dir, extensions, routes, { piAgentDir, piTheme }) {
+function captureConfig(dir, extensions, routes, { piAgentDir, piTheme, nativeSources }) {
   const config = join(dir, 'bridge.json');
   // Probes/capture see the exact planned colors before publication. A failed
   // capture must not overwrite an existing import's palette files.
   const themePath = piTheme?.json === undefined ? piTheme?.path : join(dir, 'theme.json');
   if (piTheme?.json !== undefined) writeFileSync(themePath, piTheme.json, { mode: 0o600 });
+  // The reviewed closure digests let the capture runner load plain-ESM factories
+  // natively (each served file is checked against its digest; lib/native-esm.mjs).
   writeFileSync(config, JSON.stringify({ extensions, extension_runtimes: routes,
+    ...(nativeSources ? { native_esm_sources: nativeSources } : {}),
     ...(piAgentDir ? { pi_agent_dir: piAgentDir } : {}),
     ...(piTheme ? { pi_theme: { name: piTheme.name, path: themePath } } : {}) }));
   return config;
 }
-function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.env, piAgentDir, piTheme, cacheDir } = {}) {
+function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.env, piAgentDir, piTheme, cacheDir, nativeSources } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'octet-pi-capture-'));
   try {
-    const config = captureConfig(dir, extensions, routes, { piAgentDir, piTheme });
+    const config = captureConfig(dir, extensions, routes, { piAgentDir, piTheme, nativeSources });
     // The review capture runs every reviewed factory once, so it warms the
     // runtime's own transform cache: the first real launch must not pay a cold
-    // factory transform. `cacheDir` is the `.cache` under the extension
-    // directory the generated manifest will be launched from.
+    // factory transform. `cacheDir` is pinned in the generated entrypoint's
+    // environment so automatic per-launch manifests share this same cache.
     return spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', config, '--inspect'],
       { cwd, env: cacheDir ? { ...env, OCTET_PI_COMPAT_CACHE: cacheDir } : env,
         encoding: 'utf8', timeout: 15000 + 2000 * extensions.length, maxBuffer: 4194304 });
@@ -58,14 +71,19 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   piAgentDir = resolve(piAgentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
   const runner = join(root, 'runner.mjs');
   routes = Object.fromEntries(Object.entries(routes).map(([entry, route]) => [realpathSync(entry), route]));
-  if (mirrorPiSetup && expectedSourceHashes && extensions.some(entry => !isDeepStrictEqual(expectedSourceHashes[entry], reviewedSourceHashes(entry)))) {
-    throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
-  }
-  const entrypoint_sources = mirrorPiSetup ? Object.fromEntries(extensions.map(entry => [entry, reviewedSourceHashes(entry)])) : undefined;
+  // Hash once per launch: a mirror prepared by `mirrorPreparation` already
+  // hashed this closure, so its digests are carried forward instead of walking
+  // the closure again. The one integrity check that matters runs in the runner
+  // immediately before each factory import. Without carried digests (a direct
+  // configure call) the closure is hashed here, once, and re-checked after capture.
+  const carried = mirrorPiSetup && expectedSourceHashes && extensions.every(entry => expectedSourceHashes[entry]);
+  const entrypoint_sources = mirrorPiSetup
+    ? Object.fromEntries(extensions.map(entry => [entry, carried ? expectedSourceHashes[entry] : reviewedSourceHashes(entry)])) : undefined;
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed since mirror preparation; prepare and review again');
   }
   let registrations = capturedRegistrations && structuredClone(capturedRegistrations);
+  const capturedHere = !registrations;
   if (!registrations) {
     const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: captureCacheDir ?? join(output, '.cache') });
     if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
@@ -89,7 +107,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
     .filter(hook => !captureOnly.has(hook) || registrations.hooks.includes(hook) || hook === 'resources_discover').sort();
   registrations.hooks = subscribed_hooks;
   const entrypoint_sha256 = Object.fromEntries(extensions.map(entry => [entry, createHash('sha256').update(readFileSync(entry)).digest('hex')]));
-  if (entrypoint_sources && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
+  if (entrypoint_sources && capturedHere && !carried && !extensions.every(entry => isDeepStrictEqual(entrypoint_sources[entry], reviewedSourceHashes(entry)))) throw new Error('reviewed factory sources changed during capture; configure again');
   if (mirrorPiSetup && expectedSourceHashes && !extensions.every(entry => isDeepStrictEqual(expectedSourceHashes[entry], entrypoint_sources[entry]))) {
     throw new Error('reviewed factory sources changed during capture; prepare and review again');
   }
@@ -109,6 +127,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
     'description = "Optional reviewed Pi factories; Rust owns the agent and terminal"', '',
     '[entrypoint]', `command = ${quoted(realpathSync(process.execPath))}`,
     `args = ${list([runner, '--config', join(output, 'bridge.json')])}`, '',
+    ...(captureCacheDir ? ['[entrypoint.env]', `OCTET_PI_COMPAT_CACHE = ${quoted(resolve(captureCacheDir))}`, ''] : []),
     '# Trusted factories retain normal OS authority. Declarations are consent metadata, not a sandbox.',
     '[capabilities]', 'filesystem = "unrestricted"', 'process = true', 'network = true',
     'system_prompt = true',
@@ -149,6 +168,7 @@ function mirrorPreparation({ output, cwd = process.cwd(), env = process.env, pro
     try { sourceHashes[entry] = reviewedSourceHashes(entry); }
     catch (error) { unreviewable.push({ entry, reason: String(error?.message || error).slice(0, 512) }); }
   }
+  sharedSourceFingerprints().flush();
   const extensions = setup.extensions.map(entry => ({
     path: entry,
     sources: sourceHashes[entry] ? Object.entries(sourceHashes[entry]).map(([path, sha256]) => ({ path, sha256 })) : [],
@@ -215,12 +235,36 @@ function adapterIdentity() {
 // factories each failure is isolated and named on stderr, so this one run
 // settles the common case that probing each factory separately took seconds
 // for. `undefined` when the capture itself failed: probe as before.
-function captureCombined(extensions, options) {
-  if (extensions.length < 2) return undefined;
-  let entries;
-  try { entries = extensions.map(entry => realpathSync(entry)); } catch { return undefined; }
-  const captured = capture(entries, Object.fromEntries(entries.map(entry => [entry, 'shims'])), options);
-  if (captured.error || captured.status !== 0) return undefined;
+// Phase attribution on the shared OCTET_STARTUP_TRACE channel (off by default).
+const phase = name => tracePhase(`pi_mirror.${name}`);
+async function captureCombined(extensions, options) {
+  if (!extensions.length) return undefined;
+  let entries, routes, warmup;
+  try {
+    entries = extensions.map(entry => realpathSync(entry));
+    phase('capture.begin');
+    warmup = options.cacheDir && options.warmFiles?.length ? startTransformWarmup(options.warmFiles, join(options.cacheDir, 'jiti')) : undefined;
+    const jiti = createJiti(import.meta.url, { alias: { ...typeboxAliases(), ...emulatedPiAliases() },
+      moduleCache: true, tryNative: false, ...(options.cacheDir ? { fsCache: join(options.cacheDir, 'jiti') } : {}) });
+    routes = Object.fromEntries(await Promise.all(entries.map(async entry => {
+      const gaps = await scanPiImportGaps(entry, jiti);
+      return [entry, gaps.missing.length || gaps.subpaths.length || gaps.direct_tools.length ? 'installed' : 'shims'];
+    })));
+    phase('scan.done');
+    // Capture imports (so transforms) every factory serially; overlapping it with
+    // the warm-up only duplicates the transforms and slows both. Wait for the
+    // warm-up, which runs at full width, so the capture is all cache hits.
+    await warmup?.done;
+    phase('warm.done');
+  } catch { warmup?.stop(); return undefined; }
+  const captured = capture(entries, routes, options);
+  phase('runner.done');
+  if (captured.error && entries.length === 1) throw new Error(`registration capture failed: ${captured.error.message}`);
+  if (captured.error || captured.status !== 0) {
+    if (entries.length !== 1) return undefined;
+    const error = captured.stderr.trim().split('\n')[0]?.replace(/^\[pi-compat startup\] /, '') || `exit ${captured.status}`;
+    return { skipped: new Map([[extensions[0], error]]), routes, singleFailure: true };
+  }
   const skipped = new Map();
   for (const line of captured.stderr.split('\n')) {
     if (!line.startsWith('[pi-compat] skipped ')) continue;
@@ -232,7 +276,7 @@ function captureCombined(extensions, options) {
   try {
     const frames = captured.stdout.trim().split('\n').map(line => JSON.parse(line));
     if (frames.length !== 1 || !frames[0].result) return undefined;
-    return { registrations: frames[0].result, skipped };
+    return { registrations: frames[0].result, skipped, routes };
   } catch { return undefined; }
 }
 
@@ -283,7 +327,9 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
   for (const name of ['extension.toml', 'bridge.json']) if (!overwrite && existsSync(join(output, name))) throw new Error(`${name} exists; use --overwrite after reviewing the changed mirror`);
   checkThemeImportOutput(output, overwrite);
+  phase('prepare.begin');
   const prepared = mirrorPreparation({ output, cwd, env, projectTrusted });
+  phase('prepare.done');
   if (expectedFingerprint !== undefined && (typeof expectedFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedFingerprint) || expectedFingerprint !== prepared.review.fingerprint)) {
     throw new Error('Pi setup changed since preparation; prepare and review again before running factories');
   }
@@ -301,16 +347,22 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   // The automatic mirror's output is a fresh per-launch directory, so its
   // .cache would transform every factory cold at each capture. Its captures use
   // the adapter's persistent startup cache instead.
-  const captureCacheDir = cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache');
-  const combined = reused || !cache || activeNativeTools.size ? undefined : captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir });
+  const captureCacheDir = resolve(cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache'));
+  const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir,
+    nativeSources: Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes])),
+    warmFiles: Object.entries(prepared.sourceHashes).flatMap(([entry, hashes]) =>
+      // Plain-ESM closures load natively (lib/native-esm.mjs); only the rest needs babel.
+      nativeEsmAvailable() && !nativeIneligibleReason(realpathSync(entry), hashes) && !nativeLikelyDeclines(hashes, { ...typeboxAliases(), ...emulatedPiAliases() }) ? [] : Object.keys(hashes)) });
   let routed = reused?.routed;
   if (!routed && combined) {
     // Only what the combined capture skipped is probed on its own, for the
     // installed-Pi route; a factory that ran out of time is not tried twice.
-    const retry = setup.extensions.filter(entry => combined.skipped.has(entry) && !/^setup did not finish within /.test(combined.skipped.get(entry)));
-    const probed = new Map((retry.length ? await routeExtensions(retry, { ...options, expectedSourceHashes: prepared.sourceHashes }) : []).map(result => [result.entry, result]));
+    const retry = setup.extensions.filter(entry => combined.skipped.has(entry)
+      && combined.routes[realpathSync(entry)] === 'shims' && !/^setup did not finish within /.test(combined.skipped.get(entry)));
+    const probed = new Map((retry.length ? await routeExtensions(retry, { ...options, expectedSourceHashes: prepared.sourceHashes,
+      capturedShimFailures: combined.singleFailure ? combined.skipped : undefined }) : []).map(result => [result.entry, result]));
     routed = setup.extensions.map(entry => probed.get(entry)
-      ?? (combined.skipped.has(entry) ? { entry, route: null, error: combined.skipped.get(entry) } : { entry, route: 'shims' }));
+      ?? (combined.skipped.has(entry) ? { entry, route: null, error: combined.skipped.get(entry) } : { entry, route: combined.routes[realpathSync(entry)] }));
   }
   routed ??= await routeExtensions(setup.extensions, { ...options, expectedSourceHashes: prepared.sourceHashes });
   const refused = routed.filter(result => !result.route);
@@ -324,25 +376,29 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   if (refused.length && refused.length === routed.length) throw new Error('none of your Pi extensions loaded');
   const mirrorExcluded = refused.map(result => ({ entry: realpathSync(result.entry), reason: String(result.error).slice(0, 512) }));
   const accepted = routed.filter(result => result.route);
-  const current = mirrorPreparation({ output, cwd, env, projectTrusted });
+  const current = reused ? prepared : mirrorPreparation({ output, cwd, env, projectTrusted });
   if (current.review.fingerprint !== prepared.review.fingerprint) throw new Error('Pi setup changed during mirror review; prepare and review again before capture');
   const expectedSourceHashes = Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes]));
   const result = configure({ output, reviewed, overwrite, providerCredentials, ...options, mirrorPiSetup: true,
     expectedSourceHashes, piSetupFingerprint: prepared.review.fingerprint, mirrorExcluded,
     extensions: accepted.map(result => result.entry), routes: Object.fromEntries(accepted.map(result => [result.entry, result.route])),
     capturedRegistrations: reused?.registrations ?? (combined && !combined.skipped.size ? combined.registrations : undefined), captureCacheDir });
+  phase('configure.done');
   const { config } = result;
-  // A factory that ran out of time may be waiting on something transient;
-  // never pin its exclusion, so the next start tries it again.
-  if (cached && !reused && !refused.some(item => /^setup did not finish within /.test(String(item.error)))) cached.write({ routed, registrations: result.capturedRegistrations });
+  // Timeouts, missing dependencies and unavailable installed-Pi graphs can
+  // recover without changing factory sources or the managed Pi version. Never
+  // pin those exclusions in the catalog cache; the next start must retry them.
+  const transientRefusal = refused.some(item => /^(setup did not finish within |installed_pi_unavailable\b)|\b(Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND)\b/.test(String(item.error)));
+  if (cached && !reused && !transientRefusal) cached.write({ routed, registrations: result.capturedRegistrations });
   if (reused) log('  Reused the captured catalog: the Pi setup and its factories are unchanged');
   for (const message of setup.diagnostics.slice(0, 32)) log(`  ${message}`);
+  for (const skipped of setup.unsupportedPackages) log(`  ${skipped.line}`);
   for (const item of mirrorExcluded) log(`  excluded      ${label(item.entry)}: ${item.reason.slice(0, 160)}`);
   log(`  Mirrored Pi setup at ${agentDir}: ${setup.extensions.length} extensions, ${setup.skillsPaths.length} skill paths, ${setup.promptsPaths.length} prompt paths, ${setup.themesPaths.length} theme paths`);
   log(`  Selected palette: ${setup.defaultTheme ?? 'none'}; keybindings: ${setup.keybindingsPath ? 'yes' : 'no'}; model: ${setup.defaultModel ? `${setup.defaultModel.provider}/${setup.defaultModel.model}` : 'none'}`);
   return { ...result, setup, config, routed };
 }
-// The user's enabled Pi extensions, resolved by the installed Pi 1.0.2's own
+// The user's enabled Pi extensions, resolved by the installed Pi's own
 // package manager exactly as Pi would load them. Read-only: settings are
 // never written and missing packages are skipped, never installed.
 async function piResources({ cwd = process.cwd(), env = process.env } = {}) {
@@ -408,7 +464,7 @@ async function probe(entry, route, { cwd, env, owners = new Map(), piAgentDir, p
 
 // Chooses each extension's route: octet's emulated path when it loads there,
 // otherwise the installed Pi; an extension that loads on neither is skipped.
-export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map(), expectedSourceHashes } = {}) {
+export async function routeExtensions(extensions, { installed = true, concurrency = 6, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, activeNativeTools = new Map(), expectedSourceHashes, capturedShimFailures } = {}) {
   if (!Array.isArray(extensions) || extensions.length > 64) throw new Error('Supply at most 64 entrypoints');
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) throw new Error('concurrency must be 1..64');
   // Only an authoritative selected/active owner catalog can establish a
@@ -423,7 +479,8 @@ export async function routeExtensions(extensions, { installed = true, concurrenc
         results[index] = { entry, route: null, error: 'factory sources changed since mirror preparation; prepare and review again' };
         continue;
       }
-      const emulated = await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
+      const emulated = capturedShimFailures?.has(entry) ? { ok: false, error: capturedShimFailures.get(entry) }
+        : await probe(entry, 'shims', { cwd, env, owners, piAgentDir, piTheme });
       if (emulated.ok) { results[index] = { entry, route: 'shims' }; continue; }
       // A setup that ran out of time is not a missing Pi helper; the installed
       // route would only stall again and double the wait.
@@ -459,7 +516,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
   const { install, resolved, settingsManager } = await piResources({ cwd, env });
   const piAgentDir = install.agentDir;
   const extensions = [...new Set(enabledPaths(resolved.extensions).map(entry => realpathSync(entry)))];
-  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${PI_VERSION} setup`);
+  if (!extensions.length) throw new Error(`no enabled extensions in your Pi ${install.version} setup`);
   const themeImport = planThemeImport({ output, paths: enabledPaths(resolved.themes), selection: settingsManager.getThemeSetting(),
     thinkingLevel: settingsManager.getDefaultThinkingLevel(), builtinDir: join(install.packages['coding-agent'].dir, 'dist/modes/interactive/theme') });
   checkThemeImportOutput(output, overwrite, themeImport.themes);
@@ -486,7 +543,7 @@ export async function configureFromPi({ output, reviewed, expectedFingerprint, o
     piTheme: themeImport.selected, themePaths: themeImport.themes.map(theme => theme.nativePath),
     routes: Object.fromEntries(accepted.map(r => [r.entry, r.route])) });
   writeThemeImport(themeImport, { overwrite });
-  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${PI_VERSION}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
+  for (const r of routed) log(r.route === 'shims' ? `  octet         ${label(r.entry)}` : r.route === 'installed' ? `  via Pi ${install.version}  ${label(r.entry)}` : `  skipped       ${label(r.entry)}: ${String(r.error).slice(0, 160)}`);
   for (const message of themeImport.diagnostics) log(`  ${message}`);
   log(`  Imported ${themeImport.themes.length} Pi themes; the enabled bridge contributes them and its startup preference. Host settings were not changed.`);
   if (themeImport.launchArgs.length) log(`  Optional standalone theme options (not needed with the bridge): ${themeImportLaunchHint(themeImport)}`);

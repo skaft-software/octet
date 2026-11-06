@@ -46,7 +46,7 @@ impl<'a> ModelTurnHooks<'a> {
         session: &mut Session,
         index: u64,
         cancellation: &CancellationToken,
-    ) -> Result<(), FinishReason> {
+    ) -> Result<(), Box<FinishReason>> {
         if self.hooks.is_empty() || self.stopped || self.started == Some(index) {
             return Ok(());
         }
@@ -91,7 +91,7 @@ impl<'a> ModelTurnHooks<'a> {
         &mut self,
         session: &mut Session,
         cancellation: &CancellationToken,
-    ) -> Result<(), FinishReason> {
+    ) -> Result<(), Box<FinishReason>> {
         if self.hooks.is_empty() || self.stopped {
             return Ok(());
         }
@@ -169,7 +169,7 @@ impl<'a> ModelTurnHooks<'a> {
         session: &mut Session,
         operation: SessionOperation,
         cancellation: &CancellationToken,
-    ) -> Result<(), FinishReason> {
+    ) -> Result<(), Box<FinishReason>> {
         let deadline = tokio::time::Instant::now() + MODEL_TURN_HOOK_TIMEOUT;
         for (index, hook) in self.hooks.iter().enumerate() {
             let result = run_session_operation_hooks(
@@ -210,7 +210,7 @@ impl<'a> ModelTurnHooks<'a> {
             // appends remain fail-closed. Only callback failures are isolated.
             self.stopped = true;
             if matches!(error, SessionOperationError::Cancelled) {
-                return Err(FinishReason::Aborted);
+                return Err(Box::new(FinishReason::Aborted));
             }
             let boundary = match &operation {
                 SessionOperation::ModelTurnEnd { assistant_entry, .. } => format!(
@@ -219,14 +219,14 @@ impl<'a> ModelTurnHooks<'a> {
                 ),
                 _ => "model turn start hook failed; durable entries retained; callback not retried".into(),
             };
-            return Err(FinishReason::Failed(
+            return Err(Box::new(FinishReason::Failed(
                 AiError::Config(octet_ai::ConfigError::Parse(format!("{boundary}: {error}")))
                     .into(),
-            ));
+            )));
         }
         if cancellation.is_cancelled() {
             self.stopped = true;
-            return Err(FinishReason::Aborted);
+            return Err(Box::new(FinishReason::Aborted));
         }
         Ok(())
     }

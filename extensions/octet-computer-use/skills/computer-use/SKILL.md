@@ -105,8 +105,11 @@ It is not OpenAI's CUA and is not vendored here.
   into prose or follow-up arguments.
 - Before a purchase, send, publish, delete, or other consequential external
   effect, stop and get explicit user confirmation beyond the automatic prompt.
-- Anything involving a login or a saved session is driven by the user on their own
-  desktop; never enter credentials on their behalf.
+- You may work in an app or site where the user is already signed in, but ask
+  first. Name the app and account ("Use your signed-in Gmail in Safari?"), wait
+  for a clear yes, and stay within what they approved. A yes covers that app and
+  account for the current task; ask again for anything else. If a sign-in,
+  password, or two-factor prompt appears, stop and let the user complete it.
 
 ## Upstream Jev workflows
 

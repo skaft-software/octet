@@ -300,6 +300,134 @@ fn subagent_presentation_becomes_navigable_rows_with_opaque_session_references()
 }
 
 #[tokio::test]
+async fn unavailable_subagent_refresh_is_quiet_and_deduplicated_in_status() {
+    let mut extensions = crate::extensions::ExecutableExtensions::default();
+    let mut context = SubagentRefreshContext {
+        extensions: &mut extensions,
+        last_error: None,
+    };
+    for _ in 0..2 {
+        let snapshot = refresh_subagent_snapshot(&mut context).await;
+        assert!(snapshot.notices.is_empty(), "{:?}", snapshot.notices);
+        assert_eq!(snapshot.title, "Subagents");
+    }
+    let status = context.extensions.inspect_text();
+    assert_eq!(
+        status
+            .matches("subagent view live refresh is unavailable")
+            .count(),
+        1,
+        "{status}"
+    );
+    assert!(context.extensions.drain_events().is_empty());
+}
+
+#[test]
+fn subagent_refresh_diagnostics_obey_the_extension_history_bounds() {
+    let mut extensions = crate::extensions::ExecutableExtensions::default();
+    for index in 0..600 {
+        extensions.record_subagent_refresh_error(&format!(
+            "refresh-error-{index:04}: {}",
+            "é".repeat(10_000),
+        ));
+    }
+    let status = extensions.inspect_text();
+    assert!(status.contains("older extension diagnostic(s) were dropped"));
+    assert!(!status.contains("refresh-error-0000:"));
+    assert!(status.contains("refresh-error-0599:"));
+    // The existing byte budget is 256 KiB, plus bounded status chrome.
+    assert!(status.len() < 257 * 1024, "{}", status.len());
+    assert!(extensions.drain_events().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn active_subagent_refresh_timeout_preserves_the_roster_without_transcript_notices() {
+    let (_server, _workspace, mut agent) = scripted_agent_with_delay(Duration::from_secs(2)).await;
+    let owner = agent.session().resource_owner_key();
+    let directory = tempfile::tempdir().unwrap();
+    let (mut extensions, process, log) =
+        crate::extensions::ExecutableExtensions::test_subagent_stop_fixture(
+            directory.path(),
+            Some(&owner),
+            "octet-subagents",
+            3,
+        )
+        .await;
+    extensions.test_publish_worker_roster(
+        &process,
+        &[("worker:one", "worker-one", Some("worker-one"))],
+    );
+    // The negotiated one-request slot is occupied by an owned stop. The live
+    // observation's 750 ms budget includes admission, not just its execution.
+    let stop = extensions
+        .subagent_stop_control("worker-one".into(), &owner)
+        .unwrap();
+    let observe = async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !log.exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        let run_id = shell.begin_run("test");
+        let session_path = agent.session().path().to_owned();
+        let mut run = agent.prompt("held root turn").await.unwrap();
+        shell.set_awaiting_provider(run_id);
+        let control = run.control();
+        let mut input = tokio_stream::iter([
+            Ok(Event::Paste("/subagents".into())),
+            theme_picker_key(KeyCode::Enter),
+        ])
+        .chain(futures_util::stream::pending());
+        let mut tick = tokio::time::interval(Duration::from_millis(16));
+        let mut pending = VecDeque::new();
+        let mut quit = false;
+        let mut made_tool_call = false;
+        let mut deadline = None;
+        let mut inspection = test_run_inspection().clone();
+        inspection.resource_owner = owner;
+        inspection.session_path = session_path;
+        let outcome = drive_active_run(
+            &mut run,
+            &control,
+            &mut shell,
+            &mut input,
+            &mut tick,
+            &mut pending,
+            &mut quit,
+            None,
+            None,
+            &mut extensions,
+            &mut made_tool_call,
+            &inspection,
+            &mut deadline,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, HostRunOutcome::Completed);
+        let visible = shell.debug_snapshot();
+        assert!(!visible.contains("subagent view live refresh"), "{visible}");
+        let status = extensions.inspect_text();
+        assert!(
+            status.contains("subagent status refresh timed out"),
+            "{status}"
+        );
+        let (_, entries) = subagent_view_entries(&extensions).unwrap();
+        assert_eq!(entries[0].label, "worker-one");
+    };
+    let (stopped, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(stop, observe)
+    })
+    .await
+    .unwrap();
+    stopped.unwrap();
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
 async fn cancellable_wait_returns_none_on_ctrl_c() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
@@ -435,6 +563,49 @@ async fn silent_startup_lifecycle_keeps_typed_input_and_names_the_phase_off_scre
         error.to_string(),
         "model discovery failed: catalog unavailable"
     );
+}
+
+#[test]
+fn pi_startup_status_requires_an_enabled_process_capable_adapter() {
+    let mut config = terminal_theme_test_config(PathBuf::from("/startup-fixture"));
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+    config.enabled_extensions.push("octet-pi-compat".to_owned());
+    assert_eq!(startup_app_operation(&config), STARTUP_PI_APP_OPERATION);
+    config.start_extension_processes = false;
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+    config.start_extension_processes = true;
+    config.sandbox.allow_process = false;
+    config.sandbox.allow_shell = false;
+    assert_eq!(startup_app_operation(&config), STARTUP_APP_OPERATION);
+}
+
+#[tokio::test]
+async fn pi_startup_lifecycle_keeps_typing_while_preparing_the_setup() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let mut done_tx = Some(done_tx);
+    let source = tokio_stream::iter([Ok(Event::Paste("retained Pi startup draft".into()))]).chain(
+        futures_util::stream::poll_fn(move |_| {
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(());
+            }
+            std::task::Poll::Ready(None)
+        }),
+    );
+    let mut input = EventStream::from_stream(source);
+    let mut shell = InteractiveShell::test_shell();
+    run_blocking_startup_lifecycle(
+        &mut shell,
+        &mut input,
+        STARTUP_PI_APP_OPERATION,
+        move || {
+            done_rx.recv_timeout(Duration::from_secs(5))?;
+            Ok(())
+        },
+    )
+    .await
+    .expect("Pi preparation completes after input was handled");
+    assert_eq!(shell.pending(), "retained Pi startup draft");
+    assert!(!shell.close_requested());
 }
 
 #[tokio::test]

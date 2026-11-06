@@ -1,0 +1,66 @@
+diff --git a/crates/octet-coding-agent/src/extensions/tests/notification_output.rs b/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
+index d87d5593..ef1a8cd9 100644
+--- a/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
++++ b/crates/octet-coding-agent/src/extensions/tests/notification_output.rs
+@@ -134,25 +134,16 @@ async fn configured_pi_startup_issues_reach_real_headless_stderr_as_one_group()
+             "{stderr}\n{}",
+             String::from_utf8_lossy(&output.stdout)
+         );
+-        assert_eq!(stderr.matches("[Extension issues]").count(), 1, "{stderr}");
+-        let rows = stderr.lines().collect::<Vec<_>>();
+-        let header = rows
+-            .iter()
+-            .position(|line| line.contains("[Extension issues]"))
+-            .unwrap();
+-        assert!(rows[header].ends_with("[Extension issues]:"), "{stderr}");
+-        for (offset, name) in [(1, "first.mjs"), (4, "second.mjs")] {
+-            assert!(rows[header + offset].starts_with("    "), "{stderr}");
+-            assert!(rows[header + offset].ends_with(name), "{stderr}");
+-            assert!(
+-                rows[header + offset + 1].contains("failed while loading"),
+-                "{stderr}"
+-            );
+-            assert!(
+-                rows[header + offset + 2].starts_with("      Next:"),
+-                "{stderr}"
+-            );
+-        }
++        let rows = stderr
++            .lines()
++            .filter(|line| line.contains("[Pi extensions Error]"))
++            .collect::<Vec<_>>();
++        assert_eq!(
++            rows,
++            ["[Pi extensions Error] First, Second: skipped: failed while loading. Check dependencies and settings, or disable."],
++            "{stderr}"
++        );
++        assert!(!stderr.contains("first.mjs"), "{stderr}");
+         assert!(!stderr.contains("<U+000A>"), "{stderr}");
+         assert!(!stderr.contains(PRIVATE), "{stderr}");
+         assert!(!String::from_utf8_lossy(&output.stdout).contains(PRIVATE));
+diff --git a/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs b/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
+index fda5c5ba..06dff977 100644
+--- a/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
++++ b/crates/octet-coding-agent/src/modes/interactive/tests/active_reports_and_status_tests.rs
+@@ -398,6 +398,21 @@ async fn failed_model_transition_returns_diagnostic_without_changing_status() {
+     assert!(shell.debug_snapshot().is_empty());
+ }
+ 
++#[tokio::test]
++async fn a_queued_extension_action_says_when_it_runs_without_scheduler_jargon() {
++    let mut shell = InteractiveShell::test_shell();
++    let (queue, _) = run_active_command(
++        &mut shell,
++        Command::Extensions(commands::ExtensionsSubcommand::Reload),
++        test_run_inspection(),
++    )
++    .await;
++    assert_eq!(queue.len(), 1);
++    let snapshot = shell.debug_snapshot();
++    assert!(snapshot.contains("extension action queued; it runs when the current response finishes"));
++    assert!(!snapshot.contains("idle boundary"));
++}
++
+ #[tokio::test]
+ async fn queued_setting_changes_retain_acknowledgements_and_invalid_values_retain_errors() {
+     for command in [

@@ -1,6 +1,7 @@
 //! Crossterm 0.29.0 Unix event decoder (MIT, see LICENSE.crossterm).
 //! Kept here because upstream exposes no byte decoder or raw-event provenance.
-//! Changes: public event imports, local protocol-event enum, always raw mode/paste.
+//! Changes: public event imports, local protocol-event enum, always raw mode/paste,
+//! Pi's canonical Ctrl+- spelling for the ambiguous legacy byte 0x1f.
 
 use std::io;
 
@@ -104,8 +105,15 @@ pub(crate) fn parse_event(
             KeyCode::Char((c - 0x1 + b'a') as char),
             KeyModifiers::CONTROL,
         ))))),
-        c @ b'\x1C'..=b'\x1F' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+        c @ b'\x1C'..=b'\x1E' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
             KeyCode::Char((c - 0x1C + b'4') as char),
+            KeyModifiers::CONTROL,
+        ))))),
+        // Pi 1.0.2 parseKey canonicalizes this legacy Ctrl+_/Ctrl+7 byte to
+        // Ctrl+-. Resolve the ambiguity here, not by aliasing enhanced Ctrl+7
+        // in the editor or rewriting the raw bytes offered to input listeners.
+        b'\x1F' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('-'),
             KeyModifiers::CONTROL,
         ))))),
         b'\0' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
@@ -901,6 +909,79 @@ mod tests {
                 KeyModifiers::ALT | KeyModifiers::CONTROL
             )))),
         );
+    }
+
+    #[test]
+    fn legacy_pi_undo_matches_explicit_ctrl_minus() {
+        let expected = Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('-'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert_eq!(parse_event(b"\x1b[45;5u", false).unwrap(), expected);
+        assert_eq!(parse_event(b"\x1f", false).unwrap(), expected);
+        assert_eq!(
+            parse_event(b"\x1b\x1f", false).unwrap(),
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+                KeyCode::Char('-'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ))))
+        );
+    }
+
+    #[test]
+    fn legacy_pi_undo_does_not_alias_other_control_keys() {
+        // Keep the inherited mappings for neighboring legacy bytes. Enhanced
+        // keys are unambiguous: Ctrl+7 and Ctrl+_ must not become Ctrl+-.
+        for (data, character) in [
+            (b"\x1c".as_slice(), '4'),
+            (b"\x1d".as_slice(), '5'),
+            (b"\x1e".as_slice(), '6'),
+            (b"\x1b[55;5u".as_slice(), '7'),
+            (b"\x1b[95;5u".as_slice(), '_'),
+            (b"\x1b[47;5u".as_slice(), '/'),
+            (b"\x03".as_slice(), 'c'),
+            (b"\x04".as_slice(), 'd'),
+            (b"\x07".as_slice(), 'g'),
+            (b"\x13".as_slice(), 's'),
+        ] {
+            assert_eq!(
+                parse_event(data, false).unwrap(),
+                Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    KeyModifiers::CONTROL,
+                )))),
+                "{data:?}"
+            );
+        }
+        for (data, kind) in [
+            (b"\x1b[45;5:2u".as_slice(), KeyEventKind::Repeat),
+            (b"\x1b[45;5:3u".as_slice(), KeyEventKind::Release),
+        ] {
+            assert_eq!(
+                parse_event(data, false).unwrap(),
+                Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('-'),
+                    KeyModifiers::CONTROL,
+                    kind,
+                ))))
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_pi_undo_keeps_raw_bytes_and_replacement_validation() {
+        let mut decoder = super::super::Decoder::default();
+        let packet = decoder.push(0x1f, false).unwrap().unwrap();
+        assert_eq!(packet.raw.as_deref(), Some("\x1f"));
+        assert_eq!(
+            packet.event,
+            Event::Key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::CONTROL))
+        );
+        // Interception replies use the same decoder, not a Pi-only alias.
+        assert_eq!(super::super::replacement("\x1f").unwrap(), [packet.event]);
+        for data in ["\x1b[", "\x1b[3;7R", "\x1b[?1;2c", "\x1b[999~"] {
+            assert!(super::super::replacement(data).is_err(), "{data:?}");
+        }
     }
 
     #[test]

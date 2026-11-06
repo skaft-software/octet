@@ -29,10 +29,10 @@ pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result
     cwd.canonicalize()
 }
 
-/// Mouse ownership policy. `Auto` (the default), `Terminal`, and `Off` stay
-/// inline and preserve terminal selection and uncaptured wheel history. `App`
-/// opts into the bounded semantic viewport and captures mouse gestures for it;
-/// keyboard navigation can claim the viewport independently in every mode.
+/// Mouse ownership policy. `Auto` (the default) captures on the fullscreen
+/// surface and preserves terminal selection and history inline. `App` captures
+/// on either surface; `Terminal` and `Off` never capture. Keyboard navigation
+/// can claim the semantic viewport independently in every mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseMode {
     #[default]
@@ -182,7 +182,7 @@ pub struct SandboxPolicy {
     pub allow_shell: bool,
     pub allow_remote_read: bool,
     pub shell_path: Option<PathBuf>,
-    pub bash_timeout_secs: u64,
+    pub bash_timeout_secs: Option<u64>,
     pub max_output_bytes: usize,
     /// Source labels for the secret-safe effective policy diagnostic.
     pub policy_provenance: ToolPolicyProvenance,
@@ -202,7 +202,7 @@ impl Default for SandboxPolicy {
             // and process defaults and require an explicit opt-in.
             allow_remote_read: false,
             shell_path: None,
-            bash_timeout_secs: 120,
+            bash_timeout_secs: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             policy_provenance: ToolPolicyProvenance::default(),
         }
@@ -309,7 +309,7 @@ impl ToolPolicy {
     pub fn only(names: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
         let mut enabled = BTreeSet::new();
         for name in names {
-            let name = name.trim().to_ascii_lowercase();
+            let name = name.trim().to_owned();
             if !valid_tool_name(&name) {
                 anyhow::bail!(
                     "invalid tool name {name:?}; built-ins: {}",
@@ -328,7 +328,7 @@ impl ToolPolicy {
 
     /// Remove one validated tool name.
     pub fn exclude(&mut self, name: &str) -> anyhow::Result<()> {
-        let name = name.trim().to_ascii_lowercase();
+        let name = name.trim().to_owned();
         if !valid_tool_name(&name) {
             anyhow::bail!(
                 "invalid tool name {name:?}; built-ins: {}",
@@ -347,7 +347,7 @@ impl ToolPolicy {
     /// leaves `requested` untouched so an additive grant is never reported as
     /// an `--tools` allowlist request.
     pub fn include(&mut self, name: &str) -> anyhow::Result<()> {
-        let name = name.trim().to_ascii_lowercase();
+        let name = name.trim().to_owned();
         if !valid_tool_name(&name) {
             anyhow::bail!(
                 "invalid tool name {name:?}; built-ins: {}",
@@ -386,9 +386,7 @@ fn valid_tool_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name.chars().all(|character| {
-            character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || matches!(character, '_' | '-' | '.')
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
         })
 }
 
@@ -412,7 +410,7 @@ impl SandboxPolicy {
         sandbox.allow_shell = self.allow_shell;
         sandbox.allow_remote_read = self.allow_remote_read;
         sandbox.shell_path = self.shell_path.clone();
-        sandbox.bash_timeout = Duration::from_secs(self.bash_timeout_secs);
+        sandbox.bash_timeout = self.bash_timeout_secs.map(Duration::from_secs);
         sandbox.max_output_bytes = self.max_output_bytes;
         sandbox.policy_provenance = self.policy_provenance;
         sandbox
@@ -573,6 +571,11 @@ pub struct Config {
     pub reasoning: Option<ReasoningConfig>,
     /// True when `reasoning` came from an explicit command-line override.
     pub reasoning_explicit: bool,
+    /// True when `model` came from the user's own saved, project or environment
+    /// configuration. Extension-contributed defaults never replace it.
+    pub model_saved: bool,
+    /// As `model_saved`, for `reasoning`.
+    pub reasoning_saved: bool,
     /// Standard or Pro execution, selected independently from reasoning effort.
     pub reasoning_mode: ReasoningMode,
     /// True when the reasoning mode came from an explicit command-line override.
@@ -664,6 +667,17 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether an extension-contributed default model may apply: only when the
+    /// user has neither chosen a model nor saved their own default.
+    pub(crate) fn accepts_extension_model(&self) -> bool {
+        !self.model_explicit && !self.model_saved
+    }
+
+    /// As `accepts_extension_model`, for the reasoning level.
+    pub(crate) fn accepts_extension_reasoning(&self) -> bool {
+        !self.reasoning_explicit && !self.reasoning_saved
+    }
+
     /// Whether a tool will survive both the model-visible allowlist and the
     /// matching execution capability gate for this process.
     pub fn tool_available(&self, name: &str) -> bool {
@@ -936,6 +950,47 @@ mod tests {
         assert!(extension_policy.enabled("git_status"));
         assert!(!extension_policy.enabled("another_extension_tool"));
         assert!(ToolPolicy::only(["not a tool".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn tool_policy_preserves_case_sensitive_extension_identities() {
+        let mut defaults = ToolPolicy::default();
+        assert!(defaults.enabled("mcpScript"));
+        defaults.exclude(" mcpScript ").unwrap();
+        assert!(!defaults.enabled("mcpScript"));
+        assert!(defaults.enabled("mcpscript"));
+        defaults.include("mcpScript").unwrap();
+        assert!(defaults.enabled("mcpScript"));
+
+        assert!(defaults.enabled("Read"));
+        defaults.exclude("Read").unwrap();
+        assert!(!defaults.enabled("Read"));
+        assert!(defaults.enabled("read"));
+        defaults.include("Read").unwrap();
+        defaults.exclude("read").unwrap();
+        assert!(defaults.enabled("Read"));
+        assert!(!defaults.enabled("read"));
+        let exact = ToolPolicy::only(["Read".into()]).unwrap();
+        assert!(exact.enabled("Read"));
+        assert!(!exact.enabled("read"));
+
+        let mut explicit = ToolPolicy::only([" mcpScript ".into(), "read".into()]).unwrap();
+        assert!(explicit.enabled("mcpScript"));
+        assert!(!explicit.enabled("mcpscript"));
+        assert!(explicit.enabled("read"));
+        assert_eq!(
+            explicit.explicit_names().unwrap().collect::<Vec<_>>(),
+            ["mcpScript", "read"]
+        );
+        explicit.exclude("mcpScript").unwrap();
+        assert!(!explicit.enabled("mcpScript"));
+        explicit.include("lateTool").unwrap();
+        assert!(explicit.enabled("lateTool"));
+        assert!(!explicit.enabled("latetool"));
+        for invalid in ["", "not a tool", "tool/name", "töol", "tool\nname"] {
+            assert!(!defaults.enabled(invalid));
+            assert!(ToolPolicy::only([invalid.into()]).is_err());
+        }
     }
 
     #[test]

@@ -85,9 +85,7 @@ test('internal projection diagnostics name the actual message observer, not an u
   } } };
   for (let i = 0; i < 2; i++) assert.ok((await commit(peer, assistant, [], i)).result);
   const notice = await peer.wait(f => f.method === 'notification' && f.params.title === '[Extension issues]');
-  assert.ok(notice.params.message.includes(factory), notice.params.message);
-  assert.match(notice.params.message, /turn_end: octet could not convert/);
-  assert.match(notice.params.message, /Next:/);
+  assert.match(notice.params.message, /^Octet Pi Compat: turn_end data was unavailable, so some activity was missed\./);
   assert.equal(notice.params.message.includes(privateText), false);
   assert.equal(peer.stderr().includes(privateText), false);
   assert.equal(peer.seen.filter(f => f.method === 'notification' && f.params.title === '[Extension issues]').length, 1);

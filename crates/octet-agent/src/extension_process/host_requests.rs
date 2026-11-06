@@ -34,6 +34,9 @@ pub struct ToolDefinition {
     /// Whether a newly registered tool joins the model-visible active set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_active: Option<bool>,
+    #[allow(missing_docs)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<crate::tool::ToolExposure>,
     /// Request-scoped nested dispatch without composition presentation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nested_execution: bool,
@@ -66,6 +69,11 @@ pub struct ToolCatalogUpdateResponse {
     pub revision: u64,
     /// Complete active tool-name set for this extension.
     pub tools: Vec<String>,
+    /// Names from this registration that the authoritative product tool
+    /// policy (for example `--no-tools`) keeps out of the model-visible set.
+    /// Pi registers such tools disabled; they are never published here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<String>,
 }
 
 /// Host-enforced policy for one bounded extension-owned child session.
@@ -748,6 +756,9 @@ pub struct ExtensionHostState {
     /// Frontend workspace-trust decision, absent for hosts without that policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_trusted: Option<bool>,
+    /// Actual queued steering/follow-up observation, absent without a consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_pending_messages: Option<bool>,
     /// Whether a foreground UI consumer is available in this frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_ui: Option<bool>,
@@ -780,6 +791,24 @@ pub struct ExtensionHostState {
 #[cfg(test)]
 mod host_state_contract_tests {
     use super::*;
+
+    #[test]
+    fn pending_messages_snapshot_preserves_absence_and_both_boolean_values() {
+        let absent = serde_json::to_value(ExtensionHostState::default()).unwrap();
+        assert!(absent.get("has_pending_messages").is_none());
+        for pending in [false, true] {
+            let state = ExtensionHostState {
+                has_pending_messages: Some(pending),
+                ..Default::default()
+            };
+            let wire = serde_json::to_value(&state).unwrap();
+            assert_eq!(wire["has_pending_messages"], pending);
+            assert_eq!(
+                serde_json::from_value::<ExtensionHostState>(wire).unwrap(),
+                state
+            );
+        }
+    }
 
     #[test]
     fn optional_palette_and_context_usage_roundtrip_without_fabricated_defaults() {

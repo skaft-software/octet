@@ -109,6 +109,35 @@ impl ExecutableExtensions {
         session_start_reason: &'static str,
         extension_startup_timing: ExtensionStartupTiming,
     ) -> Self {
+        Self::discover_and_start_for_selection(
+            config,
+            session,
+            Some((model, reasoning)),
+            sessions,
+            host,
+            runtime_manager,
+            provider_runtime,
+            resource_consumer,
+            remote_ui_consumer,
+            session_start_reason,
+            extension_startup_timing,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn discover_and_start_for_selection(
+        config: &Config,
+        session: &Session,
+        selection: Option<(&Model, &ReasoningConfig)>,
+        sessions: &SessionStore,
+        host: &mut ExtensionHost,
+        runtime_manager: Option<ExtensionRuntimeManager>,
+        provider_runtime: ExtensionProviderRuntime,
+        resource_consumer: crate::app::resource_paths::ResourceConsumerCapability,
+        remote_ui_consumer: Option<&crate::tui::view::InteractiveShell>,
+        session_start_reason: &'static str,
+        extension_startup_timing: ExtensionStartupTiming,
+    ) -> Self {
         let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
         let snapshot = resolver.discover(ResourceKind::Extension, &config.extension_paths);
         let mut diagnostics = snapshot
@@ -151,6 +180,12 @@ impl ExecutableExtensions {
             }
         }
 
+        crate::output::checked_diagnostics(
+            crate::output::DiagnosticComponent::Resource("extensions"),
+            diagnostics.clone(),
+            true,
+        );
+
         let discovered_names = by_name.keys().cloned().collect::<BTreeSet<_>>();
         for name in &config.enabled_extensions {
             if !discovered_names.contains(name) {
@@ -182,7 +217,15 @@ impl ExecutableExtensions {
                 config.experimental_streamable_http_mcp,
             );
         }
-        let pi_mirror_directory = pi_mirror::prepare(&mut descriptors, config, &mut diagnostics);
+        let defer_pi_mirror = extension_startup_timing == ExtensionStartupTiming::AfterFirstFrame
+            && descriptors
+                .iter()
+                .any(|descriptor| pi_mirror::needs_preparation(descriptor, config));
+        let pi_mirror_directory = if defer_pi_mirror {
+            None
+        } else {
+            pi_mirror::prepare(&mut descriptors, config, &mut diagnostics)
+        };
         let mut needs_host_authority = false;
         // A surface that never starts extension processes gets no grant hints:
         // no grant could change the outcome there.
@@ -216,8 +259,10 @@ impl ExecutableExtensions {
         if needs_host_authority {
             diagnostics.push(CONTROLLED_EXTENSION_START_DIAGNOSTIC.to_owned());
         }
-        let mut host_state = host_state(session, model, reasoning, sessions);
+        let mut host_state = host_state_for_selection(session, selection, sessions);
         host_state.project_trusted = Some(config.workspace_trusted);
+        host_state.has_pending_messages =
+            remote_ui_consumer.map(InteractiveShell::has_pending_messages);
         host_state.mode = Some(
             match config.mode {
                 Mode::Interactive => "tui",
@@ -252,8 +297,6 @@ impl ExecutableExtensions {
             })
             .cloned()
             .collect::<Vec<_>>();
-        // A tool-name clash turns the external extension off instead of
-        // failing startup; the first-party extension keeps the name.
         let ToolClashes {
             kept: startable,
             turned_off: tool_clashes,
@@ -266,7 +309,7 @@ impl ExecutableExtensions {
         }
         for (name, tools) in &withheld_tools {
             diagnostics.push(format!(
-                "note: extension {name:?} does not expose its tools {}: octet provides them itself",
+                "note: extension {name:?} does not expose its tools {}: a Pi extension provides them",
                 tools.iter().cloned().collect::<Vec<_>>().join(", ")
             ));
         }
@@ -303,20 +346,20 @@ impl ExecutableExtensions {
             ));
         }
         let event_bus = Arc::new(ExtensionEventBus::default());
-        let (session_lifecycle_service, session_lifecycle_receiver) =
-            if active_session_lifecycle_enabled(config)
-                && startable.iter().any(extension_session_lifecycle_eligible)
-            {
-                let (service, receiver) =
-                    ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
-                        .expect("fixed session lifecycle queue capacity is bounded");
-                (
-                    Some(service.with_compaction().with_model_control()),
-                    Some(receiver),
-                )
-            } else {
-                (None, None)
-            };
+        let (session_lifecycle_service, session_lifecycle_receiver) = if selection.is_some()
+            && active_session_lifecycle_enabled(config)
+            && startable.iter().any(extension_session_lifecycle_eligible)
+        {
+            let (service, receiver) =
+                ExtensionSessionLifecycleService::channel(SESSION_LIFECYCLE_QUEUE_CAPACITY)
+                    .expect("fixed session lifecycle queue capacity is bounded");
+            (
+                Some(service.with_compaction().with_model_control()),
+                Some(receiver),
+            )
+        } else {
+            (None, None)
+        };
 
         // Discovery remains static. Catalog construction reads bounded source
         // identity only; the durable manager is the sole owner allowed to
@@ -398,8 +441,9 @@ impl ExecutableExtensions {
                         None
                     }
                 };
-                let agent_sessions_tool_available =
-                    model.spec.capabilities.tools && config.tool_available("subagent_spawn");
+                let agent_sessions_tool_available = selection
+                    .is_some_and(|(model, _)| model.spec.capabilities.tools)
+                    && config.tool_available("subagent_spawn");
                 let activation_plan = ExtensionActivationPlan {
                     workspace: config.workspace.clone(),
                     python_runtime,
@@ -464,6 +508,16 @@ impl ExecutableExtensions {
                             )),
                         }
                     }
+                    ExtensionStartupTiming::AfterFirstFrame if defer_pi_mirror => {
+                        deferred_startup = Some(spawn_deferred_pi_preparation(
+                            startable,
+                            &descriptors_by_name,
+                            activation_plan,
+                            tool_clashes.clone(),
+                            agent_sessions_pending,
+                            config,
+                        ));
+                    }
                     ExtensionStartupTiming::AfterFirstFrame => {
                         // Flattened because the async block already returns a
                         // `Result`: one binding error, one failure report.
@@ -514,12 +568,13 @@ impl ExecutableExtensions {
         extensions.rescan_config = Some(config.clone());
         extensions.rescan_global_config = crate::cli::global_config_path();
         extensions.effect_policy = config.effect_policy;
+        extensions.modeless = selection.is_none();
         // Compute the host facts before installing: each installed process
         // receives them with the actual native history before either immediate
         // or deferred session_start callbacks. Initialize's coarse model/skill
         // projection deliberately does not expose a namespace-independent
         // session mirror.
-        extensions.refresh_host_state(session, model, reasoning, sessions);
+        extensions.refresh_host_state_for_selection(session, selection, sessions);
         extensions.publish_host_state_to_starts(&starts, session);
         // One install path for boot and late attach. A deferred fleet installs
         // an empty batch here (every extension keeps its discovered summary)
@@ -596,6 +651,13 @@ impl ExecutableExtensions {
         let Some(mut deferred) = self.deferred_startup.take() else {
             return DeferredStartupProgress::default();
         };
+        if let Some(preparation) = &deferred.pi_preparation {
+            if !preparation.task.is_finished() {
+                self.deferred_startup = Some(deferred);
+                return DeferredStartupProgress::default();
+            }
+            self.finish_deferred_pi_preparation(&mut deferred).await;
+        }
         let starts = drain_deferred_activations(&mut deferred);
         let mut progress = DeferredStartupProgress::default();
         if !starts.is_empty() {
@@ -622,6 +684,89 @@ impl ExecutableExtensions {
         progress
     }
 
+    async fn finish_deferred_pi_preparation(&mut self, deferred: &mut DeferredExtensionStartup) {
+        deferred.pi_preparation.as_mut().unwrap().wait().await;
+        let mut preparation = deferred.pi_preparation.take().unwrap();
+        let result = preparation.result.take().unwrap();
+        let capture_failure = result.as_ref().err().map(ToString::to_string);
+        let descriptor = deferred
+            .descriptors
+            .get_mut(PI_BRIDGE_EXTENSION_NAME)
+            .unwrap();
+        let mut diagnostics = Vec::new();
+        self.pi_mirror_directory =
+            pi_mirror::finish_preparation(descriptor, result, &mut diagnostics);
+        self.diagnostics.extend(diagnostics);
+        let ToolClashes {
+            kept: startable,
+            turned_off,
+            withheld,
+        } = turn_off_tool_clashes(
+            deferred
+                .pending
+                .iter()
+                .filter_map(|name| {
+                    let descriptor = &deferred.descriptors[name];
+                    descriptor.activation.enabled.then(|| descriptor.clone())
+                })
+                .collect(),
+        );
+        let mut tool_clashes = deferred.tool_clashes.clone();
+        tool_clashes.extend(turned_off);
+        for (name, tools) in &withheld {
+            self.diagnostics.push(format!(
+                "note: extension {name:?} does not expose its tools {}: a Pi extension provides them",
+                tools.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        preparation.plan.withheld_tools = withheld;
+        preparation.plan.host_state = self.host_state.lock().unwrap().clone();
+        let config = self.rescan_config.as_ref().unwrap();
+        let catalog =
+            ExtensionRuntimeCatalog::from_descriptors(deferred.descriptors.values().cloned().map(
+                |mut descriptor| {
+                    descriptor.activation.enabled &= config.start_extension_processes
+                        && config.sandbox.process_execution_allowed()
+                        && descriptor
+                            .activation
+                            .start_decision(descriptor.source, config.workspace_trusted)
+                            == ExtensionStartDecision::Allowed
+                        && !tool_clashes.contains_key(&descriptor.manifest.name);
+                    descriptor
+                },
+            ));
+        self.diagnostics
+            .extend(catalog.diagnostics().iter().map(|diagnostic| {
+                format!(
+                    "warning: extension {:?}: runtime catalog {}",
+                    diagnostic.extension, diagnostic.message
+                )
+            }));
+        let manager = self.runtime_manager.as_ref().unwrap();
+        manager.replace_catalog(catalog).await;
+        match manager.bind_session(self.resource_owner.clone().unwrap()) {
+            Ok(binding) => {
+                self.runtime_binding = Some(binding.clone());
+                *deferred = spawn_deferred_startup(
+                    binding,
+                    startable,
+                    &deferred.descriptors,
+                    &preparation.plan,
+                    tool_clashes,
+                    deferred.agent_sessions_pending,
+                );
+            }
+            Err(error) => self.diagnostics.push(format!(
+                "error: executable extensions could not bind to the runtime manager: {error}"
+            )),
+        }
+        if let Some(error) = capture_failure {
+            deferred
+                .queued
+                .push((PI_BRIDGE_EXTENSION_NAME.to_owned(), Err(error)));
+        }
+    }
+
     /// Waits until every pending extension that declares the native
     /// `before_prompt` hook has settled.
     ///
@@ -640,9 +785,26 @@ impl ExecutableExtensions {
         const PROMPT_HOOK_WAIT: Duration = Duration::from_secs(30);
         let deadline = tokio::time::Instant::now() + PROMPT_HOOK_WAIT;
         loop {
+            if let Some(preparation) = self
+                .deferred_startup
+                .as_mut()
+                .and_then(|deferred| deferred.pi_preparation.as_mut())
+            {
+                if tokio::time::timeout_at(deadline, preparation.wait())
+                    .await
+                    .is_err()
+                {
+                    anyhow::bail!(
+                        "Pi setup mirror is still preparing; retry after startup completes"
+                    );
+                }
+            }
             let Some(mut deferred) = self.deferred_startup.take() else {
                 return Ok(());
             };
+            if deferred.pi_preparation.is_some() {
+                self.finish_deferred_pi_preparation(&mut deferred).await;
+            }
             let starts = drain_deferred_activations(&mut deferred);
             if !starts.is_empty() {
                 self.publish_host_state_to_starts(&starts, session);
@@ -720,9 +882,7 @@ impl ExecutableExtensions {
                     self.diagnostics
                         .push(format!("error: extension {name:?} launch failed: {error}"));
                     start_failures.insert(name.clone(), clip_lifecycle_reason(&error, 4 * 1024));
-                    progress.notices.push(format!(
-                        "extension {name} did not start: {error} (see /extensions)"
-                    ));
+                    progress.notices.push(startup_failure_notice(&name, &error));
                 }
             }
         }
@@ -750,9 +910,7 @@ impl ExecutableExtensions {
                         "warning: extension {name:?} was turned off: {error}"
                     ));
                     start_failures.insert(name.clone(), format!("turned off: {error}"));
-                    progress.notices.push(format!(
-                        "extension {name} did not start: {error} (see /extensions)"
-                    ));
+                    progress.notices.push(startup_failure_notice(&name, &error));
                     turned_off.insert(name);
                 }
             }
@@ -905,6 +1063,11 @@ impl ExecutableExtensions {
             .lock()
             .expect("extension host state")
             .clone();
+        runtime.pi_settings = super::pi_mirror::settings_binding(
+            &entry.descriptor,
+            &self.workspace,
+            runtime.host_state.project_trusted == Some(true),
+        );
         runtime.remote_ui = self.remote_ui_wake.clone();
         runtime.transcript_render = runtime.remote_ui.is_some();
         runtime.resource_paths = true;
@@ -1269,6 +1432,7 @@ impl ExecutableExtensions {
     }
 
     pub(super) fn cancel_background_work(&mut self) {
+        self.deferred_startup.take();
         self.cancel_session_hook_starts();
         for task in self.renderer_tasks.drain(..) {
             task.abort();
@@ -1291,14 +1455,23 @@ impl ExecutableExtensions {
         while self.background_rx.try_recv().is_ok() {}
     }
 
-    pub(super) async fn settle_session_lifecycle(&mut self) {
+    async fn settle_session_lifecycle(&mut self, reload: bool) {
         if self.session_lifecycle_started {
-            let outcome = self
-                .last_lifecycle_outcome
-                .unwrap_or(ExtensionLifecycleOutcome::Shutdown);
+            let outcome = if reload {
+                ExtensionLifecycleOutcome::Interrupted
+            } else {
+                self.last_lifecycle_outcome
+                    .unwrap_or(ExtensionLifecycleOutcome::Shutdown)
+            };
+            let reason = reload.then_some("reload");
             if let Some(resource_owner) = self.resource_owner.clone() {
-                let diagnostics =
-                    settle_session_hooks_all(&self.processes, &resource_owner, outcome).await;
+                let diagnostics = settle_session_hooks_all_with_reason(
+                    &self.processes,
+                    &resource_owner,
+                    outcome,
+                    reason,
+                )
+                .await;
                 self.diagnostics.extend(diagnostics);
             }
             if let Some(session_id) = self.session_id.clone() {
@@ -1309,7 +1482,7 @@ impl ExecutableExtensions {
                         run_id: None,
                         outcome,
                         duration_ms: duration_millis(self.session_started_at.elapsed()),
-                        reason: None,
+                        reason: reason.map(str::to_owned),
                     },
                 )
                 .await;
@@ -1337,6 +1510,13 @@ impl ExecutableExtensions {
     /// App can bind them without a stop/restart gap. Interactive callers must
     /// revoke the terminal grant with their shell before releasing this owner.
     pub async fn release_binding(&mut self) {
+        self.release_binding_for_transition(false).await;
+    }
+
+    async fn release_binding_for_transition(&mut self, reload: bool) {
+        if !reload {
+            self.discard_provider_reload();
+        }
         self.retire_active_resources();
         self.clear_pi_mcp_registrations().await;
         // A replacement App must not inherit work queued against the old
@@ -1346,7 +1526,7 @@ impl ExecutableExtensions {
         self.remote_ui
             .revoke("the foreground extension binding ended");
         self.cancel_background_work();
-        self.settle_session_lifecycle().await;
+        self.settle_session_lifecycle(reload).await;
         for process in &self.processes {
             process.detach_dynamic_tool_catalog();
         }
@@ -1372,6 +1552,10 @@ impl ExecutableExtensions {
     /// Synchronous App rebuild boundary that preserves the durable manager.
     pub fn release_binding_blocking(&mut self) {
         let _ = block_on_runtime(self.release_binding());
+    }
+
+    pub(crate) fn release_binding_for_reload_blocking(&mut self) {
+        let _ = block_on_runtime(self.release_binding_for_transition(true));
     }
 
     /// Gracefully stops every runtime owned by this host after releasing the
@@ -1424,6 +1608,7 @@ impl ExecutableExtensions {
         )>,
     > + Send
            + 'static {
+        self.prepare_provider_reload();
         self.resource_paths_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.cancel_background_work();
@@ -1507,6 +1692,7 @@ impl ExecutableExtensions {
             }
         }
         self.await_reloaded_provider_registrations(&reloaded).await;
+        self.complete_provider_reload(Some(&reloaded));
         for mutation in completed_mutations {
             let rescans = self.notify_post_mutation(mutation).await;
             output.details.extend(rescans.into_iter().map(|request| {
@@ -1554,8 +1740,6 @@ impl ExecutableExtensions {
 /// comes from a third-party Pi package.
 pub(super) const PI_BRIDGE_EXTENSION_NAME: &str = "octet-pi-compat";
 
-/// First-party extensions keep a clashing tool name: their tools are the ones
-/// octet ships and documents.
 fn first_party_tool_owner(name: &str) -> bool {
     name != PI_BRIDGE_EXTENSION_NAME && crate::extension_bundle::is_official_bundle(name)
 }
@@ -1569,13 +1753,6 @@ struct ToolClashes {
     withheld: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Resolves tools an external extension declares that a first-party extension
-/// already provides: the first-party extension keeps the name.
-///
-/// An ordinary external extension is turned off, keyed by name with the reason.
-/// The Pi bridge is not: it mirrors many unrelated factories, so one factory's
-/// clashing tool must not take the others down. Only the clashing names are
-/// withheld from it. Runs in O(n log n) over declared tool names.
 fn turn_off_tool_clashes(startable: Vec<DiscoveredExtension>) -> ToolClashes {
     let owners = startable
         .iter()
@@ -1589,12 +1766,31 @@ fn turn_off_tool_clashes(startable: Vec<DiscoveredExtension>) -> ToolClashes {
                 .map(|tool| (tool.clone(), descriptor.manifest.name.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let pi_tools = startable
+        .iter()
+        .filter(|descriptor| descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME)
+        .flat_map(|descriptor| descriptor.manifest.contributes.tools.iter().cloned())
+        .collect::<BTreeSet<_>>();
     let mut turned_off = BTreeMap::new();
     let mut withheld = BTreeMap::new();
     let kept = startable
         .into_iter()
         .filter(|descriptor| {
+            if descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME {
+                return true;
+            }
             if first_party_tool_owner(&descriptor.manifest.name) {
+                let clashing = descriptor
+                    .manifest
+                    .contributes
+                    .tools
+                    .iter()
+                    .filter(|tool| pi_tools.contains(*tool))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !clashing.is_empty() {
+                    withheld.insert(descriptor.manifest.name.clone(), clashing);
+                }
                 return true;
             }
             let clashing = descriptor
@@ -1605,13 +1801,6 @@ fn turn_off_tool_clashes(startable: Vec<DiscoveredExtension>) -> ToolClashes {
                 .filter_map(|tool| owners.get(tool).map(|owner| (tool, owner)))
                 .collect::<Vec<_>>();
             if clashing.is_empty() {
-                return true;
-            }
-            if descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME {
-                withheld.insert(
-                    descriptor.manifest.name.clone(),
-                    clashing.iter().map(|(tool, _)| (*tool).clone()).collect(),
-                );
                 return true;
             }
             turned_off.insert(
@@ -1677,6 +1866,11 @@ impl ExtensionActivationPlan {
         runtime.resource_paths = self.resource_paths;
         runtime.provider_pipeline = true;
         runtime.host_state = self.host_state.clone();
+        runtime.pi_settings = super::pi_mirror::settings_binding(
+            descriptor,
+            &self.workspace,
+            self.host_state.project_trusted == Some(true),
+        );
         runtime.remote_ui = self.remote_ui.clone();
         // Both interactive frontends consume the same bounded asynchronous
         // transcript snapshots. Headless hosts have neither this wake nor the
@@ -1750,6 +1944,79 @@ fn activation_to_start(
     }
 }
 
+pub(super) struct DeferredPiPreparation {
+    task: JoinHandle<anyhow::Result<(tempfile::TempDir, ExtensionManifest)>>,
+    result: Option<anyhow::Result<(tempfile::TempDir, ExtensionManifest)>>,
+    plan: ExtensionActivationPlan,
+}
+
+impl DeferredPiPreparation {
+    async fn wait(&mut self) {
+        if self.result.is_none() {
+            self.result = Some(
+                (&mut self.task)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result),
+            );
+        }
+    }
+}
+
+impl Drop for DeferredPiPreparation {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn spawn_deferred_pi_preparation(
+    startable: Vec<DiscoveredExtension>,
+    descriptors: &BTreeMap<String, DiscoveredExtension>,
+    plan: ExtensionActivationPlan,
+    tool_clashes: BTreeMap<String, String>,
+    agent_sessions_pending: bool,
+    config: &Config,
+) -> DeferredExtensionStartup {
+    let descriptor = descriptors[PI_BRIDGE_EXTENSION_NAME].clone();
+    let config = config.clone();
+    let task = tokio::spawn(async move {
+        crate::app::bootstrap::startup_phase("extensions.pi_mirror.prepare.begin");
+        let result = pi_mirror::prepare_admitted(&descriptor, &config).await;
+        crate::app::bootstrap::startup_phase("extensions.pi_mirror.prepare.end");
+        result
+    });
+    let (_, completions) = mpsc::unbounded_channel();
+    DeferredExtensionStartup {
+        completions,
+        queued: Vec::new(),
+        pending: startable
+            .iter()
+            .map(|descriptor| descriptor.manifest.name.clone())
+            .collect(),
+        pending_prompt_hooks: startable
+            .iter()
+            .filter(|descriptor| {
+                descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME
+                    || descriptor
+                        .manifest
+                        .contributes
+                        .hooks
+                        .contains(&ExtensionHook::BeforePrompt)
+            })
+            .map(|descriptor| descriptor.manifest.name.clone())
+            .collect(),
+        descriptors: descriptors.clone(),
+        tool_clashes,
+        agent_sessions_pending,
+        pi_preparation: Some(DeferredPiPreparation {
+            task,
+            result: None,
+            plan,
+        }),
+        tasks: Vec::new(),
+    }
+}
+
 /// Starts one activation task per admitted extension and hands the caller the
 /// state that later installs each settled handshake.
 ///
@@ -1811,6 +2078,7 @@ fn spawn_deferred_startup(
         descriptors,
         tool_clashes,
         agent_sessions_pending,
+        pi_preparation: None,
         tasks,
     }
 }
@@ -1980,7 +2248,7 @@ mod tool_clash_tests {
     /// The bridge mirrors many unrelated Pi factories. One factory's tool
     /// sharing a name with a first-party tool must not turn the others off.
     #[test]
-    fn the_pi_bridge_keeps_running_with_only_the_clashing_tools_withheld() {
+    fn pi_tool_precedence_withholds_only_overlapping_first_party_tools() {
         let clashes = turn_off_tool_clashes(vec![
             descriptor("octet-web-search", &["web_search"]),
             descriptor("octet-subagents", &["subagent_wait"]),
@@ -1999,11 +2267,32 @@ mod tool_clash_tests {
         );
         assert!(clashes.turned_off.is_empty(), "{:?}", clashes.turned_off);
         assert_eq!(
-            clashes.withheld.get(PI_BRIDGE_EXTENSION_NAME),
-            Some(&BTreeSet::from([
-                "subagent_wait".to_owned(),
-                "web_search".to_owned()
-            ]))
+            clashes.withheld,
+            BTreeMap::from([
+                (
+                    "octet-subagents".to_owned(),
+                    BTreeSet::from(["subagent_wait".to_owned()])
+                ),
+                (
+                    "octet-web-search".to_owned(),
+                    BTreeSet::from(["web_search".to_owned()])
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn pi_tools_override_octet_only_first_party_tools_without_disabling_either_process() {
+        let clashes = turn_off_tool_clashes(vec![
+            descriptor("octet-web-search", &["web_search", "native_only"]),
+            descriptor(PI_BRIDGE_EXTENSION_NAME, &["web_search", "fetch_content"]),
+        ]);
+        assert_eq!(clashes.kept.len(), 2);
+        assert!(clashes.turned_off.is_empty());
+        assert!(!clashes.withheld.contains_key(PI_BRIDGE_EXTENSION_NAME));
+        assert_eq!(
+            clashes.withheld.get("octet-web-search"),
+            Some(&BTreeSet::from(["web_search".into()]))
         );
     }
 
@@ -2030,3 +2319,7 @@ mod tool_clash_tests {
         assert!(clashes.turned_off.is_empty() && clashes.withheld.is_empty());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "manifest_diagnostic_tests.rs"]
+mod manifest_diagnostic_tests;

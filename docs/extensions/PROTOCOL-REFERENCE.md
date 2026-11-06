@@ -55,6 +55,43 @@ user's authority.
 an extension may make; they do not confine the process. OS-level enforcement is
 future work.**
 
+## Native Pi settings mediation (`pi_settings_v1`, API `0.4`)
+
+This optional service is offered only with a native-owned Pi setup binding.
+The coding host binds it only to the admitted Pi bridge, using
+`OCTET_PI_AGENT_DIR`, then `PI_CODING_AGENT_DIR`, then the native home directory's
+`.pi/agent`. Named entrypoint selectors take precedence over native environment
+values for that selector. Factory-supplied paths never select a storage root.
+
+`pi/settings/read` takes `{parent_request_id, resource_owner, cwd, agent_dir,
+project_trusted}`. Paths must match the native workspace and Pi setup binding.
+It returns `{global, project, project_trusted, global_path, project_path, errors}`;
+errors contain `{scope, path, message}`. Project reads target only the native
+workspace's `.pi/settings.json`; requesting them requires native workspace trust.
+With `project_trusted:false`, project storage is not opened at all. Missing files
+are empty settings; invalid JSON, duplicate keys, unsafe paths, nonregular files,
+and files larger than 64 KiB produce explicit scoped errors, not silent success.
+
+`pi/settings/update` takes the same envelope plus `{scope:"global", extensions}`.
+Its only supported change appends one new `-builtin:<name>` selector to the exact
+current ordered selectors. Names match `[a-z][a-z0-9_-]{0,63}`; enable, file, glob,
+deletion, reordering and duplicate-addition requests are refused. An exact unchanged
+list is an idempotent no-op. Stale selector snapshots explicitly fail rather than
+silently dropping requested mutations or concurrent selectors. The native merge
+preserves every unrelated current disk field. It never writes project settings,
+authentication, trust, or Octet configuration. Successful `{}` acknowledges the
+actual conditional atomic commit (or an exact already persisted list), not an
+in-memory update. Conflicts and I/O failures are returned.
+
+Every call requires a genuine live issued owner for this process generation and
+an active matching parent. A settled native-issued `session_start` parent may be
+retained for its asynchronous callback, but cancelled, invented, retired, foreign,
+and prior-generation parents/owners are refused. Each generation retains at most
+4096 such parent bindings, pruning retired owners. Writer capacity and response
+bounds are admitted before a write; native cancellation and owner retirement are
+fenced through the bounded mutation. This grants no general filesystem or
+process-execution capability and is unavailable during factory inspection.
+
 ## Transport defaults
 
 | Parameter | Default |
@@ -239,11 +276,13 @@ add:
 any subset of the advertised optional features, but missing required,
 unknown, or duplicate feature names reject initialization. The accepted
 `max_concurrent_requests` must be greater than zero and is capped by the host.
-`runtime_commands` is initialization-only: the returned command list is fixed
-for the generation, there are no `commands/register` or `commands/unregister`
-methods, and reload still requires an identical command catalog. It exists for
-compatibility runtimes that cannot know foreign command names before loading
-that runtime.
+`runtime_commands` alone is initialization-only: the returned command list is
+fixed for the generation and reload requires an identical initialization catalog.
+It exists for compatibility runtimes that cannot know foreign command names
+before loading that runtime. API `0.4` may additionally negotiate
+`runtime_command_registration_v1` (which requires `runtime_commands`) for the
+owner-fenced `commands/register` method below. Earlier API versions and peers
+without that additive feature retain the fixed catalog contract.
 
 If `lifecycle_events` is negotiated and the subscription list is omitted or
 empty, all six events are subscribed. Otherwise it must be an exact subset of
@@ -1540,6 +1579,31 @@ catalogs.
 
 ---
 
+### Live commands (API `0.4`, feature `runtime_command_registration_v1`)
+
+Requires both `runtime_commands` and `runtime_command_registration_v1`.
+`commands/register` takes a closed params object containing numeric
+`parent_request_id`, optional `resource_owner`, and a nonempty `commands` array
+of complete `CommandDefinition` objects. A live parent supplies the authoritative
+owner; an explicit owner must match it. A settled parent needs the exact
+previously issued session/instance/generation owner. Cancelled parents, retired
+owners and closed/draining generations are refused, not coerced.
+
+The complete catalog and each batch are bounded to 256 commands. Names use the
+command identifier grammar (including `:`); duplicate names within one batch,
+empty descriptions and malformed definitions reject the entire request.
+Descriptions and optional usage are control-free plain text, at most 4 KiB each.
+Existing names replace complete definitions in this extension's catalog only.
+The host reserves acknowledgement capacity, rechecks owner/parent lifetime and
+publishes atomically before returning `{"commands":["all","accepted","names"]}`.
+A refused or backpressured request does not mutate the catalog. Dispatch and
+command discovery consult the same live generation catalog. Clients must commit
+handlers only after the acknowledgement; lost delivery does not authorize replay.
+There is no unregister method; replacing the process resets its live catalog to
+its initialize response.
+
+---
+
 ### 2.12 `tools/unregister` (API `0.2`)
 
 Requires `dynamic_tools`. Remove extension-owned names transactionally:
@@ -1933,15 +1997,33 @@ after the initialize request settled leaves the shortcut unavailable; a
 `session/append_entry` requests `{ "parent_request_id": 2, "entry_type":
 "custom", "data": <bounded JSON> }` and returns `{ "entry_id": "..." }`, the
 host-assigned durable entry identifier. `session/set_name` requests
-`{ "parent_request_id": 2, "name": "..." }`; an empty name clears it.
+`{ "parent_request_id": 2, "name": "..." }`; an empty or whitespace-only name
+clears it. API `0.4` returns `{ "name": string | null }`, the committed normalized
+name (`null` when cleared), independently of mounted UI or snapshot preparation.
+The adapter applies this correlated receipt before resolving the setter, only
+while its original session/instance/generation owner remains foreground and the
+call has not been cancelled. Retained API `0.2` returns `{}`.
 `session/set_label` requests `{ "parent_request_id": 2, "entry_id": "...",
-"label": "..." }`; an empty label clears it. Both mutations return `{}`.
+"label": "..." }`; an empty label clears it. It returns `{}`.
 
 `entry_type` is bounded to 128 UTF-8 bytes, the opaque `data` payload to 64 KiB
 of bounded plain JSON (no functions, exotic prototypes, non-finite numbers, or
 nesting beyond the protocol limit), the entry id to 256 bytes, and the name and
 label to 4 KiB. Every method is owner-scoped through `parent_request_id` and is
 refused with `-32002` `not_foreground_owner` for any other owner.
+
+API `0.4` may additionally negotiate `session_append_receipts_v1`, requiring
+`session_entries`, `session_owner_routes_v1`, and
+`session_snapshot_transport_v1`. Grant-less appends then return the compact native
+receipt `{ entry_id, head, successor: null, entry, previous_revision,
+view_revision, previous_head }`. `entry` is the actual durable record filtered to
+the extension's namespace, including its real parent and timestamp. The live
+parent's pinned head and revision fence each append; successful receipts advance
+that invocation's counted view before synchronous getters return. ACK capacity
+and receipt bounds are checked before mutation. A cancelled/stale parent or
+mismatched durable head refuses without a write. This feature never issues a
+session-leaf grant and does not change grant-bound append authority or replies.
+Without the feature, the grant-less result remains exactly `{ entry_id }`.
 
 <a id="session-control-v1"></a>
 
@@ -2693,7 +2775,8 @@ The encoded menu is at most 256 KiB.
 | `lifecycle_events` | no | Subscribed session/turn/tool observations |
 | `policy_intents` | no | Correlated `policy/evaluate` requests |
 | `dynamic_tools` | no | Transactional `tools/register`, `tools/unregister`, and revision-pinned `tool/call` |
-| `runtime_commands` | no | Initialize-time authoritative fixed command catalog for compatibility runtimes; no live mutations |
+| `runtime_commands` | no | Initialize-time authoritative command catalog; no live mutations without the additive API 0.4 feature |
+| `runtime_command_registration_v1` | API 0.4, optional | Owner-fenced atomic `commands/register`; requires `runtime_commands` |
 | `agent_sessions` | conditional | Principal/owner-scoped `agent/*` child model-session service |
 | `agent_session_events_v1` | API 0.4, conditional | Bounded native `agent/events` cursor observations; requires `agent_sessions` |
 | `agent_session_lifetime_v1` | API 0.4, conditional | Explicit issued-owner retained child calls and owned-tree `agent/stop`; requires `agent_sessions` |

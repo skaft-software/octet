@@ -88,7 +88,7 @@ test('from-Pi imports enabled palettes as native themes, stages the Pi default a
   const colors = imported.split('\n[colors]\n')[1].split('\n[')[0];
   assert.match(colors, /composer_border = "#7e57c2"/, 'composer snapshot belongs to colors, not a role');
   assert.match(imported, /\[roles\."extension\.pi\.thinkingXhigh"\]\nforeground = "#c792ea"/);
-  assert.match(imported, /prompt_wash = false/);
+  assert.match(imported, /^profile = "pi"$/m, 'imported colors use the shared Pi presentation profile');
   assert.equal(readFileSync(join(output, 'octet-config.toml'), 'utf8').split('\n').filter(line => !line.startsWith('#') && line).join('\n'), 'theme = "pi-ghostty-dark"');
   const bridge = JSON.parse(readFileSync(join(output, 'bridge.json'), 'utf8'));
   assert.equal(bridge.pi_theme.name, 'ghostty-dark');

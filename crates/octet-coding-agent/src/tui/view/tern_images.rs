@@ -396,9 +396,9 @@ mod tests {
                 let TranscriptBlock::Tool(panel) = &mut shell.transcript[index] else {
                     panic!("tool fixture")
                 };
-                for image in &mut panel.images {
-                    *image = ToolResultImage::Placeholder(ToolImagePlaceholder::Invalid);
-                }
+                panel
+                    .images
+                    .fill(ToolResultImage::Placeholder(ToolImagePlaceholder::Invalid));
             }
             images.prepare(&shell, supported, true).unwrap();
             images.upload(&mut client).unwrap();

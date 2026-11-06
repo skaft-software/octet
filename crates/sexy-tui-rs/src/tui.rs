@@ -430,6 +430,15 @@ impl<'a> TUI<'a> {
         self.terminal.write(&format!("\x1b]2;{clean}\x07"));
     }
 
+    pub fn set_program_status(
+        &mut self,
+        status: crate::program_status::ProgramStatus,
+        app: &str,
+        tern: bool,
+    ) {
+        self.terminal.set_program_status(status, app, tern);
+    }
+
     /// Emit one desktop-notification intent through the terminal owned by this
     /// renderer. Support and delivery are terminal-dependent; plain output and
     /// invalid OSC payloads are refused, never written as raw extension bytes.

@@ -258,7 +258,7 @@ impl SessionCatalog {
         })
     }
 
-    #[cfg(test)]
+    /// Every cached row in one query; a full listing reads them all anyway.
     pub(crate) fn load(&self) -> anyhow::Result<HashMap<String, CachedSession>> {
         self.load_selected(None)
     }

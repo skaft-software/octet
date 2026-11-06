@@ -64,6 +64,12 @@ oversized requests dominate latency and cost. A zero or unset
 the model-specific Codex route cap. A smaller explicit ceiling stays a separate
 setting.
 
+The public [Codex model guide](https://developers.openai.com/codex/models) lists
+a 500K default for GPT-6.1 Sol in Codex/Work. This is distinct from octet's 272K
+working policy and the separately discovered maximum. It does not automatically
+raise octet's cap or establish an account entitlement; the existing acknowledged,
+entitlement-checked [override](codex-context.md) remains opt-in.
+
 </details>
 
 ## Settings
@@ -105,7 +111,14 @@ the compaction reason before blaming the model for a low percentage.
 
 Local compaction writes a bounded summary only at a safe, completed-turn
 boundary. It keeps a recent tail and the active skill state, and doesn't rewrite
-history. An empty, whitespace-only or over-128KiB handoff (including the
+history. During one automatic capacity check, local compaction retries only at
+distinct boundaries and only while the effective request gets smaller. An
+unchanged or larger request stops that pass: work continues above a configured
+soft threshold if the hard context budget still fits, otherwise octet reports
+the context limit without dispatching an oversized request. This bounds repeated
+summary pauses; compaction itself still waits for the summary provider.
+
+An empty, whitespace-only or over-128KiB handoff (including the
 host-derived file footer) fails closed before a checkpoint is written, and octet
 never truncates a summary or file evidence. Resume rebuilds context from the
 selected parent chain and its compaction boundary. The compact footer shows the

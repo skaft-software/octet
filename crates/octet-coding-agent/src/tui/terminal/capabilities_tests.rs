@@ -17,6 +17,8 @@ fn probe(term: Option<&str>) -> CapabilityProbe {
         stdout_tty: true,
         term: term.map(str::to_owned),
         term_program: None,
+        rex: false,
+        multiplexed: false,
         colorterm: None,
         locale: Some("en_US.UTF-8".into()),
         no_color: false,
@@ -52,12 +54,162 @@ fn redirected_dumb_and_unknown_terminals_are_plain() {
 }
 
 #[test]
+fn rex_environment_selects_verified_capabilities_without_changing_other_terminals() {
+    let mut rex = probe(Some("xterm-256color"));
+    rex.term_program = Some("rex".into());
+    rex.colorterm = Some("truecolor".into());
+    rex.rex = true;
+    let caps = TerminalCapabilities::from_probe(ColorMode::Auto, rex.clone());
+    assert!(caps.interactive);
+    assert_eq!(caps.color, ColorDepth::TrueColor);
+    assert!(caps.italics);
+    // OSC 8 support has not been verified for Rex.
+    assert!(!caps.hyperlinks);
+    assert!(sexy_terminal_capabilities(caps, (80, 24)).kitty_graphics);
+
+    let ordinary = TerminalCapabilities::from_probe(ColorMode::Auto, probe(Some("xterm-256color")));
+    assert!(!ordinary.italics);
+    assert!(!ordinary.hyperlinks);
+    assert!(!ordinary.rex);
+
+    for term in ["tmux-256color", "screen-256color"] {
+        let mut multiplexed = rex.clone();
+        multiplexed.term = Some(term.into());
+        let caps = TerminalCapabilities::from_probe(ColorMode::Auto, multiplexed);
+        assert!(!caps.rex, "{term}");
+        assert!(!caps.italics, "{term}");
+    }
+    let mut multiplexed_with_xterm = rex.clone();
+    multiplexed_with_xterm.multiplexed = true;
+    assert!(!TerminalCapabilities::from_probe(ColorMode::Auto, multiplexed_with_xterm).rex);
+    let mut other_terminal = rex.clone();
+    other_terminal.term_program = Some("another-terminal".into());
+    assert!(!TerminalCapabilities::from_probe(ColorMode::Auto, other_terminal).rex);
+    for boundary in ["stdin", "stdout", "plain"] {
+        let mut unavailable = rex.clone();
+        match boundary {
+            "stdin" => unavailable.stdin_tty = false,
+            "stdout" => unavailable.stdout_tty = false,
+            _ => unavailable.explicit_plain = true,
+        }
+        let caps = TerminalCapabilities::from_probe(ColorMode::Auto, unavailable);
+        assert!(!caps.rex, "{boundary}");
+        assert!(!sexy_terminal_capabilities(caps, (80, 24)).kitty_graphics);
+    }
+}
+
+#[test]
+fn rex_capabilities_plan_png_as_kitty_while_plain_mode_falls_back() {
+    use sexy_tui_rs::images::{
+        ImageCapabilities, ImageCapabilityOverrides, ImageFallbackReason, ImageId, ImageLimits,
+        ImagePlanner, ImageProtocol, ImageViewport, TerminalImage,
+    };
+
+    let mut rex = probe(Some("xterm-256color"));
+    rex.term_program = Some("rex".into());
+    rex.rex = true;
+    let caps = TerminalCapabilities::from_probe(ColorMode::Auto, rex);
+    let renderer = sexy_terminal_capabilities(caps, (80, 24));
+    let image_caps = ImageCapabilities::detect(&renderer, &ImageCapabilityOverrides::default());
+    assert_eq!(image_caps.protocol(), Some(ImageProtocol::Kitty));
+    let png = TerminalImage::from_slice(include_bytes!(
+        "../../../tests/fixtures/export_html/one-pixel.png"
+    ))
+    .unwrap();
+    let viewport = ImageViewport::new(80, 24, None).unwrap();
+    let id = ImageId::new(31).unwrap();
+    let plan = ImagePlanner::new(image_caps, ImageLimits::default())
+        .plan_place(id, &png, viewport)
+        .unwrap();
+    let mut bytes = Vec::new();
+    plan.write_protocol_to(&mut bytes).unwrap();
+    assert!(bytes.starts_with(b"\x1b_G"));
+    assert!(!plan.semantic_copy_text().contains('\u{1b}'));
+
+    let plain_caps = ImageCapabilities::detect(
+        &SexyTerminalCapabilities::plain(),
+        &ImageCapabilityOverrides::default(),
+    );
+    let fallback = ImagePlanner::new(plain_caps, ImageLimits::default())
+        .plan_place(id, &png, viewport)
+        .unwrap();
+    assert_eq!(
+        fallback.fallback_reason(),
+        Some(ImageFallbackReason::UnsupportedTerminal)
+    );
+    assert!(fallback.terminal_command().is_none());
+    assert!(fallback.semantic_copy_text().starts_with("[image: PNG"));
+}
+
+#[test]
 fn apple_terminal_supports_italics_without_hyperlinks() {
     let mut apple = probe(Some("xterm-256color"));
     apple.term_program = Some("Apple_Terminal".into());
     let caps = TerminalCapabilities::from_probe(ColorMode::Auto, apple);
     assert!(caps.italics);
     assert!(!caps.hyperlinks);
+}
+
+#[test]
+fn tern_stencil_term_reaches_the_interactive_renderer_on_unix_and_windows() {
+    // Current Tern exports its own terminfo name, not xterm-256color. The
+    // frontend gate runs before native TSP negotiation (and also governs the
+    // ANSI fallback selected by --tern off).
+    for windows in [false, true] {
+        let mut tern = if windows {
+            windows_probe(false)
+        } else {
+            probe(None)
+        };
+        tern.term = Some("stencil-term".into());
+        tern.term_program = Some("tern".into());
+        tern.colorterm = Some("truecolor".into());
+        let caps = TerminalCapabilities::from_probe(ColorMode::Auto, tern);
+        assert!(caps.interactive, "windows={windows}");
+        assert!(caps.unicode, "windows={windows}");
+        assert_eq!(caps.color, ColorDepth::TrueColor);
+        let renderer = sexy_terminal_capabilities(caps, (100, 30));
+        assert!(renderer.interactive);
+        assert!(!renderer.plain);
+        assert!(renderer.cursor_addressing && renderer.line_clearing);
+    }
+}
+
+#[test]
+fn tern_identifier_does_not_override_plain_or_console_boundaries() {
+    for windows in [false, true] {
+        let mut tern = if windows {
+            windows_probe(false)
+        } else {
+            probe(None)
+        };
+        tern.term = Some("stencil-term".into());
+        tern.term_program = Some("tern".into());
+        tern.colorterm = Some("truecolor".into());
+        for stream in ["stdin", "stdout", "plain"] {
+            let mut p = tern.clone();
+            match stream {
+                "stdin" => p.stdin_tty = false,
+                "stdout" => p.stdout_tty = false,
+                _ => p.explicit_plain = true,
+            }
+            assert!(!TerminalCapabilities::from_probe(ColorMode::Always, p).interactive);
+        }
+        tern.no_color = true;
+        let caps = TerminalCapabilities::from_probe(ColorMode::Always, tern.clone());
+        assert!(caps.interactive);
+        assert_eq!(caps.color, ColorDepth::None);
+        tern.term = Some("dumb".into());
+        assert!(!TerminalCapabilities::from_probe(ColorMode::Always, tern.clone()).interactive);
+        if let Some(console) = tern.windows.as_mut() {
+            tern.term = Some("stencil-term".into());
+            console.output_vt = false;
+            assert!(!TerminalCapabilities::from_probe(ColorMode::Always, tern).interactive);
+        }
+    }
+    for term in ["stencil", "stencil-terminal", "stencil-termunknown"] {
+        assert!(!TerminalCapabilities::from_probe(ColorMode::Auto, probe(Some(term))).interactive);
+    }
 }
 
 #[test]
@@ -139,6 +291,8 @@ fn windows_probe(windows_terminal: bool) -> CapabilityProbe {
         stdout_tty: true,
         term: None,
         term_program: None,
+        rex: false,
+        multiplexed: false,
         colorterm: None,
         locale: None,
         no_color: false,

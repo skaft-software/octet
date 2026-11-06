@@ -1820,6 +1820,9 @@ pub(crate) struct ShellState {
     /// Ephemeral tool-owned prompt rendered in place of the editor. Secret
     /// keystrokes never enter `editor` or any transcript/session structure.
     pub(crate) tool_input_prompt: Option<String>,
+    terminal_permission_pending: bool,
+    terminal_operation_status: Option<sexy_tui_rs::program_status::ProgramStatus>,
+    terminal_operation_generation: u64,
     /// Identity of one exclusive request; edits never change this fence.
     pub(crate) tool_input_epoch: u64,
     /// Ordinary temporary input only. Secrets remain in the picker driver.
@@ -1894,6 +1897,9 @@ pub(crate) struct ShellState {
     /// movement clears any prior selection; the first drag event promotes
     /// this anchor into `transcript_selection`.
     pending_selection_anchor: Option<TranscriptPosition>,
+    /// Last press/drag cell. A stationary release keeps the semantic endpoint
+    /// even when intervening layout moves different content under that cell.
+    selection_pointer_cell: Option<(u16, u16)>,
     /// A web link under a stationary press; dragging or a layout change revokes it.
     pending_link_press: Option<TranscriptLinkPress>,
     /// A press whose frame was on screen before its geometry was recorded.
@@ -2249,6 +2255,9 @@ impl ShellState {
             composer_preferred_column: Default::default(),
             tool_input_revision: Default::default(),
             tool_input_prompt: Default::default(),
+            terminal_permission_pending: false,
+            terminal_operation_status: None,
+            terminal_operation_generation: 0,
             tool_input_epoch: Default::default(),
             tool_input_editor: Default::default(),
             tool_input_overflowed: Default::default(),
@@ -2285,6 +2294,7 @@ impl ShellState {
             new_output_count: Default::default(),
             transcript_selection: Default::default(),
             pending_selection_anchor: Default::default(),
+            selection_pointer_cell: Default::default(),
             pending_link_press: Default::default(),
             deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
@@ -2790,6 +2800,7 @@ impl ShellState {
             ) || current_workers.contains(&activity.id)
         });
         let is_active = subagent_activity_is_active(&view);
+        let repeated_failure = self.subagent_activity.as_ref() == Some(&view);
         // A finished session roster is inspectable, not a fresh event. Only
         // a previously active row may settle (or a fresh failed spawn with no
         // worker to have emitted an earlier running snapshot).
@@ -2812,6 +2823,7 @@ impl ShellState {
             }
         } else if is_active
             || (!was_active
+                && !repeated_failure
                 && summary.total() > 0
                 && current_workers.is_empty()
                 && self
@@ -3576,7 +3588,7 @@ impl ShellState {
     /// on the label makes `Working` and `Thinking` one continuous sweep, while
     /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        !self.theme.is_pi_theme() && reasoning.is_shimmering_activity()
+        self.theme.activity_shimmer_enabled() && reasoning.is_shimmering_activity()
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -3866,7 +3878,7 @@ fn render_user_prompt(
     theme: &OctetTheme,
     width: u16,
 ) -> Vec<String> {
-    if theme.is_pi_theme() {
+    if !theme.surface_for_width("user", width).prompt_marker {
         let document = parse_markdown(&sanitize_for_terminal(text));
         let lines = renderer
             .render(&document, width)
@@ -3949,19 +3961,78 @@ fn render_shell_output(
     width: u16,
     verbose: bool,
     output_indent: &str,
-) -> Vec<String> {
+) -> (Vec<String>, transcript_cache::ShellOutputSource) {
     let normalized = normalize_carriage_return_progress(&shell.output);
     let safe = sanitize_for_terminal(&normalized);
     let mut output_rows = Vec::new();
-    for line in safe.lines().filter(|line| !line.trim().is_empty()) {
-        output_rows.extend(wrap_hanging(
-            &understated_tool_output(theme, line),
+    let mut link_budget = 64 * 1024;
+    let content_width = usize::from(width)
+        .saturating_sub(visible_width(output_indent))
+        .max(1);
+    let mut source_offsets = Vec::new();
+    let mut source_cursor = 0;
+    for chunk in safe.split_inclusive('\n') {
+        let line_start = source_cursor;
+        source_cursor += chunk.len();
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let linked: String = line
+            .split_inclusive(char::is_whitespace)
+            .map(|part| {
+                let target = part.trim_end();
+                let encoded = (theme.capabilities().interactive && target.len() <= 2048)
+                    .then(|| sexy_tui_rs::SafeUrl::parse(target))
+                    .flatten()
+                    .filter(|url| url.as_str().len() <= 2048);
+                let link_bytes = encoded.as_ref().map_or(0, |url| {
+                    (wrap_text_with_ansi(target, content_width).len() + 1)
+                        * (url.as_str().len() + 16)
+                });
+                if encoded.is_some()
+                    && link_bytes <= link_budget
+                    && url::Url::parse(target)
+                        .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+                {
+                    link_budget -= link_bytes;
+                    format!(
+                        "{}{}",
+                        sexy_tui_rs::safe_hyperlink(
+                            target,
+                            target,
+                            theme.capabilities().interactive,
+                            !theme.unicode()
+                        ),
+                        &part[target.len()..]
+                    )
+                } else {
+                    part.to_owned()
+                }
+            })
+            .collect();
+        let rows = wrap_hanging(
+            &understated_tool_output(theme, &linked),
             output_indent,
             output_indent,
             width,
-        ));
+        );
+        let mut cursor = 0;
+        for row in &rows {
+            let plain = strip_terminal_sequences(row);
+            let fragment = plain.strip_prefix(output_indent).unwrap_or(&plain);
+            if let Some(relative) = line[cursor..].find(fragment) {
+                cursor += relative;
+                source_offsets.push(line_start + cursor);
+                cursor += fragment.len();
+            } else {
+                source_offsets.push(line_start + cursor);
+            }
+        }
+        output_rows.extend(rows);
     }
-    if output_rows.is_empty() {
+    let placeholder = output_rows.is_empty();
+    if placeholder {
         let placeholder = if shell.running {
             "(waiting for output)"
         } else {
@@ -3975,12 +4046,25 @@ fn render_shell_output(
         ));
     }
 
+    let hidden = if !verbose && output_rows.len() > COMPACT_EXEC_OUTPUT_ROWS {
+        output_rows.len() - (COMPACT_EXEC_OUTPUT_ROWS - 1)
+    } else {
+        0
+    };
+    let mut source = transcript_cache::ShellOutputSource {
+        start: source_offsets.get(hidden).copied().unwrap_or(safe.len()),
+        metadata_rows: if placeholder {
+            output_rows.len()
+        } else {
+            usize::from(hidden > 0)
+        },
+    };
     if verbose {
-        return output_rows;
+        return (output_rows, source);
     }
 
     let ellipsis = if theme.unicode() { "…" } else { "..." };
-    bounded_tail_rows(
+    let rows = bounded_tail_rows(
         output_rows,
         COMPACT_EXEC_OUTPUT_ROWS,
         false,
@@ -3997,7 +4081,11 @@ fn render_shell_output(
                 width,
             )
         },
-    )
+    );
+    if placeholder {
+        source.metadata_rows = rows.len();
+    }
+    (rows, source)
 }
 
 #[cfg(test)]
@@ -4698,6 +4786,7 @@ impl InteractiveShell {
     /// waiting for a provider event.
     pub fn begin_run(&mut self, provider: &str) -> RunId {
         let mut state = self.state.borrow_mut();
+        state.terminal_operation_status = None;
         state.run_label.clear();
         state.clear_turn_telemetry();
         // The session roster and its committed-cost watermarks outlive a run.
@@ -5660,6 +5749,22 @@ impl InteractiveShell {
         }
     }
 
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        use octet_agent::extension_process::ExtensionMessageDelivery as Delivery;
+        let state = self.state.borrow();
+        !state.follow_up_queue.is_empty()
+            || state.steering_queue.iter().any(|queued| {
+                queued
+                    .recall
+                    .as_ref()
+                    .is_none_or(octet_agent::SteeringReceipt::is_pending)
+            })
+            || state
+                .extension_messages
+                .iter()
+                .any(|message| message.delivery != Delivery::NextTurn && !message.context_only)
+    }
+
     /// Number of follow-up messages queued but not yet admitted to the Agent.
     /// This is the exact queue `session/send_user_message` feeds.
     pub fn queued_follow_up_len(&self) -> usize {
@@ -6209,10 +6314,9 @@ impl InteractiveShell {
         false
     }
 
-    /// Replace the host-owned delegation telemetry for the active root run.
-    /// Unlike generic extension presentation, this path is fed directly by
-    /// `AgentEvent::DelegationUpdated` and never polls a slash command.
-    #[allow(dead_code)]
+    /// Replace the host-owned delegation telemetry for the root session.
+    /// Active runs deliver the same snapshots through
+    /// `AgentEvent::DelegationUpdated`; idle updates never poll a slash command.
     pub fn set_subagent_telemetry(
         &mut self,
         snapshot: Option<&octet_agent::DelegationTelemetrySnapshot>,
@@ -6410,6 +6514,12 @@ impl InteractiveShell {
 
     pub fn set_run_label(&mut self, label: &str) {
         let mut state = self.state.borrow_mut();
+        if !state
+            .terminal_operation_status
+            .is_some_and(sexy_tui_rs::program_status::ProgramStatus::is_transient)
+        {
+            state.terminal_operation_status = None;
+        }
         let was_compacting = state.run_label == "compacting";
         let run_label = if label == "idle" || label.starts_with("run:") {
             String::new()
@@ -7282,6 +7392,7 @@ impl InteractiveShell {
             .then(|| self.transcript_link_at_screen_cell(row, col))
             .flatten();
         let mut state = self.state.borrow_mut();
+        state.selection_pointer_cell = Some((row, col));
         state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
@@ -7339,6 +7450,7 @@ impl InteractiveShell {
         //
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
+        state.selection_pointer_cell = Some((row, col));
         if state
             .pending_link_press
             .as_ref()
@@ -7418,6 +7530,7 @@ impl InteractiveShell {
     fn end_transcript_selection_with(&mut self, row: u16, col: u16, open: impl FnOnce(&str)) {
         let mut state = self.state.borrow_mut();
         let pressed_link = state.pending_link_press.take();
+        let last_cell = state.selection_pointer_cell.take();
         Self::resolve_deferred_pointer_press(&mut state);
         state.deferred_pointer_press = None;
         if !state.selection_dragging && state.pending_selection_anchor.is_none() {
@@ -7430,10 +7543,13 @@ impl InteractiveShell {
         // composer, and footer never enter the payload. The retained buffer
         // remains available even when OSC 52 transport is unavailable.
         //
-        // Release coordinates are also movement evidence: terminals can coalesce
-        // all intermediate motion events. Promote the pending anchor before
-        // deciding whether this was a stationary click.
-        self.extend_transcript_selection(row, col);
+        // Terminals can coalesce motion into a displaced release. A release
+        // at the last observed cell is not new motion: remapping it after
+        // reflow would replace the semantic endpoint the reader highlighted.
+        if last_cell != Some((row, col)) {
+            self.extend_transcript_selection(row, col);
+            self.state.borrow_mut().selection_pointer_cell = None;
+        }
         let had_pending = self.state.borrow().pending_selection_anchor.is_some();
         if had_pending {
             // Clear any previous selection and discard the pending anchor.
@@ -8942,6 +9058,7 @@ impl InteractiveShell {
     /// activity marker supplies its restrained pulse.
     /// Returns the block id so the caller can update and finalize it.
     pub fn append_shell_in_progress(&mut self, command: String) -> String {
+        self.begin_terminal_operation();
         let mut state = self.state.borrow_mut();
         state.event_dot_visible = true;
         let id = format!("shell-{}", state.transcript.len());
@@ -8986,6 +9103,11 @@ impl InteractiveShell {
                 shell.output = output;
                 shell.exit_code = exit_code;
             }
+            state.terminal_operation_status = Some(if exit_code == 0 {
+                sexy_tui_rs::program_status::ProgramStatus::Done
+            } else {
+                sexy_tui_rs::program_status::ProgramStatus::Error
+            });
             state.unregister_active_event(index);
             state.touch_block(index);
         }
@@ -9197,6 +9319,8 @@ impl InteractiveShell {
         state.run_cost_microdollars = checkpoint_cost.unwrap_or_default();
         state.run_cost_available = checkpoint_cost.is_some();
         state.run.clear();
+        state.terminal_operation_status = None;
+        state.terminal_permission_pending = false;
         // Session hydration may reuse this shell, so clear the roster pointer;
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
@@ -9386,6 +9510,7 @@ mod ordinary_surface;
 mod outcome_render;
 mod output_window;
 mod panel_render;
+mod program_status;
 mod reasoning_render;
 mod remote_ui;
 mod renderer_geometry;

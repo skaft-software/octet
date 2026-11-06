@@ -1,0 +1,25 @@
+From 5c1b79a4530b7af887e25e2e45c522006efa5b1f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 08:14:12 +0000
+Subject: [PATCH 7/8] eval: jank fixture octet model declares reasoning
+
+---
+ scripts/pi-eval/jank.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 63cf768f..3ad24581 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -235,7 +235,7 @@ def write_provider_config(home: Path, port: int) -> None:
+     credentials.mkdir(parents=True, exist_ok=True)
+     path = credentials / "custom.json"
+     path.write_text(json.dumps({"base_url": f"http://127.0.0.1:{port}/v1/", "api_key": "", "api_name": MODEL_ID, "headers": [], "auto_discover": False,
+-                                "models": [{"api_name": MODEL_ID, "display_name": MODEL_NAME, "context_window": CONTEXT, "max_output_tokens": 4096}]}))
++                                "models": [{"api_name": MODEL_ID, "display_name": MODEL_NAME, "context_window": CONTEXT, "max_output_tokens": 4096, "reasoning": True, "reasoning_configurable": True}]}))
+     path.chmod(0o600)
+ 
+ 
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
 # Executable extensions
 
 Extensions run as subprocesses over JSON-RPC. The optional Pi adapter implements
-the reviewed subset of **Pi 1.0.2's public extension API** that the
+the reviewed subset of **Pi 1.4's public extension API** that the
 [27-row ledger](pi-extension-api.md) records; Pi defines that API's semantics,
 and rows the adapter does not implement are marked partial or missing there. The
 adapter is not a general Pi runtime. Third-party package internals, the Pi CLI
@@ -48,9 +48,10 @@ shape). The rules are under [CLI flags](#api-04-cli-flags).
 This guide mixes two kinds of extension work. **First-party** material — the
 octet SDK, generated bindings and the shipped bundles listed in
 `extensions/release-catalog.txt` — is built
-and tested with octet. **Community compatibility** material — the optional Pi
-adapter, retained legacy API examples and generic single-file helpers — is
-third-party work that octet loads or exports without owning it.
+and tested with octet. **Community compatibility** material — the Pi factories loaded by the optional
+first-party adapter, retained legacy API examples and generic single-file
+helpers — has its own compatibility boundaries. The 0.10.0 release catalog
+includes the Pi adapter; see [Pi compatibility](pi-compatibility.md) for setup.
 
 Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
 for single-file Python/JS/TS tools, narrow Rust/C/C++ helpers, reviewed local
@@ -59,7 +60,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for **octet 0.9.6**: the
+only the contributions you need. It's a source recipe for the **octet 0.10.0 source SDK**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact
@@ -208,11 +209,16 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, SDK source packages and five shipped executable
-bundles have distribution version **0.9.6**. That doesn't select an extension
-API or publish SDK registries. Catalog installation needs version-matched
-published assets: see [installation](installation.md) and the [release
-notes](releases/v0.9.6.md).
+names or imports. The local host, Python/TypeScript source SDKs and six candidate
+executable bundles have distribution version **0.10.0** (the independent Rust
+SDK remains 0.8.2). That doesn't select an extension API or publish SDK registries.
+Use reviewed source or an explicit local archive; public 0.10.0 artifacts do not
+exist. See [installation](installation.md) and the [RC notes](releases/v0.10.0.md).
+
+Installation and discovery of Pi are inert. Enabling the stock bridge automatically
+mirrors/runs enabled Pi factories with OS permissions. It does not silently opt
+into native credential disclosure or disable independent native TOML appearance.
+The [27-row ledger](pi-extension-api.md) remains the partial compatibility contract.
 
 Declare the entrypoint and the tools you actually supply. Return the complete
 tool and command catalogs and the selected protocol features from
@@ -296,6 +302,30 @@ See the [wire methods](extensions/PROTOCOL-REFERENCE.md#226-native-resource-life
 Implementation is not a full conformance or Pi compatibility claim; actual
 SPICE execution additionally requires `ngspice`. These services do not sandbox
 a trusted subprocess's operating-system access.
+
+### Run-scoped system prompt reads (API `0.4`)
+
+`run_system_prompt_read_v1` requires `system_prompt_read` and is offered only
+with `capabilities.system_prompt = true`. At run admission the host binds the
+Agent's current composed system prompt to its exact session owner, process
+instance and generation. This immutable run value remains readable while the
+run mutably borrows the Agent; no frontend event pump or prior host snapshot
+supplies the text.
+
+The host sends `context/system_prompt_scope` with `{resource_owner, scope}` and
+adds `context.system_prompt_scope` to subsequent owner-bound requests during
+that run. Read with `context/system_prompt` using
+`{parent_request_id, resource_owner, scope}`; the result is `{text}`. A request
+callback keeps its actual live parent. A read-only lifecycle observer uses
+`parent_request_id: 0`, its genuine issued owner and the native run scope;
+this does not create request, mutation or session-leaf authority.
+
+Cancellation, stream drop, completion, owner retirement and process replacement
+invalidate the scope. A stale, foreign or unnegotiated scope is refused, never
+rerouted to a newer run or the idle frontend. Text is limited to 262,144 UTF-8
+bytes and may not contain NUL; empty text is valid and over-bound text is never
+truncated. Without a scope, the existing live frontend disclosure service is
+unchanged.
 
 ### Tool prompt metadata (API `0.4`)
 

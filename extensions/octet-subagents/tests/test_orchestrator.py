@@ -334,6 +334,107 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIn(("new-observation", "done"), results)
         self.assertEqual(self.orchestrator.status(self.client, self.owner, {"target": agent_id})["worker"]["state"], "done")
 
+    def test_live_status_progresses_during_wait_without_replaying_its_stale_snapshot(self):
+        for cancel_wait in (False, True):
+            with self.subTest(cancel_wait=cancel_wait):
+                agent_id = self.spawn("wait-cancelled" if cancel_wait else "wait-completed")["worker"]["id"]
+                self.host.start(agent_id)
+                entered = threading.Event()
+                release = threading.Event()
+                status_done = threading.Event()
+                cancellation = FakeCancellation()
+                results = {}
+                errors = []
+                wait_slices = []
+                delegate = self.client
+
+                class HeldWaitClient:
+                    def list_agents(self):
+                        return delegate.list_agents()
+
+                    def wait_agents(self, *, timeout_ms):
+                        wait_slices.append(timeout_ms)
+                        snapshot = delegate.list_agents()
+                        entered.set()
+                        if not release.wait(timeout=10):
+                            raise AssertionError("test did not release the held wait")
+                        return {"timed_out": True, "snapshot": snapshot}
+
+                def wait():
+                    try:
+                        results["wait"] = self.orchestrator.wait(
+                            HeldWaitClient(), self.owner,
+                            {"target": agent_id, "timeout_seconds": 10}, cancellation,
+                        )
+                    except BaseException as error:
+                        errors.append(("wait", error))
+
+                def status():
+                    try:
+                        results["status"] = self.orchestrator.status(
+                            delegate, self.owner, {"target": agent_id},
+                        )
+                    except BaseException as error:
+                        errors.append(("status", error))
+                    finally:
+                        status_done.set()
+
+                waiter = threading.Thread(target=wait, daemon=True)
+                observer = threading.Thread(target=status, daemon=True)
+                waiter.start()
+                try:
+                    self.assertTrue(entered.wait(timeout=3))
+                    self.host.complete(agent_id, "Finished while the wait response was held.")
+                    observer.start()
+                    # The wait cannot finish before release. Status must make
+                    # progress independently, not merely fit a timing threshold.
+                    self.assertTrue(status_done.wait(timeout=3), "live status blocked behind wait")
+                    self.assertTrue(waiter.is_alive())
+                    self.assertFalse(release.is_set())
+                    self.assertEqual(results["status"]["worker"]["state"], "done")
+                    terminal_revision = self.snapshots[-1]["revision"]
+                    if cancel_wait:
+                        cancellation.cancel()
+                finally:
+                    release.set()
+                    waiter.join(timeout=3)
+                    if observer.ident is not None:
+                        observer.join(timeout=3)
+                self.assertFalse(waiter.is_alive())
+                self.assertFalse(observer.is_alive())
+                self.assertEqual(wait_slices, [1000])
+                if cancel_wait:
+                    self.assertEqual(len(errors), 1, errors)
+                    self.assertEqual(errors[0][0], "wait")
+                    self.assertIsInstance(errors[0][1], CancelledError)
+                else:
+                    self.assertEqual(errors, [])
+                    self.assertEqual(results["wait"]["worker"]["state"], "done")
+                    self.assertFalse(results["wait"]["wait_timed_out"])
+                newer = [snapshot for snapshot in self.snapshots
+                         if snapshot["revision"] > terminal_revision]
+                self.assertTrue(newer)
+                for snapshot in newer:
+                    node = next(node for node in snapshot["collection"]["nodes"]
+                                if node["id"] == "worker:" + agent_id)
+                    self.assertEqual(node["state"], "succeeded")
+                revisions = [snapshot["revision"] for snapshot in self.snapshots]
+                self.assertEqual(revisions, sorted(set(revisions)))
+
+    def test_wait_validates_the_fresh_list_after_its_wakeup(self):
+        agent_id = self.spawn()["worker"]["id"]
+        self.host.start(agent_id)
+        snapshot = self.client.list_agents()
+        with mock.patch.object(self.client, "list_agents", side_effect=[snapshot, {"agents": None}]):
+            with mock.patch.object(self.client, "wait_agents", return_value={
+                "timed_out": True, "snapshot": snapshot,
+            }) as waited:
+                with self.assertRaises(SubagentError) as raised:
+                    self.orchestrator.wait(self.client, self.owner, {"target": agent_id})
+        self.assertEqual(raised.exception.code, "host_state_invalid")
+        waited.assert_called_once_with(timeout_ms=1000)
+        self.assertEqual(self.host.agents[agent_id].status["state"], "running")
+
     def test_concurrency_is_enforced_and_children_inherit_no_token_ceiling(self):
         for number in range(1, 9):
             self.spawn("worker-%02d" % number)

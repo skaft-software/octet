@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './lib/runtime-prerequisites.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('.', import.meta.url));

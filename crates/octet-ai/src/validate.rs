@@ -608,7 +608,9 @@ pub(crate) fn validate_request(
                                         Protocol::MistralConversations => false,
                                         // Pi's `ImageContent` block carries inline bytes only;
                                         // a URL or provider reference has no mapping.
-                                        Protocol::PiMessages => {
+                                        // The extension's own stream receives Pi's inline
+                                        // `ImageContent`, as Pi Messages does.
+                                        Protocol::ExtensionStream | Protocol::PiMessages => {
                                             matches!(&image.source, ImageSource::Inline(_))
                                         }
                                     },
@@ -706,6 +708,9 @@ pub(crate) fn validate_request(
                                         Protocol::PiMessages,
                                         crate::types::ReasoningStateKind::AnthropicSignature { .. }
                                             | crate::types::ReasoningStateKind::AnthropicRedacted { .. }
+                                    ) | (
+                                        Protocol::OpenAiChat,
+                                        crate::types::ReasoningStateKind::ChatReasoningDetails { .. }
                                     )
                                 );
                                 let empty_bedrock_signature = protocol == Protocol::BedrockConverse

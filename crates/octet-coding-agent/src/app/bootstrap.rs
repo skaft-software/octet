@@ -33,7 +33,7 @@ use crate::codex_context::{
     CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
     CODEX_MAX_OUTPUT_TOKENS,
 };
-use crate::config::{CompactionMode, Config, ResumeSelector};
+use crate::config::{CompactionMode, Config, Mode, ResumeSelector};
 use crate::extensions::{
     provider_preflight_config, ExecutableExtensions, ExtensionProviderRuntime,
     SUBAGENTS_EXTENSION_NAME,
@@ -171,24 +171,48 @@ impl Bootstrap {
             .context("could not create temporary extension-provider bootstrap session")?;
         let session = Session::create(temporary.path().join("provider-bootstrap.jsonl"))
             .context("could not create temporary extension-provider bootstrap session")?;
-        let model = extension_provider_bootstrap_model(&self.catalog);
-        let reasoning = self
-            .config
-            .reasoning
-            .clone()
-            .unwrap_or_else(|| default_reasoning_for_model(&model));
-        let (host, mut extensions) = configured_extensions_with_runtime_manager(
-            &config,
-            &session,
-            &model,
-            &reasoning,
-            &self.sessions,
-            None,
-            self.provider_runtime.clone(),
-            super::resource_paths::ResourceConsumerCapability::Disabled,
-            "startup",
-            crate::extensions::ExtensionStartupTiming::Synchronous,
-        )?;
+        let (host, mut extensions) = if matches!(self.config.mode, Mode::Interactive)
+            && self.catalog.models().next().is_none()
+        {
+            let mut host = ExtensionHost::new();
+            host.load(&CoreTools);
+            let tool_config = config.clone();
+            host.set_tool_policy(move |name| tool_config.tool_available(name));
+            host.finalize_tool_surface();
+            let extensions = ExecutableExtensions::discover_and_start_for_selection(
+                &config,
+                &session,
+                None,
+                &self.sessions,
+                &mut host,
+                None,
+                self.provider_runtime.clone(),
+                super::resource_paths::ResourceConsumerCapability::Disabled,
+                None,
+                "startup",
+                crate::extensions::ExtensionStartupTiming::Synchronous,
+            );
+            (host, extensions)
+        } else {
+            let model = extension_provider_bootstrap_model(&self.catalog);
+            let reasoning = self
+                .config
+                .reasoning
+                .clone()
+                .unwrap_or_else(|| default_reasoning_for_model(&model));
+            configured_extensions_with_runtime_manager(
+                &config,
+                &session,
+                &model,
+                &reasoning,
+                &self.sessions,
+                None,
+                self.provider_runtime.clone(),
+                super::resource_paths::ResourceConsumerCapability::Disabled,
+                "startup",
+                crate::extensions::ExtensionStartupTiming::Synchronous,
+            )?
+        };
         // Populate a throwaway copy now so callers can validate/select the
         // projected models. `build_app` repeats this against its owned catalog.
         let mut catalog = self.catalog.clone();
@@ -218,6 +242,16 @@ impl Bootstrap {
 
     pub(crate) fn take_prepared_session(&self) -> Option<Session> {
         self.prepared_session.borrow_mut().take()
+    }
+
+    pub(crate) fn prepare_modeless_extension_runtime(&mut self) -> ExtensionProviderRuntime {
+        if let Some((_, mut extensions)) = self.prestarted_extensions.get_mut().take() {
+            extensions.clear_provider_catalog(&mut self.catalog, &self.client);
+            extensions.shutdown_blocking();
+        }
+        self.provider_runtime
+            .bind_native_provider_catalog(&self.catalog, &self.client);
+        self.provider_runtime.clone()
     }
 
     fn enter_modeless_mode(&self) {
@@ -290,7 +324,7 @@ pub enum SessionSelection {
 }
 
 impl SessionSelection {
-    fn session_start_reason(&self, initial_launch: bool) -> &'static str {
+    pub(crate) fn session_start_reason(&self, initial_launch: bool) -> &'static str {
         match self {
             Self::CreateNew(_) if initial_launch => "startup",
             Self::CreateNew(_) => "new",
@@ -1602,9 +1636,9 @@ fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
 }
 
 const MODALITY_FIELDS: &[&str] = &[
-    "architecture",
+    "architecture/input_modalities",
     "input_modalities",
-    "modalities",
+    "modalities/input",
     "vision",
     "audio",
 ];
@@ -2077,10 +2111,27 @@ struct DiscoveredApiModel {
     display_name: Option<String>,
     vision: bool,
     audio: bool,
+    output_modalities: ModalitySet,
     /// The inventory or pinned record lists PDF (or OpenRouter `file`) input.
     pdf: bool,
     modalities_asserted: bool,
     structured_output: Option<bool>,
+}
+
+impl DiscoveredApiModel {
+    fn input_modalities(&self, protocol: Protocol) -> ModalitySet {
+        let mut modalities = ModalitySet::none();
+        if self.vision {
+            modalities = modalities.with(octet_ai::Modality::Image);
+        }
+        if self.audio && !protocol.audio_input_formats().is_empty() {
+            modalities = modalities.with(octet_ai::Modality::Audio);
+        }
+        if self.pdf && protocol.supports_document_input() {
+            modalities = modalities.with(octet_ai::Modality::Pdf);
+        }
+        modalities
+    }
 }
 
 fn is_deepseek_v4_model(id: &str) -> bool {
@@ -2228,30 +2279,70 @@ fn custom_model_metadata_supports_tools(entry: &serde_json::Value) -> bool {
 /// from being incorrectly treated as text-only just because its inventory
 /// shape differs.
 fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
-    let values = entry
-        .get("architecture")
-        .and_then(|value| value.get("input_modalities"))
-        .or_else(|| entry.get("input_modalities"))
-        .or_else(|| entry.get("modalities").map(|m| m.get("input").unwrap_or(m)))
-        .and_then(serde_json::Value::as_array);
+    modalities_from_entry(entry, "input")
+}
+
+fn output_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
+    modalities_from_entry(entry, "output")
+}
+
+fn modalities_from_entry(entry: &serde_json::Value, direction: &str) -> ModalitySet {
+    let field = format!("{direction}_modalities");
+    let values = [
+        Some(entry),
+        entry.get("top_provider"),
+        entry.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|metadata| [Some(metadata), metadata.get("capabilities")])
+    .flatten()
+    .find_map(|metadata| {
+        metadata
+            .get("architecture")
+            .and_then(|architecture| {
+                if architecture.is_object() {
+                    architecture.get(&field)
+                } else {
+                    Some(architecture)
+                }
+            })
+            .or_else(|| metadata.get(&field))
+            .or_else(|| {
+                metadata.get("modalities").and_then(|modalities| {
+                    if modalities.is_object() {
+                        modalities.get(direction)
+                    } else if direction == "input" {
+                        Some(modalities)
+                    } else {
+                        None
+                    }
+                })
+            })
+    })
+    .and_then(serde_json::Value::as_array)
+    .filter(|values| values.iter().all(serde_json::Value::is_string));
     let mut result = ModalitySet::none();
     for value in values.into_iter().flatten() {
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-        let value = value.to_ascii_lowercase();
-        if value == "image" || value == "vision" || value.contains("image") {
-            result = result.with(octet_ai::Modality::Image);
-        }
-        if value == "audio" || value.contains("audio") {
-            result = result.with(octet_ai::Modality::Audio);
-        }
-        // models.dev says `pdf`; OpenRouter's architecture says `file`.
-        if value == "pdf" || value == "file" {
-            result = result.with(octet_ai::Modality::Pdf);
+        match value.as_str().unwrap().to_ascii_lowercase().as_str() {
+            "image" | "vision" => result = result.with(octet_ai::Modality::Image),
+            "audio" => result = result.with(octet_ai::Modality::Audio),
+            // models.dev says `pdf`; OpenRouter's architecture says `file`.
+            "pdf" | "file" if direction == "input" => {
+                result = result.with(octet_ai::Modality::Pdf);
+            }
+            _ => {}
         }
     }
     result
+}
+
+fn conversation_output_modalities(protocol: Protocol, advertised: ModalitySet) -> ModalitySet {
+    if protocol == Protocol::OpenAiChat && advertised.contains(octet_ai::Modality::Audio) {
+        ModalitySet::none().with(octet_ai::Modality::Audio)
+    } else {
+        ModalitySet::none()
+    }
 }
 
 /// Parse the two inventory envelopes used by supported providers: OpenAI-style
@@ -2388,6 +2479,7 @@ fn api_models_from_response_for(
             display_name: discovered_display_name(entry, id),
             vision,
             audio,
+            output_modalities: output_modalities_from_entry(entry),
             pdf: input_modalities.contains(octet_ai::Modality::Pdf),
             modalities_asserted,
             structured_output: discovered_structured_output(entry),
@@ -2510,7 +2602,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && known_gpt_6_model(id)
+    declaration.id == "openai" && (known_gpt_6_model(id) || id == "gpt-6.1-terra")
 }
 
 fn anthropic_budget_capability() -> ReasoningCapability {
@@ -2672,7 +2764,7 @@ fn sparse_route_reasoning(
                 Some("medium"),
             ));
         }
-        if matches!(id, "gpt-6-sol" | "gpt-6-luna") {
+        if matches!(id, "gpt-6-sol" | "gpt-6-luna" | "gpt-6.1-terra") {
             return Some(effort_capability(
                 Mode::Standard,
                 &["none", "low", "medium", "high", "xhigh", "max"],
@@ -2742,6 +2834,9 @@ fn discovered_reasoning_capability(
         // This codec does not support Conversations reasoning controls yet.
         // Discovery must not manufacture a Chat control for the native route.
         Protocol::MistralConversations => return None,
+        // The extension's own stream owns its reasoning mapping; the host
+        // declares no native control for it.
+        Protocol::ExtensionStream => return None,
         // Native codecs need a declaration-owned control/budget contract, but
         // that must not broaden an endpoint's narrower exact choices/default.
         // Pi-messages is native in the same sense: its reasoning state is
@@ -2983,19 +3078,9 @@ pub(crate) fn register_openai_compatible_models_from_response(
             .discovery_capabilities
             .gpt_vision_fallback(api_name)
             && (!gpt_6_family_model(api_name) || public_openai_gpt_6_model(declaration, api_name));
-        let mut input_modalities = if model.vision
-            || (!model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7))
-        {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        };
-        // Inventory audio requires an implemented input mapping on this route.
-        if model.audio && !protocol.audio_input_formats().is_empty() {
-            input_modalities = input_modalities.with(octet_ai::Modality::Audio);
-        }
-        if model.pdf && protocol.supports_document_input() {
-            input_modalities = input_modalities.with(octet_ai::Modality::Pdf);
+        let mut input_modalities = model.input_modalities(protocol);
+        if !model.modalities_asserted && (gpt_vision_fallback || direct_grok_4_7) {
+            input_modalities = input_modalities.with(octet_ai::Modality::Image);
         }
         crate::providers::register_discovered_model(
             catalog,
@@ -3010,7 +3095,10 @@ pub(crate) fn register_openai_compatible_models_from_response(
                 .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
             Capabilities {
                 input_modalities,
-                output_modalities: ModalitySet::none(),
+                output_modalities: conversation_output_modalities(
+                    protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools
                     && model
@@ -3093,6 +3181,10 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
             .max_output_tokens
             .unwrap_or(if direct_opus_5_5 { 128_000 } else { 64_000 })
             .min(context_window);
+        let mut input_modalities = model.input_modalities(route.protocol);
+        if !model.modalities_asserted && declaration.discovery_capabilities.assumes_image_input() {
+            input_modalities = input_modalities.with(octet_ai::Modality::Image);
+        }
         crate::providers::register_discovered_model(
             catalog,
             declaration,
@@ -3102,15 +3194,11 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
                 .clone()
                 .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
             Capabilities {
-                input_modalities: if model.vision
-                    || (!model.modalities_asserted
-                        && declaration.discovery_capabilities.assumes_image_input())
-                {
-                    ModalitySet::none().with(octet_ai::Modality::Image)
-                } else {
-                    ModalitySet::none()
-                },
-                output_modalities: ModalitySet::none(),
+                input_modalities,
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
                 // Only a separately declared native contract is a fallback;
@@ -3346,12 +3434,11 @@ fn register_deepseek_models_from_response(
             api_name,
             model.display_name.clone(),
             Capabilities {
-                input_modalities: if model.vision {
-                    ModalitySet::none().with(octet_ai::Modality::Image)
-                } else {
-                    ModalitySet::none()
-                },
-                output_modalities: ModalitySet::none(),
+                input_modalities: model.input_modalities(route.protocol),
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    model.output_modalities,
+                ),
                 tools: model.tools,
                 parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
                 reasoning,
@@ -3620,7 +3707,10 @@ fn openrouter_models_from_response(
             protocol: route.protocol,
             capabilities: Capabilities {
                 input_modalities,
-                output_modalities: ModalitySet::none(),
+                output_modalities: conversation_output_modalities(
+                    route.protocol,
+                    output_modalities_from_entry(entry),
+                ),
                 tools: supports_tools,
                 parallel_tool_calls: supports_tools
                     && asserted_capability(entry, &["parallel_tool_calls"]).unwrap_or(false),
@@ -5039,8 +5129,18 @@ fn apple_foundation_model_defaults(api_name: &str) -> Option<crate::auth::custom
 
 /// Whether two endpoint base URLs name the same HTTP(S) origin and path,
 /// ignoring case in the host, default ports and a trailing slash.
-fn same_endpoint_base(left: &str, right: &str) -> bool {
-    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+fn same_endpoint_base(left: &str, right: &url::Url) -> bool {
+    // A declared base URL spells its host out: parsing only lowercases ASCII
+    // domains, and no declaration is an IP literal or uppercase
+    // (`declared_endpoint_hosts_are_lowercase_domains`). Skip the parse for
+    // the declarations that cannot name this host.
+    if right
+        .host_str()
+        .is_some_and(|host| !left.contains(&host.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    let Ok(left) = url::Url::parse(left) else {
         return false;
     };
     matches!(left.scheme(), "http" | "https")
@@ -5064,12 +5164,15 @@ fn apply_declared_endpoint_catalog_limits(
     cred: &crate::auth::custom::CustomCredential,
     models: Vec<crate::auth::custom::CustomModel>,
 ) -> Vec<crate::auth::custom::CustomModel> {
+    let Ok(base_url) = url::Url::parse(&cred.base_url) else {
+        return models;
+    };
     let Some(declaration) =
         crate::providers::BUILTIN_PROVIDER_DECLARATIONS
             .iter()
             .find(|declaration| {
                 declaration.base_url_environment.is_empty()
-                    && same_endpoint_base(declaration.base_url, &cred.base_url)
+                    && same_endpoint_base(declaration.base_url, &base_url)
             })
     else {
         return models;
@@ -6226,9 +6329,7 @@ pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<
 /// Codex retains the provider-advertised maximum as discovery metadata, while
 /// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
 /// Luna uses its 372K default; smaller advertised windows remain authoritative.
-/// Version 10 invalidates inventories fetched as client 0.156.1, which the
-/// live backend served without GPT-6.1 Sol, so upgrading shows it at once.
-const CODEX_MODEL_CACHE_VERSION: u8 = 10;
+const CODEX_MODEL_CACHE_VERSION: u8 = 11;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -6261,6 +6362,8 @@ struct DiscoveredCodexModel {
     id: String,
     #[serde(default)]
     display_name: Option<String>,
+    input_modalities: ModalitySet,
+    output_modalities: ModalitySet,
     reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
     /// Backend default window before octet's deliberate working cap. Kept so the
@@ -6488,6 +6591,10 @@ fn codex_inventory_from_response(
                 continue;
             }
         };
+        if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
+            skipped.push(format!("{id}: unknown reasoning metadata"));
+            continue;
+        }
         let mut reasoning_options = if metadata.supported == Some(false) {
             octet_ai::types::ReasoningOptions {
                 values: vec!["none".into()],
@@ -6514,6 +6621,8 @@ fn codex_inventory_from_response(
             id: id.to_owned(),
             display_name: discovered_display_name(entry, id)
                 .or_else(|| (id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned())),
+            input_modalities: codex_input_modalities(entry, id),
+            output_modalities: output_modalities_from_entry(entry),
             reasoning_options,
             context_window,
             default_context_window,
@@ -6640,6 +6749,24 @@ fn codex_supports_image_input(model_id: &str) -> bool {
         || model_id.starts_with("gpt-5.3-codex")
         || model_id.starts_with("gpt-5.2-codex")
         || model_id.starts_with("gpt-5.1-codex")
+}
+
+fn codex_input_modalities(entry: &serde_json::Value, id: &str) -> ModalitySet {
+    let mut modalities = input_modalities_from_entry(entry);
+    if !has_metadata_assertion(entry, MODALITY_FIELDS) && codex_supports_image_input(id) {
+        modalities = modalities.with(octet_ai::Modality::Image);
+    }
+    for (field, modality) in [
+        ("vision", octet_ai::Modality::Image),
+        ("audio", octet_ai::Modality::Audio),
+    ] {
+        match asserted_capability(entry, &[field]) {
+            Some(true) => modalities = modalities.with(modality),
+            Some(false) => modalities = modalities.without(modality),
+            None => {}
+        }
+    }
+    modalities
 }
 
 fn codex_plan_cache_key(claims: &crate::auth::codex::SubscriptionClaims) -> Option<&str> {
@@ -6871,6 +6998,8 @@ fn fallback_codex_models(
             DiscoveredCodexModel {
                 id: (*model_id).to_owned(),
                 display_name: (*model_id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned()),
+                input_modalities: codex_input_modalities(&serde_json::Value::Null, model_id),
+                output_modalities: ModalitySet::none(),
                 reasoning_options,
                 context_window: limits.context_window,
                 default_context_window,
@@ -7174,12 +7303,12 @@ fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> any
 /// explicitly selected Lite remains supported by `octet-ai` for SDK callers.
 fn codex_inference_capabilities(model: &DiscoveredCodexModel) -> Capabilities {
     Capabilities {
-        input_modalities: if codex_supports_image_input(&model.id) {
-            ModalitySet::none().with(octet_ai::Modality::Image)
-        } else {
-            ModalitySet::none()
-        },
-        output_modalities: ModalitySet::none(),
+        // Preserve known advertised inputs, but Responses has no audio codec.
+        input_modalities: model.input_modalities.without(octet_ai::Modality::Audio),
+        output_modalities: conversation_output_modalities(
+            Protocol::OpenAiResponses,
+            model.output_modalities,
+        ),
         tools: true,
         parallel_tool_calls: true,
         reasoning: Some(ReasoningCapability {
@@ -8048,6 +8177,8 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
     }
     startup_phase("session.marker");
     let client = AiClient::try_new()?;
+    let provider_runtime = ExtensionProviderRuntime::default();
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
     startup_phase("catalog.client");
     startup_phase("bootstrap.ready");
     Ok(Bootstrap {
@@ -8055,7 +8186,7 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
         catalog,
         sessions,
         client,
-        provider_runtime: ExtensionProviderRuntime::default(),
+        provider_runtime,
         prestarted_extensions: RefCell::new(None),
         prepared_session: RefCell::new(None),
         prepared_config: RefCell::new(None),
@@ -8490,7 +8621,7 @@ pub async fn resolve_launch_interactive(
     let pick_model = should_pick_interactive_model(&boot.config, &catalog, model.as_ref());
     let model = if no_configured_model {
         boot.enter_modeless_mode();
-        shell.notice("no configured model; opening session read-only");
+        shell.notice("no configured model; opening session with prompts disabled");
         shell.render();
         model.unwrap_or_else(|| ModelId(String::new()))
     } else {
@@ -9007,6 +9138,7 @@ fn build_app_with_consumer(
         extensions.clear_provider_catalog(&mut catalog, &client);
         extensions.shutdown_blocking();
     }
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
 
     let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::new_with_invocation(
         config.workspace.clone(),
@@ -9060,7 +9192,7 @@ fn build_app_with_consumer(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );
@@ -9281,10 +9413,111 @@ fn resolve_model_or_complete_fleet(
     }
 }
 
+/// Reuse the live binding only when model-dependent tool and reasoning modes
+/// remain compatible. No provider discovery, resource reload or session reopen
+/// belongs on this foreground path; incompatible selections use `rebuild_app`.
+pub(super) fn try_select_model_at_idle(
+    app: &mut App,
+    model: Model,
+    new_reasoning: Option<ReasoningConfig>,
+) -> anyhow::Result<bool> {
+    if model.spec.capabilities.tools != app.model.spec.capabilities.tools {
+        return Ok(false);
+    }
+    let requested_mode = if new_reasoning.is_some() {
+        ReasoningMode::Standard
+    } else {
+        app.reasoning_mode
+    };
+    let requested = match new_reasoning {
+        Some(reasoning) => reasoning,
+        None => thinking_to_reasoning(level_from_reasoning(&app.reasoning, &app.model)?, &model)?,
+    };
+    let (reasoning, mode, migration_diagnostic) =
+        normalize_reasoning_selection_for_model_with_subagents(
+            &requested,
+            requested_mode,
+            &model,
+            app.subagents_available(),
+        )?;
+    if mode != app.reasoning_mode {
+        return Ok(false);
+    }
+    let compact_model = match app.config.compaction.compact_model.as_ref() {
+        Some(id) => match app.catalog.resolve(id) {
+            Ok(model) => Some(model),
+            // Only the blocking rebuild may complete a deferred inventory.
+            Err(_) => return Ok(false),
+        },
+        None => None,
+    };
+    validate_compaction_route(app.config.compaction.mode, &model, compact_model.as_ref())?;
+    validate_native_compaction_replay(app.config.compaction.mode, app.agent.session(), &model)?;
+    validate_explicit_tool_policy(
+        &app.config,
+        &app.agent.extension_host_mut().tool_definitions(),
+        &model,
+        app.executable_extensions.has_dynamic_tool_provider(),
+    )?;
+    startup_phase("model.select.begin");
+    record_codex_context_uncertainty(app.agent.session_mut(), &model)?;
+    let previous_tier = app.agent.service_tier();
+    let clear_tier = previous_tier.is_some() && !crate::commands::codex_fast_tier_endpoint(&model);
+    if clear_tier {
+        app.agent.set_service_tier(None)?;
+    }
+    if let Err(error) = app.agent.select_model_at_idle(
+        model.clone(),
+        reasoning.clone(),
+        super::reasoning_label(&reasoning),
+    ) {
+        app.agent.set_service_tier(previous_tier)?;
+        return Err(error.into());
+    }
+    app.agent
+        .set_prompt_model_source(Some(crate::tui::theme::model_lab(&model).key().to_owned()));
+    app.agent
+        .set_prompt_color(Some(crate::tui::theme::prompt_color_for_model(&model)));
+    app.agent.set_compaction_model(compact_model);
+    app.agent.set_compaction_token_mode(
+        agent_compaction_mode(app.config.compaction.mode),
+        effective_compaction_threshold_fraction(&app.config, &model),
+        app.config.compaction.keep_recent_tokens,
+    )?;
+    app.config.model = Some(model.spec.id.clone());
+    app.config.reasoning = Some(reasoning.clone());
+    app.config.reasoning_mode = mode;
+    app.model = model;
+    app.reasoning = reasoning;
+    app.reasoning_mode = mode;
+    app.executable_extensions.discard_provider_reload();
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("reasoning-migration".into()),
+        migration_diagnostic
+            .into_iter()
+            .map(|diagnostic| format!("warning: {diagnostic}"))
+            .collect(),
+        true,
+    );
+    if clear_tier {
+        crate::output::stderr!(
+            "warning: fast mode disabled: the selected model route does not support it"
+        );
+    }
+    startup_phase("model.select.complete");
+    Ok(true)
+}
+
 /// Recreate the Agent at an idle boundary. Taking `App` by value guarantees the
 /// old Agent and its session file are dropped before a session is reopened.
 pub fn rebuild_app(
-    mut app: App,
+    app: App,
     new_model: Option<Model>,
     new_reasoning: Option<ReasoningConfig>,
     new_reasoning_mode: Option<ReasoningMode>,
@@ -9293,6 +9526,28 @@ pub fn rebuild_app(
     let session_start_reason = selection
         .as_ref()
         .map_or("resume", |selection| selection.session_start_reason(false));
+    rebuild_app_with_start_reason(
+        app,
+        new_model,
+        new_reasoning,
+        new_reasoning_mode,
+        selection,
+        session_start_reason,
+    )
+}
+
+pub fn rebuild_app_for_reload(app: App) -> anyhow::Result<App> {
+    rebuild_app_with_start_reason(app, None, None, None, None, "reload")
+}
+
+fn rebuild_app_with_start_reason(
+    mut app: App,
+    new_model: Option<Model>,
+    new_reasoning: Option<ReasoningConfig>,
+    new_reasoning_mode: Option<ReasoningMode>,
+    selection: Option<SessionSelection>,
+    session_start_reason: &'static str,
+) -> anyhow::Result<App> {
     app.synchronize_extension_provider_catalog();
     let resource_consumer = app.resource_paths.capability;
     let mut config = app.original_resource_config();
@@ -9428,8 +9683,18 @@ pub fn rebuild_app(
     let mut released_extensions = std::mem::take(&mut app.executable_extensions);
     let runtime_manager = released_extensions.runtime_manager();
     let provider_runtime = released_extensions.provider_runtime();
+    if session_start_reason == "reload" && same_session {
+        released_extensions.prepare_provider_reload();
+    } else {
+        released_extensions.discard_provider_reload();
+    }
     released_extensions.clear_provider_catalog(&mut catalog, &client);
-    released_extensions.release_binding_blocking();
+    provider_runtime.bind_native_provider_catalog(&catalog, &client);
+    if session_start_reason == "reload" {
+        released_extensions.release_binding_for_reload_blocking();
+    } else {
+        released_extensions.release_binding_blocking();
+    }
     // These are actual queue discards, not inferred interruption risks. Use the
     // existing terminal-aware diagnostic route: interactive lifecycle callers
     // defer this queue through final hydration; never print into the raw frame.
@@ -9508,11 +9773,14 @@ pub fn rebuild_app(
         &config,
         &skills,
         &prompts,
-        &executable_extensions,
+        &mut executable_extensions,
         &mut extensions,
         resource_consumer,
     );
     let definitions = extensions.tool_definitions();
+    if session_start_reason == "reload" && same_session {
+        executable_extensions.complete_provider_reload(None);
+    }
     let service_available = executable_extensions.has_agent_session_service();
     let subagents_available = service_available
         && subagents_surface_available(&executable_extensions, &definitions, &model);
@@ -9685,6 +9953,12 @@ mod bounded_env_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use tests::provider_reload_rebind::{
+    provider_app as provider_reload_test_app, provider_hook_app as provider_reload_hook_test_app,
+    set_variant as set_provider_reload_test_variant,
+};
 
 #[cfg(test)]
 #[path = "bootstrap/tests/custom_model_inventory_indexing.rs"]

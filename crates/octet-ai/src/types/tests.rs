@@ -402,6 +402,13 @@ fn opaque_reasoning_debug_redacts_without_changing_serialized_replay() {
             item_id: Some("OPAQUE_ID".into()),
             encrypted_content: Some("OPAQUE_ENCRYPTED".into()),
         },
+        ReasoningStateKind::ChatReasoningDetails {
+            details: vec![serde_json::json!({
+                "type": "reasoning.encrypted",
+                "data": "OPAQUE_DETAIL",
+                "format": "google-gemini-v1",
+            })],
+        },
     ] {
         let state = ReasoningState {
             protocol: Protocol::BedrockConverse,

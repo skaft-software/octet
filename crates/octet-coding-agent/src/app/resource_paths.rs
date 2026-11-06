@@ -43,12 +43,18 @@ impl ResourcePathConsumer {
         config: &Config,
         skills: &Arc<dyn octet_agent::SkillRegistry>,
         prompts: &Arc<crate::prompts::PromptRegistry>,
-        extensions: &crate::extensions::ExecutableExtensions,
+        extensions: &mut crate::extensions::ExecutableExtensions,
         host: &mut octet_agent::ExtensionHost,
         capability: ResourceConsumerCapability,
     ) -> Self {
         let enabled = capability == ResourceConsumerCapability::AppFrontend
             && extensions.has_resource_consumer_processes();
+        extensions.bind_command_resources(
+            skills.clone(),
+            prompts.clone(),
+            Default::default(),
+            None,
+        );
         let guard = ResourceProviderGuard::default();
         // This observes an already negotiated offer. It NEVER creates one, and
         // is appended after process hooks to reject retirement while they wait.
@@ -87,7 +93,8 @@ impl ResourcePathConsumer {
                 .map(|(model, _)| model.clone())
                 .or_else(|| self.model.clone());
         }
-        if !config.reasoning_explicit && (self.model_default_active || self.thinking_default_active)
+        if config.accepts_extension_reasoning()
+            && (self.model_default_active || self.thinking_default_active)
         {
             if let Some((_, reasoning)) = &self.selection {
                 config.reasoning = Some(reasoning.clone());
@@ -174,8 +181,9 @@ impl App {
             .selection
             .get_or_insert_with(|| (self.model.spec.id.clone(), self.reasoning.clone()))
             .clone();
-        let model_preference = requested_model.filter(|_| !self.config.model_explicit);
-        let thinking_preference = requested_thinking.filter(|_| !self.config.reasoning_explicit);
+        let model_preference = requested_model.filter(|_| self.config.accepts_extension_model());
+        let thinking_preference =
+            requested_thinking.filter(|_| self.config.accepts_extension_reasoning());
         let withdraw_model = !self.config.model_explicit
             && model_preference.is_none()
             && self.resource_paths.model_default_active;
@@ -184,24 +192,30 @@ impl App {
             && self.resource_paths.thinking_default_active;
         let id = if let Some(selection) = model_preference {
             self.resolve_contributed_model(&selection.provider, &selection.model)
-                .with_context(|| format!(
-                    "requested Pi default model {}/{} is unavailable; configure this provider/model and its credentials, or choose an available --model",
-                    selection.provider, selection.model
-                ))?
+                .with_context(|| {
+                    format!(
+                        "Pi default model {}/{} is unavailable",
+                        selection.provider, selection.model
+                    )
+                })?
         } else if withdraw_model {
             baseline.0.clone()
         } else {
             self.model.spec.id.clone()
         };
-        let model = self.catalog.resolve(&id)?;
+        let model = self
+            .catalog
+            .resolve(&id)
+            .context("Pi defaults not applied")?;
         let changed_model = id != self.model.spec.id;
         let subagents = self.executable_extensions.has_agent_session_service();
-        let reasoning = if self.config.reasoning_explicit && changed_model {
+        // The user's own effort follows a model they did not pick; Pi's only fills a gap.
+        let reasoning = if !self.config.accepts_extension_reasoning() && changed_model {
             let requested = self
                 .config
                 .reasoning
                 .as_ref()
-                .context("explicit invocation reasoning is unset")?;
+                .context("configured reasoning is unset")?;
             if matches!(requested, ReasoningConfig::Budget(_)) {
                 // Custom explicit budgets have no portable level; core admission
                 // validates the exact budget rather than silently normalizing it.
@@ -214,10 +228,16 @@ impl App {
                 )?
             }
         } else if let Some(level) = thinking_preference {
-            // The protocol has already required exact Pi spellings. Native
-            // admission rejects unsupported levels instead of lowering max.
-            requested_thinking_to_reasoning(ThinkingLevel::parse(level)?, &model, subagents)?
-        } else if !self.config.reasoning_explicit && (withdraw_model || withdraw_thinking) {
+            // Pi clamps its own default to the model silently; only an explicit
+            // user choice is refused when unsupported.
+            let supported = supported_levels_with_subagents(&model, subagents);
+            requested_thinking_to_reasoning(
+                clamp_thinking_level(ThinkingLevel::parse(level)?, &supported),
+                &model,
+                subagents,
+            )?
+        } else if self.config.accepts_extension_reasoning() && (withdraw_model || withdraw_thinking)
+        {
             if id == baseline.0 {
                 baseline.1.clone()
             } else {
@@ -230,17 +250,30 @@ impl App {
             self.reasoning.clone()
         };
         if changed_model || reasoning != self.reasoning {
-            self.agent.select_model_at_idle(
-                model.clone(),
-                reasoning.clone(),
-                reasoning_label(&reasoning),
-            )?;
+            self.agent
+                .select_model_at_idle(
+                    model.clone(),
+                    reasoning.clone(),
+                    reasoning_label(&reasoning),
+                )
+                .context("Pi defaults not applied")?;
             self.model = model;
             self.reasoning = reasoning;
         }
         self.resource_paths.model_default_active = model_preference.is_some();
         self.resource_paths.thinking_default_active = thinking_preference.is_some();
         Ok(())
+    }
+
+    /// An in-session effort choice outranks saved and Pi defaults on every later reload.
+    pub(crate) fn keep_thinking_choice(&mut self) {
+        self.config.reasoning = Some(self.reasoning.clone());
+        self.config.reasoning_explicit = true;
+    }
+
+    /// An in-session model choice outranks saved and Pi defaults on every later reload.
+    pub(crate) fn keep_model_choice(&mut self) {
+        self.config.model_explicit = true;
     }
 
     pub(crate) fn mark_resource_paths_reload(&mut self) {
@@ -305,18 +338,27 @@ impl App {
         let suffix = dynamic_suffix(&loaded.context, loaded.skills.as_ref());
         let system = format!("{prefix}{suffix}");
         let mut diagnostics = loaded.diagnostics;
-        if let Err(error) = self.apply_resource_defaults(
+        match self.apply_resource_defaults(
             loaded.default_model.as_ref(),
             loaded.default_thinking_level.as_deref(),
         ) {
-            diagnostics.push(
-                format!("warning: session-only Pi defaults were not applied; previous model/thinking retained: {error}")
+            Ok(()) => {}
+            Err(error) => diagnostics.push(
+                format!("warning: {error}")
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .take(4096)
                     .collect(),
-            );
+            ),
         }
+        // Default resolution may complete the native provider catalog. Publish
+        // those genuine model facts as well as the invocation scope, without
+        // importing interactive preferences or granting credential/UI access.
+        self.executable_extensions.refresh_pi_model_catalog(
+            &self.catalog,
+            self.model_scope.as_deref(),
+            &self.model,
+        );
         // All fallible work is above. Registry snapshots and provider admission
         // receive the same owner/generation fence in this synchronous boundary.
         self.system = system;
@@ -328,6 +370,12 @@ impl App {
             lease: lease.clone(),
         });
         self.prompts = Arc::new((*loaded.prompts).clone().with_resource_lease(lease.clone()));
+        self.executable_extensions.bind_command_resources(
+            self.skills.clone(),
+            self.prompts.clone(),
+            loaded.source_infos,
+            Some(lease.clone()),
+        );
         self.config.skill_paths = loaded.config.skill_paths;
         self.config.prompt_paths = loaded.config.prompt_paths;
         self.config.theme_paths = loaded.config.theme_paths;
@@ -372,6 +420,16 @@ impl App {
         })
     }
     pub(crate) async fn refresh_resource_paths_headless(&mut self) -> anyhow::Result<()> {
+        // The interactive pump normally publishes these secret-free facts. A
+        // headless App must do so before releasing its deferred session_start
+        // barrier: Pi factories can read/spread ctx there, before discovery.
+        // None is the real absence of an invocation scope, not an unavailable
+        // snapshot or permission to load the interactive persisted scope.
+        self.executable_extensions.refresh_pi_model_catalog(
+            &self.catalog,
+            self.model_scope.as_deref(),
+            &self.model,
+        );
         let resources_pending = self.resource_paths_pending();
         if !resources_pending && !self.executable_extensions.has_pending_session_starts() {
             return Ok(());

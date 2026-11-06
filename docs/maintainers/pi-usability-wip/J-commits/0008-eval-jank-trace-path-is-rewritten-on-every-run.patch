@@ -1,0 +1,25 @@
+From 155ba10aa0f5f23e33a73ad7cbd0393ac9307a09 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 08:18:45 +0000
+Subject: [PATCH 8/8] eval: jank trace path is rewritten on every run
+
+---
+ scripts/pi-eval/jank.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/pi-eval/jank.py b/scripts/pi-eval/jank.py
+index 3ad24581..386dd3a5 100644
+--- a/scripts/pi-eval/jank.py
++++ b/scripts/pi-eval/jank.py
+@@ -265,7 +265,7 @@ def traced_extensions(source: Path, into: Path, trace: Path) -> Path:
+         into.mkdir(parents=True, exist_ok=True)
+         subprocess.run(["cp", "-al", str(source), str(target)], check=True)
+     module = target / "octet-pi-compat" / "lib" / "api-trace.mjs"
+-    text = module.read_text()
++    text = (source / "octet-pi-compat" / "lib" / "api-trace.mjs").read_text()
+     module.unlink()
+     module.write_text(text.replace("process.env.OCTET_PI_API_TRACE", json.dumps(str(trace)), 1))
+     return target
+-- 
+2.43.0
+

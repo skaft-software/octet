@@ -98,12 +98,16 @@ mod connection;
 mod contributions;
 mod exec;
 mod host_requests;
+mod nested_inference;
 pub use self::exec::ExtensionExecRequest;
 mod mcp;
 pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
 mod manifest;
+mod message_events;
 mod model_control;
+mod native_provider;
+pub use native_provider::NativeProviderCatalog;
 mod negotiation;
 mod presentation;
 mod process_api;
@@ -117,9 +121,11 @@ pub use transcript_render::{
 mod process_group;
 mod process_hooks;
 mod process_state;
+mod prompt_read;
 mod protocol;
 mod protocol_line;
 mod provider_context;
+mod provider_hooks;
 mod provider_stream;
 mod python_runtime;
 pub use python_runtime::{provision_python_runtime, PythonRuntimeConfig, PythonRuntimeSetup};
@@ -130,7 +136,7 @@ use self::model_control::dispatch_model_control;
 pub use self::model_control::{ExtensionModelControl, PiProviderModelMetadata};
 pub use resource_paths::{
     ExtensionDefaultModel, ExtensionResourceDiscoveryReason, ExtensionResourcePaths,
-    EXTENSION_FEATURE_RESOURCE_PATHS,
+    ExtensionSourceInfo, EXTENSION_FEATURE_COMMAND_CATALOG, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
 use session_control::{dispatch_session_compaction, dispatch_session_control};
 pub use session_control::{
@@ -147,6 +153,10 @@ pub use resources::{
     EXTENSION_FEATURE_RESOURCE_REFS_V1, MAX_RESOURCE_RECORDS,
     MAX_RESOURCE_REGISTRATIONS_PER_PARENT,
 };
+mod pi_settings;
+pub use pi_settings::PiSettingsConfig;
+mod runtime_commands;
+pub use runtime_commands::EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1;
 mod runtime_config;
 pub mod session_leaf;
 mod spawn;
@@ -327,6 +337,7 @@ pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE;
 pub use self::process_group::EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1;
 pub use self::process_group::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1;
 pub use self::process_group::EXTENSION_FEATURE_CACHE_WARMING_DECISION;
+pub use self::process_group::EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1;
 pub use self::process_group::EXTENSION_FEATURE_COMPACTION_STRATEGY;
 pub use self::process_group::EXTENSION_FEATURE_COMPOSER;
 pub use self::process_group::EXTENSION_FEATURE_CONTENT_PARTS;

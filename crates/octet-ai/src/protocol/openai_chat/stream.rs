@@ -201,6 +201,10 @@ struct ChatChunkDelta {
     // alias their reasoning is silently dropped.
     #[serde(default)]
     reasoning: Option<String>,
+    // OpenRouter's structured reasoning, including the provider signatures it
+    // needs back on the next request.
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Option<Vec<ChatChunkToolCall>>,
 }
@@ -251,6 +255,79 @@ fn emit_reasoning_delta(
             delta: reasoning,
         },
     )
+}
+
+/// Upper bound for one response's retained `reasoning_details`.
+const MAX_CHAT_REASONING_DETAILS_BYTES: usize = 8 * 1024 * 1024;
+
+/// Merges streamed `reasoning_details` the way OpenRouter's own SDK does:
+/// consecutive `reasoning.text` and `reasoning.summary` deltas for the same
+/// entry are concatenated, later deltas fill fields such as `signature` that
+/// arrive last, and every other entry (for example `reasoning.encrypted`) is
+/// kept as received.
+fn merge_reasoning_details(
+    builder: &mut ResponseBuilder,
+    incoming: &[serde_json::Value],
+) -> Result<(), AiError> {
+    for detail in incoming {
+        let serde_json::Value::Object(detail) = detail else {
+            continue;
+        };
+        let bytes = serde_json::to_vec(detail).map_or(0, |bytes| bytes.len());
+        builder.chat_reasoning_details_bytes = builder
+            .chat_reasoning_details_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_CHAT_REASONING_DETAILS_BYTES)
+            .ok_or(AiError::Decode(DecodeError::ResponseTooLarge))?;
+        let field = match detail.get("type").and_then(serde_json::Value::as_str) {
+            Some("reasoning.text") => Some("text"),
+            Some("reasoning.summary") => Some("summary"),
+            _ => None,
+        };
+        if let (Some(field), Some(serde_json::Value::Object(last))) =
+            (field, builder.chat_reasoning_details.last_mut())
+        {
+            let same_entry = last.get("type") == detail.get("type")
+                && match (last.get("index"), detail.get("index")) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => true,
+                };
+            if same_entry {
+                for (key, value) in detail {
+                    if key == field {
+                        let more = value.as_str().unwrap_or_default();
+                        match last.get_mut(key) {
+                            Some(serde_json::Value::String(text)) => text.push_str(more),
+                            _ => {
+                                last.insert(key.clone(), serde_json::Value::String(more.into()));
+                            }
+                        }
+                    } else if !value.is_null()
+                        && last.get(key).is_none_or(serde_json::Value::is_null)
+                    {
+                        last.insert(key.clone(), value.clone());
+                    }
+                }
+                continue;
+            }
+        }
+        builder
+            .chat_reasoning_details
+            .push(serde_json::Value::Object(detail.clone()));
+    }
+    Ok(())
+}
+
+/// Visible reasoning carried only inside `reasoning_details`.
+fn reasoning_details_text(details: &[serde_json::Value]) -> String {
+    details
+        .iter()
+        .filter_map(|detail| match detail.get("type")?.as_str()? {
+            "reasoning.text" => detail.get("text")?.as_str(),
+            "reasoning.summary" => detail.get("summary")?.as_str(),
+            _ => None,
+        })
+        .collect()
 }
 
 fn provider_error_from_stream_event(data: &str) -> Option<ProviderError> {
@@ -421,6 +498,34 @@ pub(crate) fn decode_stream_event(
             });
         if let Some(reasoning) = reasoning_text {
             emit_reasoning_delta(&mut events, builder, reasoning.clone())?;
+        }
+
+        // Structured reasoning. Gateways that only send `reasoning_details`
+        // still show their reasoning; the entries themselves are replayed.
+        if let Some(details) = choice
+            .delta
+            .reasoning_details
+            .as_deref()
+            .filter(|details| !details.is_empty())
+        {
+            if reasoning_text.is_none() {
+                let text = reasoning_details_text(details);
+                if !text.is_empty() {
+                    emit_reasoning_delta(&mut events, builder, text)?;
+                }
+            }
+            if builder.chat_reasoning_details_index.is_none() {
+                let idx = segment_index(builder, "reasoning");
+                if !builder.reasoning_text_buffers.contains_key(&idx) {
+                    emit_event(
+                        &mut events,
+                        builder,
+                        StreamEvent::ReasoningStart { index: idx },
+                    )?;
+                }
+                builder.chat_reasoning_details_index = Some(idx);
+            }
+            merge_reasoning_details(builder, details)?;
         }
 
         // Delta tool calls

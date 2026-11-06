@@ -47,7 +47,7 @@ impl Agent {
         let template = DelegationTemplate {
             model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
-            model: self.model.clone(),
+            model: std::sync::RwLock::new(self.model.clone()),
             base_system: std::sync::RwLock::new(self.system.clone()),
             sandbox: self.sandbox.clone(),
             effect_broker: self.effect_broker.clone(),
@@ -62,6 +62,18 @@ impl Agent {
         let team_directory = binding.team_directory().to_path_buf();
         self.delegation = Some(binding);
         Ok(team_directory)
+    }
+
+    /// Subscribe to the root session's latest worker telemetry, including
+    /// updates between prompts. Observers share a bounded, coalescing stream;
+    /// starting or settling a root run does not retire another observer.
+    /// Returns `None` without a root delegation binding.
+    pub fn delegation_telemetry(
+        &self,
+    ) -> Option<watch::Receiver<Option<DelegationTelemetrySnapshot>>> {
+        self.delegation
+            .as_ref()
+            .and_then(DelegationBinding::telemetry_receiver)
     }
 
     /// Returns the authoritative host count of active delegated workers.

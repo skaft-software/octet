@@ -258,9 +258,14 @@ fn replacing_the_image_changes_the_generation() {
     let path = directory.path().join("octet");
     std::fs::write(&path, b"binary").unwrap();
     let first = BinaryGeneration::capture(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::write(&path, b"binary").unwrap();
+    // Create the replacement while the original inode is still live, then
+    // atomically install it. Unlinking first can reuse the inode and timestamps.
+    let replacement = directory.path().join("replacement");
+    std::fs::write(&replacement, b"binary").unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
     let second = BinaryGeneration::capture(&path).unwrap();
+    assert_eq!(first.len, second.len, "the sizes deliberately match");
+    assert_ne!(first.identity.inode, second.identity.inode);
     assert_ne!(first, second);
 }
 

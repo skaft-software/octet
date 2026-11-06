@@ -110,6 +110,8 @@ enum ChatCompletionsMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_details: Option<Vec<serde_json::Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ChatToolCall>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         audio: Option<ChatAssistantAudioRef>,
@@ -224,10 +226,8 @@ struct ChatFunctionDef {
     name: String,
     description: String,
     parameters: serde_json::Value,
-    /// Always emitted: providers that reject unknown fields are excluded from
-    /// strict routes; the flag is `false` unless the tool requested and the
-    /// route could enforce the rewritten schema.
-    strict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 /// OpenAI `custom` tool constrained by a Lark/regex grammar.
@@ -313,6 +313,10 @@ pub(crate) fn build_request(
     )?;
     let mistral_profile = model.endpoint.runtime.openai_chat_profile
         == crate::types::OpenAiChatRuntimeProfile::Mistral;
+    let custom_profile = match model.endpoint.runtime.openai_chat_profile {
+        crate::types::OpenAiChatRuntimeProfile::PiCustom(profile) => Some(profile),
+        _ => None,
+    };
 
     // 2. Map system prompt
     let reasoning_capability = model.spec.capabilities.reasoning.as_ref();
@@ -365,6 +369,7 @@ pub(crate) fn build_request(
             },
         );
         if has_reasoning
+            && custom_profile.is_none_or(|profile| profile.supports_developer_role)
             && !deepseek_thinking
             && !matches!(reasoning_mode, Some(OpenAiChatReasoningMode::SystemMessage))
             && !provider_uses_system_message
@@ -514,9 +519,22 @@ pub(crate) fn build_request(
                 let mut reasoning_parts = Vec::new();
                 let mut tool_calls = Vec::new();
                 let mut audio_ref = None;
+                // A gateway that returned `reasoning_details` for this exact
+                // model needs them back unchanged, with the reasoning text in
+                // `reasoning` rather than mixed into visible content.
+                let reasoning_details = (assistant.protocol == Protocol::OpenAiChat
+                    && assistant.model == model.spec.id)
+                    .then(|| replayable_reasoning_details(assistant, &model.spec.id))
+                    .filter(|details| !details.is_empty());
+                let mut details_reasoning_text = Vec::new();
 
                 for part in &assistant.content {
                     match part {
+                        AssistantPart::Reasoning(reasoning) if reasoning_details.is_some() => {
+                            if let Some(text) = &reasoning.text {
+                                details_reasoning_text.push(text.clone());
+                            }
+                        }
                         AssistantPart::Text(ref text) => {
                             text_parts.push(text.clone());
                             if mistral_profile {
@@ -649,16 +667,22 @@ pub(crate) fn build_request(
                     Some(tool_calls)
                 };
 
+                let reasoning = if reasoning_details.is_some() {
+                    (!details_reasoning_text.is_empty()).then(|| details_reasoning_text.join(""))
+                } else {
+                    cerebras_reasoning
+                        .then(|| reasoning_content.clone())
+                        .flatten()
+                };
                 messages.push(ChatCompletionsMessage::Assistant {
                     content: content_str,
-                    reasoning: cerebras_reasoning
-                        .then(|| reasoning_content.clone())
-                        .flatten(),
+                    reasoning,
                     reasoning_content: if cerebras_reasoning {
                         None
                     } else {
                         reasoning_content
                     },
+                    reasoning_details,
                     tool_calls: tool_calls_opt,
                     audio: audio_ref,
                 });
@@ -711,7 +735,9 @@ pub(crate) fn build_request(
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters,
-                    strict,
+                    strict: custom_profile
+                        .is_none_or(|profile| profile.supports_strict_mode)
+                        .then_some(strict),
                 },
                 cache_control: (index + 1 == active_tools.len()
                     && model.spec.cache.supports_cache_control_on_tools)
@@ -881,7 +907,10 @@ pub(crate) fn build_request(
     // the compatible `max_tokens` field, while current OpenAI Chat uses
     // `max_completion_tokens`.
     let output_cap = crate::effective_output_token_cap(model, req.max_output_tokens);
-    let (max_tokens, max_completion_tokens) = if deepseek_thinking || mistral_profile {
+    let use_max_tokens = custom_profile.map_or(deepseek_thinking || mistral_profile, |profile| {
+        profile.use_max_tokens
+    });
+    let (max_tokens, max_completion_tokens) = if use_max_tokens {
         (output_cap, None)
     } else {
         (None, output_cap)
@@ -1060,4 +1089,48 @@ fn add_cache_control_to_instruction(
         }
         ChatInstructionContent::Text(_) => None,
     }
+}
+
+/// `reasoning_details` this model returned on `assistant`, in order. As in
+/// OpenRouter's SDK, a `reasoning.text` entry in the Anthropic or Gemini
+/// format without its signature is dropped: those providers reject unsigned
+/// reasoning, and the remaining entries are still valid on their own.
+fn replayable_reasoning_details(
+    assistant: &crate::types::AssistantMessage,
+    model: &crate::types::ModelId,
+) -> Vec<serde_json::Value> {
+    assistant
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Reasoning(crate::types::ReasoningPart {
+                state:
+                    Some(crate::types::ReasoningState {
+                        protocol: Protocol::OpenAiChat,
+                        model: state_model,
+                        kind: crate::types::ReasoningStateKind::ChatReasoningDetails { details },
+                    }),
+                ..
+            }) if state_model == model => Some(details),
+            _ => None,
+        })
+        .flatten()
+        .filter(|detail| {
+            if detail.get("type").and_then(serde_json::Value::as_str) != Some("reasoning.text") {
+                return true;
+            }
+            let format = detail
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("anthropic-claude-v1");
+            if format != "anthropic-claude-v1" && format != "google-gemini-v1" {
+                return true;
+            }
+            detail
+                .get("signature")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|signature| !signature.is_empty())
+        })
+        .cloned()
+        .collect()
 }

@@ -53,13 +53,24 @@ export function appendReply(result, grant, owner, routed = false) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) invalid('session append reply');
   bounded(result.entry_id, 'committed entry id', 256);
   if (!result.entry_id || controls.test(result.entry_id)) invalid('committed entry id');
-  if (!grant) {
+  if (!grant && !routed) {
     if (Object.keys(result).some(key => key !== 'entry_id')) invalid('unbound session append reply');
     return { entryId: result.entry_id };
   }
-  if (Object.keys(result).some(key => !['entry_id', 'head', 'successor', ...(routed ? ['entry', 'previous_revision', 'view_revision', 'previous_head'] : [])].includes(key))) invalid('session append reply fields');
+  if (Object.keys(result).some(key => !['entry_id', 'head', 'successor', ...(routed ? ['entry', 'previous_revision', 'view_revision', 'previous_head', 'gap'] : [])].includes(key))) invalid('session append reply fields');
   bounded(result.head, 'committed head', 256);
   if (result.head !== result.entry_id) invalid('session append committed head');
+  if (!grant && result.successor !== null) invalid('unbound session append successor');
   const successor = result.successor === null ? null : leafGrant(result.successor, owner, grant, result.head);
   return { entryId: result.entry_id, head: result.head, successor };
+}
+
+// A replacement keeps the live command RPC (id, controller, method) but none
+// of the previous session's owner-bound authority: its consumed session_leaf
+// grant, pinned invocation view/activation and preparation barrier belong to
+// the retired owner and are settled by the original store. The new owner's
+// appends route through its own published view and a fresh native receipt.
+export function replacementStore(store, extra = {}) {
+  const { leaf, sessionView, sessionPayload, activation, preparationBarrier, preparationOwner, ...rest } = store;
+  return { ...rest, ...extra };
 }

@@ -1,0 +1,1972 @@
+{
+  "ai": {
+    "ANTHROPIC_API_KEY_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_API_KEY_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_AUTH_TOKEN_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_AUTH_TOKEN_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_FEDERATION_RULE_ID_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_FEDERATION_RULE_ID_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_IDENTITY_TOKEN_FILE_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_IDENTITY_TOKEN_FILE_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_OAUTH_TOKEN_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_OAUTH_TOKEN_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_ORGANIZATION_ID_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_ORGANIZATION_ID_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_SERVICE_ACCOUNT_ID_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_SERVICE_ACCOUNT_ID_ENV",
+      "binding": "local"
+    },
+    "ANTHROPIC_WORKSPACE_ID_ENV": {
+      "module": "env-api-keys.js",
+      "original": "ANTHROPIC_WORKSPACE_ID_ENV",
+      "binding": "local"
+    },
+    "AssistantMessageEventStream": {
+      "module": "utils/event-stream.js",
+      "original": "AssistantMessageEventStream",
+      "binding": "local"
+    },
+    "AssistantMessageFrameEncoder": {
+      "module": "utils/assistant-message-frame.js",
+      "original": "AssistantMessageFrameEncoder",
+      "binding": "managed-local"
+    },
+    "DEFAULT_MAX_AGENT_RETRY_DELAY_MS": {
+      "module": "utils/retry.js",
+      "original": "DEFAULT_MAX_AGENT_RETRY_DELAY_MS",
+      "binding": "local"
+    },
+    "EventStream": {
+      "module": "utils/event-stream.js",
+      "original": "EventStream",
+      "binding": "local"
+    },
+    "InMemoryCredentialStore": {
+      "module": "auth/credential-store.js",
+      "original": "InMemoryCredentialStore",
+      "binding": "managed-local"
+    },
+    "InMemoryModelsStore": {
+      "module": "models-store.js",
+      "original": "InMemoryModelsStore",
+      "binding": "managed-local"
+    },
+    "ModelsError": {
+      "module": "utils/models-error.js",
+      "original": "ModelsError",
+      "binding": "managed-local"
+    },
+    "StringEnum": {
+      "module": "utils/typebox-helpers.js",
+      "original": "StringEnum",
+      "binding": "local"
+    },
+    "Type": {
+      "module": "index.js",
+      "original": "Type",
+      "binding": "local"
+    },
+    "anthropicMessagesApi": {
+      "module": "api/anthropic-messages.lazy.js",
+      "original": "anthropicMessagesApi",
+      "binding": "host"
+    },
+    "appendAssistantMessageDiagnostic": {
+      "module": "utils/diagnostics.js",
+      "original": "appendAssistantMessageDiagnostic",
+      "binding": "local"
+    },
+    "azureOpenAIResponsesApi": {
+      "module": "api/azure-openai-responses.lazy.js",
+      "original": "azureOpenAIResponsesApi",
+      "binding": "refused"
+    },
+    "bedrockConverseStreamApi": {
+      "module": "api/bedrock-converse-stream.lazy.js",
+      "original": "bedrockConverseStreamApi",
+      "binding": "refused"
+    },
+    "calculateCost": {
+      "module": "models.js",
+      "original": "calculateCost",
+      "binding": "local"
+    },
+    "clampThinkingLevel": {
+      "module": "models.js",
+      "original": "clampThinkingLevel",
+      "binding": "local"
+    },
+    "cleanupSessionResources": {
+      "module": "session-resources.js",
+      "original": "cleanupSessionResources",
+      "binding": "managed-local"
+    },
+    "collapseSystemMessages": {
+      "module": "utils/transcript.js",
+      "original": "collapseSystemMessages",
+      "binding": "local"
+    },
+    "complete": {
+      "module": "compat.js",
+      "original": "complete",
+      "binding": "refused"
+    },
+    "completeSimple": {
+      "module": "compat.js",
+      "original": "completeSimple",
+      "binding": "refused"
+    },
+    "contentText": {
+      "module": "utils/text.js",
+      "original": "contentText",
+      "binding": "local"
+    },
+    "createAssistantMessageDiagnostic": {
+      "module": "utils/diagnostics.js",
+      "original": "createAssistantMessageDiagnostic",
+      "binding": "local"
+    },
+    "createAssistantMessageEventStream": {
+      "module": "utils/event-stream.js",
+      "original": "createAssistantMessageEventStream",
+      "binding": "local"
+    },
+    "createFauxCore": {
+      "module": "providers/faux.js",
+      "original": "createFauxCore",
+      "binding": "managed-local"
+    },
+    "createInitialSystemMessage": {
+      "module": "utils/transcript.js",
+      "original": "createInitialSystemMessage",
+      "binding": "local"
+    },
+    "createModels": {
+      "module": "models.js",
+      "original": "createModels",
+      "binding": "refused"
+    },
+    "createProvider": {
+      "module": "models.js",
+      "original": "createProvider",
+      "binding": "refused"
+    },
+    "declarationsEqual": {
+      "module": "utils/transcript.js",
+      "original": "declarationsEqual",
+      "binding": "local"
+    },
+    "defaultProviderAuthContext": {
+      "module": "auth/context.js",
+      "original": "defaultProviderAuthContext",
+      "binding": "refused"
+    },
+    "envApiKeyAuth": {
+      "module": "auth/helpers.js",
+      "original": "envApiKeyAuth",
+      "binding": "local"
+    },
+    "extractDiagnosticError": {
+      "module": "utils/diagnostics.js",
+      "original": "extractDiagnosticError",
+      "binding": "local"
+    },
+    "fauxAssistantMessage": {
+      "module": "providers/faux.js",
+      "original": "fauxAssistantMessage",
+      "binding": "managed-local"
+    },
+    "fauxProvider": {
+      "module": "providers/faux.js",
+      "original": "fauxProvider",
+      "binding": "managed-local"
+    },
+    "fauxText": {
+      "module": "providers/faux.js",
+      "original": "fauxText",
+      "binding": "managed-local"
+    },
+    "fauxThinking": {
+      "module": "providers/faux.js",
+      "original": "fauxThinking",
+      "binding": "managed-local"
+    },
+    "fauxToolCall": {
+      "module": "providers/faux.js",
+      "original": "fauxToolCall",
+      "binding": "managed-local"
+    },
+    "findEnvKeys": {
+      "module": "env-api-keys.js",
+      "original": "findEnvKeys",
+      "binding": "managed-local"
+    },
+    "formatThrownValue": {
+      "module": "utils/diagnostics.js",
+      "original": "formatThrownValue",
+      "binding": "local"
+    },
+    "generateImages": {
+      "module": "images.js",
+      "original": "generateImages",
+      "binding": "refused"
+    },
+    "generateImagesOpenRouter": {
+      "module": "providers/images/register-builtins.js",
+      "original": "generateImagesOpenRouter",
+      "binding": "refused"
+    },
+    "getApiProvider": {
+      "module": "compat.js",
+      "original": "getApiProvider",
+      "binding": "refused"
+    },
+    "getApiProviders": {
+      "module": "compat.js",
+      "original": "getApiProviders",
+      "binding": "refused"
+    },
+    "getCurrentSystemMessage": {
+      "module": "utils/transcript.js",
+      "original": "getCurrentSystemMessage",
+      "binding": "local"
+    },
+    "getCurrentSystemPrompt": {
+      "module": "utils/transcript.js",
+      "original": "getCurrentSystemPrompt",
+      "binding": "local"
+    },
+    "getCurrentTools": {
+      "module": "utils/transcript.js",
+      "original": "getCurrentTools",
+      "binding": "local"
+    },
+    "getDeclaredTools": {
+      "module": "utils/transcript.js",
+      "original": "getDeclaredTools",
+      "binding": "local"
+    },
+    "getEnvApiKey": {
+      "module": "env-api-keys.js",
+      "original": "getEnvApiKey",
+      "binding": "managed-local"
+    },
+    "getImageModel": {
+      "module": "image-models.js",
+      "original": "getImageModel",
+      "binding": "local"
+    },
+    "getImageModels": {
+      "module": "image-models.js",
+      "original": "getImageModels",
+      "binding": "local"
+    },
+    "getImageProviders": {
+      "module": "image-models.js",
+      "original": "getImageProviders",
+      "binding": "local"
+    },
+    "getImagesApiProvider": {
+      "module": "images-api-registry.js",
+      "original": "getImagesApiProvider",
+      "binding": "refused"
+    },
+    "getInitialSystemMessage": {
+      "module": "utils/transcript.js",
+      "original": "getInitialSystemMessage",
+      "binding": "local"
+    },
+    "getModel": {
+      "module": "compat.js",
+      "original": "getModel",
+      "binding": "local"
+    },
+    "getModelType": {
+      "module": "utils/model-operations.js",
+      "original": "getModelType",
+      "binding": "local"
+    },
+    "getModels": {
+      "module": "compat.js",
+      "original": "getModels",
+      "binding": "local"
+    },
+    "getOverflowPatterns": {
+      "module": "utils/overflow.js",
+      "original": "getOverflowPatterns",
+      "binding": "local"
+    },
+    "getProviders": {
+      "module": "compat.js",
+      "original": "getProviders",
+      "binding": "local"
+    },
+    "getSupportedThinkingLevels": {
+      "module": "models.js",
+      "original": "getSupportedThinkingLevels",
+      "binding": "local"
+    },
+    "getSystemMessageText": {
+      "module": "utils/text.js",
+      "original": "getSystemMessageText",
+      "binding": "local"
+    },
+    "getToolStateChanges": {
+      "module": "utils/transcript.js",
+      "original": "getToolStateChanges",
+      "binding": "local"
+    },
+    "googleGenerativeAIApi": {
+      "module": "api/google-generative-ai.lazy.js",
+      "original": "googleGenerativeAIApi",
+      "binding": "refused"
+    },
+    "googleVertexApi": {
+      "module": "api/google-vertex.lazy.js",
+      "original": "googleVertexApi",
+      "binding": "refused"
+    },
+    "hasApi": {
+      "module": "models.js",
+      "original": "hasApi",
+      "binding": "local"
+    },
+    "hasNonAdditiveToolChanges": {
+      "module": "utils/transcript.js",
+      "original": "hasNonAdditiveToolChanges",
+      "binding": "local"
+    },
+    "hasToolRedefinitions": {
+      "module": "utils/transcript.js",
+      "original": "hasToolRedefinitions",
+      "binding": "local"
+    },
+    "isContextOverflow": {
+      "module": "utils/overflow.js",
+      "original": "isContextOverflow",
+      "binding": "local"
+    },
+    "isModelType": {
+      "module": "utils/model-operations.js",
+      "original": "isModelType",
+      "binding": "local"
+    },
+    "isRecoverableLength": {
+      "module": "utils/overflow.js",
+      "original": "isRecoverableLength",
+      "binding": "local"
+    },
+    "isRetryableAssistantError": {
+      "module": "utils/retry.js",
+      "original": "isRetryableAssistantError",
+      "binding": "local"
+    },
+    "lazyApi": {
+      "module": "api/lazy.js",
+      "original": "lazyApi",
+      "binding": "local"
+    },
+    "lazyOAuth": {
+      "module": "auth/helpers.js",
+      "original": "lazyOAuth",
+      "binding": "local"
+    },
+    "lazyStream": {
+      "module": "api/lazy.js",
+      "original": "lazyStream",
+      "binding": "local"
+    },
+    "mistralConversationsApi": {
+      "module": "api/mistral-conversations.lazy.js",
+      "original": "mistralConversationsApi",
+      "binding": "refused"
+    },
+    "modelsAreEqual": {
+      "module": "models.js",
+      "original": "modelsAreEqual",
+      "binding": "local"
+    },
+    "normalizeContext": {
+      "module": "utils/transcript.js",
+      "original": "normalizeContext",
+      "binding": "local"
+    },
+    "openAICodexResponsesApi": {
+      "module": "api/openai-codex-responses.lazy.js",
+      "original": "openAICodexResponsesApi",
+      "binding": "refused"
+    },
+    "openAICompletionsApi": {
+      "module": "api/openai-completions.lazy.js",
+      "original": "openAICompletionsApi",
+      "binding": "refused"
+    },
+    "openAIResponsesApi": {
+      "module": "api/openai-responses.lazy.js",
+      "original": "openAIResponsesApi",
+      "binding": "refused"
+    },
+    "parseJsonWithRepair": {
+      "module": "utils/json-parse.js",
+      "original": "parseJsonWithRepair",
+      "binding": "managed-local"
+    },
+    "parseStreamingJson": {
+      "module": "utils/json-parse.js",
+      "original": "parseStreamingJson",
+      "binding": "managed-local"
+    },
+    "piMessagesApi": {
+      "module": "api/pi-messages.lazy.js",
+      "original": "piMessagesApi",
+      "binding": "refused"
+    },
+    "reduceAssistantMessageFrames": {
+      "module": "utils/assistant-message-frame.js",
+      "original": "reduceAssistantMessageFrames",
+      "binding": "managed-local"
+    },
+    "registerApiProvider": {
+      "module": "compat.js",
+      "original": "registerApiProvider",
+      "binding": "refused"
+    },
+    "registerBuiltInApiProviders": {
+      "module": "compat.js",
+      "original": "registerBuiltInApiProviders",
+      "binding": "refused"
+    },
+    "registerBuiltInImagesApiProviders": {
+      "module": "providers/images/register-builtins.js",
+      "original": "registerBuiltInImagesApiProviders",
+      "binding": "refused"
+    },
+    "registerFauxProvider": {
+      "module": "compat.js",
+      "original": "registerFauxProvider",
+      "binding": "refused"
+    },
+    "registerImagesApiProvider": {
+      "module": "images-api-registry.js",
+      "original": "registerImagesApiProvider",
+      "binding": "refused"
+    },
+    "registerSessionResourceCleanup": {
+      "module": "session-resources.js",
+      "original": "registerSessionResourceCleanup",
+      "binding": "managed-local"
+    },
+    "renderSystemMessageUpdate": {
+      "module": "utils/text.js",
+      "original": "renderSystemMessageUpdate",
+      "binding": "local"
+    },
+    "repairJson": {
+      "module": "utils/json-parse.js",
+      "original": "repairJson",
+      "binding": "managed-local"
+    },
+    "resetApiProviders": {
+      "module": "compat.js",
+      "original": "resetApiProviders",
+      "binding": "refused"
+    },
+    "resolveTranscript": {
+      "module": "utils/transcript.js",
+      "original": "resolveTranscript",
+      "binding": "local"
+    },
+    "resolveTranscriptTools": {
+      "module": "utils/transcript.js",
+      "original": "resolveTranscriptTools",
+      "binding": "local"
+    },
+    "retryAssistantCall": {
+      "module": "utils/retry.js",
+      "original": "retryAssistantCall",
+      "binding": "local"
+    },
+    "retryDelayMs": {
+      "module": "utils/retry.js",
+      "original": "retryDelayMs",
+      "binding": "local"
+    },
+    "setBedrockProviderModule": {
+      "module": "api/bedrock-converse-stream.lazy.js",
+      "original": "setBedrockProviderModule",
+      "binding": "refused"
+    },
+    "stream": {
+      "module": "compat.js",
+      "original": "stream",
+      "binding": "refused"
+    },
+    "streamAnthropic": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamAnthropic",
+      "binding": "refused"
+    },
+    "streamAzureOpenAIResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamAzureOpenAIResponses",
+      "binding": "refused"
+    },
+    "streamGoogle": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamGoogle",
+      "binding": "refused"
+    },
+    "streamGoogleVertex": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamGoogleVertex",
+      "binding": "refused"
+    },
+    "streamMistral": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamMistral",
+      "binding": "refused"
+    },
+    "streamOpenAICodexResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamOpenAICodexResponses",
+      "binding": "refused"
+    },
+    "streamOpenAICompletions": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamOpenAICompletions",
+      "binding": "host"
+    },
+    "streamOpenAIResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamOpenAIResponses",
+      "binding": "host"
+    },
+    "streamSimple": {
+      "module": "compat.js",
+      "original": "streamSimple",
+      "binding": "refused"
+    },
+    "streamSimpleAnthropic": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleAnthropic",
+      "binding": "refused"
+    },
+    "streamSimpleAzureOpenAIResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleAzureOpenAIResponses",
+      "binding": "refused"
+    },
+    "streamSimpleGoogle": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleGoogle",
+      "binding": "refused"
+    },
+    "streamSimpleGoogleVertex": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleGoogleVertex",
+      "binding": "refused"
+    },
+    "streamSimpleMistral": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleMistral",
+      "binding": "refused"
+    },
+    "streamSimpleOpenAICodexResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleOpenAICodexResponses",
+      "binding": "refused"
+    },
+    "streamSimpleOpenAICompletions": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleOpenAICompletions",
+      "binding": "refused"
+    },
+    "streamSimpleOpenAIResponses": {
+      "module": "legacy-api-aliases.js",
+      "original": "streamSimpleOpenAIResponses",
+      "binding": "refused"
+    },
+    "toToolDeclaration": {
+      "module": "utils/transcript.js",
+      "original": "toToolDeclaration",
+      "binding": "local"
+    },
+    "unregisterApiProviders": {
+      "module": "compat.js",
+      "original": "unregisterApiProviders",
+      "binding": "refused"
+    },
+    "uuidv7": {
+      "module": "utils/uuid.js",
+      "original": "uuidv7",
+      "binding": "local"
+    },
+    "validateToolArguments": {
+      "module": "utils/validation.js",
+      "original": "validateToolArguments",
+      "binding": "local"
+    },
+    "validateToolCall": {
+      "module": "utils/validation.js",
+      "original": "validateToolCall",
+      "binding": "local"
+    },
+    "withoutInitialSystemMessage": {
+      "module": "utils/transcript.js",
+      "original": "withoutInitialSystemMessage",
+      "binding": "local"
+    }
+  },
+  "coding-agent": {
+    "AgentSession": {
+      "module": "core/agent-session.js",
+      "original": "AgentSession",
+      "binding": "host"
+    },
+    "AgentSessionRuntime": {
+      "module": "core/agent-session-runtime.js",
+      "original": "AgentSessionRuntime",
+      "binding": "refused"
+    },
+    "ArminComponent": {
+      "module": "modes/interactive/components/armin.js",
+      "original": "ArminComponent",
+      "binding": "managed-local"
+    },
+    "AssistantMessageComponent": {
+      "module": "modes/interactive/components/assistant-message.js",
+      "original": "AssistantMessageComponent",
+      "binding": "managed-local"
+    },
+    "BashExecutionComponent": {
+      "module": "modes/interactive/components/bash-execution.js",
+      "original": "BashExecutionComponent",
+      "binding": "managed-local"
+    },
+    "BorderedLoader": {
+      "module": "modes/interactive/components/bordered-loader.js",
+      "original": "BorderedLoader",
+      "binding": "local"
+    },
+    "BranchSummaryMessageComponent": {
+      "module": "modes/interactive/components/branch-summary-message.js",
+      "original": "BranchSummaryMessageComponent",
+      "binding": "managed-local"
+    },
+    "CONFIG_DIR_NAME": {
+      "module": "config.js",
+      "original": "CONFIG_DIR_NAME",
+      "binding": "local"
+    },
+    "CURRENT_SESSION_VERSION": {
+      "module": "core/session-manager.js",
+      "original": "CURRENT_SESSION_VERSION",
+      "binding": "local"
+    },
+    "CompactionSummaryMessageComponent": {
+      "module": "modes/interactive/components/compaction-summary-message.js",
+      "original": "CompactionSummaryMessageComponent",
+      "binding": "managed-local"
+    },
+    "CredentialSynchronizationError": {
+      "module": "core/model-runtime.js",
+      "original": "CredentialSynchronizationError",
+      "binding": "local"
+    },
+    "CustomEditor": {
+      "module": "modes/interactive/components/custom-editor.js",
+      "original": "CustomEditor",
+      "binding": "host"
+    },
+    "CustomMessageComponent": {
+      "module": "modes/interactive/components/custom-message.js",
+      "original": "CustomMessageComponent",
+      "binding": "managed-local"
+    },
+    "DEFAULT_COMPACTION_SETTINGS": {
+      "module": "core/compaction/compaction.js",
+      "original": "DEFAULT_COMPACTION_SETTINGS",
+      "binding": "local"
+    },
+    "DEFAULT_MAX_BYTES": {
+      "module": "core/tools/truncate.js",
+      "original": "DEFAULT_MAX_BYTES",
+      "binding": "local"
+    },
+    "DEFAULT_MAX_LINES": {
+      "module": "core/tools/truncate.js",
+      "original": "DEFAULT_MAX_LINES",
+      "binding": "local"
+    },
+    "DefaultPackageManager": {
+      "module": "core/package-manager.js",
+      "original": "DefaultPackageManager",
+      "binding": "refused"
+    },
+    "DefaultResourceLoader": {
+      "module": "core/resource-loader.js",
+      "original": "DefaultResourceLoader",
+      "binding": "refused"
+    },
+    "DynamicBorder": {
+      "module": "modes/interactive/components/dynamic-border.js",
+      "original": "DynamicBorder",
+      "binding": "local"
+    },
+    "ExtensionEditorComponent": {
+      "module": "modes/interactive/components/extension-editor.js",
+      "original": "ExtensionEditorComponent",
+      "binding": "refused"
+    },
+    "ExtensionInputComponent": {
+      "module": "modes/interactive/components/extension-input.js",
+      "original": "ExtensionInputComponent",
+      "binding": "managed-local"
+    },
+    "ExtensionRunner": {
+      "module": "core/extensions/runner.js",
+      "original": "ExtensionRunner",
+      "binding": "host"
+    },
+    "ExtensionSelectorComponent": {
+      "module": "modes/interactive/components/extension-selector.js",
+      "original": "ExtensionSelectorComponent",
+      "binding": "managed-local"
+    },
+    "FooterComponent": {
+      "module": "modes/interactive/components/footer.js",
+      "original": "FooterComponent",
+      "binding": "managed-local"
+    },
+    "InteractiveMode": {
+      "module": "modes/interactive/interactive-mode.js",
+      "original": "InteractiveMode",
+      "binding": "refused"
+    },
+    "LoginDialogComponent": {
+      "module": "modes/interactive/components/login-dialog.js",
+      "original": "LoginDialogComponent",
+      "binding": "refused"
+    },
+    "ModelRegistry": {
+      "module": "core/model-registry.js",
+      "original": "ModelRegistry",
+      "binding": "refused"
+    },
+    "ModelRuntime": {
+      "module": "core/model-runtime.js",
+      "original": "ModelRuntime",
+      "binding": "refused"
+    },
+    "ModelSelectorComponent": {
+      "module": "modes/interactive/components/model-selector.js",
+      "original": "ModelSelectorComponent",
+      "binding": "refused"
+    },
+    "OAuthSelectorComponent": {
+      "module": "modes/interactive/components/oauth-selector.js",
+      "original": "OAuthSelectorComponent",
+      "binding": "refused"
+    },
+    "ProjectTrustStore": {
+      "module": "core/trust-manager.js",
+      "original": "ProjectTrustStore",
+      "binding": "refused"
+    },
+    "RpcClient": {
+      "module": "modes/rpc/rpc-client.js",
+      "original": "RpcClient",
+      "binding": "refused"
+    },
+    "SessionManager": {
+      "module": "core/session-manager.js",
+      "original": "SessionManager",
+      "binding": "host"
+    },
+    "SessionSelectorComponent": {
+      "module": "modes/interactive/components/session-selector.js",
+      "original": "SessionSelectorComponent",
+      "binding": "refused"
+    },
+    "SettingsManager": {
+      "module": "core/settings-manager.js",
+      "original": "SettingsManager",
+      "binding": "refused"
+    },
+    "SettingsSelectorComponent": {
+      "module": "modes/interactive/components/settings-selector.js",
+      "original": "SettingsSelectorComponent",
+      "binding": "managed-local"
+    },
+    "ShowImagesSelectorComponent": {
+      "module": "modes/interactive/components/show-images-selector.js",
+      "original": "ShowImagesSelectorComponent",
+      "binding": "managed-local"
+    },
+    "SkillInvocationMessageComponent": {
+      "module": "modes/interactive/components/skill-invocation-message.js",
+      "original": "SkillInvocationMessageComponent",
+      "binding": "managed-local"
+    },
+    "Theme": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "Theme",
+      "binding": "local"
+    },
+    "ThemeSelectorComponent": {
+      "module": "modes/interactive/components/theme-selector.js",
+      "original": "ThemeSelectorComponent",
+      "binding": "managed-local"
+    },
+    "ThinkingSelectorComponent": {
+      "module": "modes/interactive/components/thinking-selector.js",
+      "original": "ThinkingSelectorComponent",
+      "binding": "managed-local"
+    },
+    "ToolExecutionComponent": {
+      "module": "modes/interactive/components/tool-execution.js",
+      "original": "ToolExecutionComponent",
+      "binding": "refused"
+    },
+    "TreeSelectorComponent": {
+      "module": "modes/interactive/components/tree-selector.js",
+      "original": "TreeSelectorComponent",
+      "binding": "managed-local"
+    },
+    "UserMessageComponent": {
+      "module": "modes/interactive/components/user-message.js",
+      "original": "UserMessageComponent",
+      "binding": "managed-local"
+    },
+    "UserMessageSelectorComponent": {
+      "module": "modes/interactive/components/user-message-selector.js",
+      "original": "UserMessageSelectorComponent",
+      "binding": "managed-local"
+    },
+    "VERSION": {
+      "module": "config.js",
+      "original": "VERSION",
+      "binding": "local"
+    },
+    "VIRTUAL_MODEL_STATE_ENTRY": {
+      "module": "core/virtual-models.js",
+      "original": "VIRTUAL_MODEL_STATE_ENTRY",
+      "binding": "local"
+    },
+    "buildContextEntries": {
+      "module": "core/session-manager.js",
+      "original": "buildContextEntries",
+      "binding": "managed-local"
+    },
+    "buildSessionContext": {
+      "module": "core/session-manager.js",
+      "original": "buildSessionContext",
+      "binding": "local"
+    },
+    "buildSessionProjection": {
+      "module": "core/session-manager.js",
+      "original": "buildSessionProjection",
+      "binding": "managed-local"
+    },
+    "calculateContextTokens": {
+      "module": "core/compaction/compaction.js",
+      "original": "calculateContextTokens",
+      "binding": "local"
+    },
+    "collectEntriesForBranchSummary": {
+      "module": "core/compaction/branch-summarization.js",
+      "original": "collectEntriesForBranchSummary",
+      "binding": "managed-local"
+    },
+    "compact": {
+      "module": "core/compaction/compaction.js",
+      "original": "compact",
+      "binding": "refused"
+    },
+    "convertToLlm": {
+      "module": "core/messages.js",
+      "original": "convertToLlm",
+      "binding": "local"
+    },
+    "convertToPng": {
+      "module": "utils/image-convert.js",
+      "original": "convertToPng",
+      "binding": "managed-local"
+    },
+    "copyToClipboard": {
+      "module": "utils/clipboard.js",
+      "original": "copyToClipboard",
+      "binding": "refused"
+    },
+    "createAgentSession": {
+      "module": "core/sdk.js",
+      "original": "createAgentSession",
+      "binding": "host"
+    },
+    "createAgentSessionFromServices": {
+      "module": "core/agent-session-services.js",
+      "original": "createAgentSessionFromServices",
+      "binding": "refused"
+    },
+    "createAgentSessionRuntime": {
+      "module": "core/agent-session-runtime.js",
+      "original": "createAgentSessionRuntime",
+      "binding": "refused"
+    },
+    "createAgentSessionServices": {
+      "module": "core/agent-session-services.js",
+      "original": "createAgentSessionServices",
+      "binding": "refused"
+    },
+    "createBashTool": {
+      "module": "core/sdk.js",
+      "original": "createBashTool",
+      "binding": "host"
+    },
+    "createBashToolDefinition": {
+      "module": "core/tools/bash.js",
+      "original": "createBashToolDefinition",
+      "binding": "host"
+    },
+    "createCodemodeExtension": {
+      "module": "extensions/codemode/index.js",
+      "original": "createCodemodeExtension",
+      "binding": "refused"
+    },
+    "createCodingTools": {
+      "module": "core/sdk.js",
+      "original": "createCodingTools",
+      "binding": "host"
+    },
+    "createEditTool": {
+      "module": "core/sdk.js",
+      "original": "createEditTool",
+      "binding": "host"
+    },
+    "createEditToolDefinition": {
+      "module": "core/tools/edit.js",
+      "original": "createEditToolDefinition",
+      "binding": "host"
+    },
+    "createEventBus": {
+      "module": "core/event-bus.js",
+      "original": "createEventBus",
+      "binding": "managed-local"
+    },
+    "createExtensionRuntime": {
+      "module": "core/extensions/loader.js",
+      "original": "createExtensionRuntime",
+      "binding": "refused"
+    },
+    "createFindTool": {
+      "module": "core/sdk.js",
+      "original": "createFindTool",
+      "binding": "host"
+    },
+    "createFindToolDefinition": {
+      "module": "core/tools/find.js",
+      "original": "createFindToolDefinition",
+      "binding": "host"
+    },
+    "createGrepTool": {
+      "module": "core/sdk.js",
+      "original": "createGrepTool",
+      "binding": "host"
+    },
+    "createGrepToolDefinition": {
+      "module": "core/tools/grep.js",
+      "original": "createGrepToolDefinition",
+      "binding": "host"
+    },
+    "createLocalBashOperations": {
+      "module": "core/tools/bash.js",
+      "original": "createLocalBashOperations",
+      "binding": "refused"
+    },
+    "createLocalPowerShellOperations": {
+      "module": "core/tools/powershell.js",
+      "original": "createLocalPowerShellOperations",
+      "binding": "refused"
+    },
+    "createLsTool": {
+      "module": "core/sdk.js",
+      "original": "createLsTool",
+      "binding": "host"
+    },
+    "createLsToolDefinition": {
+      "module": "core/tools/ls.js",
+      "original": "createLsToolDefinition",
+      "binding": "host"
+    },
+    "createMcpExtension": {
+      "module": "extensions/mcp/index.js",
+      "original": "createMcpExtension",
+      "binding": "refused"
+    },
+    "createPowerShellTool": {
+      "module": "core/sdk.js",
+      "original": "createPowerShellTool",
+      "binding": "host"
+    },
+    "createPowerShellToolDefinition": {
+      "module": "core/tools/powershell.js",
+      "original": "createPowerShellToolDefinition",
+      "binding": "host"
+    },
+    "createReadOnlyTools": {
+      "module": "core/sdk.js",
+      "original": "createReadOnlyTools",
+      "binding": "host"
+    },
+    "createReadTool": {
+      "module": "core/sdk.js",
+      "original": "createReadTool",
+      "binding": "host"
+    },
+    "createReadToolDefinition": {
+      "module": "core/tools/read.js",
+      "original": "createReadToolDefinition",
+      "binding": "host"
+    },
+    "createSyntheticSourceInfo": {
+      "module": "core/source-info.js",
+      "original": "createSyntheticSourceInfo",
+      "binding": "managed-local"
+    },
+    "createToolSearchExtension": {
+      "module": "extensions/tool-search/index.js",
+      "original": "createToolSearchExtension",
+      "binding": "refused"
+    },
+    "createWriteTool": {
+      "module": "core/sdk.js",
+      "original": "createWriteTool",
+      "binding": "host"
+    },
+    "createWriteToolDefinition": {
+      "module": "core/tools/write.js",
+      "original": "createWriteToolDefinition",
+      "binding": "host"
+    },
+    "defineTool": {
+      "module": "core/extensions/types.js",
+      "original": "defineTool",
+      "binding": "local"
+    },
+    "detectSupportedImageMimeTypeFromFile": {
+      "module": "utils/mime.js",
+      "original": "detectSupportedImageMimeTypeFromFile",
+      "binding": "managed-local"
+    },
+    "discoverAndLoadExtensions": {
+      "module": "core/extensions/loader.js",
+      "original": "discoverAndLoadExtensions",
+      "binding": "refused"
+    },
+    "estimateTokens": {
+      "module": "core/compaction/compaction.js",
+      "original": "estimateTokens",
+      "binding": "local"
+    },
+    "findCutPoint": {
+      "module": "core/compaction/compaction.js",
+      "original": "findCutPoint",
+      "binding": "managed-local"
+    },
+    "findTurnStartIndex": {
+      "module": "core/compaction/compaction.js",
+      "original": "findTurnStartIndex",
+      "binding": "managed-local"
+    },
+    "formatDimensionNote": {
+      "module": "utils/image-resize.js",
+      "original": "formatDimensionNote",
+      "binding": "managed-local"
+    },
+    "formatSize": {
+      "module": "core/tools/truncate.js",
+      "original": "formatSize",
+      "binding": "local"
+    },
+    "formatSkillsForPrompt": {
+      "module": "core/skills.js",
+      "original": "formatSkillsForPrompt",
+      "binding": "local"
+    },
+    "generateBranchSummary": {
+      "module": "core/compaction/branch-summarization.js",
+      "original": "generateBranchSummary",
+      "binding": "refused"
+    },
+    "generateDiffString": {
+      "module": "core/tools/edit-diff.js",
+      "original": "generateDiffString",
+      "binding": "managed-local"
+    },
+    "generateSummary": {
+      "module": "core/compaction/compaction.js",
+      "original": "generateSummary",
+      "binding": "refused"
+    },
+    "generateSummaryWithUsage": {
+      "module": "core/compaction/compaction.js",
+      "original": "generateSummaryWithUsage",
+      "binding": "refused"
+    },
+    "generateUnifiedPatch": {
+      "module": "core/tools/edit-diff.js",
+      "original": "generateUnifiedPatch",
+      "binding": "managed-local"
+    },
+    "getAgentDir": {
+      "module": "config.js",
+      "original": "getAgentDir",
+      "binding": "local"
+    },
+    "getDocsPath": {
+      "module": "config.js",
+      "original": "getDocsPath",
+      "binding": "local"
+    },
+    "getExamplesPath": {
+      "module": "config.js",
+      "original": "getExamplesPath",
+      "binding": "local"
+    },
+    "getLanguageFromPath": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "getLanguageFromPath",
+      "binding": "local"
+    },
+    "getLastAssistantUsage": {
+      "module": "core/compaction/compaction.js",
+      "original": "getLastAssistantUsage",
+      "binding": "managed-local"
+    },
+    "getLatestCompactionEntry": {
+      "module": "core/session-manager.js",
+      "original": "getLatestCompactionEntry",
+      "binding": "managed-local"
+    },
+    "getMarkdownTheme": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "getMarkdownTheme",
+      "binding": "local"
+    },
+    "getPackageDir": {
+      "module": "config.js",
+      "original": "getPackageDir",
+      "binding": "local"
+    },
+    "getPowerShellConfig": {
+      "module": "utils/shell.js",
+      "original": "getPowerShellConfig",
+      "binding": "refused"
+    },
+    "getReadmePath": {
+      "module": "config.js",
+      "original": "getReadmePath",
+      "binding": "local"
+    },
+    "getSelectListTheme": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "getSelectListTheme",
+      "binding": "local"
+    },
+    "getSettingsListTheme": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "getSettingsListTheme",
+      "binding": "local"
+    },
+    "getShellConfig": {
+      "module": "utils/shell.js",
+      "original": "getShellConfig",
+      "binding": "refused"
+    },
+    "hasTrustRequiringProjectResources": {
+      "module": "core/trust-manager.js",
+      "original": "hasTrustRequiringProjectResources",
+      "binding": "managed-local"
+    },
+    "highlightCode": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "highlightCode",
+      "binding": "managed-local"
+    },
+    "initTheme": {
+      "module": "modes/interactive/theme/theme.js",
+      "original": "initTheme",
+      "binding": "refused"
+    },
+    "isBashToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isBashToolResult",
+      "binding": "local"
+    },
+    "isEditToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isEditToolResult",
+      "binding": "local"
+    },
+    "isFindToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isFindToolResult",
+      "binding": "local"
+    },
+    "isGrepToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isGrepToolResult",
+      "binding": "local"
+    },
+    "isLsToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isLsToolResult",
+      "binding": "local"
+    },
+    "isPowerShellToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isPowerShellToolResult",
+      "binding": "local"
+    },
+    "isReadToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isReadToolResult",
+      "binding": "local"
+    },
+    "isToolCallEventType": {
+      "module": "core/extensions/types.js",
+      "original": "isToolCallEventType",
+      "binding": "local"
+    },
+    "isWriteToolResult": {
+      "module": "core/extensions/types.js",
+      "original": "isWriteToolResult",
+      "binding": "local"
+    },
+    "keyHint": {
+      "module": "modes/interactive/components/keybinding-hints.js",
+      "original": "keyHint",
+      "binding": "local"
+    },
+    "keyText": {
+      "module": "modes/interactive/components/keybinding-hints.js",
+      "original": "keyText",
+      "binding": "local"
+    },
+    "loadProjectContextFiles": {
+      "module": "core/resource-loader.js",
+      "original": "loadProjectContextFiles",
+      "binding": "managed-local"
+    },
+    "loadSkills": {
+      "module": "core/skills.js",
+      "original": "loadSkills",
+      "binding": "managed-local"
+    },
+    "loadSkillsFromDir": {
+      "module": "core/skills.js",
+      "original": "loadSkillsFromDir",
+      "binding": "managed-local"
+    },
+    "main": {
+      "module": "main.js",
+      "original": "main",
+      "binding": "refused"
+    },
+    "migrateSessionEntries": {
+      "module": "core/session-manager.js",
+      "original": "migrateSessionEntries",
+      "binding": "managed-local"
+    },
+    "parseArgs": {
+      "module": "cli/args.js",
+      "original": "parseArgs",
+      "binding": "managed-local"
+    },
+    "parseFrontmatter": {
+      "module": "utils/frontmatter.js",
+      "original": "parseFrontmatter",
+      "binding": "local"
+    },
+    "parseSessionEntries": {
+      "module": "core/session-manager.js",
+      "original": "parseSessionEntries",
+      "binding": "managed-local"
+    },
+    "parseSkillBlock": {
+      "module": "core/agent-session.js",
+      "original": "parseSkillBlock",
+      "binding": "local"
+    },
+    "prepareBranchEntries": {
+      "module": "core/compaction/branch-summarization.js",
+      "original": "prepareBranchEntries",
+      "binding": "managed-local"
+    },
+    "rawKeyHint": {
+      "module": "modes/interactive/components/keybinding-hints.js",
+      "original": "rawKeyHint",
+      "binding": "local"
+    },
+    "readStoredCredential": {
+      "module": "core/auth-storage.js",
+      "original": "readStoredCredential",
+      "binding": "refused"
+    },
+    "renderDiff": {
+      "module": "modes/interactive/components/diff.js",
+      "original": "renderDiff",
+      "binding": "managed-local"
+    },
+    "resizeImage": {
+      "module": "utils/image-resize.js",
+      "original": "resizeImage",
+      "binding": "managed-local"
+    },
+    "resolveCliModel": {
+      "module": "core/model-resolver.js",
+      "original": "resolveCliModel",
+      "binding": "managed-local"
+    },
+    "resolveModelScopeWithDiagnostics": {
+      "module": "core/model-resolver.js",
+      "original": "resolveModelScopeWithDiagnostics",
+      "binding": "managed-local"
+    },
+    "runPrintMode": {
+      "module": "modes/print-mode.js",
+      "original": "runPrintMode",
+      "binding": "refused"
+    },
+    "runRpcMode": {
+      "module": "modes/rpc/rpc-mode.js",
+      "original": "runRpcMode",
+      "binding": "refused"
+    },
+    "serializeConversation": {
+      "module": "core/compaction/utils.js",
+      "original": "serializeConversation",
+      "binding": "local"
+    },
+    "sessionEntryToContextMessages": {
+      "module": "core/session-manager.js",
+      "original": "sessionEntryToContextMessages",
+      "binding": "managed-local"
+    },
+    "shouldCompact": {
+      "module": "core/compaction/compaction.js",
+      "original": "shouldCompact",
+      "binding": "managed-local"
+    },
+    "stripFrontmatter": {
+      "module": "utils/frontmatter.js",
+      "original": "stripFrontmatter",
+      "binding": "local"
+    },
+    "truncateHead": {
+      "module": "core/tools/truncate.js",
+      "original": "truncateHead",
+      "binding": "local"
+    },
+    "truncateLine": {
+      "module": "core/tools/truncate.js",
+      "original": "truncateLine",
+      "binding": "local"
+    },
+    "truncateTail": {
+      "module": "core/tools/truncate.js",
+      "original": "truncateTail",
+      "binding": "local"
+    },
+    "truncateToVisualLines": {
+      "module": "modes/interactive/components/visual-truncate.js",
+      "original": "truncateToVisualLines",
+      "binding": "managed-local"
+    },
+    "withFileMutationQueue": {
+      "module": "core/tools/file-mutation-queue.js",
+      "original": "withFileMutationQueue",
+      "binding": "local"
+    },
+    "wrapRegisteredTool": {
+      "module": "core/extensions/wrapper.js",
+      "original": "wrapRegisteredTool",
+      "binding": "refused"
+    },
+    "wrapRegisteredTools": {
+      "module": "core/extensions/wrapper.js",
+      "original": "wrapRegisteredTools",
+      "binding": "refused"
+    }
+  },
+  "tui": {
+    "Box": {
+      "module": "components/box.js",
+      "original": "Box",
+      "binding": "local"
+    },
+    "CURSOR_MARKER": {
+      "module": "tui.js",
+      "original": "CURSOR_MARKER",
+      "binding": "local"
+    },
+    "CancellableLoader": {
+      "module": "components/cancellable-loader.js",
+      "original": "CancellableLoader",
+      "binding": "local"
+    },
+    "CombinedAutocompleteProvider": {
+      "module": "autocomplete.js",
+      "original": "CombinedAutocompleteProvider",
+      "binding": "refused"
+    },
+    "Container": {
+      "module": "tui.js",
+      "original": "Container",
+      "binding": "local"
+    },
+    "Editor": {
+      "module": "components/editor.js",
+      "original": "Editor",
+      "binding": "host"
+    },
+    "HStack": {
+      "module": "components/h-stack.js",
+      "original": "HStack",
+      "binding": "local"
+    },
+    "Image": {
+      "module": "components/image.js",
+      "original": "Image",
+      "binding": "refused"
+    },
+    "Input": {
+      "module": "components/input.js",
+      "original": "Input",
+      "binding": "local"
+    },
+    "Key": {
+      "module": "keys.js",
+      "original": "Key",
+      "binding": "local"
+    },
+    "KeybindingsManager": {
+      "module": "keybindings.js",
+      "original": "KeybindingsManager",
+      "binding": "local"
+    },
+    "Loader": {
+      "module": "components/loader.js",
+      "original": "Loader",
+      "binding": "local"
+    },
+    "Markdown": {
+      "module": "components/markdown.js",
+      "original": "Markdown",
+      "binding": "local"
+    },
+    "Marked": {
+      "module": "index.js",
+      "original": "Marked",
+      "binding": "local"
+    },
+    "MouseRegion": {
+      "module": "components/mouse-region.js",
+      "original": "MouseRegion",
+      "binding": "local"
+    },
+    "ProcessTerminal": {
+      "module": "terminal.js",
+      "original": "ProcessTerminal",
+      "binding": "refused"
+    },
+    "ScrollView": {
+      "module": "components/scroll-view.js",
+      "original": "ScrollView",
+      "binding": "local"
+    },
+    "SelectList": {
+      "module": "components/select-list.js",
+      "original": "SelectList",
+      "binding": "local"
+    },
+    "SettingsList": {
+      "module": "components/settings-list.js",
+      "original": "SettingsList",
+      "binding": "local"
+    },
+    "Spacer": {
+      "module": "components/spacer.js",
+      "original": "Spacer",
+      "binding": "local"
+    },
+    "StdinBuffer": {
+      "module": "stdin-buffer.js",
+      "original": "StdinBuffer",
+      "binding": "local"
+    },
+    "TUI_KEYBINDINGS": {
+      "module": "keybindings.js",
+      "original": "TUI_KEYBINDINGS",
+      "binding": "local"
+    },
+    "Text": {
+      "module": "components/text.js",
+      "original": "Text",
+      "binding": "local"
+    },
+    "TruncatedText": {
+      "module": "components/truncated-text.js",
+      "original": "TruncatedText",
+      "binding": "local"
+    },
+    "TuiAltScreen": {
+      "module": "tui-alt-screen.js",
+      "original": "TuiAltScreen",
+      "binding": "refused"
+    },
+    "TuiMainScreen": {
+      "module": "tui-main-screen.js",
+      "original": "TuiMainScreen",
+      "binding": "refused"
+    },
+    "VStack": {
+      "module": "components/v-stack.js",
+      "original": "VStack",
+      "binding": "local"
+    },
+    "allocateImageId": {
+      "module": "terminal-image.js",
+      "original": "allocateImageId",
+      "binding": "local"
+    },
+    "backgroundAnsi": {
+      "module": "colors.js",
+      "original": "backgroundAnsi",
+      "binding": "local"
+    },
+    "calculateImageRows": {
+      "module": "terminal-image.js",
+      "original": "calculateImageRows",
+      "binding": "local"
+    },
+    "colorToHex": {
+      "module": "colors.js",
+      "original": "colorToHex",
+      "binding": "local"
+    },
+    "colorToOkhsl": {
+      "module": "colors.js",
+      "original": "colorToOkhsl",
+      "binding": "local"
+    },
+    "colorToOklch": {
+      "module": "colors.js",
+      "original": "colorToOklch",
+      "binding": "local"
+    },
+    "colorToRgb": {
+      "module": "colors.js",
+      "original": "colorToRgb",
+      "binding": "local"
+    },
+    "compositeTuiLine": {
+      "module": "tui.js",
+      "original": "compositeTuiLine",
+      "binding": "local"
+    },
+    "decodeKittyPrintable": {
+      "module": "keys.js",
+      "original": "decodeKittyPrintable",
+      "binding": "local"
+    },
+    "deleteAllKittyImages": {
+      "module": "terminal-image.js",
+      "original": "deleteAllKittyImages",
+      "binding": "local"
+    },
+    "deleteKittyImage": {
+      "module": "terminal-image.js",
+      "original": "deleteKittyImage",
+      "binding": "local"
+    },
+    "detectCapabilities": {
+      "module": "terminal-image.js",
+      "original": "detectCapabilities",
+      "binding": "refused"
+    },
+    "encodeITerm2": {
+      "module": "terminal-image.js",
+      "original": "encodeITerm2",
+      "binding": "local"
+    },
+    "encodeKitty": {
+      "module": "terminal-image.js",
+      "original": "encodeKitty",
+      "binding": "local"
+    },
+    "foregroundAnsi": {
+      "module": "colors.js",
+      "original": "foregroundAnsi",
+      "binding": "local"
+    },
+    "fuzzyFilter": {
+      "module": "fuzzy.js",
+      "original": "fuzzyFilter",
+      "binding": "local"
+    },
+    "fuzzyMatch": {
+      "module": "fuzzy.js",
+      "original": "fuzzyMatch",
+      "binding": "local"
+    },
+    "getCapabilities": {
+      "module": "terminal-image.js",
+      "original": "getCapabilities",
+      "binding": "refused"
+    },
+    "getCellDimensions": {
+      "module": "terminal-image.js",
+      "original": "getCellDimensions",
+      "binding": "local"
+    },
+    "getGifDimensions": {
+      "module": "terminal-image.js",
+      "original": "getGifDimensions",
+      "binding": "local"
+    },
+    "getImageDimensions": {
+      "module": "terminal-image.js",
+      "original": "getImageDimensions",
+      "binding": "local"
+    },
+    "getJpegDimensions": {
+      "module": "terminal-image.js",
+      "original": "getJpegDimensions",
+      "binding": "local"
+    },
+    "getKeybindings": {
+      "module": "keybindings.js",
+      "original": "getKeybindings",
+      "binding": "local"
+    },
+    "getNativeClipboard": {
+      "module": "native-platform.js",
+      "original": "getNativeClipboard",
+      "binding": "refused"
+    },
+    "getOsc8LinkAtColumn": {
+      "module": "utils.js",
+      "original": "getOsc8LinkAtColumn",
+      "binding": "local"
+    },
+    "getPngDimensions": {
+      "module": "terminal-image.js",
+      "original": "getPngDimensions",
+      "binding": "local"
+    },
+    "getTerminalColorMode": {
+      "module": "terminal-image.js",
+      "original": "getTerminalColorMode",
+      "binding": "refused"
+    },
+    "getWebpDimensions": {
+      "module": "terminal-image.js",
+      "original": "getWebpDimensions",
+      "binding": "local"
+    },
+    "hyperlink": {
+      "module": "terminal-image.js",
+      "original": "hyperlink",
+      "binding": "local"
+    },
+    "imageFallback": {
+      "module": "terminal-image.js",
+      "original": "imageFallback",
+      "binding": "local"
+    },
+    "indexedColor": {
+      "module": "colors.js",
+      "original": "indexedColor",
+      "binding": "local"
+    },
+    "isAppleTerminalSession": {
+      "module": "terminal.js",
+      "original": "isAppleTerminalSession",
+      "binding": "local"
+    },
+    "isFocusable": {
+      "module": "tui.js",
+      "original": "isFocusable",
+      "binding": "local"
+    },
+    "isKeyRelease": {
+      "module": "keys.js",
+      "original": "isKeyRelease",
+      "binding": "local"
+    },
+    "isKeyRepeat": {
+      "module": "keys.js",
+      "original": "isKeyRepeat",
+      "binding": "local"
+    },
+    "isKittyProtocolActive": {
+      "module": "keys.js",
+      "original": "isKittyProtocolActive",
+      "binding": "local"
+    },
+    "isViewportTUI": {
+      "module": "tui.js",
+      "original": "isViewportTUI",
+      "binding": "local"
+    },
+    "matchesKey": {
+      "module": "keys.js",
+      "original": "matchesKey",
+      "binding": "local"
+    },
+    "mixColors": {
+      "module": "colors.js",
+      "original": "mixColors",
+      "binding": "local"
+    },
+    "okhslColor": {
+      "module": "colors.js",
+      "original": "okhslColor",
+      "binding": "local"
+    },
+    "oklabToOkhslLightness": {
+      "module": "oklab.js",
+      "original": "oklabToOkhslLightness",
+      "binding": "local"
+    },
+    "oklchColor": {
+      "module": "colors.js",
+      "original": "oklchColor",
+      "binding": "local"
+    },
+    "parseColor": {
+      "module": "colors.js",
+      "original": "parseColor",
+      "binding": "local"
+    },
+    "parseKey": {
+      "module": "keys.js",
+      "original": "parseKey",
+      "binding": "local"
+    },
+    "parseTerminalColorSchemeReport": {
+      "module": "terminal-colors.js",
+      "original": "parseTerminalColorSchemeReport",
+      "binding": "local"
+    },
+    "renderImage": {
+      "module": "terminal-image.js",
+      "original": "renderImage",
+      "binding": "refused"
+    },
+    "renderLatex": {
+      "module": "latex.js",
+      "original": "renderLatex",
+      "binding": "local"
+    },
+    "resetCapabilitiesCache": {
+      "module": "terminal-image.js",
+      "original": "resetCapabilitiesCache",
+      "binding": "local"
+    },
+    "rgbColor": {
+      "module": "colors.js",
+      "original": "rgbColor",
+      "binding": "local"
+    },
+    "setCapabilities": {
+      "module": "terminal-image.js",
+      "original": "setCapabilities",
+      "binding": "local"
+    },
+    "setCapabilityOverrides": {
+      "module": "terminal-image.js",
+      "original": "setCapabilityOverrides",
+      "binding": "local"
+    },
+    "setCellDimensions": {
+      "module": "terminal-image.js",
+      "original": "setCellDimensions",
+      "binding": "local"
+    },
+    "setImageTranscoder": {
+      "module": "components/image.js",
+      "original": "setImageTranscoder",
+      "binding": "local"
+    },
+    "setKeybindings": {
+      "module": "keybindings.js",
+      "original": "setKeybindings",
+      "binding": "local"
+    },
+    "setKittyProtocolActive": {
+      "module": "keys.js",
+      "original": "setKittyProtocolActive",
+      "binding": "local"
+    },
+    "sliceByColumn": {
+      "module": "utils.js",
+      "original": "sliceByColumn",
+      "binding": "local"
+    },
+    "stripTerminalSequences": {
+      "module": "utils.js",
+      "original": "stripTerminalSequences",
+      "binding": "local"
+    },
+    "styleText": {
+      "module": "colors.js",
+      "original": "styleText",
+      "binding": "local"
+    },
+    "styleTextWithAnsi": {
+      "module": "colors.js",
+      "original": "styleTextWithAnsi",
+      "binding": "local"
+    },
+    "truncateToWidth": {
+      "module": "utils.js",
+      "original": "truncateToWidth",
+      "binding": "local"
+    },
+    "visibleWidth": {
+      "module": "utils.js",
+      "original": "visibleWidth",
+      "binding": "local"
+    },
+    "wrapTextWithAnsi": {
+      "module": "utils.js",
+      "original": "wrapTextWithAnsi",
+      "binding": "local"
+    }
+  },
+  "agent-core": {
+    "Agent": {
+      "module": "agent.js",
+      "original": "Agent",
+      "binding": "refused"
+    },
+    "agentLoop": {
+      "module": "agent-loop.js",
+      "original": "agentLoop",
+      "binding": "refused"
+    },
+    "agentLoopContinue": {
+      "module": "agent-loop.js",
+      "original": "agentLoopContinue",
+      "binding": "refused"
+    },
+    "runAgentLoop": {
+      "module": "agent-loop.js",
+      "original": "runAgentLoop",
+      "binding": "refused"
+    },
+    "runAgentLoopContinue": {
+      "module": "agent-loop.js",
+      "original": "runAgentLoopContinue",
+      "binding": "refused"
+    },
+    "runToolCall": {
+      "module": "agent-loop.js",
+      "original": "runToolCall",
+      "binding": "refused"
+    },
+    "setDefaultStreamFn": {
+      "module": "stream-fn.js",
+      "original": "setDefaultStreamFn",
+      "binding": "refused"
+    },
+    "streamProxy": {
+      "module": "proxy.js",
+      "original": "streamProxy",
+      "binding": "refused"
+    }
+  },
+  "ai-providers": {
+    "builtinModels": {
+      "module": "providers/all.js",
+      "original": "builtinModels",
+      "binding": "host"
+    },
+    "builtinProviders": {
+      "module": "providers/all.js",
+      "original": "builtinProviders",
+      "binding": "host"
+    },
+    "getAllBuiltinModels": {
+      "module": "providers/all.js",
+      "original": "getAllBuiltinModels",
+      "binding": "local"
+    },
+    "getBuiltinClassifierModel": {
+      "module": "providers/all.js",
+      "original": "getBuiltinClassifierModel",
+      "binding": "local"
+    },
+    "getBuiltinClassifierModels": {
+      "module": "providers/all.js",
+      "original": "getBuiltinClassifierModels",
+      "binding": "local"
+    },
+    "getBuiltinImageModel": {
+      "module": "providers/all.js",
+      "original": "getBuiltinImageModel",
+      "binding": "local"
+    },
+    "getBuiltinImageModels": {
+      "module": "providers/all.js",
+      "original": "getBuiltinImageModels",
+      "binding": "local"
+    },
+    "getBuiltinModel": {
+      "module": "providers/all.js",
+      "original": "getBuiltinModel",
+      "binding": "local"
+    },
+    "getBuiltinModelDataGeneratedAt": {
+      "module": "providers/all.js",
+      "original": "getBuiltinModelDataGeneratedAt",
+      "binding": "local"
+    },
+    "getBuiltinModels": {
+      "module": "providers/all.js",
+      "original": "getBuiltinModels",
+      "binding": "local"
+    },
+    "getBuiltinProviders": {
+      "module": "providers/all.js",
+      "original": "getBuiltinProviders",
+      "binding": "local"
+    },
+    "radiusProvider": {
+      "module": "providers/all.js",
+      "original": "radiusProvider",
+      "binding": "host"
+    }
+  }
+}

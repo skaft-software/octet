@@ -1,6 +1,8 @@
 import { contextBytes, historyItems } from './context-limits.mjs';
 // Translate host-owned native records; never read/write the Session JSONL here.
 import { canonicalToPi } from './provider-context.mjs';
+import { assistantMetadata } from './model-turns.mjs';
+import { assistantObservation } from './run-messages.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
 // Translating walks each message's ancestry, so a host view is translated once
@@ -16,10 +18,16 @@ function cachedTranslation(entries, namespace) {
   if (cached?.length !== entries.length) byKey.set(key, cached = { length: entries.length, result: translateSessionEntries(entries, namespace) });
   return cached.result;
 }
-export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace));
+function observedEntry(entry) {
+  if (entry.type === 'message' && entry.message?.role === 'assistant') {
+    entry.message = assistantObservation(entry.message);
+  }
+  return entry;
+}
+export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace)).map(observedEntry);
 export function sessionEntryCopy(entries, namespace, id) {
   const entry = cachedTranslation(entries, namespace).find(candidate => candidate.id === id);
-  return entry === undefined ? undefined : structuredClone(entry);
+  return entry === undefined ? undefined : observedEntry(structuredClone(entry));
 }
 
 export function translateSessionEntries(entries, namespace) {
@@ -74,6 +82,7 @@ export function translateSessionEntries(entries, namespace) {
         message.details = plainJSON(metadata.pi_details, 'Pi tool details');
       }
       if (entry.timestamp_unix_ms !== undefined) message.timestamp = entry.timestamp_unix_ms;
+      if (message.role === 'assistant') assistantFacts(message, entry);
       return { ...base, type: 'message', message };
     }
     if (value.type === 'branch_summary') {
@@ -96,4 +105,12 @@ export function translateHostSnapshot(host, namespace) {
   const translated = { ...host };
   for (const key of ['session_entries', 'session_branch']) if (Object.hasOwn(host, key)) translated[key] = translateSessionEntries(host[key], namespace);
   return translated;
+}
+
+// Pi assistant messages carry their own usage and stop reason, and extensions
+// such as Pi's custom-footer example read them from every branch entry. The
+// host attaches the usage ledger's record for each assistant; without one the
+// facts stay absent rather than invented, exactly as model-turn observation.
+function assistantFacts(message, entry) {
+  if (entry.assistant_metadata != null) assistantMetadata(message, entry, entry.assistant_metadata);
 }

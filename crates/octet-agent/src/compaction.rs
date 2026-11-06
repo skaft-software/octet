@@ -30,12 +30,14 @@ pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 pub const SUMMARY_OUTPUT_TOKENS: u64 = 13_107; // floor(0.8 * Pi's 16,384-token reserve)
 /// Maximum output budget for a split-turn prefix summary.
 pub const TURN_PREFIX_OUTPUT_TOKENS: u64 = 8_192; // floor(0.5 * Pi's 16,384-token reserve)
-/// Largest durable local-compaction handoff, including host-derived file lists.
+/// Largest durable textual compaction handoff, including host-derived file lists.
 ///
-/// Two bounded model calls can contribute at most 21,299 tokens. 128 KiB leaves
-/// room for their UTF-8 output and the small structured host footer while
-/// preventing a malformed provider response from becoming durable context.
-pub const MAX_COMPACTION_HANDOFF_BYTES: usize = 128 * 1024;
+/// The two requested output budgets total 21,299 tokens, but tokens do not
+/// imply a fixed UTF-8 byte count and some routes cannot enforce an output cap.
+/// Allow roughly 96 bytes per requested token plus footer space, while still
+/// rejecting unexpectedly large output before publishing a checkpoint. This is
+/// independent of the provider's opaque native Responses compaction state.
+pub const MAX_COMPACTION_HANDOFF_BYTES: usize = 2 * 1024 * 1024;
 
 const SUMMARIZATION_PROMPT: &str = r#"The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
@@ -751,6 +753,26 @@ mod tests {
             modified_files: Vec::new(),
         };
         assert!(finish_handoff_bounded("summary".into(), &details, 7).is_none());
+    }
+
+    #[test]
+    fn handoff_byte_limit_counts_utf8_and_host_footer() {
+        let details = CompactionDetails {
+            read_files: vec!["é.rs".into()],
+            modified_files: Vec::new(),
+        };
+        let footer = format_file_operations(&details);
+        let summary = "é".repeat((MAX_COMPACTION_HANDOFF_BYTES - footer.len()) / 2);
+        let complete =
+            finish_handoff_bounded(summary.clone(), &details, MAX_COMPACTION_HANDOFF_BYTES)
+                .unwrap();
+        assert!(complete.len() <= MAX_COMPACTION_HANDOFF_BYTES);
+        assert!(finish_handoff_bounded(
+            format!("{summary}é"),
+            &details,
+            MAX_COMPACTION_HANDOFF_BYTES,
+        )
+        .is_none());
     }
 
     fn assistant(parts: Vec<AssistantPart>) -> Message {

@@ -23,7 +23,7 @@ function install(dir, entries, settings = entries) {
   writeFileSync(join(agent, 'settings.json'), JSON.stringify(settings));
   const sources = {
     'pi-coding-agent': `import {readFileSync} from 'node:fs';
-export const parseSkillBlock = text => ({text});
+export const formatReadLineRange = text => ({text});
 export const createReadTool = cwd => ({name:'read',async execute(){return {content:[{type:'text',text:'installed read'}]};}});
 export class SettingsManager { static create(cwd, agentDir) { const settings = JSON.parse(readFileSync(agentDir+'/settings.json','utf8')); return {cwd, agentDir, getThemeSetting(){return settings.theme;}, getDefaultThinkingLevel(){return settings.defaultThinkingLevel;}}; } }
 export class DefaultPackageManager { constructor(options) { this.options = options; }
@@ -44,19 +44,19 @@ async resolve() { const settings = JSON.parse(readFileSync(this.options.agentDir
 test('automatic routing chooses shims, installed Pi, or an explicit skip, preserving cwd/env', async t => {
   const dir = temporary(t);
   const good = entry(dir, 'good', `export default pi => { if (process.cwd() !== ${JSON.stringify(dir)} || process.env.IMPORT_PROBE !== 'yes') throw new Error('cwd/env lost'); pi.registerCommand('good',{handler(){}}); };`);
-  const fallback = entry(dir, 'fallback', `import {parseSkillBlock} from '@earendil-works/pi-coding-agent'; export default pi => { parseSkillBlock('test'); pi.registerCommand('fallback',{handler(){}}); };`);
+  const fallback = entry(dir, 'fallback', `import {formatReadLineRange} from '@earendil-works/pi-coding-agent'; export default pi => { formatReadLineRange('test'); pi.registerCommand('fallback',{handler(){}}); };`);
   const broken = entry(dir, 'broken', `export default () => {throw new Error('broken factory');};`);
   const override = entry(dir, 'override', `export default pi => pi.registerTool({name:'read',label:'read',description:'override',parameters:{type:'object'},async execute(){return {content:[]};}});`);
-  const unsupportedSchema = entry(dir, 'schema', `export default pi => pi.registerTool({name:'unsafe_schema',description:'unsupported constraint',parameters:{type:'object',properties:{value:{type:'string',pattern:'^[a-z]+$'}}},async execute(){return {content:[]};}});`);
+  const unsupportedSchema = entry(dir, 'schema', `export default pi => pi.registerTool({name:'unsafe_schema',description:'unsupported constraint',parameters:{type:'object',properties:{value:{type:'string',unsupportedConstraint:true}}},async execute(){return {content:[]};}});`);
   const agent = install(dir, []);
   const routed = await routeExtensions([good, fallback, broken, override, unsupportedSchema], { cwd: dir, env: { ...process.env, OCTET_PI_AGENT_DIR: agent, IMPORT_PROBE: 'yes' } });
   assert.deepEqual(routed.map(r => r.route), ['shims', 'installed', null, 'shims', null]);
   assert.match(routed[2].error, /broken factory/);
-  assert.match(routed[4].error, /parameters.properties.value.pattern.*not supported/);
+  assert.match(routed[4].error, /parameters.properties.value.unsupportedConstraint.*not supported/);
   await assert.rejects(routeExtensions([], { concurrency: 0 }), /concurrency/);
 });
 
-test('deferred direct Pi tool execution routes to installed Pi, but child-only descriptors stay native', async t => {
+test('deferred Pi builtin execution stays brokered on the shim route without a raw installed fallback', async t => {
   const dir = temporary(t);
   const helper = entry(dir, 'read-helper', `import { createReadTool as makeRead } from '@mariozechner/pi-coding-agent';
     export async function read(ctx) { const builtinRead = makeRead(ctx.cwd); const execute = builtinRead.execute; return execute('id', {path:'file'}, undefined, undefined, ctx); }`);
@@ -68,10 +68,10 @@ test('deferred direct Pi tool execution routes to installed Pi, but child-only d
     const read = createReadTool(); pi.registerCommand('descriptor',{description:read.name,handler(){}}); };`);
   const env = { ...process.env, OCTET_PI_AGENT_DIR: install(dir, []) };
   const routed = await routeExtensions([direct, chained, descriptor], { cwd: dir, env });
-  assert.deepEqual(routed.map(r => r.route), ['installed', 'installed', 'shims']);
+  assert.deepEqual(routed.map(r => r.route), ['shims', 'shims', 'shims']);
   const disabled = await routeExtensions([direct], { cwd: dir, env, installed: false });
-  assert.equal(disabled[0].route, null);
-  assert.match(disabled[0].error, /createReadTool.*installed-Pi fallback/);
+  assert.equal(disabled[0].route, 'shims');
+  assert.equal(disabled[0].error, undefined);
   assert.ok(readFileSync(helper, 'utf8').includes('builtinRead.execute'));
 });
 
@@ -102,7 +102,7 @@ test('the first-party list matches the release catalog, minus the Pi bridge itse
 test('from-Pi setup requires review, excludes disabled entries, records routes and install, refuses overwrite', async t => {
   const dir = temporary(t);
   const good = entry(dir, 'good', `export default pi => pi.registerCommand('good',{handler(){}});`);
-  const fallback = entry(dir, 'fallback', `import {parseSkillBlock} from '@earendil-works/pi-coding-agent'; export default pi => { parseSkillBlock('test'); pi.registerCommand('fallback',{handler(){}}); };`);
+  const fallback = entry(dir, 'fallback', `import {formatReadLineRange} from '@earendil-works/pi-coding-agent'; export default pi => { formatReadLineRange('test'); pi.registerCommand('fallback',{handler(){}}); };`);
   const later = entry(dir, 'duplicate', `export default pi => {pi.registerCommand('discard',{handler(){}}); pi.registerCommand('good',{handler(){}});};`);
   const agent = install(dir, [{ path: good, enabled: true }, { path: fallback, enabled: true }, { path: later, enabled: true }, { path: '/not/executed.ts', enabled: false }]);
   const output = join(dir, 'octet-pi-compat'), options = { output, cwd: dir, env: { ...process.env, OCTET_PI_AGENT_DIR: agent } };
@@ -130,6 +130,35 @@ test('from-Pi setup requires review, excludes disabled entries, records routes a
   assert.deepEqual(JSON.parse(loaded.stdout).result.commands.map(c => c.name), ['good', 'fallback']);
 });
 
+test('recorded Pi agent directory reaches imports and factories under a minimal relocated environment', t => {
+  const dir = temporary(t), agent = join(dir, 'recorded-agent'), home = join(dir, 'relocated-home');
+  mkdirSync(home);
+  const expected = JSON.stringify(agent);
+  const factory = entry(dir, 'directory', `import { getAgentDir } from '@earendil-works/pi-coding-agent';
+    if (process.env.PI_CODING_AGENT_DIR !== ${expected} || getAgentDir() !== ${expected}) throw new Error('import directory mismatch');
+    export default pi => {
+      if (process.env.PI_CODING_AGENT_DIR !== ${expected} || getAgentDir() !== ${expected}) throw new Error('factory directory mismatch');
+      pi.registerCommand('directory', {handler(){}});
+    };`);
+  const output = join(dir, 'octet-pi-compat'), env = { HOME: home, PATH: process.env.PATH };
+  const { registrations } = configure({ output, extensions: [factory], reviewed: true, piAgentDir: agent, env });
+  assert.deepEqual(registrations.commands.map(command => command.name), ['directory']);
+  const configPath = join(output, 'bridge.json');
+  for (const ambient of [{}, { PI_CODING_AGENT_DIR: join(dir, 'ambient-agent'), OCTET_PI_AGENT_DIR: join(dir, 'other-agent') }]) {
+    const loaded = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', configPath, '--inspect'],
+      { encoding: 'utf8', env: { ...env, ...ambient } });
+    assert.equal(loaded.status, 0, loaded.stderr);
+    assert.deepEqual(JSON.parse(loaded.stdout).result.commands.map(command => command.name), ['directory']);
+  }
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, pi_agent_dir: 'relative-agent' }));
+  const invalid = spawnSync(process.execPath, [join(root, 'runner.mjs'), '--config', configPath, '--inspect'],
+    { encoding: 'utf8', env });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /pi_agent_dir must be an absolute path/);
+  assert.equal(existsSync(agent), false);
+});
+
 test('failing factories roll back tools, hooks, commands, bus listeners, MCP, and timers; missing files are isolated', async t => {
   const dir = temporary(t);
   const good = entry(dir, 'good', `export default pi => { pi.registerTool({name:'kept',label:'kept',description:'original',parameters:{type:'object'},async execute(){return {content:[]};}}); pi.registerCommand('good',{handler(){pi.events.emit('topic',{});}}); };`);
@@ -145,11 +174,11 @@ throw new Error('factory failed'); };`);
   assert.equal(peer.metadata.tools[0].description, 'original');
   assert.ok(!peer.metadata.events.includes('before_agent_start'));
   await peer.init(); await peer.start();
-  const notice = await peer.wait(f => f.method === 'notification' && f.params.level === 'warning');
+  const notice = await peer.wait(f => f.method === 'notification' && f.params.level === 'error');
   assert.equal(notice.params.title, '[Extension issues]');
-  assert.ok(notice.params.message.includes(broken));
-  assert.ok(notice.params.message.includes(join(dir, 'missing.ts')));
-  assert.equal((notice.params.message.match(/Next:/g) || []).length, 2);
+  assert.match(notice.params.message, /^Broken: skipped: failed while loading\./m);
+  assert.match(notice.params.message, /^Missing: skipped: a file is missing\./m);
+  assert.ok(!notice.params.message.includes(dir));
   assert.ok((await peer.command('good').response).result);
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.doesNotMatch(peer.stderr(), /leaked timer|leaked listener/);

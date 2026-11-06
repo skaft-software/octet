@@ -92,10 +92,18 @@ export function forgetMcpRegistrations(runtime, extensionPath) {
 
 async function connect(runtime, store, servers) {
   runtime.assertOwner(store); store.controller.signal.throwIfAborted();
-  runtime.require('mcp_registration_v1');
-  const reply = await runtime.hostCall('mcp/replace', {
-    resource_owner: store.state.owner, servers: plainJSON(servers, 'MCP registrations', 262144),
-  }, store);
+  let reply;
+  try {
+    runtime.require('mcp_registration_v1');
+    reply = await runtime.hostCall('mcp/replace', {
+      resource_owner: store.state.owner, servers: plainJSON(servers, 'MCP registrations', 262144),
+    }, store);
+  } catch (error) {
+    runtime.assertOwner(store); store.controller.signal.throwIfAborted();
+    if (error?.code === -32002 || error?.code === -32800) throw error;
+    runtime.backgroundError(rpcError(-32601, 'MCP servers: connection_unavailable'));
+    return;
+  }
   if (!record(reply) || !Array.isArray(reply.errors) || !Array.isArray(reply.shadowed)
     || !record(reply.changes)) invalid('MCP native acknowledgement');
   for (const error of reply.errors) {

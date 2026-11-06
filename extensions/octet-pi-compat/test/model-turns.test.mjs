@@ -51,6 +51,31 @@ test('per-model hooks carry real iteration and entry timestamps; whole-run notif
   await peer.close();
 });
 
+test('agent_start and actual model iterations synchronously read only their live native prompt scope', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/run-prompt-reads.ts')]);
+  await peer.init(['session_entries', 'lifecycle_events', 'system_prompt_read', 'run_system_prompt_read_v1']);
+  await peer.start({ system_prompt: 'stale preparation must not be returned' });
+  const scope = 'native-run-scope';
+  peer.notify('context/system_prompt_scope', { resource_owner: owner, scope });
+  peer.notify('turn/started', { resource_owner: owner });
+  const observation = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(observation.params, { parent_request_id: 0, resource_owner: owner, scope });
+  peer.send({ jsonrpc: '2.0', id: observation.id, result: { text: 'admitted run prompt' } });
+  await notification(peer, 'agent_start-prompt:admitted run prompt');
+  for (const [event, payload] of [['turn_start', start()], ['turn_end', end()]]) {
+    const body = params(peer, payload);
+    body.context.system_prompt_scope = scope;
+    const hook = peer.request('hook/run', body);
+    const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+    assert.deepEqual(read.params, { parent_request_id: hook.id, resource_owner: owner, scope });
+    peer.send({ jsonrpc: '2.0', id: read.id, result: { text: 'admitted run prompt' } });
+    assert.deepEqual((await hook.response).result, expected);
+    await notification(peer, `${event}-prompt:admitted run prompt`);
+  }
+  assert.equal(peer.seen.some(issueNotice), false);
+  await peer.close();
+});
+
 test('one durable native tool-result batch supplies every Pi tool result without fabricated entry IDs', async t => {
   const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
   const entry = structuredClone(assistant);
@@ -65,9 +90,7 @@ test('one durable native tool-result batch supplies every Pi tool result without
   // Like Pi, a turn observation that cannot be shown is reported, never a failed turn.
   assert.deepEqual((await peer.request('hook/run', params(peer, end(entry, [missing], 'tool_use'))).response).result, expected);
   const issue = await peer.wait(issueNotice);
-  assert.ok(issue.params.message.includes(factory));
-  assert.match(issue.params.message, /turn_end: octet could not convert/);
-  assert.match(issue.params.message, /Next:/);
+  assert.match(issue.params.message, /^Octet Pi Compat: turn_end data was unavailable, so some activity was missed\. Update octet if this keeps happening\.$/);
   await peer.close();
 });
 
@@ -153,8 +176,7 @@ test('turn observations ignore results and report problems once per extension/ev
   const unavailable = { ...end(), assistant_metadata: null };
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);
   const skipped = await peer.wait(issueNotice);
-  assert.ok(skipped.params.message.includes(factory));
-  assert.match(skipped.params.message, /turn_end callback.*API or event field.*not support/);
+  assert.match(skipped.params.message, /^Octet Pi Compat: turn_end hook uses an event field octet does not support and was skipped\./);
   const opaque = structuredClone(assistant); opaque.value.Assistant.content.push({ Reasoning: { text: 'reason', state: { secret: 'opaque' } } });
   assert.deepEqual((await peer.request('hook/run', params(peer, end(opaque))).response).result, expected);
   assert.deepEqual((await peer.request('hook/run', params(peer, unavailable, 'usage')).response).result, expected);

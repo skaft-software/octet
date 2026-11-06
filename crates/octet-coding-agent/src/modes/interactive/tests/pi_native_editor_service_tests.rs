@@ -81,3 +81,105 @@ export default pi => pi.on('session_start', (_, ctx) => {
     assert!(frame.contains("NATIVE-EDITOR-SERVICE"), "{frame}");
     app.executable_extensions.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composed_native_theme_commit_does_not_queue_resource_retirement() {
+    const CHILD: &str = "OCTET_COMPOSED_THEME_COMMIT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "modes::interactive::tests::pi_native_editor_service_tests::composed_native_theme_commit_does_not_queue_resource_retirement",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("RUST_MIN_STACK", "8388608")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // A generated test factory, not an installed user's original Pi factory.
+    let factory = r#"
+import {CustomEditor} from '@earendil-works/pi-coding-agent';
+export default pi => pi.on('session_start', (_, ctx) => {
+  ctx.ui.setEditorComponent((tui, theme, keys) => new (class extends CustomEditor {
+    render(width){return [...super.render(width), 'COMPOSED-THEME-EDITOR'];}
+  })(tui, theme, keys));
+  ctx.ui.setFooter((_tui, theme) => ({invalidate(){}, render(){return [theme.fg('accent', 'COMPOSED-THEME-FOOTER')];}}));
+});
+"#;
+    let (_directory, mut app, mut shell) = pi_ui_app(factory);
+    let mut startup = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut startup),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    shell.finish_startup();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            apply_extension_background(&mut shell, &mut app.executable_extensions);
+            shell.render();
+            let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+            if frame.contains("COMPOSED-THEME-EDITOR") && frame.contains("COMPOSED-THEME-FOOTER") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both native editor and footer must actually mount before the theme commit");
+    let path = crate::cli::global_config_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "theme = 'pi'\n").unwrap();
+    let mut watches = crate::reload::ReloadWatchSet::new();
+    watches.watch_path(crate::reload::ReloadLayer::Resources, &path);
+    let watcher = crate::reload::ReloadWatcher::new(watches);
+    let mut reload = crate::reload::ReloadSupervisor::new(Default::default());
+    let now = std::time::Instant::now();
+    reload.observe(now, &watcher.scan(&crate::reload::SystemMetadata, 32));
+    let mut input = EventStream::new();
+    let mut goal_deadline = None;
+    let result = run_idle_command(
+        app,
+        &mut shell,
+        &mut input,
+        Command::Theme(Some("dark".into())),
+        &mut goal_deadline,
+        None,
+        &mut reload,
+    )
+    .await
+    .unwrap();
+    let IdleCommandOutcome::Continue(mut app) = result else {
+        panic!("theme selection must retain the current app");
+    };
+    let changed = reload.observe(
+        now + Duration::from_secs(1),
+        &watcher.scan(&crate::reload::SystemMetadata, 32),
+    );
+    let unexpected_reload = changed.anything_changed();
+    app.executable_extensions.shutdown().await;
+    assert!(
+        !unexpected_reload,
+        "an already-applied theme preference must not enqueue a resource rebuild that retires the composed editor/footer"
+    );
+    // Suppressing our own exact write must not hide a subsequent external edit.
+    std::fs::write(&path, "theme = 'pi'\nshow_images = false\n").unwrap();
+    assert!(reload
+        .observe(
+            now + Duration::from_secs(2),
+            &watcher.scan(&crate::reload::SystemMetadata, 32),
+        )
+        .anything_changed());
+}

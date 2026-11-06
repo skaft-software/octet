@@ -72,20 +72,36 @@ fn describe_success(flow: &Arc<dyn SubscriptionFlow>, credential: &StoredCredent
 /// Failure is ignored on purpose: the URL was already printed, and a headless
 /// machine simply has nothing to launch.
 pub(crate) fn open_browser(url: &str) {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    let _ = spawn_browser(
-        std::process::Command::new(opener)
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    );
+    let _ = spawn_browser(&mut browser_command(url));
+}
+
+/// The executable that hands a URL to the default browser on this platform.
+pub(crate) const BROWSER_OPENER: &str = browser_invocation(std::env::consts::OS).0;
+
+/// A command that opens `url` in the user's default browser, with inert stdio.
+///
+/// Windows uses `rundll32 url.dll,FileProtocolHandler`, which passes the URL to
+/// the registered protocol handler as one argument. `explorer <url>` only
+/// treats simple URLs as links: OAuth URLs with query strings make it open
+/// File Explorer instead.
+pub(crate) fn browser_command(url: &str) -> std::process::Command {
+    let (program, prefix) = browser_invocation(std::env::consts::OS);
+    let mut command = std::process::Command::new(program);
+    command
+        .args(prefix)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+const fn browser_invocation(os: &str) -> (&'static str, &'static [&'static str]) {
+    match os.as_bytes() {
+        b"macos" => ("open", &[]),
+        b"windows" => ("rundll32.exe", &["url.dll,FileProtocolHandler"]),
+        _ => ("xdg-open", &[]),
+    }
 }
 
 const MAX_BROWSER_OPENERS: usize = 2;
@@ -209,6 +225,21 @@ mod pasted_input;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_hands_urls_to_the_protocol_handler_not_file_explorer() {
+        let url = "https://auth.example/authorize?client_id=a&redirect_uri=http%3A%2F%2Flocalhost&state=s";
+        assert_eq!(
+            browser_invocation("windows"),
+            ("rundll32.exe", &["url.dll,FileProtocolHandler"][..])
+        );
+        assert_eq!(browser_invocation("macos"), ("open", &[][..]));
+        assert_eq!(browser_invocation("linux"), ("xdg-open", &[][..]));
+        // The URL stays one argument after any platform prefix.
+        let command = browser_command(url);
+        assert_eq!(command.get_program(), BROWSER_OPENER);
+        assert_eq!(command.get_args().last(), Some(std::ffi::OsStr::new(url)));
+    }
     use crate::auth::subscription::flow::{RefreshMode, SubscriptionFlow};
     use crate::auth::subscription::store::CREDENTIAL_VERSION;
     use crate::auth::subscription::wire::Encoding;

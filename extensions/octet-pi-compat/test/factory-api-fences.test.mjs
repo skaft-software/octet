@@ -48,4 +48,10 @@ test('readonly session facade exposes complete branch/tree/projection getters wi
   assert.deepEqual(manager.buildSessionProjection().messages, [{ role: 'user', content: 'hi' }]);
   assert.deepEqual(manager.buildSessionContext(), { messages: [{ role: 'user', content: 'hi' }], thinkingLevel: 'off', model: null });
   assert.throws(() => manager.appendCustomEntry('illegal', {}), /unsupported_feature/);
+  for (const name of ['setSessionFile', 'newSession', 'appendMessage', 'appendThinkingLevelChange', 'appendModelChange',
+    'appendUsage', 'appendCompaction', 'appendCustomEntry', 'appendSessionInfo', 'appendCustomMessageEntry',
+    'appendContextEdit', 'appendLabelChange', 'branch', 'resetLeaf', 'branchWithSummary', 'createBranchedSession']) {
+    assert.throws(() => manager[name](), new RegExp(`unsupported_feature ctx.sessionManager.${name}`));
+  }
+  assert.equal(manager.futureUnknownMember, undefined);
 });

@@ -22,17 +22,23 @@ mod deferred_enrichment;
 #[cfg(test)]
 mod discovery_and_capability;
 #[cfg(test)]
+mod idle_model_switch;
+#[cfg(test)]
 mod inventory_cache;
 #[cfg(test)]
 mod launch_and_resume;
 #[cfg(test)]
 mod mistral_large_4;
 #[cfg(test)]
+mod model_metadata_refresh;
+#[cfg(test)]
 mod openrouter_discovery;
 #[cfg(test)]
 mod openrouter_offline_catalog;
 #[cfg(test)]
 mod pinned_metadata;
+#[cfg(all(test, unix))]
+pub(crate) mod provider_reload_rebind;
 #[cfg(test)]
 mod reasoning_ingress_and_loopback;
 #[cfg(test)]

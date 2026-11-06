@@ -296,6 +296,8 @@ fn pi_app_policy_with_frontend_and_native(
     app.config.sandbox.allow_process = true;
     app.config.sandbox.allow_shell = true;
     let mut host = octet_agent::ExtensionHost::new();
+    let provider_runtime = crate::extensions::ExtensionProviderRuntime::default();
+    provider_runtime.bind_native_provider_catalog(&app.catalog, &app.client);
     let mut extensions =
         crate::extensions::ExecutableExtensions::discover_and_start_with_provider_runtime(
             &app.config,
@@ -305,7 +307,7 @@ fn pi_app_policy_with_frontend_and_native(
             &app.sessions,
             &mut host,
             None,
-            crate::extensions::ExtensionProviderRuntime::default(),
+            provider_runtime,
             crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
             frontend,
         );
@@ -334,7 +336,7 @@ fn pi_app_policy_with_frontend_and_native(
         &app.config,
         &app.skills,
         &app.prompts,
-        &extensions,
+        &mut extensions,
         &mut host,
         crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
     );

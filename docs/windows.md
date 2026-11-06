@@ -2,14 +2,15 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
-> **Preview platform in v0.9.6.** The native MSVC archive is published and passes
-> automated release checks, but attended desktop use is unqualified and known
+> **Preview platform in v0.10.0.** Native MSVC artifact availability and automated
+> release qualification are recorded on the release page. Attended desktop use
+> remains unqualified, and known
 > issues such as [#572](https://github.com/skaft-software/octet/issues/572)
 > remain open.
 
 octet builds and runs as a native Windows x64 program (`octet.exe` and
 `octet-host.exe`); WSL is not used or required. The
-[v0.9.6 release page](https://github.com/skaft-software/octet/releases/tag/v0.9.6)
+[v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
 records actual MSVC artifact availability and qualification. Pull requests
 produce unsigned GNU test builds, described below; these do not qualify the
 MSVC release archive. Automated terminal checks are not physical-display or
@@ -75,8 +76,9 @@ hello handshake, and gates on the Windows-relevant suites: terminal detection
 and frame writing, ConPTY scenarios against both the test and release
 binaries, the renderer, private file access, partial-assistant journal settlement
 and genuine interrupted-reasoning recovery, Python extension launch, Windows
-Bash and PowerShell process control, the Python SDK, the computer-use extension (no driver
-installed), and release tooling. It starts the packaged executables with only
+Bash and PowerShell process control, managed extension updates and interrupted-update
+recovery, the Python SDK, the computer-use extension (no driver installed), and
+release tooling. It starts the packaged executables with only
 the Windows system directories on `PATH` and as a freshly created standard
 (non-administrator) account, and uploads an artifact named
 `octet-pr-<commit>-x86_64-pc-windows-gnu` for 14 days. For a pull request,
@@ -106,9 +108,9 @@ The artifact contains:
 | `extensions/octet-computer-use/` | The version-matched source computer-use bundle, for the [attended procedure](../extensions/octet-computer-use/README.md#windows) |
 
 Manually dispatched [dogfood candidates](distribution.md#unsigned-dogfood-candidates)
-also include all five official extension bundles and extracted payloads.
-The experimental Pi compatibility adapter is not shipped in v0.9.6. Their
-root checksum manifest covers those extracted files as well as the binaries,
+also include the six version-matched first-party extension bundles and extracted
+payloads, including the experimental Pi compatibility adapter. Their root
+checksum manifest covers those extracted files as well as the binaries,
 metadata and archives; verify it before running the extracted extensions.
 
 Ordinary PR builds are unsigned and are **not releases**: they are not published,
@@ -365,6 +367,44 @@ extension has no Windows build instead of starting. Dogfood codemode bundles
 from CI contain native `bin/codemode.exe`; the Pi adapter uses Node
 22.19+ and its bundled dependencies. Neither installation nor extraction enables
 an extension or authorizes Pi factory execution.
+
+### Managed extension updates (unreleased)
+
+`octet extension update NAME` and `octet extension update --path ARCHIVE`
+validate the complete candidate before replacing the managed bundle. Close other
+octet instances and programs using the bundle first: Windows can deny directory
+renames or old-file cleanup while handles are open.
+
+Windows replacement is **recoverable, not an atomic directory exchange**. Under
+`%USERPROFILE%\.octet\extensions`, octet records a synced update intent in
+`.octet-extension-update-<id>\intent.json`, moves the old directory to its
+`previous` subdirectory, and publishes the candidate with no-replace renames.
+Cooperating package operations and global managed discovery share `.package.lock`
+so they cannot scan the brief gap. Already running extensions and external
+readers are not covered by that lock; close/restart them around updates.
+
+If publication fails, octet restores the previous bundle. If restoration is
+blocked, it retains the backup and reports its path instead of deleting it.
+After process interruption, the next `octet extension list`, package operation,
+or global managed discovery restores the previous bundle if publication had not
+completed, or keeps the published candidate and finishes cleanup. No extension
+code runs during recovery. This covers process interruption, **not a power-loss
+durability guarantee**; Linux/macOS retain atomic directory exchange.
+
+If recovery reports a lock or sharing violation, close programs using the bundle
+and retry `octet extension list`. If a conflicting destination is reported, move
+that conflicting path outside extension discovery roots before retrying. Do not
+delete `.octet-extension-update-*` backups to clear an error. Malformed intents,
+changed install records and redirected paths stop recovery rather than discarding
+retained files. A cleanup warning after publication does not undo the update;
+close programs using the old files and retry listing to finish cleanup. Until
+cleanup completes, updating or removing that bundle is blocked so recovery cannot
+restore a stale backup after an intentional removal.
+
+Installation/recovery does not enable, trust or launch extensions or change their
+external state. A restored older bundle can still be rejected by a newer host's
+exact version pin; install a reviewed compatible archive rather than editing pins.
+This change does not provide a Windows build of the official 0.9.6 codemode bundle.
 
 ### Bulk-object storage boundary
 

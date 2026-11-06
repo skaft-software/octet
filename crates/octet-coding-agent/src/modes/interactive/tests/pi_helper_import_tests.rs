@@ -82,7 +82,7 @@ async fn pi_public_helpers_load_and_persist_through_the_real_host() {
         .unwrap()
         .to_string();
     assert!(entries.contains("helper-proof"), "{entries}");
-    assert!(entries.contains("\"version\":\"1.0.2\""), "{entries}");
+    assert!(entries.contains("\"version\":\"1.4.0\""), "{entries}");
     assert!(entries.contains("\"config\":\".pi\""), "{entries}");
     assert!(entries.contains("00000000-007b"), "{entries}");
     assert!(entries.contains("\"guard\":true"), "{entries}");
@@ -193,7 +193,9 @@ async fn pi_matrix_optional_context_and_bus_properties_are_absent() {
     app.executable_extensions.shutdown().await;
     result.unwrap();
     let reopened = Session::open_read_only(&path).unwrap();
-    assert!(reopened.entries().iter().any(|entry| reopened
-        .extension_entry(&entry.id, "octet-pi-compat")
-        .is_some_and(|entry| entry.entry_type == "matrix-optional")));
+    assert!(reopened.entries().iter().any(|entry| {
+        reopened
+            .extension_entry(&entry.id, "octet-pi-compat")
+            .is_some_and(|entry| entry.entry_type == "matrix-optional")
+    }));
 }

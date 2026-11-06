@@ -135,6 +135,7 @@ pub(super) fn negotiate_api_v03_contributions(
             composition: None,
             constrained_sampling: None,
             default_active: None,
+            exposure: None,
             nested_execution: false,
             prepare_arguments: false,
         })
@@ -235,9 +236,18 @@ pub(super) fn negotiate_contributions_with_host_services(
                 allowed.insert(EXTENSION_FEATURE_TOOL_PROMPT_METADATA);
                 allowed.insert(EXTENSION_FEATURE_AUTOCOMPLETE_EDIT_V1);
                 allowed.insert(EXTENSION_FEATURE_NOTIFICATION_SOURCE_V1);
+                allowed.insert(EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1);
+                allowed.insert(EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1);
                 if !manifest.capabilities.builtin_tool_overrides.is_empty() {
                     allowed.insert(EXTENSION_FEATURE_BUILTIN_TOOL_OVERRIDES);
                 }
+            }
+            if features.contains(EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1)
+                && !features.contains(EXTENSION_FEATURE_RUNTIME_COMMANDS)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "runtime_command_registration_v1 requires runtime_commands".into(),
+                ));
             }
             if negotiated.limits.resource_refs_v1.is_some_and(|limits| {
                 manifest.api_version != EXTENSION_API_VERSION_0_4
@@ -291,8 +301,18 @@ pub(super) fn negotiate_contributions_with_host_services(
             {
                 allowed.insert("input_transform_v1");
             }
+            if manifest.api_version == EXTENSION_API_VERSION_0_4
+                && offered_host_services.pi_settings
+            {
+                allowed.insert(pi_settings::FEATURE);
+            }
             if offered_host_services.provider_proxy {
                 allowed.insert("provider_proxy_v1");
+                allowed.insert(provider_hooks::FEATURE);
+                if offered_host_services.provider_inheritance {
+                    allowed.insert("provider_inheritance_v1");
+                    allowed.insert("provider_google_generative_ai_v1");
+                }
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4
                 && offered_host_services.provider_pipeline
@@ -335,6 +355,11 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if offered_host_services.resource_paths
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
+            {
+                allowed.insert(EXTENSION_FEATURE_COMMAND_CATALOG);
+            }
+            if offered_host_services.resource_paths
+                && manifest.api_version == EXTENSION_API_VERSION_0_4
                 && manifest
                     .contributes
                     .hooks
@@ -361,6 +386,17 @@ pub(super) fn negotiate_contributions_with_host_services(
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
             {
                 allowed.insert(EXTENSION_FEATURE_TOOL_COMPOSITION);
+                allowed.insert("composition_builtin_tools_v1");
+                allowed.insert("composition_preflight_v1");
+                allowed.insert(nested_inference::FEATURE);
+            }
+            if (features.contains("composition_builtin_tools_v1")
+                || features.contains("composition_preflight_v1"))
+                && !features.contains(EXTENSION_FEATURE_TOOL_COMPOSITION)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "composition builtin and preflight features require tool_composition_v1".into(),
+                ));
             }
             if manifest.api_version == EXTENSION_API_VERSION_0_4 && offered_host_services.remote_ui
             {
@@ -369,6 +405,26 @@ pub(super) fn negotiate_contributions_with_host_services(
                 if offered_host_services.transcript_render {
                     allowed.insert(EXTENSION_FEATURE_TRANSCRIPT_RENDER);
                 }
+            }
+            if features.contains("provider_google_generative_ai_v1")
+                && !features.contains("provider_inheritance_v1")
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_google_generative_ai_v1 requires provider_inheritance_v1".into(),
+                ));
+            }
+            if features.contains(provider_hooks::FEATURE) && !features.contains("provider_proxy_v1")
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_request_hooks_v1 requires provider_proxy_v1".into(),
+                ));
+            }
+            if features.contains("provider_inheritance_v1")
+                && !features.contains("provider_proxy_v1")
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "provider_inheritance_v1 requires provider_proxy_v1".into(),
+                ));
             }
             if features.contains(EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT)
                 && !features.contains(EXTENSION_FEATURE_REMOTE_UI)
@@ -406,6 +462,16 @@ pub(super) fn negotiate_contributions_with_host_services(
             }
             if manifest.capabilities.system_prompt {
                 allowed.insert(EXTENSION_FEATURE_SYSTEM_PROMPT_READ);
+                if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                    allowed.insert(prompt_read::FEATURE);
+                }
+            }
+            if features.contains(prompt_read::FEATURE)
+                && !features.contains(EXTENSION_FEATURE_SYSTEM_PROMPT_READ)
+            {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "run_system_prompt_read_v1 requires system_prompt_read".into(),
+                ));
             }
             let session_offer = (offered_host_services.max_message_bytes > 0)
                 .then(|| {
@@ -418,6 +484,9 @@ pub(super) fn negotiate_contributions_with_host_services(
             if session_offer.is_some() {
                 allowed.insert(session_leaf::transport::OWNER_ROUTES);
                 allowed.insert(session_leaf::transport::SNAPSHOT_TRANSPORT);
+                if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                    allowed.insert(session_leaf::transport::APPEND_RECEIPTS);
+                }
             }
             if let Some(feature) = features
                 .iter()
@@ -438,6 +507,12 @@ pub(super) fn negotiate_contributions_with_host_services(
             if selected == 1 {
                 return Err(ExtensionRuntimeError::Protocol(
                     "session_owner_routes_v1 and session_snapshot_transport_v1 must be negotiated together"
+                        .into(),
+                ));
+            }
+            if features.contains(session_leaf::transport::APPEND_RECEIPTS) && selected != 2 {
+                return Err(ExtensionRuntimeError::Protocol(
+                    "session_append_receipts_v1 requires the paired session transport features"
                         .into(),
                 ));
             }

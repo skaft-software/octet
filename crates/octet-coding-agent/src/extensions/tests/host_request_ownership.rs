@@ -123,6 +123,54 @@ fn host_request_owner_fence_requires_the_foreground_owner() {
     assert!(!host_request_owner_is_foreground(None, Some("owner-a")));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn session_name_write_refreshes_host_facts_before_the_next_shell_pump() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = super::support::lifecycle_fixture(&directory).await;
+    let mut session =
+        Session::create(directory.path().join("lifecycle-test-session.jsonl")).unwrap();
+    let sessions = SessionStore::for_directory(directory.path(), directory.path());
+    extensions.refresh_host_state_for_selection(&session, None, &sessions);
+    let process = extensions.processes[0].clone();
+
+    for (id, name, expected) in [
+        (701, "  Committed name  ", Some("Committed name")),
+        (702, "", None),
+    ] {
+        extensions
+            .pending_session_requests
+            .push_back(PendingHostRequest {
+                process: process.clone(),
+                request_id: ExtensionRequestId::Number(id),
+                generation: process.health_snapshot().generation,
+                operation: HostRequestOperation::SessionEntry(
+                    ExtensionSessionEntryOperation::SetName { name: name.into() },
+                ),
+            });
+        assert!(extensions.apply_modeless_session_host_requests(&mut session, &sessions));
+        assert_eq!(
+            extensions
+                .host_state
+                .lock()
+                .unwrap()
+                .session_name
+                .as_deref(),
+            expected,
+            "the committed name must be visible without another host refresh"
+        );
+        assert_eq!(
+            sessions
+                .load_metadata("lifecycle-test-session")
+                .unwrap()
+                .name
+                .as_deref(),
+            expected
+        );
+    }
+    extensions.shutdown().await;
+}
+
 #[test]
 fn status_contributions_never_become_ambient_messages() {
     let (sender, receiver) = broadcast::channel(4);

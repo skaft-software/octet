@@ -7,6 +7,120 @@ use super::*;
 
 use super::support::*;
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resource_reload_activates_replacement_model_driver_before_startup_preflight() {
+    use super::pi_contract_support::pi_ui_app;
+    use octet_ai::{auth::Auth, EndpointId, ModelId};
+
+    let factory = r#"
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+export default pi => {
+  const record = row => appendFileSync(TRACE, JSON.stringify(row) + '\n');
+  let settled = false;
+  pi.on('session_start', async (event, ctx) => {
+    const target = ctx.modelRegistry.getAvailable().find(model => model.provider === 'reload-local');
+    if (!target) throw Error('real local catalog route missing');
+    const selected = await pi.setModel(target);
+    if (!selected) throw Error('real local model selection refused');
+    settled = true;
+    record({phase: 'start', reason: event.reason, selected, model: ctx.model});
+  });
+  pi.on('resources_discover', (_, ctx) => {
+    record({phase: 'discover', settled});
+    if (!settled) throw Error('startup model selection did not settle');
+    return {promptPaths: [join(ctx.cwd, 'reload-prompts')]};
+  });
+};
+"#;
+    let (directory, mut app, mut shell) = pi_ui_app(factory);
+    let mut endpoint = (*app.model.endpoint).clone();
+    endpoint.id = EndpointId("reload-local".into());
+    endpoint.auth = Auth::None;
+    endpoint.base_url = "http://127.0.0.1:9/v1/".parse().unwrap();
+    app.catalog.register_endpoint(endpoint.clone()).unwrap();
+    let mut spec = (*app.model.spec).clone();
+    spec.id = ModelId("reload-local-model".into());
+    spec.endpoint = endpoint.id;
+    app.catalog.register_model(spec.clone()).unwrap();
+    assert_ne!(app.model.spec.id, spec.id);
+    let prompts = app.config.workspace.join("reload-prompts");
+    std::fs::create_dir_all(&prompts).unwrap();
+    let prompt = prompts.join("reload-driver.md");
+    std::fs::write(&prompt, "Native reload driver resource $1\n").unwrap();
+    // The host resolves resource paths to their real location, so expect that
+    // path; macOS temporary directories sit behind the /var -> /private/var link.
+    let prompt = prompt.canonicalize().unwrap();
+    let session = app.agent.session().path().to_owned();
+    let owner = app.agent.session().resource_owner_key();
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(app.model.spec.id, spec.id);
+    assert_eq!(app.agent.model().spec.id, spec.id);
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
+
+    let (mut app, applied) = tokio::time::timeout(
+        Duration::from_secs(20),
+        reload_resources_announcing(app, &mut shell, &mut input, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(applied);
+    assert_eq!(app.model.spec.id, spec.id);
+    assert_eq!(app.agent.model().spec.id, spec.id);
+    assert_eq!(app.agent.session().path(), session);
+    assert_eq!(app.agent.session().resource_owner_key(), owner);
+    assert!(app.agent.session().usage_records().is_empty());
+    assert!(app
+        .prompts
+        .descriptors()
+        .iter()
+        .any(|value| value.path == prompt));
+    let visible = shell.debug_snapshot();
+    assert!(!visible.contains("reload failed"), "{visible}");
+    assert!(visible.contains("reload succeeded"), "{visible}");
+    app.executable_extensions.shutdown().await;
+
+    let rows = std::fs::read_to_string(directory.path().join("trace.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let starts = rows
+        .iter()
+        .filter(|row| row["phase"] == "start")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2, "{rows:#?}");
+    assert_eq!(starts[0]["reason"], "startup");
+    assert_eq!(starts[1]["reason"], "reload");
+    for row in starts {
+        assert_eq!(row["selected"], true, "{row}");
+        assert_eq!(row["model"]["provider"], "reload-local", "{row}");
+        assert_eq!(row["model"]["id"], spec.api_name, "{row}");
+    }
+    let discoveries = rows
+        .iter()
+        .filter(|row| row["phase"] == "discover")
+        .collect::<Vec<_>>();
+    assert_eq!(discoveries.len(), 2, "{rows:#?}");
+    assert!(
+        discoveries.iter().all(|row| row["settled"] == true),
+        "{rows:#?}"
+    );
+}
+
 #[test]
 fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
     use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};
@@ -229,6 +343,98 @@ fn enable_native_delegation(app: &mut App, directory: &std::path::Path) {
             directory.join("delegation"),
         ))
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polling() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let roots = Arc::new(AtomicUsize::new(0));
+    let root_turns = roots.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let response = ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream");
+            if body["system"].to_string().contains("You are /root/idle-worker") {
+                return response
+                    .set_body_string(text_turn())
+                    .set_delay(Duration::from_secs(5));
+            }
+            response.set_body_string(match roots.fetch_add(1, Ordering::SeqCst) {
+                0 => worker_tool_turn(
+                    "spawn_agent",
+                    serde_json::json!({"task_name":"idle-worker", "message":"finish in the background"}),
+                ),
+                1 => text_turn(),
+                unexpected => panic!("unexpected root turn {unexpected}"),
+            })
+        })
+        .mount(&server)
+        .await;
+    let mut model = scripted_model(&server.uri());
+    // The held child response must settle before the fixture provider deadline.
+    Arc::make_mut(&mut model.endpoint).timeout = Duration::from_secs(30);
+    let (directory, mut app) = fast_test_app(model);
+    app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    enable_native_delegation(&mut app, directory.path());
+    // This observer must survive the root run subscribing and settling too.
+    let mut telemetry = app.agent.delegation_telemetry().unwrap();
+    app.agent.complete("start idle worker").await.unwrap();
+    assert_no_tool_errors(&app);
+    assert_eq!(app.agent.busy_delegated_worker_count(), 1);
+    let mut shell = InteractiveShell::test_shell();
+    shell.extension_set_editor("untouched draft".into());
+    shell.set_subagent_telemetry(telemetry.borrow_and_update().as_ref(), true);
+    let before = shell.debug_snapshot();
+    assert!(before.contains("Subagents · 1 running"), "{before}");
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_secs(60));
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    {
+        let idle = wait_for_prompt(
+            &mut shell,
+            &mut input,
+            &mut scroll_tick,
+            &mut extension_tick,
+            &mut app.executable_extensions,
+            None,
+            &mut reload_tick,
+            &watcher,
+            &mut reload,
+            Some(&mut app.agent),
+        );
+        tokio::pin!(idle);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    result = &mut idle => panic!("idle prompt unexpectedly ended: {}", result.is_ok()),
+                    changed = telemetry.changed() => {
+                        changed.expect("root settlement must not close a session observer");
+                        let snapshot = telemetry.borrow_and_update().clone().unwrap();
+                        if snapshot.children.iter().any(|child| child.state == "completed") {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Drain the ready idle observation without sending a key, starting
+            // another root run, or waiting for the extension polling interval.
+            assert!(futures_util::poll!(&mut idle).is_pending());
+        }).await.expect("the local worker settles while the root stays idle");
+    }
+    let after = shell.debug_snapshot();
+    assert!(after.contains("Subagents · 1 completed"), "{after}");
+    assert!(!after.contains("Subagents · 1 running"), "{after}");
+    assert_eq!(after.matches("Subagents").count(), 1, "{after}");
+    assert_eq!(shell.pending(), "untouched draft");
+    assert_eq!(root_turns.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -495,7 +701,7 @@ async fn forced_watch_reload_refusal_does_not_restart_extensions_or_claim_succes
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
+async fn resource_and_model_session_transitions_restore_granted_terminal_input() {
     use crate::extensions::reload_lifecycle_test_support::{
         acquire_terminal, assert_revoked_before_shutdown, fixture,
     };
@@ -543,7 +749,22 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
             !app.executable_extensions.terminal_grant_is_active(),
             "{operation}"
         );
-        assert_revoked_before_shutdown(&wire);
+        if operation == "model" {
+            // A compatible selection still revokes the foreground grant, but
+            // keeps its exact executable instance and command service alive.
+            assert!(process.is_running());
+            assert_eq!(
+                app.executable_extensions
+                    .execute_command_without_confirmation("worker-control", Vec::new())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("control retained"),
+            );
+            assert!(!std::fs::read_to_string(&wire).unwrap().contains("shutdown"));
+        } else {
+            assert_revoked_before_shutdown(&wire);
+        }
         // Test input uses the same restored ownership flag as the live stream.
         let key = theme_picker_key(KeyCode::Char('x'));
         let mut restored =
@@ -555,6 +776,9 @@ async fn resource_and_model_session_rebuilds_restore_granted_terminal_input() {
                 .is_some()
         );
         app.executable_extensions.shutdown().await;
+        if operation == "model" {
+            assert_revoked_before_shutdown(&wire);
+        }
     }
 }
 
@@ -593,4 +817,103 @@ async fn same_mode_idle_thinking_preserves_the_existing_terminal_grant_and_proce
         .revoke_terminal_grant_for_shell(&mut shell, "test shutdown");
     app.executable_extensions.shutdown().await;
     assert_revoked_before_shutdown(&wire);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_reload_preserves_native_lifecycle_reasons() {
+    let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    let root = directory.path().join("extensions");
+    let extension = root.join("reload-reason-probe");
+    std::fs::create_dir_all(&extension).unwrap();
+    let log = directory.path().join("reload-hooks.jsonl");
+    let script = extension.join("probe.py");
+    std::fs::write(
+        &script,
+        r#"import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if "id" not in request:
+        continue
+    result = {}
+    if method == "initialize":
+        protocol = request["params"]["protocol"]
+        result = {"api_version":"0.4", "tools":[], "commands":[],
+            "protocol":{"version":"0.4", "features":protocol["required_features"],
+                "limits":{"max_concurrent_requests":2}}}
+    elif method == "hook/run":
+        with open(sys.argv[1], "a") as log:
+            log.write(json.dumps(request["params"]) + "\n")
+    print(json.dumps({"jsonrpc":"2.0", "id":request["id"], "result":result}), flush=True)
+    if method == "shutdown":
+        break
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        extension.join("extension.toml"),
+        format!(
+            r#"name = "reload-reason-probe"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "python3"
+args = [{}, {}]
+[contributes]
+hooks = ["session_start", "session_end"]
+"#,
+            serde_json::to_string(&script).unwrap(),
+            serde_json::to_string(&log).unwrap()
+        ),
+    )
+    .unwrap();
+    app.config.extension_paths = vec![root];
+    app.config.enabled_extensions = vec!["reload-reason-probe".into()];
+    app.config.invocation_trusted_extensions = vec!["reload-reason-probe".into()];
+    app.config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+    app.config.sandbox.allow_process = true;
+    app.config.sandbox.allow_shell = true;
+    app = rebuild_app(app, None, None, None, None).unwrap();
+    assert!(
+        app.executable_extensions
+            .summaries()
+            .iter()
+            .any(|summary| summary.name == "reload-reason-probe" && summary.running),
+        "{}",
+        app.executable_extensions.inspect_text()
+    );
+    let session = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = EventStream::from_stream(futures_util::stream::pending());
+    let (mut app, applied) = reload_resources_announcing(app, &mut shell, &mut input, true)
+        .await
+        .unwrap();
+    assert!(applied);
+    assert_eq!(app.agent.session().path(), session);
+    app.executable_extensions.shutdown().await;
+    let hooks: Vec<serde_json::Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let reasons: Vec<_> = hooks
+        .iter()
+        .map(|hook| {
+            (
+                hook["hook"].as_str().unwrap(),
+                hook["payload"]["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            ("session_start", "resume"),
+            ("session_end", "reload"),
+            ("session_start", "reload"),
+            ("session_end", "shutdown")
+        ]
+    );
+    assert_eq!(hooks[1]["payload"]["outcome"], "interrupted");
 }

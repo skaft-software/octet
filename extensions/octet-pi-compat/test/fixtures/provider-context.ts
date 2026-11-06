@@ -10,6 +10,7 @@ export default function (pi) {
         content: `known:${ctx.sessionManager.getLeafId()}:${ctx.sessionManager.getBranch().at(-1).id}` });
     }
     if (mode === 'replace') return { messages: [{ role: 'user', content: 'projected' }] };
+    if (mode === 'throws-coded') throw Object.assign(new Error('coded context failure'), { code: -32602 });
     if (mode === 'in-place') { event.messages.splice(0, 1); event.messages.push({ role: 'user', content: 'mutated' }); }
     if (mode === 'unknown-field') return { messages: [], tools: [] };
     if (mode === 'unknown-role') return { messages: [{ role: 'system', content: 'cannot create a hidden provider role' }] };
@@ -18,7 +19,7 @@ export default function (pi) {
   });
   pi.on('context', (event, ctx) => {
     const mode = ctx.sessionManager.getSessionName();
-    if (['replace', 'in-place', 'throws', 'wait'].includes(mode)) {
+    if (['replace', 'in-place', 'throws', 'throws-coded', 'wait'].includes(mode)) {
       event.messages.push({ role: 'user', content: `second:${ctx.getSystemPrompt()}` });
     }
   });

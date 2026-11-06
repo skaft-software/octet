@@ -6,9 +6,11 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    octet_sdk::build_runtime()
+    let code = octet_sdk::build_runtime()
         .expect("build the octet runtime")
-        .block_on(octet_sdk::run_cli())
+        .block_on(octet_sdk::run_cli());
+    octet_sdk::restore_starting_terminal_attributes();
+    code
 }
 
 fn is_version_only_invocation() -> bool {

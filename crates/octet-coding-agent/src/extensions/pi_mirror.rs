@@ -7,35 +7,96 @@ use octet_agent::extension_process::{sanitized_subprocess_environment, ProcessGr
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 
+pub(super) fn settings_binding(
+    descriptor: &DiscoveredExtension,
+    workspace: &Path,
+    project_trusted: bool,
+) -> Option<octet_agent::extension_process::PiSettingsConfig> {
+    if descriptor.manifest.name != PI_BRIDGE_EXTENSION_NAME || !workspace.is_absolute() {
+        return None;
+    }
+    let selected = ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"]
+        .into_iter()
+        .find_map(|name| {
+            descriptor
+                .manifest
+                .entrypoint
+                .env
+                .get(name)
+                .map(std::ffi::OsString::from)
+                .or_else(|| std::env::var_os(name))
+        });
+    let selected = match selected {
+        Some(value) if value.is_empty() => return None,
+        Some(value) => PathBuf::from(value),
+        None => dirs::home_dir()?.join(".pi/agent"),
+    };
+    let absolute = if selected.is_absolute() {
+        selected
+    } else {
+        workspace.join(selected)
+    };
+    let mut agent_dir = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                agent_dir.pop();
+            }
+            component => agent_dir.push(component.as_os_str()),
+        }
+    }
+    Some(octet_agent::extension_process::PiSettingsConfig {
+        workspace: workspace.to_path_buf(),
+        agent_dir,
+        project_trusted,
+    })
+}
+
 pub(super) fn prepare(
     descriptors: &mut [DiscoveredExtension],
     config: &Config,
     diagnostics: &mut Vec<String>,
 ) -> Option<tempfile::TempDir> {
-    let descriptor = descriptors.iter_mut().find(|descriptor| {
-        descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME
-            && descriptor
-                .manifest
-                .entrypoint
-                .env
-                .get("OCTET_PI_AUTO_MIRROR")
-                == Some(&"1".to_owned())
-    })?;
-    if !config.start_extension_processes
-        || !config.sandbox.process_execution_allowed()
-        || descriptor
+    let descriptor = descriptors
+        .iter_mut()
+        .find(|descriptor| needs_preparation(descriptor, config))?;
+    let result = block_on_runtime(prepare_admitted(descriptor, config)).and_then(|result| result);
+    finish_preparation(descriptor, result, diagnostics)
+}
+
+pub(super) fn needs_preparation(descriptor: &DiscoveredExtension, config: &Config) -> bool {
+    descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME
+        && descriptor
+            .manifest
+            .entrypoint
+            .env
+            .get("OCTET_PI_AUTO_MIRROR")
+            .is_some_and(|value| value == "1")
+        && config.start_extension_processes
+        && config.sandbox.process_execution_allowed()
+        && descriptor
             .activation
             .start_decision(descriptor.source, config.workspace_trusted)
-            != ExtensionStartDecision::Allowed
-    {
-        return None;
-    }
-    let result = block_on_runtime(prepare_admitted(descriptor, config)).and_then(|result| result);
+            == ExtensionStartDecision::Allowed
+}
+
+pub(super) fn finish_preparation(
+    descriptor: &mut DiscoveredExtension,
+    result: anyhow::Result<(tempfile::TempDir, ExtensionManifest)>,
+    diagnostics: &mut Vec<String>,
+) -> Option<tempfile::TempDir> {
     match result {
         Ok((directory, manifest)) => {
             // Keep the selected source and trust identity. Only the session's
             // captured entrypoint/catalog changes, never the installed manifest.
-            descriptor.manifest.entrypoint = manifest.entrypoint;
+            let mut entrypoint = manifest.entrypoint;
+            for name in ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"] {
+                if let Some(value) = descriptor.manifest.entrypoint.env.get(name) {
+                    entrypoint.env.insert(name.into(), value.clone());
+                }
+            }
+            descriptor.manifest.entrypoint = entrypoint;
             descriptor.manifest.contributes = manifest.contributes;
             descriptor.manifest.capabilities = manifest.capabilities;
             Some(directory)
@@ -49,7 +110,7 @@ pub(super) fn prepare(
     }
 }
 
-async fn prepare_admitted(
+pub(super) async fn prepare_admitted(
     descriptor: &DiscoveredExtension,
     config: &Config,
 ) -> anyhow::Result<(tempfile::TempDir, ExtensionManifest)> {
@@ -138,4 +199,97 @@ async fn prepare_admitted(
         "Pi mirror exceeded its declared capability envelope"
     );
     Ok((directory, manifest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> DiscoveredExtension {
+        DiscoveredExtension {
+            manifest: ExtensionManifest::parse(
+                "name = \"octet-pi-compat\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = \"node\"\n",
+            ).unwrap(),
+            manifest_path: PathBuf::from("/reviewed/extension.toml"),
+            source: ExtensionSource::Explicit,
+            activation: octet_agent::extension_process::ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        }
+    }
+
+    #[test]
+    fn pi_settings_binding_uses_native_named_selector_and_exact_workspace_trust() {
+        let mut descriptor = descriptor();
+        descriptor
+            .manifest
+            .entrypoint
+            .env
+            .insert("OCTET_PI_AGENT_DIR".into(), "../selected".into());
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        descriptor.manifest.entrypoint.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            root.join("secondary").to_string_lossy().into_owned(),
+        );
+        let workspace = root.join("workspace");
+        let binding = settings_binding(&descriptor, &workspace, false).unwrap();
+        assert_eq!(binding.agent_dir, root.join("selected"));
+        assert_eq!(binding.workspace, workspace);
+        assert!(!binding.project_trusted);
+        assert!(
+            settings_binding(&descriptor, &workspace, true)
+                .unwrap()
+                .project_trusted
+        );
+        descriptor.manifest.name = "foreign-extension".into();
+        assert!(settings_binding(&descriptor, &workspace, true).is_none());
+    }
+
+    #[test]
+    fn pi_settings_binding_survives_native_mirror_preparation_without_extra_environment() {
+        let mut descriptor = descriptor();
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().canonicalize().unwrap().join("selected");
+        descriptor.manifest.entrypoint.env.insert(
+            "OCTET_PI_AGENT_DIR".into(),
+            selected.to_string_lossy().into_owned(),
+        );
+        descriptor
+            .manifest
+            .entrypoint
+            .env
+            .insert("UNRELATED".into(), "not-forwarded".into());
+        let mut prepared = descriptor.manifest.clone();
+        prepared.entrypoint.env.clear();
+        prepared
+            .entrypoint
+            .env
+            .insert("OCTET_PI_COMPAT_CACHE".into(), "/cache".into());
+        let mut diagnostics = Vec::new();
+        let directory = finish_preparation(
+            &mut descriptor,
+            Ok((tempfile::tempdir().unwrap(), prepared)),
+            &mut diagnostics,
+        );
+        assert!(directory.is_some());
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            descriptor
+                .manifest
+                .entrypoint
+                .env
+                .get("OCTET_PI_AGENT_DIR")
+                .unwrap(),
+            &selected.to_string_lossy()
+        );
+        assert!(!descriptor.manifest.entrypoint.env.contains_key("UNRELATED"));
+        assert_eq!(
+            settings_binding(&descriptor, selected.parent().unwrap(), false)
+                .unwrap()
+                .agent_dir,
+            selected
+        );
+    }
 }

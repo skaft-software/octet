@@ -15,6 +15,8 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
         model_explicit: false,
         reasoning: None,
         reasoning_explicit: false,
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
@@ -1122,6 +1124,59 @@ fn managed_extension_bundle_skills_are_discovered_but_unmanaged_copies_are_not()
             .instructions
             .trim(),
         "User instructions."
+    );
+}
+
+#[test]
+fn user_agents_skill_replaces_bundled_skill_without_a_collision_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    let bundled = home.join(".octet/extensions/example/skills/example");
+    let user = home.join(".agents/skills/example");
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        home.join(".octet/extensions/example/install.json"),
+        format!(
+            "{{\n  \"schema_version\": 1,\n  \"id\": \"example\",\n  \"version\": \"0.1.0\",\n  \"api_version\": \"{}\",\n  \"requires_octet\": \"={}\",\n  \"source_kind\": \"local\",\n  \"source\": \"fixture\",\n  \"archive_sha256\": \"{}\",\n  \"installed_by_octet\": \"{}\"\n}}\n",
+            octet_agent::EXTENSION_API_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            "a".repeat(64),
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        bundled.join("SKILL.md"),
+        "---\nname: example\ndescription: Packaged skill.\n---\nPackaged instructions.",
+    )
+    .unwrap();
+    std::fs::write(
+        user.join("SKILL.md"),
+        "---\nname: example\ndescription: User copy.\n---\nUser instructions.",
+    )
+    .unwrap();
+
+    let registry =
+        FileSystemSkillRegistry::discover(workspace.clone(), workspace, vec![], false, Some(home))
+            .unwrap();
+    assert_eq!(
+        registry
+            .load(&"example".to_owned())
+            .unwrap()
+            .instructions
+            .trim(),
+        "User instructions."
+    );
+    assert!(
+        registry
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("collision")),
+        "{:?}",
+        registry.diagnostics()
     );
 }
 

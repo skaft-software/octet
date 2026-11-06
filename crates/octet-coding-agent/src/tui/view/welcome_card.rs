@@ -242,6 +242,18 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             "full access"
         };
         let role = if state.safe_mode { "accent" } else { "warning" };
+        let access = state.theme.fg(role, access);
+        let wordmark = state.theme.bold("octet");
+        let version = state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION")));
+        let mut identity = format!("{wordmark} {version} {access}");
+        // Keep the permission label intact before optional identity details,
+        // without adding rows or moving the pending/ready composer geometry.
+        if sexy_tui_rs::visible_width(&identity) > usize::from(width) {
+            identity = format!("{wordmark} {access}");
+        }
+        if sexy_tui_rs::visible_width(&identity) > usize::from(width) {
+            identity = access;
+        }
         let detail = if state.model.trim().is_empty() {
             state
                 .theme
@@ -251,12 +263,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                 .unwrap_or_else(|| changelog_hint(state, width))
         };
         return [
-            format!(
-                "{} {} {}",
-                state.theme.bold("octet"),
-                state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
-                state.theme.fg(role, access)
-            ),
+            identity,
             detail,
             format!(
                 "{} {}",
@@ -826,6 +833,61 @@ mod tests {
             let plain = strip_terminal_sequences(&rows.join("\n"));
             assert!(plain.contains("No models configured"), "{plain}");
             assert!(plain.contains("full access"), "{plain}");
+        }
+    }
+
+    #[test]
+    fn short_welcome_keeps_permissions_at_current_version_width_breakpoints() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        for color in [ColorDepth::TrueColor, ColorDepth::Ansi16, ColorDepth::None] {
+            let mut shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_with(TerminalCapabilities::test(true, true, color)),
+            );
+            shell.set_identity("custom", "custom/probe", "off");
+            let started = Instant::now();
+            let mut state = shell.state.borrow_mut();
+            state.startup_card_started_at = Some(started);
+            for safe_mode in [false, true] {
+                state.safe_mode = safe_mode;
+                let access = if safe_mode {
+                    "safe mode"
+                } else {
+                    "full access"
+                };
+                let full = format!("octet {version} {access}");
+                let compact = format!("octet {access}");
+                for width in [
+                    access.len() as u16,
+                    compact.len() as u16 - 1,
+                    compact.len() as u16,
+                    24, // v0.10.0 plus full access is 25 cells, not 24.
+                    full.len() as u16 - 1,
+                    full.len() as u16,
+                ] {
+                    let expected = if usize::from(width) >= full.len() {
+                        full.as_str()
+                    } else if usize::from(width) >= compact.len() {
+                        compact.as_str()
+                    } else {
+                        access
+                    };
+                    for budget in 1..7 {
+                        let rows = render_welcome_card(&state, width, budget, started);
+                        let identity = strip_terminal_sequences(&rows[0]);
+                        assert_eq!(identity, expected, "width={width} budget={budget}");
+                        assert!(identity.contains(access), "{identity}");
+                        assert_eq!(rows.len(), budget.min(3));
+                        assert_eq!(welcome_content_rows(&state, width, budget), rows.len());
+                        assert!(rows
+                            .iter()
+                            .all(|line| sexy_tui_rs::visible_width(line) <= usize::from(width)));
+                        if color == ColorDepth::None {
+                            assert!(!rows.join("").contains('\x1b'));
+                        }
+                    }
+                }
+            }
         }
     }
 

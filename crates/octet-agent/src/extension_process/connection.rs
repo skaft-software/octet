@@ -46,9 +46,22 @@ impl ProtocolFrameLimit {
 }
 
 pub(super) struct ProviderStreamIngress {
+    pub(super) delegate: Option<Arc<native_provider::NativeDelegate>>,
+    pub(super) request_hooks: Option<Arc<provider_hooks::ProviderHooksJob>>,
     pub(super) sender: mpsc::Sender<api_v03::ProviderStreamEvent>,
     pub(super) next_sequence: usize,
     pub(super) terminal: bool,
+}
+
+impl Drop for ProviderStreamIngress {
+    fn drop(&mut self) {
+        if let Some(job) = &self.request_hooks {
+            job.cancelled.cancel();
+        }
+        if let Some(delegate) = &self.delegate {
+            delegate.cancelled.notify_one();
+        }
+    }
 }
 
 pub(super) type ProviderStreams = Arc<StdMutex<HashMap<String, ProviderStreamIngress>>>;
@@ -61,7 +74,9 @@ pub(super) struct ProcessConnection {
     pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
+    pub(super) prompt_reads: Arc<prompt_read::Mailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
+    pub(super) pi_settings: Option<Arc<pi_settings::Service>>,
     pub(super) pending_changed: Arc<Notify>,
     pub(super) child_requests: ChildRequests,
     pub(super) next_id: AtomicU64,
@@ -70,6 +85,7 @@ pub(super) struct ProcessConnection {
     pub(super) active_admissions: AtomicU64,
     pub(super) slots: StdRwLock<Arc<Semaphore>>,
     pub(super) publications: StdMutex<session_leaf::transport::PublicationPump>,
+    pub(super) registered_shortcuts: StdMutex<HashSet<String>>,
     pub(super) frame_limit: Arc<ProtocolFrameLimit>,
     pub(super) shutdown_timeout: Duration,
     pub(super) cancellation_grace: Duration,
@@ -81,6 +97,7 @@ pub(super) struct ProcessConnection {
     pub(super) initialization_changed: Arc<Notify>,
     pub(super) catalog_guard: StdRwLock<()>,
     pub(super) tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
+    pub(super) command_catalog: Arc<StdRwLock<Vec<CommandDefinition>>>,
     pub(super) catalog_revision: AtomicU64,
     pub(super) health: Arc<StdRwLock<ConnectionHealth>>,
     pub(super) events: broadcast::Sender<ExtensionEvent>,
@@ -166,6 +183,7 @@ pub(super) struct ChildRequest {
     pub(super) response_state: Arc<ChildResponseState>,
     pub(super) policy_intent: Option<ExtensionActionIntent>,
     pub(super) remote_ui: Option<RemoteUiChildRequest>,
+    pub(super) shortcut_registration: Option<(String, ExtensionResourceOwner)>,
 }
 
 pub(super) struct RegisteredChildRequest {
@@ -180,6 +198,7 @@ pub(super) struct ChildResponseState {
     pub(super) changed: Notify,
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
     pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
+    pub(super) inference_id: StdMutex<Option<String>>,
     pub(super) session_leaf_cancel: StdMutex<Option<crate::session_leaf::SessionLeafCancelHandle>>,
 }
 
@@ -790,7 +809,30 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, true, true, None, None, None, None, None, None,
+            method, params, timeout, true, true, None, None, None, None, None, None, None,
+        )
+        .await
+    }
+
+    pub(super) async fn request_provider_stream(
+        self: &Arc<Self>,
+        params: serde_json::Value,
+        timeout: Duration,
+        route: &mut crate::extension_provider::ExtensionProviderRoute,
+    ) -> Result<serde_json::Value, ExtensionRuntimeError> {
+        self.request_inner(
+            methods::PROVIDER_STREAM,
+            params,
+            timeout,
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(route),
         )
         .await
     }
@@ -812,6 +854,7 @@ impl ProcessConnection {
             None,
             None,
             resource_owner,
+            None,
             None,
             None,
         )
@@ -837,6 +880,7 @@ impl ProcessConnection {
             None,
             resource_owner,
             Some(request_started),
+            None,
             None,
         )
         .await
@@ -867,6 +911,7 @@ impl ProcessConnection {
             resource_owner,
             Some(request_started),
             None,
+            None,
         )
         .await
     }
@@ -878,7 +923,7 @@ impl ProcessConnection {
         timeout: Duration,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         self.request_inner(
-            method, params, timeout, false, false, None, None, None, None, None, None,
+            method, params, timeout, false, false, None, None, None, None, None, None, None,
         )
         .await
     }
@@ -903,6 +948,7 @@ impl ProcessConnection {
             None,
             None,
             Some(resource_owner),
+            None,
             None,
             None,
         )
@@ -938,6 +984,7 @@ impl ProcessConnection {
             owner,
             request_started,
             Some(Arc::clone(&admission)),
+            None,
         )
         .await?;
         let output = lock_std_mutex(&admission.output)
@@ -960,6 +1007,7 @@ impl ProcessConnection {
         resource_owner: Option<ExtensionResourceOwner>,
         request_started: Option<oneshot::Sender<ExtensionOperationToken>>,
         tool_admission: Option<Arc<ToolResultAdmission>>,
+        provider_route: Option<&mut crate::extension_provider::ExtensionProviderRoute>,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&self.protocol));
         // Lifecycle hooks execute factory code too: routed requests cannot use
@@ -1041,6 +1089,16 @@ impl ProcessConnection {
                 ));
             }
             let mut params = params;
+            if let Some(owner) = resource_owner.as_ref() {
+                if let Some(scope) = connection.prompt_reads.scope(owner) {
+                    if let Some(context) = params
+                        .get_mut("context")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        context.insert("system_prompt_scope".into(), scope.into());
+                    }
+                }
+            }
             session_leaf::attach_request_session_mirror(
                 &connection,
                 resource_owner.as_ref(),
@@ -1103,7 +1161,13 @@ impl ProcessConnection {
             let frame_state = Arc::new(AtomicU8::new(FRAME_QUEUED));
             let cancellation_sent = Arc::new(AtomicBool::new(false));
             if let Some(owner) = &resource_owner {
-                lock_std_mutex(&connection.issued_resource_owners).insert(owner.clone());
+                let mut issued = lock_std_mutex(&connection.issued_resource_owners);
+                issued.insert(owner.clone());
+                if method == methods::HOOK_RUN && message["params"]["hook"] == "session_start" {
+                    if let Some(service) = &connection.pi_settings {
+                        service.remember_parent(id, owner, &issued)?;
+                    }
+                }
             }
             {
                 let mut pending = lock_std_mutex(&connection.pending);
@@ -1144,12 +1208,27 @@ impl ProcessConnection {
             }
             let mut registration =
                 PendingRegistration::new(&connection, id, Arc::clone(&operation_reason));
-            writer.send(WriterFrame {
+            let frame = WriterFrame {
                 line,
                 state: frame_state,
                 completion: None,
                 bus_delivery: None,
-            });
+            };
+            if let Some(route) = provider_route {
+                let registry = connection
+                    .provider_registry
+                    .as_ref()
+                    .expect("provider registry");
+                *route = registry
+                    .admit_route(route, || writer.send(frame))
+                    .ok_or_else(|| {
+                        ExtensionRuntimeError::Closed(
+                            "provider route changed before admission".into(),
+                        )
+                    })?;
+            } else {
+                writer.send(frame);
+            }
 
             let reply = match reply_rx.await {
                 Ok(reply) => reply,
@@ -1422,6 +1501,9 @@ impl ProcessConnection {
             // admission. Publish retirement before releasing that disposition;
             // there must be no cancelled-terminal/current-surface window.
             lock_std_mutex(&self.tombstones).insert(id, self.tombstone_ttl);
+            if let Some(service) = &self.pi_settings {
+                service.forget_parent(id);
+            }
             // Retire only the surfaces this request created. A resource owner
             // names the session and process generation, never one request, so a
             // cancelled sibling (an expired input hook, an interrupted turn)
@@ -1635,6 +1717,20 @@ impl ProcessConnection {
             .await
     }
 
+    /// Answers a process request only if the host-issued resource owner is
+    /// still live at writer admission. The owner lock is held through enqueue,
+    /// making retirement and disclosure linearly ordered.
+    pub(super) async fn send_child_response_for_owner<T: Serialize + ?Sized>(
+        &self,
+        id: ExtensionRequestId,
+        result: &T,
+        owner: &ExtensionResourceOwner,
+    ) -> Result<(), ExtensionRuntimeError> {
+        self.send_child_envelope_admitted_for_owner(id, ChildEnvelope::Success(result), Some(owner))
+            .await
+            .map(|_| ())
+    }
+
     /// Answers one process-originated request with a typed contract failure.
     pub(super) async fn send_child_error_response(
         &self,
@@ -1651,6 +1747,16 @@ impl ProcessConnection {
         &self,
         id: ExtensionRequestId,
         envelope: ChildEnvelope<'_, T>,
+    ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
+        self.send_child_envelope_admitted_for_owner(id, envelope, None)
+            .await
+    }
+
+    async fn send_child_envelope_admitted_for_owner<T: Serialize + ?Sized>(
+        &self,
+        id: ExtensionRequestId,
+        envelope: ChildEnvelope<'_, T>,
+        owner_fence: Option<&ExtensionResourceOwner>,
     ) -> Result<ChildResponseAdmission, ExtensionRuntimeError> {
         let response = match envelope {
             ChildEnvelope::Success(result) => serde_json::to_value(ChildSuccessResponse {
@@ -1685,7 +1791,7 @@ impl ProcessConnection {
         }
         let line = ZeroizingBytes(line);
         loop {
-            let (response_state, remote_ui_response) = {
+            let (response_state, remote_ui_response, shortcut_registration) = {
                 let children = lock_std_mutex(&self.child_requests);
                 let Some(child) = children.get(&id) else {
                     return Ok(ChildResponseAdmission::AlreadySettled);
@@ -1697,7 +1803,17 @@ impl ProcessConnection {
                     .transpose()
                     .map_err(ExtensionRuntimeError::Protocol)?
                     .flatten();
-                (Arc::clone(&child.response_state), remote_ui_response)
+                let shortcut_registration = child.shortcut_registration.clone().filter(|_| {
+                    response
+                        .get("result")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|result| result.is_empty())
+                });
+                (
+                    Arc::clone(&child.response_state),
+                    remote_ui_response,
+                    shortcut_registration,
+                )
             };
             match response_state.state.compare_exchange(
                 CHILD_ACTIVE,
@@ -1739,13 +1855,69 @@ impl ProcessConnection {
                     // Writer admission is the sole terminal outcome boundary:
                     // after this non-awaiting step cancellation cannot enqueue
                     // a competing $/cancelRequest for the same child request.
-                    claim.mark_admitted();
-                    permit.send(WriterFrame {
+                    let frame = WriterFrame {
                         line: line.0.clone(),
                         state: Arc::new(AtomicU8::new(FRAME_QUEUED)),
                         completion: Some(completed),
                         bus_delivery: None,
-                    });
+                    };
+                    if let Some(owner) = owner_fence {
+                        // This mutex is also taken by retire_resource_owner.
+                        // Keep it until the writer permit is committed so a
+                        // retirement cannot slip between validation and send.
+                        let issued = lock_std_mutex(&self.issued_resource_owners);
+                        if self.closed.load(Ordering::Acquire)
+                            || self.draining.load(Ordering::Acquire)
+                            || owner.process_generation != self.generation
+                            || !issued.contains(owner)
+                        {
+                            return Err(resource_error(
+                                "resource owner retired before response publication",
+                            ));
+                        }
+                        claim.mark_admitted();
+                        permit.send(frame);
+                        drop(issued);
+                    } else if let Some((shortcut_id, owner)) = shortcut_registration {
+                        let pending = lock_std_mutex(&self.pending);
+                        let issued = lock_std_mutex(&self.issued_resource_owners);
+                        let mut children = lock_std_mutex(&self.child_requests);
+                        let child = children.get(&id).ok_or_else(|| {
+                            resource_error("shortcut registration child is unavailable")
+                        })?;
+                        if self.closed.load(Ordering::Acquire)
+                            || self.draining.load(Ordering::Acquire)
+                            || owner.process_generation != self.generation
+                            || !issued.contains(&owner)
+                            || child.exec_cancelled
+                            || !Arc::ptr_eq(&child.response_state, &claim.response_state)
+                            || child.response_state.state.load(Ordering::Acquire)
+                                != CHILD_RESPONDING
+                            || (child.parent_request_id != 0
+                                && pending.get(&child.parent_request_id).is_none_or(|parent| {
+                                    parent.terminal.load(Ordering::Acquire) != REQUEST_ACTIVE
+                                        || parent.resource_owner.as_ref() != Some(&owner)
+                                }))
+                        {
+                            return Err(resource_error(
+                                "shortcut registration is no longer active",
+                            ));
+                        }
+                        let mut registered = lock_std_mutex(&self.registered_shortcuts);
+                        if !registered.contains(&shortcut_id)
+                            && registered.len() >= MAX_EXTENSION_SHORTCUTS
+                        {
+                            return Err(resource_error(
+                                "runtime shortcut registration limit reached",
+                            ));
+                        }
+                        registered.insert(shortcut_id);
+                        claim.mark_admitted_with_children(&mut children);
+                        permit.send(frame);
+                    } else {
+                        claim.mark_admitted();
+                        permit.send(frame);
+                    }
                     let completed = tokio::select! {
                         biased;
                         _ = host_shutdown_requested() => return Err(

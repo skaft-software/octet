@@ -100,6 +100,8 @@ pub(super) fn looks_like_context_error(error: &AiError) -> bool {
     if veto.is_permanent() {
         return false;
     }
+    // Generic request_too_large can mean an encoded media/HTTP byte limit,
+    // not token overflow. Only context/token-specific evidence may compact.
     let text = error.to_string().to_ascii_lowercase();
     [
         "context window exceeded",
@@ -110,7 +112,6 @@ pub(super) fn looks_like_context_error(error: &AiError) -> bool {
         "maximum context length",
         "exceeds the context window",
         "exceeds model's maximum context length",
-        "request_too_large",
         "too many tokens",
         "token limit",
         "prompt is too long",
@@ -811,6 +812,7 @@ pub(super) async fn auxiliary_complete(
     deadline: Option<tokio::time::Instant>,
     max_network_wait: Option<Duration>,
     dispatch: AuxiliaryDispatch,
+    host_options: Option<octet_ai::HostRequestOptions>,
 ) -> Result<octet_ai::Response, AgentError> {
     let client = client.track_request_dispatch();
     *dispatch
@@ -819,7 +821,12 @@ pub(super) async fn auxiliary_complete(
     let mut stream = tokio::select! {
         biased;
         _ = wait_network_deadline(deadline) => return Err(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: client.request_may_have_been_sent() }),
-        result = client.stream(model, request) => result?,
+        result = async {
+            match host_options {
+                Some(options) => client.stream_with_host_options(model, request, Default::default(), options).await,
+                None => client.stream(model, request).await,
+            }
+        } => result?,
     };
     let mut response = None;
     while let Some(event) = stream.next().await {
@@ -1187,10 +1194,16 @@ pub(super) async fn open_provider_stream(
     model: &Model,
     request: Request,
     abort: &AbortFlag,
+    host_options: Option<octet_ai::HostRequestOptions>,
 ) -> Result<Option<octet_ai::ResponseStream>, AiError> {
     tokio::select! {
         biased;
         _ = abort.wait() => Ok(None),
-        result = client.stream(model, request) => result.map(Some),
+        result = async {
+            match host_options {
+                Some(options) => client.stream_with_host_options(model, request, Default::default(), options).await,
+                None => client.stream(model, request).await,
+            }
+        } => result.map(Some),
     }
 }

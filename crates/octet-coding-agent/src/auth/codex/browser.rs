@@ -182,6 +182,7 @@ async fn serve_callbacks(
                 anyhow::bail!("OpenAI denied browser sign-in");
             }
             Callback::Code(code) => {
+                login::browser_exchange_started();
                 // Do not include a code, verifier, token, query string, or remote
                 // response body in diagnostics or the rendered HTML.
                 let result = oauth::exchange_browser_code_with_url(

@@ -392,7 +392,7 @@ impl ExtensionProcess {
 impl ExtensionProcess {
     pub(super) fn observe_agent_event(&self, event: &AgentEvent, resource_owner: Option<&str>) {
         match event {
-            AgentEvent::ToolStarted { id, name, .. } => {
+            AgentEvent::ToolStarted { id, name, args } => {
                 let mut lifecycle = lock_std_mutex(&self.inner.lifecycle);
                 let owner = resource_owner.map(str::to_owned).or_else(|| {
                     (lifecycle.turns.len() == 1)
@@ -407,11 +407,12 @@ impl ExtensionProcess {
                 };
                 let active = ActiveLifecycleTool {
                     name: name.clone(),
+                    arguments: args.clone(),
                     started_at: Instant::now(),
                     context: turn.context.clone(),
                     endpoint: turn.endpoint.clone(),
                 };
-                let _ = Self::queue_lifecycle_observation(
+                let _ = self.queue_pi_tool_event(
                     &active.endpoint,
                     ExtensionLifecycleEvent::ToolStarted {
                         session_id: active.context.session_id.clone(),
@@ -420,8 +421,34 @@ impl ExtensionProcess {
                         tool_call_id: id.0.clone(),
                         tool_name: name.clone(),
                     },
+                    &owner,
+                    serde_json::json!({"args":args}),
                 );
                 lifecycle.tools.insert((owner, id.0.clone()), active);
+            }
+            AgentEvent::ToolProgress {
+                id,
+                progress: crate::tool::ToolProgress::PartialResult(output),
+            } => {
+                let Some(owner) = resource_owner else {
+                    return;
+                };
+                let lifecycle = lock_std_mutex(&self.inner.lifecycle);
+                let Some(active) = lifecycle.tools.get(&(owner.to_owned(), id.0.clone())) else {
+                    return;
+                };
+                if !read_std_lock(&active.endpoint.connection.protocol)
+                    .supports(EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1)
+                {
+                    return;
+                }
+                let Some(result) = message_events::pi_execution_result(output) else {
+                    return;
+                };
+                active.endpoint.connection.queue_notification("tool/updated", serde_json::json!({
+                    "resource_owner":{"session_id":owner,"extension_instance_id":self.inner.instance_id,"process_generation":active.endpoint.generation},
+                    "tool_call_id":id.0,"tool_name":active.name,"args":active.arguments,"partialResult":result
+                }));
             }
             AgentEvent::ToolFinished { id, result, .. } => {
                 let mut lifecycle = lock_std_mutex(&self.inner.lifecycle);
@@ -437,7 +464,7 @@ impl ExtensionProcess {
                 let Some(owner) = owner else {
                     return;
                 };
-                let active = lifecycle.tools.remove(&(owner, id.0.clone()));
+                let active = lifecycle.tools.remove(&(owner.clone(), id.0.clone()));
                 let Some(active) = active else {
                     return;
                 };
@@ -457,7 +484,14 @@ impl ExtensionProcess {
                 });
                 let duration_ms =
                     u64::try_from(active.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let _ = Self::queue_lifecycle_observation(
+                let output = match result {
+                    Ok(output) => Some(output),
+                    Err(error) => error.output(),
+                };
+                let pi_result = output.and_then(message_events::pi_execution_result).unwrap_or_else(|| {
+                    serde_json::json!({"content":[{"type":"text", "text":match result { Ok(output) => output.text.as_str(), Err(error) => error.message.as_str() }}], "details":{}})
+                });
+                let _ = self.queue_pi_tool_event(
                     &active.endpoint,
                     ExtensionLifecycleEvent::ToolSettled {
                         session_id: active.context.session_id,
@@ -469,6 +503,8 @@ impl ExtensionProcess {
                         duration_ms,
                         reason,
                     },
+                    &owner,
+                    serde_json::json!({"result":pi_result, "isError":result.is_err() || output.is_some_and(ToolOutput::is_error)}),
                 );
             }
             _ => {}
@@ -477,6 +513,104 @@ impl ExtensionProcess {
 }
 
 impl EventObserver for ExtensionProcess {
+    fn bind_run_system_prompt(
+        &self,
+        resource_owner: &str,
+        system_prompt: &str,
+        cancellation: CancellationToken,
+    ) -> Option<Box<dyn Send>> {
+        let connection = read_std_lock(&self.inner.connection).clone();
+        if connection.closed.load(Ordering::Acquire)
+            || connection.draining.load(Ordering::Acquire)
+            || !read_std_lock(&connection.protocol).supports(prompt_read::FEATURE)
+        {
+            return None;
+        }
+        let owner = ExtensionResourceOwner {
+            session_id: resource_owner.to_owned(),
+            extension_instance_id: self.inner.instance_id.clone(),
+            process_generation: connection.generation,
+        };
+        let guard = connection
+            .prompt_reads
+            .bind(owner.clone(), system_prompt, cancellation);
+        connection.queue_notification(
+            "context/system_prompt_scope",
+            serde_json::json!({
+                "resource_owner": owner, "scope": guard.scope()
+            }),
+        );
+        Some(Box::new(guard))
+    }
+
+    fn on_tool_call_stream(&self, event: &octet_ai::StreamEvent, owner: &str) {
+        let fields = match event {
+            octet_ai::StreamEvent::ToolCallStart {
+                index, id, name, ..
+            } => serde_json::json!({"phase":"start", "index":index, "id":id.0, "name":name}),
+            octet_ai::StreamEvent::ToolCallArgsDelta { index, delta } => {
+                serde_json::json!({"phase":"delta", "index":index, "delta":delta})
+            }
+            octet_ai::StreamEvent::ToolCallEnd { index, .. } => {
+                serde_json::json!({"phase":"end", "index":index})
+            }
+            _ => return,
+        };
+        let turn = lock_std_mutex(&self.inner.lifecycle)
+            .turns
+            .get(owner)
+            .cloned();
+        let Some(turn) = turn else {
+            return;
+        };
+        if !read_std_lock(&turn.endpoint.connection.protocol)
+            .supports(EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1)
+        {
+            return;
+        }
+        self.flush_pi_message_deltas(&turn.endpoint, owner);
+        turn.endpoint.connection.queue_notification("message/updated", serde_json::json!({
+            "resource_owner":{"session_id":owner,"extension_instance_id":self.inner.instance_id,"process_generation":turn.endpoint.generation},
+            "tool_call":fields
+        }));
+    }
+
+    fn on_assistant_message_committed(
+        &self,
+        entry: &crate::session::Entry,
+        metadata: &crate::compaction::ModelTurnAssistantMetadata,
+        resource_owner: &str,
+    ) {
+        let turn = lock_std_mutex(&self.inner.lifecycle)
+            .turns
+            .get(resource_owner)
+            .cloned();
+        let Some(turn) = turn else {
+            return;
+        };
+        if !read_std_lock(&turn.endpoint.connection.protocol)
+            .supports(EXTENSION_FEATURE_COMMITTED_MESSAGE_EVENTS_V1)
+        {
+            return;
+        }
+        let mut entry = entry.clone();
+        entry.metadata = None;
+        self.flush_pi_message_deltas(&turn.endpoint, resource_owner);
+        let params = serde_json::json!({
+            "resource_owner": {
+                "session_id": resource_owner,
+                "extension_instance_id": self.inner.instance_id,
+                "process_generation": turn.endpoint.generation,
+            },
+            "assistant_entry": entry,
+            "assistant_metadata": metadata,
+        });
+        let _ = turn
+            .endpoint
+            .connection
+            .queue_notification(methods::MESSAGE_SETTLED, params);
+    }
+
     fn on_event(&self, event: &AgentEvent) {
         self.observe_agent_event(event, None);
     }

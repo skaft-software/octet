@@ -4,14 +4,20 @@ use super::*;
 
 impl DelegationManager {
     pub(super) fn attach_telemetry(&self) -> watch::Receiver<Option<DelegationTelemetrySnapshot>> {
-        let (sender, receiver) = watch::channel(None);
-        {
+        let receiver = {
             let mut telemetry = self
                 .telemetry
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            telemetry.sender = Some(sender);
-        }
+            match &telemetry.sender {
+                Some(sender) => sender.subscribe(),
+                None => {
+                    let (sender, receiver) = watch::channel(None);
+                    telemetry.sender = Some(sender);
+                    receiver
+                }
+            }
+        };
         self.publish_telemetry(None, None);
         receiver
     }
@@ -88,7 +94,7 @@ impl DelegationManager {
                         .as_ref()
                         .and_then(|p| p.resolved_model.as_ref())
                         .map(|m| m.model.clone())
-                        .unwrap_or_else(|| self.template.model.spec.id.0.clone()),
+                        .unwrap_or_else(|| self.template.model().spec.id.0.clone()),
                     state: record.status.label().to_owned(),
                     phase: if !record.active_tools.is_empty() {
                         "using_tool".to_owned()
@@ -165,13 +171,6 @@ impl DelegationManager {
         // published after a newer one and become the watch channel's latest.
         drop(telemetry);
         drop(state);
-    }
-
-    pub(super) fn detach_telemetry(&self) {
-        self.telemetry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .sender = None;
     }
 
     /// Installs the owning agent's explicit span observer for child runs.

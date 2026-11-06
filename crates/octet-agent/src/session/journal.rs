@@ -84,7 +84,8 @@ impl AssistantFrameJournal {
             .file
             .take()
             .expect("an unsettled journal owns its writer");
-        let _ = file.sync_data();
+        // No `sync_data`: the frames are deleted next, and they never needed
+        // power-loss durability (see the type's documentation).
         // Snapshot the descriptor we created, not a potentially replaced path.
         let mut bytes = Vec::new();
         let snapshot = file.rewind().and_then(|()| {

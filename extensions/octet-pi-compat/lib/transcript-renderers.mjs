@@ -147,7 +147,10 @@ export class TranscriptRenderers {
       },
       executionStarted: boolean(request.execution_started, 'executionStarted'), argsComplete: boolean(request.args_complete, 'argsComplete'),
       isPartial: boolean(request.is_partial, 'isPartial'), expanded: boolean(request.expanded, 'expanded'),
-      showImages: boolean(request.show_images, 'showImages'), isError: boolean(request.is_error, 'isError') };
+      showImages: boolean(request.show_images, 'showImages'), isError: boolean(request.is_error, 'isError'),
+      // Pi 1.1 fields. The host does not record per-result durations and pads
+      // no tool rows, so these are Pi's values for an unrecorded, unpadded row.
+      durationMs: undefined, outputPad: 0 };
     const replace = (slot, callback) => {
       const previous = cached[slot];
       const component = this.call(store, factory, () => callback({ ...context, lastComponent: previous }));

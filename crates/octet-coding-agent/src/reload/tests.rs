@@ -1527,6 +1527,57 @@ fn applied_config_write_acknowledges_only_its_exact_sampled_revision() {
 }
 
 #[test]
+fn applied_config_write_chains_require_order_and_preserve_in_flight_evidence() {
+    let path = PathBuf::from("/config.toml");
+    let scan = |revision| {
+        Scan::from_parts(
+            vec![WatchedFingerprint::new(
+                path.clone(),
+                ReloadLayer::Resources,
+                file_fingerprint(revision),
+            )],
+            None,
+            ScanMeta::default(),
+        )
+    };
+    let first = AppliedConfigWrite {
+        path: path.clone(),
+        before: file_fingerprint(1),
+        after: file_fingerprint(2),
+    };
+    let second = AppliedConfigWrite {
+        path: path.clone(),
+        before: file_fingerprint(2),
+        after: file_fingerprint(3),
+    };
+    let now = base();
+    let mut reload = ReloadSupervisor::new(ReloadSettings::default());
+    reload.observe(now, &scan(1));
+    assert!(
+        !reload.acknowledge_applied_write(&second),
+        "skipping a receipt breaks its provenance"
+    );
+    assert!(reload.acknowledge_applied_write(&first));
+    assert!(reload.acknowledge_applied_write(&second));
+    assert!(!reload
+        .observe(now + Duration::from_secs(1), &scan(3))
+        .anything_changed());
+    reload.observe(now + Duration::from_secs(2), &scan(4));
+    let plan = reload
+        .begin(now + Duration::from_secs(3), ReloadBoundary::Idle)
+        .unwrap();
+    let deadline = reload.deadline();
+    assert!(plan.contains(ReloadLayer::Resources));
+    assert!(!reload.acknowledge_applied_write(&AppliedConfigWrite {
+        path,
+        before: file_fingerprint(3),
+        after: file_fingerprint(5),
+    }));
+    assert!(reload.is_in_flight());
+    assert_eq!(reload.deadline(), deadline);
+}
+
+#[test]
 fn applied_config_write_cannot_absorb_an_unseen_prior_edit_or_unknown_baseline() {
     let path = PathBuf::from("/config.toml");
     let mut reload = ReloadSupervisor::new(ReloadSettings::default());

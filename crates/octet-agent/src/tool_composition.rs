@@ -79,6 +79,39 @@ pub trait ToolCompositionService: Send + Sync {
         }
         self.call_outcome(name, arguments, cancellation).await
     }
+    #[allow(missing_docs)]
+    async fn call_builtin(
+        &self,
+        _name: String,
+        _arguments: Value,
+        _cancellation: CancellationToken,
+        _full_outcome: bool,
+        _updates: Option<tokio::sync::mpsc::Sender<Value>>,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::new("nested builtin calls are unavailable"))
+    }
+    #[allow(missing_docs)]
+    async fn prepare(
+        &self,
+        _name: String,
+        _arguments: Value,
+        _builtin: bool,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::new("nested preflight is unavailable"))
+    }
+    #[allow(missing_docs)]
+    async fn call_prepared(
+        &self,
+        _prepared_id: String,
+        _name: String,
+        _arguments: Value,
+        _builtin: bool,
+        _cancellation: CancellationToken,
+        _updates: Option<tokio::sync::mpsc::Sender<Value>>,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::new("prepared nested calls are unavailable"))
+    }
     /// Commits successful script writes to private, branch-scoped session state.
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError>;
 }
@@ -225,7 +258,7 @@ pub(crate) fn validate_store_writes(
 }
 
 pub(crate) fn callable_catalog(tools: &[Arc<dyn Tool>]) -> Vec<Value> {
-    tools.iter().filter(|tool| tool.composition_config().is_none()).map(|tool| {
+    tools.iter().filter(|tool| tool.composition_config().is_none() && tool.exposure().callable(true)).map(|tool| {
         let definition = tool.definition();
         let mut entry = serde_json::json!({
             "name":definition.name, "description":definition.description, "parameters":definition.parameters,
@@ -259,7 +292,7 @@ pub(crate) fn advertised_surface(tools: &[Arc<dyn Tool>]) -> Vec<ToolDef> {
     });
     let ordinary = tools
         .iter()
-        .filter(|tool| tool.composition_config().is_none())
+        .filter(|tool| tool.composition_config().is_none() && tool.exposure().callable(true))
         .collect::<Vec<_>>();
     let bindings = tool_bindings(&ordinary);
     tools.iter().filter(|tool| !only || tool.composition_config().is_some()).map(|tool| {

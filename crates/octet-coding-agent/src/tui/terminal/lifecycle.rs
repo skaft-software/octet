@@ -14,6 +14,8 @@ static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FOCUS_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
 
 /// Keep ordinary text in the terminal's normal text path while asking Kitty
 /// protocol terminals to include the layout-resolved alternate character for
@@ -23,6 +25,55 @@ static FOCUS_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(super) fn keyboard_enhancement_flags() -> event::KeyboardEnhancementFlags {
     event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+}
+
+#[cfg(unix)]
+pub(super) fn save_original_termios() {
+    let mut saved = ORIGINAL_TERMIOS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if saved.is_none() {
+        *saved = with_tty_fd(|fd| {
+            let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+            (unsafe { libc::tcgetattr(fd, attributes.as_mut_ptr()) } == 0)
+                .then(|| unsafe { attributes.assume_init() })
+        })
+        .flatten();
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn save_original_termios() {}
+
+#[cfg(unix)]
+fn reapply_original_termios() {
+    let saved = *ORIGINAL_TERMIOS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(attributes) = saved {
+        with_tty_fd(|fd| unsafe { libc::tcsetattr(fd, libc::TCSANOW, &attributes) });
+    }
+}
+
+#[cfg(not(unix))]
+fn reapply_original_termios() {}
+
+pub fn restore_starting_attributes() {
+    reapply_original_termios();
+}
+
+#[cfg(unix)]
+fn with_tty_fd<T>(apply: impl FnOnce(libc::c_int) -> T) -> Option<T> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+        return Some(apply(libc::STDIN_FILENO));
+    }
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    Some(apply(tty.as_raw_fd()))
 }
 
 pub(super) fn mark_raw_active() {
@@ -116,6 +167,7 @@ fn restore_terminal(advance_line: bool) {
         // CSI-u repeat/release of the exiting Ctrl+D, tail `00;5u`) may still
         // sit in the kernel buffer and leak into the parent shell. Drain it.
         drain_pending_input();
+        reapply_original_termios();
         return;
     }
 
@@ -138,6 +190,7 @@ fn restore_terminal(advance_line: bool) {
         // A release arriving between Pop and raw-mode exit lands here; drain
         // again now that the terminal is back in cooked mode.
         drain_pending_input();
+        reapply_original_termios();
         let _ = execute!(
             out,
             event::DisableBracketedPaste,

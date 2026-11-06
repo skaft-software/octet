@@ -35,6 +35,13 @@ pub(super) struct SessionMirror {
 }
 
 impl SessionMirror {
+    /// The published leaf of this owner's counted facts, if available.
+    pub(super) fn leaf_id(&self) -> Option<serde_json::Value> {
+        self.value
+            .as_ref()
+            .map(|facts| facts.get("session_leaf_id").cloned().unwrap_or_default())
+    }
+
     pub(super) fn rebind_generation(&mut self, generation: u64) {
         self.owner.process_generation = generation;
     }
@@ -924,12 +931,17 @@ fn session_snapshot(
     // Admit the complete visible serialization BEFORE cloning any history.
     // This includes duplicate legacy branch bodies and all header/label facts.
     visible::legacy_snapshot_bytes(session, namespace, limit)?;
+    let usage = session.assistant_usage_index();
     let entries = session
         .entries()
         .iter()
         .map(|entry| {
-            serde_json::to_value(visible::VisibleEntry { entry, namespace })
-                .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))
+            serde_json::to_value(visible::VisibleEntry {
+                entry,
+                namespace,
+                usage: usage.get(&entry.id).copied(),
+            })
+            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut branch = Vec::new();
@@ -939,9 +951,12 @@ fn session_snapshot(
             ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
         })?;
         branch.push(
-            serde_json::to_value(visible::VisibleEntry { entry, namespace }).map_err(|_| {
-                ExtensionRuntimeError::Protocol("session snapshot unavailable".into())
-            })?,
+            serde_json::to_value(visible::VisibleEntry {
+                entry,
+                namespace,
+                usage: usage.get(&entry.id).copied(),
+            })
+            .map_err(|_| ExtensionRuntimeError::Protocol("session snapshot unavailable".into()))?,
         );
         cursor = entry.parent.clone();
     }
@@ -1204,9 +1219,9 @@ pub(super) fn dispatch_append_request(
         && !lock_std_mutex(&state.session_leaf.transport)
             .parents
             .get(&request.parent_request_id)
-            .is_some_and(|(owner, preparation)| {
-                owner == &admitted.owner
-                    && preparation.as_ref().is_some_and(|p| {
+            .is_some_and(|parent| {
+                parent.owner == admitted.owner
+                    && parent.preparation.as_ref().is_some_and(|p| {
                         p.activation_epoch == request.session_leaf.activation_epoch
                             && p.operation_id == request.session_leaf.operation_id
                     })
@@ -1330,7 +1345,7 @@ pub(super) fn dispatch_append_request(
                     let entry = commit.entry.clone();
                     let previous_head = entry.parent.as_ref().map(|id| id.0.clone());
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":transport::receipt::Receipt {
-                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace }, previous_revision, view_revision, previous_head,
+                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head, gap: Vec::new(),
                     }})
                 } else {
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})

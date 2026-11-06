@@ -304,10 +304,12 @@ details.
 Each decision carries an `EffectiveToolPolicy` snapshot. `effect_policy`,
 `workspace_confinement`, `allow_edit`, `allow_write`, `allow_process`,
 `allow_shell`, `shell_path`, `bash_timeout_ms`, `max_output_bytes`, and
-`allow_remote_read` are `{ value, source }` values. `shell_path.value.selection`
-is only one of `configured`, `system_bash`, `path_bash`, `sh_fallback`, or
-`unavailable`, derived by the same resolver used for Bash execution; it contains
-neither a path nor a digest.
+`allow_remote_read` are `{ value, source }` values. `bash_timeout_ms.value` is
+`null` by default (no command deadline), or an integer millisecond ceiling;
+explicit per-call deadlines and cancellation remain enforced.
+`shell_path.value.selection` is only one of `configured`, `system_bash`,
+`path_bash`, `sh_fallback`, or `unavailable`, derived by the same resolver used
+for Bash execution; it contains neither a path nor a digest.
 
 ## Sessions
 

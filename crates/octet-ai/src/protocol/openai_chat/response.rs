@@ -58,6 +58,8 @@ struct ChatResponseMessage {
     #[serde(default)]
     reasoning: Option<String>,
     #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
     tool_calls: Option<Vec<ChatResponseMessageToolCall>>,
     #[serde(default)]
     audio: Option<ChatAudioResponse>,
@@ -390,10 +392,29 @@ fn decode_response_inner(
                 .as_ref()
                 .filter(|text| !text.is_empty())
         });
-    if let Some(reasoning) = reasoning {
+    // OpenRouter's structured reasoning carries the provider signatures the
+    // next request must return; keep it as this turn's reasoning state.
+    let details_state = choice
+        .message
+        .reasoning_details
+        .as_ref()
+        .map(|details| {
+            details
+                .iter()
+                .filter(|detail| detail.is_object())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|details| !details.is_empty())
+        .map(|details| crate::types::ReasoningState {
+            protocol: crate::types::Protocol::OpenAiChat,
+            model: model.spec.id.clone(),
+            kind: crate::types::ReasoningStateKind::ChatReasoningDetails { details },
+        });
+    if reasoning.is_some() || details_state.is_some() {
         content.push(AssistantPart::Reasoning(ReasoningPart {
-            text: Some(reasoning.clone()),
-            state: None,
+            text: reasoning.cloned(),
+            state: details_state,
         }));
     }
 

@@ -152,7 +152,7 @@ async fn activation_refusal_categories_reach_agent_and_persistence_without_hook_
 #[tokio::test]
 async fn activation_refusal_distinguishes_capability_and_retired_process_from_busy() {
     let temp = TempDir::new().unwrap();
-    let process = process(&temp, false).await;
+    let process = process(&temp, false, false, 0).await;
     let session = synthetic_history(&temp, 0);
     let context = preparation(&session);
     let connection = read_std_lock(&process.inner.connection).clone();
@@ -341,7 +341,12 @@ impl HostStreamTransport for Capture {
 }
 
 #[cfg(any(unix, windows))]
-async fn process(temp: &TempDir, invalid: bool) -> ExtensionProcess {
+async fn process(
+    temp: &TempDir,
+    invalid: bool,
+    cancel: bool,
+    remote_error: i32,
+) -> ExtensionProcess {
     let source = r#"#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
@@ -391,8 +396,13 @@ while True:
     projection = {"messages":[{"User":{"content":[{"Text":"effective leaf context"}]}}],"system":None}
     # Tool omissions are supported; output caps remain exclusively host-owned.
     if $INVALID: projection["max_output_tokens"] = 1
-    send({"jsonrpc":"2.0","id":request["id"],"result":{"provider_context":projection}})
-"#.replace("$INVALID", if invalid { "True" } else { "False" });
+    if $CANCEL:
+        send({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32800,"message":"private cancellation detail"}})
+    elif $ERROR:
+        send({"jsonrpc":"2.0","id":request["id"],"error":{"code":$ERROR,"message":"secret-bearing remote detail"}})
+    else:
+        send({"jsonrpc":"2.0","id":request["id"],"result":{"provider_context":projection}})
+"#.replace("$INVALID", if invalid { "True" } else { "False" }).replace("$CANCEL", if cancel { "True" } else { "False" }).replace("$ERROR", &remote_error.to_string());
     write_executable_script(&temp.path().join("extension.py"), &source);
     ExtensionProcess::start(
         trusted_descriptor(temp.path(), manifest()),
@@ -406,9 +416,14 @@ while True:
 #[tokio::test]
 async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses_bad_projection_or_cap(
 ) {
-    for case in ["valid", "invalid", "finite"] {
+    for case in ["valid", "invalid", "finite", "cancel", "failure", "refusal"] {
         let temp = TempDir::new().unwrap();
-        let process = process(&temp, case == "invalid").await;
+        let remote_error = match case {
+            "failure" => -32000,
+            "refusal" => -32602,
+            _ => 0,
+        };
+        let process = process(&temp, case == "invalid", case == "cancel", remote_error).await;
         let mut host = ExtensionHost::new();
         process.register(&mut host);
         assert_eq!(host.provider_context_hooks.len(), 1);
@@ -446,12 +461,13 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
                 .unwrap();
         match case {
             "valid" => assert_eq!(result.unwrap().text, "answer"),
-            "invalid" => assert!(
-                matches!(
-                    result,
-                    Err(crate::AgentError::ProviderContextPreparation(_))
-                ),
-                "unexpected result for {case}: {result:?}"
+            "failure" => assert_eq!(result.unwrap().text, "answer"),
+            "invalid" | "refusal" => assert!(matches!(
+                result,
+                Err(crate::AgentError::ProviderContextPreparation(_))
+            )),
+            "cancel" => assert!(
+                matches!(result, Ok(output) if matches!(output.reason, crate::FinishReason::Aborted))
             ),
             _ => assert!(matches!(
                 result,
@@ -462,7 +478,10 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
             std::fs::read_to_string(temp.path().join("hook-calls")).unwrap(),
             "1"
         );
-        assert_eq!(captures.lock().unwrap().len(), usize::from(case == "valid"));
+        assert_eq!(
+            captures.lock().unwrap().len(),
+            usize::from(matches!(case, "valid" | "failure"))
+        );
         if case == "valid" {
             let request = &captures.lock().unwrap()[0];
             assert_eq!(request.system, None);
@@ -472,6 +491,20 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
             assert!(!serde_json::to_string(&request.messages)
                 .unwrap()
                 .contains("private"));
+        } else if case == "failure" {
+            let request = &captures.lock().unwrap()[0];
+            assert_eq!(request.system.as_deref(), Some("canonical system"));
+            let messages = serde_json::to_string(&request.messages).unwrap();
+            assert!(messages.contains("canonical task"));
+            assert!(!messages.contains("effective leaf context"));
+        }
+        if matches!(case, "cancel" | "invalid" | "refusal") {
+            assert!(
+                captures.lock().unwrap().is_empty(),
+                "cancelled/refused hook must not dispatch provider"
+            );
+            assert!(process.shutdown().await);
+            continue;
         }
         let private = &agent.session().entries()[1];
         let checkpoint = agent
@@ -531,7 +564,7 @@ fn preparation(session: &Session) -> ProviderContextProjectionContext {
 async fn append_activation_repro_distinguishes_mirror_limit_from_private_snapshot_limit() {
     for count in [0, 40, 80] {
         let temp = TempDir::new().unwrap();
-        let process = process(&temp, false).await;
+        let process = process(&temp, false, false, 0).await;
         let session = synthetic_history(&temp, count);
         let before = std::fs::read(session.path()).unwrap();
         let head = session.head();
@@ -611,7 +644,7 @@ async fn append_activation_repro_distinguishes_mirror_limit_from_private_snapsho
 #[tokio::test]
 async fn append_activation_repro_large_history_fails_before_hook_and_provider_without_data_loss() {
     let temp = TempDir::new().unwrap();
-    let process = process(&temp, false).await;
+    let process = process(&temp, false, false, 0).await;
     let session = synthetic_history(&temp, 80);
     let before = std::fs::read(session.path()).unwrap();
     let original_entries = serde_json::to_value(session.entries()).unwrap();
@@ -692,7 +725,7 @@ async fn append_activation_repro_large_history_fails_before_hook_and_provider_wi
 #[tokio::test]
 async fn append_activation_repro_keeps_foreign_owner_and_duplicate_lease_refusals() {
     let temp = TempDir::new().unwrap();
-    let process = process(&temp, false).await;
+    let process = process(&temp, false, false, 0).await;
     let session = synthetic_history(&temp, 0);
     let before = std::fs::read(session.path()).unwrap();
     let context = preparation(&session);
@@ -733,7 +766,7 @@ async fn append_activation_repro_keeps_foreign_owner_and_duplicate_lease_refusal
 #[tokio::test]
 async fn append_activation_repro_scoped_child_conflicts_with_parent_even_without_large_history() {
     let temp = TempDir::new().unwrap();
-    let process = process(&temp, false).await;
+    let process = process(&temp, false, false, 0).await;
     let parent = Session::create(temp.path().join("parent.jsonl")).unwrap();
     let parent_before = std::fs::read(parent.path()).unwrap();
     let mut host = ExtensionHost::new();

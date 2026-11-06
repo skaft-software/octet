@@ -21,6 +21,14 @@ const MAX_RESOURCE_ENTRIES = 256;
 export const SOURCE_EXTENSIONS = new Set(['.ts', '.mts', '.cts', '.tsx', '.js', '.mjs', '.cjs', '.jsx']);
 const CONTEXT_FILES = ['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'];
 const RESOURCE_KINDS = ['extensions', 'skills', 'prompts', 'themes'];
+// Pi packages octet deliberately does not load: a product decision, not a load
+// failure. `match` is compared exactly with the npm package name (the `npm:`
+// source, or the `name` in a resolved package.json), never as a substring.
+// `line` is the one short line printed for a skipped package.
+export const UNSUPPORTED_PACKAGES = Object.freeze([
+  Object.freeze({ match: 'pi-subagents', line: 'pi-subagents: replaced by octet-subagents' }),
+  Object.freeze({ match: '@narumitw/pi-goal', line: 'pi-goal: octet uses its built-in /goal' }),
+]);
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const posix = value => value.split(sep).join('/');
 const override = value => /^[!+-]/.test(value);
@@ -48,7 +56,9 @@ function markIncomplete(ctx, key, limit, message) {
 // Check every component: lstat on only the leaf still follows linked parents.
 function safeStat(path, ctx, label, required = false) {
   path = resolve(path);
-  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot)) {
+  // From the home directory the project `.pi` contains the user's agent directory,
+  // which is user scope and never gated by project trust.
+  if (ctx.projectRoot && !ctx.projectTrusted && within(path, ctx.projectRoot) && !within(path, ctx.agentDir)) {
     diagnostic(ctx, `${label} ${path}: untrusted project .pi paths are not mirrored`);
     return undefined;
   }
@@ -345,7 +355,21 @@ function packageEntries(settings, base, scope, ctx) {
   });
 }
 
-function add(map, path, enabled, rank = 4) { if (!map.has(path)) map.set(path, { enabled, rank }); }
+// Match an unsupported package by its npm name (`npm:name[@version]`) or, for
+// local and git sources, by the name in its resolved package.json. Probing is
+// quiet: the ordinary package pass reports any real problem with the same files.
+function unsupportedPackage(entry, ctx) {
+  const npm = parseNpm(entry.source.trim());
+  let name = npm?.name;
+  if (!npm) {
+    const quiet = { ...ctx, diagnostics: [] };
+    if (!safeStat(entry.info.root, quiet, 'package source')?.isDirectory()) return undefined;
+    name = readJson(join(entry.info.root, 'package.json'), 'package.json', quiet, MAX_THEME_BYTES)?.name;
+  }
+  return typeof name === 'string' ? UNSUPPORTED_PACKAGES.find(item => item.match === name) : undefined;
+}
+
+function add(map, path, enabled, rank = 4, metadata) { if (!map.has(path)) map.set(path, { enabled, rank, sourceInfo: { path, ...metadata } }); }
 
 function packageResources(entries, maps, ctx) {
   const deduped = [], seen = new Map();
@@ -360,10 +384,19 @@ function packageResources(entries, maps, ctx) {
     } else if (entry.scope === 'project') deduped[index] = entry;
   }
   for (const entry of deduped) {
+    const unsupported = unsupportedPackage(entry, ctx);
+    if (unsupported) {
+      // Skipped before any install or manifest check: no resources, no
+      // diagnostics. The caller prints one line per package per discovery.
+      ctx.unsupported.set(unsupported.match, unsupported);
+      continue;
+    }
     const filter = plainObject(entry.pkg) ? entry.pkg : undefined;
     const delta = filter?.autoload === false;
     const base = entry.scope === 'project' && delta ? deduped.find(other => other.scope === 'user' && other.info.identity === entry.info.identity) ?? entry : entry;
     const { root, type, version } = base.info;
+    const metadata = { source: entry.source, scope: entry.scope, origin: 'package',
+      baseDir: type === 'local' && safeStat(root, ctx, 'package source')?.isFile() ? dirname(root) : root };
     const emptyDelta = delta && RESOURCE_KINDS.every(kind => filter?.[kind] === undefined || Array.isArray(filter[kind]) && filter[kind].length === 0);
     // Empty npm/git deltas contribute nothing and need no package lookup. Local
     // file entries are special: Pi enables the file directly, regardless of filters.
@@ -371,7 +404,7 @@ function packageResources(entries, maps, ctx) {
     const stat = safeStat(root, ctx, `package ${entry.source}`);
     if (!stat) { diagnostic(ctx, `package ${entry.source}: not installed at ${root}; the mirror never installs packages`); continue; }
     if (type === 'local' && stat.isFile()) {
-      for (const path of collect(root, 'extensions', ctx, { required: true })) add(maps.extensions, path, true);
+      for (const path of collect(root, 'extensions', ctx, { required: true })) add(maps.extensions, path, true, 4, metadata);
       continue;
     }
     if (emptyDelta) continue;
@@ -397,7 +430,7 @@ function packageResources(entries, maps, ctx) {
         // A project delta with unsupported selectors must also suppress the
         // global kind; otherwise global autoload would bypass the restriction.
         const files = manifest.pi?.[kind] !== undefined ? manifestFiles(root, kind, manifest.pi[kind], ctx) : collect(join(root, kind), kind, ctx);
-        for (const path of files) add(maps[kind], path, false);
+        for (const path of files) add(maps[kind], path, false, 4, metadata);
         continue;
       }
       let files;
@@ -425,10 +458,10 @@ function packageResources(entries, maps, ctx) {
             changes.set(path, enabled);
           }
         }
-        for (const [path, enabled] of changes) add(maps[kind], path, enabled);
+        for (const [path, enabled] of changes) add(maps[kind], path, enabled, 4, metadata);
       } else {
         const enabled = patterns === undefined ? new Set(files) : patterns.length === 0 ? new Set() : enabledPaths(files, patterns, root);
-        for (const path of files) add(maps[kind], path, enabled.has(path));
+        for (const path of files) add(maps[kind], path, enabled.has(path), 4, metadata);
       }
     }
   }
@@ -451,18 +484,32 @@ function mergeSettings(base, overrides) {
   return merged;
 }
 
+function agentDirectory(agentDir, env) {
+  return resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+}
+
+// Pi's SettingsManager.getSettings(): global and trusted project settings.json
+// merged, no defaults filled in. Unreadable or non-object files contribute
+// nothing; the diagnostics say why.
+export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
+  const ctx = { diagnostics: [], projectTrusted: projectTrusted === true };
+  const global = settingsObject(join(agentDirectory(agentDir, env), 'settings.json'), 'settings.json', ctx) ?? {};
+  const project = ctx.projectTrusted ? settingsObject(join(resolve(cwd, '.pi'), 'settings.json'), 'project settings.json', ctx) ?? {} : {};
+  return { settings: mergeSettings(global, project), diagnostics: ctx.diagnostics };
+}
+
 // Contract: extensions and resource paths are exact enabled files, not roots
 // that a downstream loader could re-expand to excluded or linked resources.
 // projectTrusted defaults false, even for a reviewed global mirror. Callers
 // must pass the host's current project decision, never infer trust from opt-in.
 export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd(), projectTrusted = false } = {}) {
-  const resolvedAgentDir = resolve(agentDir ?? env.OCTET_PI_AGENT_DIR ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+  const resolvedAgentDir = agentDirectory(agentDir, env);
   const projectRoot = resolve(cwd, '.pi');
-  const ctx = { diagnostics: [], scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, projectTrusted: projectTrusted === true };
+  const ctx = { diagnostics: [], unsupported: new Map(), scanned: 0, incomplete: [], incompleteKeys: new Set(), projectRoot, agentDir: resolvedAgentDir, projectTrusted: projectTrusted === true };
   const globalSettings = settingsObject(join(resolvedAgentDir, 'settings.json'), 'settings.json', ctx);
   const projectSettings = ctx.projectTrusted ? settingsObject(join(projectRoot, 'settings.json'), 'project settings.json', ctx) : {};
   const settings = mergeSettings(globalSettings ?? {}, projectSettings ?? {});
-  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, resourceLimitsExceeded: [], diagnostics: ctx.diagnostics };
+  const setup = { agentDir: resolvedAgentDir, settings, extensions: [], skillsPaths: [], promptsPaths: [], themesPaths: [], keybindingsPath: undefined, contextPath: undefined, defaultTheme: undefined, defaultThinkingLevel: undefined, defaultModel: undefined, resourceLimitsExceeded: [], diagnostics: ctx.diagnostics, unsupportedPackages: [] };
   const text = value => typeof value === 'string' && value.trim() ? value.trim() : undefined;
   setup.defaultTheme = text(settings.theme);
   setup.defaultThinkingLevel = text(settings.defaultThinkingLevel);
@@ -473,6 +520,7 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     ...packageEntries(globalSettings ?? {}, resolvedAgentDir, 'user', ctx),
   ];
   packageResources(packages, maps, ctx);
+  setup.unsupportedPackages = [...ctx.unsupported.values()];
   // Pi's first declaration wins for the same path (including disabled paths).
   // Return Pi's precedence order: project explicit/auto, user explicit/auto,
   // then packages. Native discovery still owns name collisions and admission.
@@ -483,7 +531,7 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
     if (!validSelectors(patterns, `settings.skills (${label})`, ctx)) return;
     const base = dirname(directory), files = collect(directory, 'skills', ctx);
     const enabled = enabledPaths(files, patterns.filter(override), base);
-    for (const path of files) add(maps.skills, path, enabled.has(path), rank);
+    for (const path of files) add(maps.skills, path, enabled.has(path), rank, { source: 'auto', scope: rank === 1 ? 'project' : 'user', origin: 'top-level', baseDir: base });
   };
   for (const [base, scopeSettings] of scopes) {
     for (const kind of RESOURCE_KINDS) {
@@ -496,10 +544,10 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
         catch (error) { diagnostic(ctx, `${kind} ${value}: ${error.message}`); }
       }
       const enabled = enabledPaths(local, patterns, base);
-      for (const path of local) add(maps[kind], path, enabled.has(path), base === projectRoot ? 0 : 2);
+      for (const path of local) add(maps[kind], path, enabled.has(path), base === projectRoot ? 0 : 2, { source: 'local', scope: base === projectRoot ? 'project' : 'user', origin: 'top-level' });
       const auto = collect(join(base, kind), kind, ctx);
       const autoEnabled = enabledPaths(auto, patterns.filter(override), base);
-      for (const path of auto) add(maps[kind], path, autoEnabled.has(path), base === projectRoot ? 1 : 3);
+      for (const path of auto) add(maps[kind], path, autoEnabled.has(path), base === projectRoot ? 1 : 3, { source: 'auto', scope: base === projectRoot ? 'project' : 'user', origin: 'top-level', baseDir: base });
     }
     if (base === projectRoot && ctx.projectTrusted) {
       const globalAgentsSkills = resolve(homedir(), '.agents', 'skills');
@@ -516,9 +564,11 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   }
   if (globalSettings !== undefined) addAgentSkills(join(homedir(), '.agents', 'skills'), globalSettings, 3, 'user .agents');
   const resourceFiles = {};
+  setup.sourceInfos = {};
   for (const kind of RESOURCE_KINDS) {
     const files = [...maps[kind]].filter(([, value]) => value.enabled).sort((a, b) => a[1].rank - b[1].rank).map(([path]) => path);
     resourceFiles[kind] = files;
+    for (const path of files) setup.sourceInfos[path] = maps[kind].get(path).sourceInfo;
     const limit = kind === 'extensions' ? MAX_EXTENSIONS : MAX_RESOURCE_ENTRIES;
     if (files.length > limit) {
       setup.resourceLimitsExceeded.push({ dimension: 'kind', kind, actual: files.length, limit });

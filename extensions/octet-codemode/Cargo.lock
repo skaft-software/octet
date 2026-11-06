@@ -232,7 +232,7 @@ checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
 name = "octet-codemode"
-version = "0.9.6"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",

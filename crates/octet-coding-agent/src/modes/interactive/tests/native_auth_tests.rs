@@ -229,6 +229,67 @@ async fn synthetic_completion_failure_and_input_error_restore_the_composer() {
 }
 
 #[tokio::test]
+async fn synthetic_login_settles_only_after_catalog_readiness_not_a_previous_run() {
+    use sexy_tui_rs::program_status::ProgramStatus;
+    for reload in ["ready", "failed", "empty"] {
+        for previous in [
+            None,
+            Some(octet_agent::FinishReason::Completed),
+            Some(octet_agent::FinishReason::MaxTurns),
+        ] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.prefill_editor("kept draft".into());
+            if let Some(reason) = previous {
+                let id = shell.begin_run("inert");
+                shell.on_run_event(
+                    id,
+                    &octet_agent::AgentEvent::RunFinished {
+                        head: octet_agent::EntryId("inert".into()),
+                        reason,
+                    },
+                );
+            }
+            let (_sender, progress) = login_progress_channel();
+            let mut input = futures_util::stream::pending();
+            assert_eq!(
+                await_codex_login(&mut shell, &mut input, progress, async { Ok(()) })
+                    .await
+                    .unwrap(),
+                Some(())
+            );
+            assert_eq!(shell.test_terminal_activity(), ProgramStatus::Working);
+            let result = reload_codex_login_catalog(&mut shell, &mut input, move || {
+                if reload == "failed" {
+                    anyhow::bail!("inert reload failure");
+                }
+                let mut catalog = octet_ai::ModelCatalog::default();
+                if reload == "ready" {
+                    let builtin = octet_ai::ModelCatalog::builtin()?;
+                    let mut model = builtin.models().next().unwrap().clone();
+                    let mut endpoint = builtin.endpoint(&model.endpoint).unwrap().clone();
+                    endpoint.id = octet_ai::EndpointId(crate::auth::codex::ENDPOINT_ID.into());
+                    model.endpoint = endpoint.id.clone();
+                    catalog.register_endpoint(endpoint)?;
+                    catalog.register_model(model)?;
+                }
+                Ok(catalog)
+            })
+            .await;
+            assert_eq!(result.is_ok(), reload == "ready");
+            assert_eq!(
+                shell.test_terminal_activity(),
+                if reload == "ready" {
+                    ProgramStatus::Done
+                } else {
+                    ProgramStatus::Error
+                }
+            );
+            assert_eq!(shell.pending(), "kept draft");
+        }
+    }
+}
+
+#[tokio::test]
 async fn synthetic_late_cancel_after_published_commit_does_not_claim_rollback() {
     let mut shell = InteractiveShell::test_shell();
     let (sender, progress) = login_progress_channel();

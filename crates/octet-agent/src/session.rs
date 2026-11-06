@@ -121,6 +121,8 @@ pub enum UsageRecordKind {
         /// The owning outer model tool call.
         parent: String,
     },
+    #[allow(missing_docs)]
+    ToolInference { attempt: u64, parent: String },
     /// A tool-free call used to produce a context-compaction summary.
     Compaction,
     /// Isolated Anthropic prompt-cache keepalive; never an assistant turn.
@@ -1123,6 +1125,15 @@ pub enum SessionRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bound: Option<UsageUncertaintyBound>,
     },
+    #[allow(missing_docs)]
+    ToolInferenceStarted {
+        attempt: u64,
+        parent: String,
+        endpoint: EndpointId,
+        model: ModelId,
+    },
+    #[allow(missing_docs)]
+    ToolInferenceSettled { attempt: u64 },
     /// Cache-warm lifecycle; independent from provider usage and context.
     CacheWarm {
         /// Sanitized status record.
@@ -1158,6 +1169,13 @@ pub enum SessionRecord {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRecordRef<'a> {
+    ToolInferenceStarted {
+        #[serde(flatten)]
+        record: &'a tool_inference::ToolInferenceAttempt,
+    },
+    ToolInferenceSettled {
+        attempt: u64,
+    },
     UsageUncertainty {
         record: &'a UsageUncertaintyRecord,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1197,8 +1215,12 @@ fn write_json_line<T: Serialize>(buf: &mut Vec<u8>, record: &T) -> Result<(), Se
     Ok(())
 }
 
-pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
-pub(crate) const MAX_SESSION_RECORDS: usize = 1_000_000;
+/// Largest session file octet writes or opens. Pi has no write limit and
+/// cannot reopen a session past Node's ~512 MiB string limit, so every session
+/// Pi can resume fits.
+pub(crate) const MAX_SESSION_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Every record line is at least two bytes, so the byte limit binds first.
+pub(crate) const MAX_SESSION_RECORDS: usize = (MAX_SESSION_FILE_BYTES / 2) as usize;
 
 /// Immutable-entry index shared by replay and live appends. Parent links and
 /// call IDs are indexed once, rather than rewalking a batch for every result.
@@ -1480,6 +1502,8 @@ pub struct Session {
     usage_uncertainty_bounds: Vec<Option<UsageUncertaintyBound>>,
     /// Separate cache-warm lifecycle, session-global and never model-visible.
     cache_warm_records: Vec<CacheWarmRecord>,
+    next_tool_inference_attempt: u64,
+    tool_inference_attempts: BTreeMap<u64, tool_inference::ToolInferenceAttempt>,
     /// Replaceable parked deferred-run leaves, keyed by operation id. The
     /// store owns its own descriptor-bound append line so a durable change is
     /// one synced record.
@@ -1487,6 +1511,9 @@ pub struct Session {
     /// Replaceable durable entry labels. Keyed by an existing entry ID, so the
     /// map can never grow past the session's entry count (one label per entry).
     entry_labels: BTreeMap<EntryId, String>,
+    // Ephemeral notices belong to this live Session, not to the process or
+    // its durable transcript. Pruned against active hooks before preparation.
+    pub(crate) context_failure_notices: BTreeSet<String>,
 }
 
 impl Drop for Session {
@@ -1523,7 +1550,12 @@ mod entries;
 mod journal;
 mod replay;
 mod store;
+mod tool_inference;
 mod usage;
+
+#[cfg(test)]
+#[path = "session/tests/tool_inference.rs"]
+mod tool_inference_tests;
 
 #[cfg(test)]
 mod tests;

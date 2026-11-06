@@ -280,14 +280,31 @@ async fn run_prompt(
             style_log(theme, &format!("[extension] {notification}"))
         )?;
     }
-    app.agent.set_system_prompt(composition.system);
-    app.agent.set_prompt_display_text(Some(display_prompt));
     let prior_cache_misses = crate::commands::cache_miss_count(app);
     let mut composed_input = octet_agent::UserInput::from(composition.prompt);
     composed_input.custom_messages = composition.custom_messages;
-    let mut run = match app
-        .agent
-        .prompt_with_responses_prewarm(composed_input)
+    let submission = match app.prepare_submission(composed_input) {
+        Ok((submission, diagnostics)) => {
+            for diagnostic in diagnostics {
+                writeln!(output, "{}", style_log(theme, &diagnostic))?;
+            }
+            submission
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            let outcome = tracker.fail(run_id, reason.clone()).expect("active run");
+            writeln!(output, "{}", style_log(theme, &outcome_text(&outcome)))?;
+            output.flush()?;
+            return Ok(PromptExit::Finished(HostRunOutcome::Failed(reason)));
+        }
+    };
+    app.agent.set_system_prompt(composition.system);
+    app.agent.set_prompt_display_text(Some(display_prompt));
+    let mut run = match submission
+        .start(
+            &mut app.agent,
+            octet_agent::PreparedPromptMode::ResponsesPrewarm,
+        )
         .await
     {
         Ok(run) => run,

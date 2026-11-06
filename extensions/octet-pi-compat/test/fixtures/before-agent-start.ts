@@ -8,5 +8,6 @@ export default pi => {
     if (event.prompt === 'empty') return { systemPrompt: '' };
     return { systemPrompt: `${event.systemPrompt}\nfirst` };
   });
-  pi.on('before_agent_start', event => event.prompt === 'chain' ? { systemPrompt: `${event.systemPrompt}\nsecond` } : undefined);
+  // Pi 1.2+ handlers that act only on user prompts check messageType.
+  pi.on('before_agent_start', event => event.messageType === 'user' && event.prompt === 'chain' ? { systemPrompt: `${event.systemPrompt}\nsecond` } : undefined);
 }

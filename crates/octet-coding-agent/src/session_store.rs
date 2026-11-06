@@ -27,8 +27,9 @@ static NEXT_SESSION_SUFFIX: AtomicU64 = AtomicU64::new(1);
 // Keep the picker scanner under the same documented bounds as Session::open.
 // Unlike a semantic replay, this path retains only IDs, parents, entry kinds,
 // and one clipped user title per entry.
-pub(crate) const MAX_SESSION_FILE_BYTES: usize = 256 * 1024 * 1024;
-const MAX_SESSION_RECORDS: usize = 1_000_000;
+pub(crate) const MAX_SESSION_FILE_BYTES: usize = 512 * 1024 * 1024;
+// Every record line is at least two bytes, so the byte limit binds first.
+const MAX_SESSION_RECORDS: usize = MAX_SESSION_FILE_BYTES / 2;
 const MAX_SESSION_METADATA_BYTES: usize = 64 * 1024;
 const MAX_SESSION_NAME_CHARS: usize = 120;
 const MAX_SESSION_TAGS: usize = 32;

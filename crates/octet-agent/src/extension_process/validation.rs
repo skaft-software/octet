@@ -275,396 +275,17 @@ pub(super) fn contributions_compatible(
 }
 
 pub(super) fn validate_output_schema_definition(schema: &serde_json::Value) -> Result<(), String> {
-    fn visit(schema: &serde_json::Value, depth: usize) -> Result<(), String> {
-        if depth > 32 {
-            return Err("schema nesting exceeds 32 levels".into());
-        }
-        let object = schema
-            .as_object()
-            .ok_or_else(|| "schema nodes must be objects".to_owned())?;
-        const SUPPORTED: &[&str] = &[
-            "$schema",
-            "title",
-            "description",
-            "default",
-            "examples",
-            "type",
-            "properties",
-            "required",
-            "additionalProperties",
-            "items",
-            "enum",
-            "const",
-            "allOf",
-            "anyOf",
-            "oneOf",
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "minLength",
-            "maxLength",
-            "minItems",
-            "maxItems",
-            "uniqueItems",
-            "minProperties",
-            "maxProperties",
-        ];
-        if let Some(keyword) = object
-            .keys()
-            .find(|keyword| !SUPPORTED.contains(&keyword.as_str()))
-        {
-            return Err(format!("unsupported JSON Schema keyword `{keyword}`"));
-        }
-        if let Some(types) = object.get("type") {
-            let valid_type = |name: &str| {
-                matches!(
-                    name,
-                    "null" | "boolean" | "object" | "array" | "number" | "integer" | "string"
-                )
-            };
-            match types {
-                serde_json::Value::String(name) if valid_type(name) => {}
-                serde_json::Value::Array(names)
-                    if !names.is_empty()
-                        && names
-                            .iter()
-                            .all(|name| name.as_str().is_some_and(valid_type)) => {}
-                _ => return Err("type must name one or more supported JSON types".into()),
-            }
-        }
-        if let Some(properties) = object.get("properties") {
-            for (name, property) in properties
-                .as_object()
-                .ok_or_else(|| "properties must be an object".to_owned())?
-            {
-                if name.len() > 256 {
-                    return Err("property name exceeds 256 bytes".into());
-                }
-                visit(property, depth + 1)?;
-            }
-        }
-        if let Some(required) = object.get("required") {
-            let required = required
-                .as_array()
-                .ok_or_else(|| "required must be an array".to_owned())?;
-            if !required.iter().all(serde_json::Value::is_string) {
-                return Err("required entries must be strings".into());
-            }
-        }
-        if let Some(additional) = object.get("additionalProperties") {
-            if !additional.is_boolean() {
-                visit(additional, depth + 1)?;
-            }
-        }
-        if let Some(items) = object.get("items") {
-            visit(items, depth + 1)?;
-        }
-        for keyword in ["allOf", "anyOf", "oneOf"] {
-            if let Some(branches) = object.get(keyword) {
-                let branches = branches
-                    .as_array()
-                    .filter(|branches| !branches.is_empty())
-                    .ok_or_else(|| format!("{keyword} must be a non-empty array"))?;
-                for branch in branches {
-                    visit(branch, depth + 1)?;
-                }
-            }
-        }
-        if object.get("enum").is_some_and(|values| {
-            !values.is_array() || values.as_array().is_some_and(Vec::is_empty)
-        }) {
-            return Err("enum must be a non-empty array".into());
-        }
-        for keyword in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
-            if object.get(keyword).is_some_and(|value| !value.is_number()) {
-                return Err(format!("{keyword} must be a number"));
-            }
-        }
-        for keyword in [
-            "minLength",
-            "maxLength",
-            "minItems",
-            "maxItems",
-            "minProperties",
-            "maxProperties",
-        ] {
-            if object
-                .get(keyword)
-                .is_some_and(|value| value.as_u64().is_none())
-            {
-                return Err(format!("{keyword} must be a non-negative integer"));
-            }
-        }
-        if object
-            .get("uniqueItems")
-            .is_some_and(|value| !value.is_boolean())
-        {
-            return Err("uniqueItems must be boolean".into());
-        }
-        Ok(())
-    }
-    visit(schema, 0)
+    octet_ai::validate_json_schema_definition(schema).map_err(|error| error.to_string())
 }
 
 pub(super) fn validate_structured_content(
     schema: &serde_json::Value,
     value: &serde_json::Value,
 ) -> Result<(), String> {
-    struct ValidationBudget {
-        remaining: usize,
+    match octet_ai::validate_json_schema_value(schema, value).map_err(|error| error.to_string())? {
+        true => Ok(()),
+        false => Err("structured content does not match output schema".into()),
     }
-
-    impl ValidationBudget {
-        fn consume(&mut self) -> Result<(), String> {
-            self.remaining = self
-                .remaining
-                .checked_sub(1)
-                .ok_or_else(|| "structured output validation budget exceeded".to_owned())?;
-            Ok(())
-        }
-    }
-
-    fn matches_type(value: &serde_json::Value, expected: &str) -> bool {
-        match expected {
-            "null" => value.is_null(),
-            "boolean" => value.is_boolean(),
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "number" => value.is_number(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "string" => value.is_string(),
-            _ => false,
-        }
-    }
-
-    fn visit(
-        schema: &serde_json::Value,
-        value: &serde_json::Value,
-        path: &str,
-        depth: usize,
-        budget: &mut ValidationBudget,
-    ) -> Result<(), String> {
-        budget.consume()?;
-        if depth > 32 {
-            return Err(format!("{path} exceeds validation depth"));
-        }
-        let object = schema
-            .as_object()
-            .ok_or_else(|| "validated schema node is not an object".to_owned())?;
-        if let Some(expected) = object.get("type") {
-            let accepted = match expected {
-                serde_json::Value::String(expected) => matches_type(value, expected),
-                serde_json::Value::Array(expected) => expected
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .any(|expected| matches_type(value, expected)),
-                _ => false,
-            };
-            if !accepted {
-                return Err(format!("{path} does not match declared type"));
-            }
-        }
-        if let Some(values) = object.get("enum").and_then(serde_json::Value::as_array) {
-            let mut matched = false;
-            for candidate in values {
-                budget.consume()?;
-                if candidate == value {
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                return Err(format!("{path} is not one of the declared enum values"));
-            }
-        }
-        if object
-            .get("const")
-            .is_some_and(|constant| constant != value)
-        {
-            return Err(format!("{path} does not match const"));
-        }
-        if let Some(branches) = object.get("allOf").and_then(serde_json::Value::as_array) {
-            for branch in branches {
-                visit(branch, value, path, depth + 1, budget)?;
-            }
-        }
-        if let Some(branches) = object.get("anyOf").and_then(serde_json::Value::as_array) {
-            let mut matched = false;
-            for branch in branches {
-                if visit(branch, value, path, depth + 1, budget).is_ok() {
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                return Err(format!("{path} does not match anyOf"));
-            }
-        }
-        if let Some(branches) = object.get("oneOf").and_then(serde_json::Value::as_array) {
-            let mut matches = 0_u8;
-            for branch in branches {
-                if visit(branch, value, path, depth + 1, budget).is_ok() {
-                    matches = matches.saturating_add(1);
-                    if matches > 1 {
-                        break;
-                    }
-                }
-            }
-            if matches != 1 {
-                return Err(format!("{path} does not match exactly one oneOf branch"));
-            }
-        }
-        if let Some(value) = value.as_object() {
-            let properties = object
-                .get("properties")
-                .and_then(serde_json::Value::as_object);
-            if let Some(required) = object.get("required").and_then(serde_json::Value::as_array) {
-                for required in required.iter().filter_map(serde_json::Value::as_str) {
-                    budget.consume()?;
-                    if !value.contains_key(required) {
-                        return Err(format!("{path}.{required} is required"));
-                    }
-                }
-            }
-            for (name, child) in value {
-                budget.consume()?;
-                if let Some(schema) = properties.and_then(|properties| properties.get(name)) {
-                    visit(schema, child, &format!("{path}.{name}"), depth + 1, budget)?;
-                } else if let Some(additional) = object.get("additionalProperties") {
-                    match additional {
-                        serde_json::Value::Bool(false) => {
-                            return Err(format!("{path}.{name} is not allowed"));
-                        }
-                        serde_json::Value::Object(_) => {
-                            visit(
-                                additional,
-                                child,
-                                &format!("{path}.{name}"),
-                                depth + 1,
-                                budget,
-                            )?;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let count = value.len() as u64;
-            if object
-                .get("minProperties")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|minimum| count < minimum)
-            {
-                return Err(format!("{path} has too few properties"));
-            }
-            if object
-                .get("maxProperties")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|maximum| count > maximum)
-            {
-                return Err(format!("{path} has too many properties"));
-            }
-        }
-        if let Some(value) = value.as_array() {
-            if let Some(items) = object.get("items") {
-                for (index, child) in value.iter().enumerate() {
-                    visit(items, child, &format!("{path}[{index}]"), depth + 1, budget)?;
-                }
-            }
-            let count = value.len() as u64;
-            if object
-                .get("minItems")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|minimum| count < minimum)
-            {
-                return Err(format!("{path} has too few items"));
-            }
-            if object
-                .get("maxItems")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|maximum| count > maximum)
-            {
-                return Err(format!("{path} has too many items"));
-            }
-            if object
-                .get("uniqueItems")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            {
-                let mut unique = HashSet::with_capacity(value.len());
-                for item in value {
-                    budget.consume()?;
-                    let canonical = serde_json::to_vec(item)
-                        .map_err(|error| format!("cannot canonicalize {path} item: {error}"))?;
-                    if !unique.insert(canonical) {
-                        return Err(format!("{path} contains duplicate items"));
-                    }
-                }
-            }
-        }
-        if let Some(value) = value.as_str() {
-            let count = value.chars().count() as u64;
-            if object
-                .get("minLength")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|minimum| count < minimum)
-            {
-                return Err(format!("{path} is shorter than minLength"));
-            }
-            if object
-                .get("maxLength")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|maximum| count > maximum)
-            {
-                return Err(format!("{path} is longer than maxLength"));
-            }
-        }
-        if let Some(number) = value.as_f64() {
-            for (keyword, predicate) in [
-                (
-                    "minimum",
-                    number
-                        < object
-                            .get("minimum")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(number),
-                ),
-                (
-                    "maximum",
-                    number
-                        > object
-                            .get("maximum")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(number),
-                ),
-                (
-                    "exclusiveMinimum",
-                    number
-                        <= object
-                            .get("exclusiveMinimum")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(number - 1.0),
-                ),
-                (
-                    "exclusiveMaximum",
-                    number
-                        >= object
-                            .get("exclusiveMaximum")
-                            .and_then(serde_json::Value::as_f64)
-                            .unwrap_or(number + 1.0),
-                ),
-            ] {
-                if object.contains_key(keyword) && predicate {
-                    return Err(format!("{path} violates {keyword}"));
-                }
-            }
-        }
-        Ok(())
-    }
-    let mut budget = ValidationBudget {
-        remaining: MAX_SCHEMA_VALIDATION_STEPS,
-    };
-    visit(schema, value, "$", 0, &mut budget)
 }
 
 pub(super) fn decode_tool_call_output(
@@ -989,5 +610,41 @@ pub(super) fn require_artifact_feature(
         Err(ExtensionRuntimeError::Protocol(format!(
             "tool `{tool_name}` returned an artifact without artifacts negotiation"
         )))
+    }
+}
+
+#[cfg(test)]
+mod schema_keyword_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pi_output_schema_value_budget_is_fatal_without_echoing_payloads() {
+        let schema = json!({"type":"array","items":{"type":"string"}});
+        validate_output_schema_definition(&schema).unwrap();
+        let value = json!(vec!["private-output-value"; 4096]);
+        let error = validate_structured_content(&schema, &value).unwrap_err();
+        assert!(error.contains("work limit"));
+        assert!(!error.contains("private-output-value"));
+    }
+
+    #[test]
+    fn pi_output_schema_keywords_share_input_validator_and_preserve_constraints() {
+        let schema = json!({"type":"object","properties":{"runId":{"type":"string","format":"uuid"},"step":{"type":"number","multipleOf":0.5},"fields":{"type":"object","patternProperties":{"^.*$":{"type":"integer"}},"additionalProperties":false}},"required":["runId","step","fields"]});
+        validate_output_schema_definition(&schema).unwrap();
+        let value =
+            json!({"runId":"053dc2bc-237c-4c08-b4de-77b5dbd05fa2","step":1.5,"fields":{"a":2}});
+        validate_structured_content(&schema, &value).unwrap();
+        for (name, bad) in [
+            ("runId", json!("bad")),
+            ("step", json!(1.25)),
+            ("fields", json!({"a":"bad"})),
+        ] {
+            let mut invalid = value.clone();
+            invalid[name] = bad;
+            assert!(validate_structured_content(&schema, &invalid).is_err());
+        }
+        assert!(validate_output_schema_definition(&json!({"patternProperties":{"[":{}}})).is_err());
+        assert!(validate_output_schema_definition(&json!({"unknownConstraint":true})).is_err());
     }
 }

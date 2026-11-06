@@ -10,6 +10,8 @@ pub struct ExtensionRuntimeConfig {
     /// Native-owned private Python location. Download consent, when present,
     /// belongs only to a selected explicit setup action, never source trust.
     pub python_runtime: Option<PythonRuntimeConfig>,
+    #[allow(missing_docs)]
+    pub pi_settings: Option<PiSettingsConfig>,
     /// Initial session/model/skill state.
     pub host_state: ExtensionHostState,
     /// Manifest-declared CLI values resolved by the product before startup.
@@ -64,6 +66,8 @@ pub struct ExtensionRuntimeConfig {
     pub provider_stream_deadline: Duration,
     /// Maximum duration of one request.
     pub request_timeout: Duration,
+    /// Maximum duration of one extension tool call, which may wait on a person.
+    pub tool_call_timeout: Duration,
     /// Per-stage shutdown timeout, applied once to the shutdown request/ack and
     /// again while waiting for the child to exit during shutdown or reload.
     pub shutdown_timeout: Duration,
@@ -90,6 +94,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
             .debug_struct("ExtensionRuntimeConfig")
             .field("workspace", &self.workspace)
             .field("python_runtime_configured", &self.python_runtime.is_some())
+            .field("pi_settings_configured", &self.pi_settings.is_some())
             .field("host_state", &self.host_state)
             .field(
                 "flag_value_names",
@@ -120,6 +125,7 @@ impl std::fmt::Debug for ExtensionRuntimeConfig {
             )
             .field("provider_stream_deadline", &self.provider_stream_deadline)
             .field("request_timeout", &self.request_timeout)
+            .field("tool_call_timeout", &self.tool_call_timeout)
             .field("shutdown_timeout", &self.shutdown_timeout)
             .field("max_message_bytes", &self.max_message_bytes)
             .field("max_pending_requests", &self.max_pending_requests)
@@ -137,6 +143,7 @@ impl ExtensionRuntimeConfig {
         Self {
             workspace: workspace.into(),
             python_runtime: None,
+            pi_settings: None,
             host_state: ExtensionHostState::default(),
             flag_values: BTreeMap::new(),
             agent_sessions: false,
@@ -156,6 +163,7 @@ impl ExtensionRuntimeConfig {
             provider_stream_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
             provider_stream_deadline: DEFAULT_PROVIDER_STREAM_DEADLINE,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            tool_call_timeout: DEFAULT_TOOL_CALL_TIMEOUT,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             max_message_bytes: DEFAULT_EXTENSION_MESSAGE_BYTES,
             max_pending_requests: DEFAULT_PENDING_REQUESTS,
@@ -170,6 +178,7 @@ impl ExtensionRuntimeConfig {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct OfferedHostServices {
     pub(super) provider_proxy: bool,
+    pub(super) provider_inheritance: bool,
     pub(super) remote_ui: bool,
     pub(super) transcript_render: bool,
     pub(super) agent_sessions: bool,
@@ -181,6 +190,7 @@ pub(super) struct OfferedHostServices {
     pub(super) session_compaction: bool,
     pub(super) approvals: bool,
     pub(super) secrets: bool,
+    pub(super) pi_settings: bool,
     /// Effective physical frame offered for the paired session-repair.v2
     /// profile; zero means the pair is not offered this process.
     pub(super) max_message_bytes: usize,

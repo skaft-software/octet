@@ -382,6 +382,27 @@ impl ResourceResolver {
             return;
         }
 
+        // Recover managed Windows updates before catalog/CLI-flag discovery,
+        // and hold the writer lock across this scan. Project and explicit
+        // source roots are not package-manager recovery authorities.
+        #[cfg(windows)]
+        let _package_lock = if kind == ResourceKind::Extension && scope == ResourceScope::Global {
+            match crate::extension_package::lock_existing(root) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    diagnostics.push(ResourceDiagnostic {
+                        level: ResourceDiagnosticLevel::Warning,
+                        kind,
+                        path: root.to_owned(),
+                        message: format!("cannot prepare installed extensions: {error:#}"),
+                    });
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         // Normalize accepted roots after rejecting a symlink at the resource
         // boundary. This keeps secure descriptor traversal working on macOS,
         // where temporary directories are commonly reached through `/var`,

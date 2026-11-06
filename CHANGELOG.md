@@ -1,5 +1,316 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Update pulldown-cmark from 0.13.5 to 0.13.6 for RUSTSEC-2026-0433 (quadratic
+  parsing of nested image wikilinks). octet does not enable the affected
+  wikilinks extension.
+
+### Fixed
+
+- Pi session-name writes acknowledge the committed, normalized name, including
+  clears, even without a custom footer, editor or widget. Concurrent host
+  snapshots cannot leave the adapter reading the old name until another shell
+  update, and late acknowledgements cannot cross a retired session owner.
+- Subagent chrome continues updating while the parent waits for input after its
+  turn ends. Worker telemetry is session-lived; background roster refresh
+  failures retain the last accepted view and go to extension diagnostics instead
+  of adding repeated transcript notices.
+- Compaction accepts textual summaries up to 2 MiB (previously 128 KiB),
+  including the host-derived file list, so routes that cannot enforce the
+  requested output budget no longer fail compaction of long sessions; this was
+  reported with long Codex sessions. Oversized output is still refused before any
+  checkpoint is published, and opaque native Responses compaction state is
+  unchanged. Branch summaries and extension-supplied replacement summaries share
+  the same bound.
+- Subagent lifecycle and tool-status events keep neutral transcript separators,
+  independent of theme density and painted surface padding.
+- Top-clipped tool images retain their original horizontal gutter while scrolling.
+  Repeated viewport crops compose correctly, and image placement preserves the
+  text cursor and payload-free diagnostic logs.
+- Reasoning prose preserves the terminal foreground when its background is
+  unknown, rather than guessing a gray that loses contrast on common palettes.
+  Known light/dark profiles and explicit theme colors remain unchanged.
+- Release documentation inventory includes the retained Pi design, historical
+  benchmark evidence, theme profile, linked adapter guides and TypeBox license,
+  while excluding per-run maintainer notes and unreviewed patch backups from
+  installed documentation. Git records remain unchanged.
+- Pi custom-provider streams and inherited native delegation use bundled pure
+  context helpers and request-option parsing, without accidentally requiring an
+  installed Pi runtime. Explicit installed-Pi helpers retain their version gates.
+- Pi custom-provider compatibility defaults and OpenRouter session-affinity
+  headers match parsed endpoint hostnames, not provider names embedded in URL
+  paths or lookalike hosts. Explicit provider IDs and compatibility overrides
+  still take precedence; credential and endpoint authority are unchanged.
+- Native Pi notification tests follow the concise grouped notice format while
+  continuing to reject private exception text and factory paths.
+
+- Unix bash background descendants with redirected output remain supervised when
+  no execution deadline is configured, instead of being killed at shell exit by
+  an overflowing deadline calculation. Cancellation and host cleanup still apply.
+
+- Incremental assistant rendering rebuilds the block when neighboring surface
+  geometry changes, rather than reusing rows with stale spacing.
+- Provider-credential responses are fenced against host-owner retirement during
+  asynchronous resolution and writer admission. This grants no new credential
+  capability and does not enable generic Pi inference.
+
+- The Pi adapter no longer shows `parent settled` or `active numeric
+  parent_request_id required` notices. They mean an extension's late work lost
+  its finished request, which the user cannot act on; the cause stays in the log.
+- Pi extension tools that write session entries (pi-web-access `web_search`,
+  rpiv-todo `todo`) no longer fail with `missing field session_leaf`. The host
+  forwards the operation's own single-use session grant on `tool/call` and the
+  adapter presents it; the numeric-parent, owner, generation, single-use and
+  bound checks on every append are unchanged, and a request without a causal
+  driver (parallel waves) still carries no grant.
+- Pi `mcp search` (pi-mcp-adapter) no longer fails with
+  `unsupported_feature ctx.modelRegistry.classify`. The adapter feature-detects
+  Pi's classifier API on every search; `ctx.modelRegistry.classify` and
+  `findOfType` now read as absent (octet has no classifier-model contract), so
+  word search works and semantic search reports itself unavailable. No credential
+  path changes.
+- A prompt entered while octet is busy (compaction, hooks, a thinking change) is
+  queued once and sent when the wait ends, so Enter no longer has to be repeated.
+  Commands and shell escapes are still never queued as model input. Busy and
+  thinking notices are one short line each.
+- Extension tool calls may wait up to 10 minutes for a person to answer a dialog
+  (it was 30 seconds, which cut `ask_user` dialogs short); Esc still cancels.
+- Pi `/mcp` (pi-mcp-adapter) no longer takes the extension host down. The keybinding
+  facades handed to custom UI factories and returned by `getKeybindings()` threw
+  `unsupported_feature keybindings.getUserBindings` on the adapter's optional
+  `getUserBindings?.()` probe; the rejection was unhandled and the host exited.
+  The member now reads as absent (the host still supplies no override provenance;
+  other unsupported members still refuse).
+- A quit stops waiting for a slow Pi `session_start` handler so shutdown handlers
+  run at once; reload, new, resume and fork still wait their turn.
+- A Pi `defaultThinkingLevel` the model does not offer is now clamped to the
+  nearest supported level (up first, then down, as Pi does) with no startup or
+  `/reload` notice; applied Pi defaults no longer print a red `reload failed:`
+  line, and a thinking level chosen in the session is kept across `/reload`.
+- Pi mirror loading rechecks reviewed sources at each ordered factory import and
+  after a failed native-ESM probe before fallback. A changed source is refused;
+  this review check is not an operating-system sandbox.
+- Pi's `ctx.isProjectTrusted()` applies its plain-repository rule for already
+  enabled factories, allowing repo tooling such as language servers to start
+  when no trust-requiring project resources exist. The signal cannot silently
+  re-promote an owner after resources disappear or native trust is revoked;
+  replacement owners reevaluate it. Native workspace trust, project-resource
+  loading and tool policy are unchanged.
+- Pi hook callback waits now share one bounded deadline, including the late-handler
+  reserve. Resource discovery budgets 4 s for callbacks against the host's 5 s
+  deadline, and tool guards remain fail-closed. Queueing, transport and pending
+  tracked host operations are outside the callback budget.
+- Resource `/reload` ends the old extension session binding with
+  `interrupted` / `reload` and starts the replacement with `reload`, rather than
+  reporting shutdown/resume. Ordinary quit and session resume remain distinct.
+- Interactive shutdown reapplies saved terminal attributes after the runtime
+  stops, preserving macOS `PENDIN` through extension reload and cleanup.
+- Pi automatic-mirror capture and the live runner share one persistent transform
+  and compile-cache directory instead of warming a cache the runner did not use.
+- Explicitly enabled Pi setup preparation displays **Loading your Pi setup**
+  while the native input pump retains typing and resize handling. Cold catalog
+  capture still precedes the fully initialized branded frame; no cold-start
+  performance parity is claimed.
+
+### Changed
+
+- Bash has no default deadline. Explicit per-call timeouts and configured
+  ceilings still apply; cancellation retains process-tree cleanup.
+- Native TOML themes can opt into a Pi presentation profile and explicitly
+  override transcript styles, tool-state fills, horizontal padding and activity
+  shimmer. Existing adapter snapshots retain legacy presentation defaults.
+- Pi startup reuses source fingerprints and module resolutions and can import
+  eligible reviewed ESM factories natively. Ordered registration and jiti
+  fallback remain; the resolution cache repopulates after the format change.
+
+### Known limitations
+
+- **Continue without a provider** can load normally enabled, admitted
+  extensions. Prompts and model-dependent operations stay unavailable until a
+  model is configured and octet restarts.
+- In codemode scripts, `tools.bash` resolves to octet's result (`stdout`,
+  `stderr`, `exit_code`, …) and rejects on a non-zero exit. Pi resolves to
+  `{output, truncated, exit_code, wall_time_seconds}`.
+- Pi packages that start their own child agent session, such as `/btw`, don't
+  work yet.
+- `pi-subagents`, `@narumitw/pi-goal` and Pi codemode are replaced by octet's
+  subagents, `/goal` and codemode and are not loaded; see
+  `docs/pi-compatibility.md#pi-packages-octet-replaces`.
+- Pi's startup `[Skills]` and `[Prompts]` listing isn't printed.
+- With a Pi custom editor active, Enter in `!` bash mode may not submit.
+
+### Added
+
+- Pi `settings.json` `"defaultTools": ["+codemode"]` turns on an installed,
+  host-admitted octet-codemode bundle for that session only, with
+  `codemode.mode` presentation defaults. Explicit CLI flags win; project
+  settings count only in a trusted workspace; nothing is installed, granted or
+  persisted.
+
+## [0.10.0]
+
+**The first Pi-compatible octet release.** Bring your Pi extensions, skills,
+prompts, themes and custom UI to a native, open-source coding agent.
+See the [release notes](docs/releases/v0.10.0.md) for setup and known boundaries.
+
+### Added
+
+- Interactive terminal-tab activity via OSC 7501 v0.4: `app=octet`, host-owned
+  working/blocked/done/error, and idle on cancellation. Reports contain no
+  private text or fabricated percentages, preserve OSC 2 session titles, and
+  stay out of plain/print/RPC/redirected output. Rex can consume its documented
+  native status protocol; tab-logo association remains terminal-owned.
+- Direct OpenAI `gpt-6.1-terra` uses Responses for tools, its exact reasoning
+  choices, 1.05M context / 128K output, and reviewed public cache/long-context
+  pricing. This does not grant a Codex route or subscription pricing.
+- The release catalog includes `octet-pi-compat` among six optional bundles,
+  all at 0.10.0 with exact `=0.10.0` host pins and API `0.4`. Installation and
+  discovery remain inert; enabling the stock bridge imports/runs enabled Pi
+  factories with OS permissions, without granting native credential disclosure.
+- Native command catalogs and resource provenance stay bound to the current
+  owner across reloads; metadata never grants execution authority.
+- Pi 1.4 support. `--from-pi` and the installed-Pi fallback accept managed Pi
+  1.0.2 through 1.4.x, and the adapter follows Pi 1.4's extension API:
+  `before_agent_start` reports `messageType: "user"`, `agent_settled` reports
+  `aborted`, tool lifecycle events carry `toolCallId`, `toolName` and
+  `durationMs`, tools may declare `reachesTools` and namespace `aliases`,
+  `prepareLoadout` gets `getPromptGuidelines()`, and `@earendil-works/pi-ai/models`
+  resolves like the pi-ai root. Pi 1.4's 79 example extensions load exactly as
+  Pi 1.0.2's do.
+
+### Security
+
+- Update zstd from 0.13.3 to 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2) for
+  RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403 and
+  RUSTSEC-2026-0410. octet only compresses Codex request bodies with one-shot
+  zstd calls and does not use the affected reused-stream, seekable,
+  legacy-frame decompression or WebAssembly paths.
+- Update pulldown-cmark from 0.13.4 to 0.13.5 for RUSTSEC-2026-0414. octet does
+  not enable the affected wikilinks extension.
+
+### Fixed
+
+- Exiting the interactive TUI restores the terminal attributes it started with,
+  including `pendin` on macOS, matching Pi.
+- Tern progress uses indeterminate working instead of 0%, reflects actual
+  user gates and failure, and shares lifecycle/deduplication with ANSI rendering.
+  Distinct fast foreground operations retain separate results; sign-in settles
+  only after catalog readiness. Suspension/exit retire live activity without
+  erasing persistent OSC 7501 done/error. Existing TSP app identity is retained;
+  an octet tab-logo catalog entry still requires upstream Tern support. Actual
+  Rex/Tern runtime pixels remain unverified.
+- Pi session context/projection helpers tolerate absent historical provider
+  identity without fabricating it or weakening unavailable-usage/cost guards.
+- Shell output selections copy the sanitized, progress-normalized output instead
+  of a fragment of the command header, including wide Unicode text. Wrapped
+  continuation rows retain their own source spans instead of copying the first row.
+  Compact tails start at the renderer's retained source boundary; omitted
+  duplicates and elision labels cannot steal a visible output selection.
+- Literal HTTP(S) URLs in shell output retain their complete click targets across
+  wrapping, including terminals without OSC 8 support; stationary clicks preserve
+  the draft and keep the existing browser-safety and stale-geometry fences.
+  Encoded targets over 2 KiB and links beyond the 64 KiB wrapped-payload budget
+  remain plain text to bound decoration allocation.
+- Copied Pi session entries preserve unavailable-usage/cost diagnostics instead
+  of an incidental `undefined.total` error. Subscription prices remain unknown
+  when not recorded; no zero price is fabricated for custom footers.
+- Pi assistant messages from `ctx.sessionManager` carry their recorded token
+  usage, cost and stop reason, so Pi footers and status lines such as the
+  `custom-footer` example work once a session has a model reply. Unpriced and
+  unrecorded turns keep those facts absent rather than invented.
+- On Windows, OpenAI, Copilot and other sign-in flows, and transcript link
+  clicks, open the default browser instead of File Explorer. URLs go to the
+  registered protocol handler as one argument, so OAuth query strings survive.
+- Pasting multi-line text in Windows terminals inserts it as one paste instead
+  of submitting at the first line break. The Windows console input API never
+  reports bracketed paste, so a queued run of text keys containing a line break
+  is recombined; all other input still arrives as the original keys.
+- Captured transcript links retain their click targets on terminals without
+  OSC 8 support, including Apple Terminal, without emitting unsupported controls
+  or changing the HTTP(S)-only activation and stale-geometry fences.
+- Successful live `/settings tui` switches acknowledge their exact preference
+  writes, avoiding redundant reloads that reset the transcript viewport. Active
+  runs retain ordered receipts for idle ownership; failed switches and external
+  edits still participate in normal reload.
+- HTTP 413 includes recovery advice for accumulated native media. Generic
+  `request_too_large` errors no longer trigger token compaction; failed requests
+  retain native audio in history without silent removal or provider switching.
+- Google streaming preserves signed assistant text/reasoning boundaries across tool
+  calls and chunk-position changes, including signatures on empty final text
+  chunks. Repeated and prefix-related text/thought deltas are no longer mistaken
+  for cumulative snapshots, preserving the original signed text on tool-result
+  replay through Gemini, Vertex and native Google-compatible gateways.
+- OpenRouter `reasoning_details` are kept with each reply and returned unchanged
+  on the next request to the same model, so Gemini 3-class and Anthropic models
+  keep their signed reasoning across tool calls. As in OpenRouter's SDK, unsigned
+  Anthropic/Gemini text entries are not returned, and replayed reasoning goes in
+  `reasoning` instead of the visible assistant content.
+- A provider stream may stay silent for 15 minutes after its first byte instead
+  of 5. Gemini models never stream tool-call arguments, so a large file write was
+  cut off while the model was still generating it. The 15-minute first-byte wait
+  and one-hour response deadline are unchanged.
+- Long sessions no longer stop at 256 MiB or one million records with "session
+  append exceeds storage bounds". A session can grow to 512 MiB, about the
+  largest file Pi can reopen, and a full session now says so and suggests
+  `/new`; it stays saved and resumable.
+- Your own skills in `~/.agents/skills`, `~/.pi/agent/skills` and
+  `~/.octet/skills` now replace a skill of the same name bundled with an
+  installed extension, as in Pi, and doing so no longer prints a name-collision
+  warning.
+- The computer-use and Cua Driver skills let the agent work in apps and sites
+  where you are already signed in once you approve that app and account. Signing
+  in, passwords and two-factor prompts stay with you.
+- Pi startup publishes real model/scoped-model facts before callbacks run.
+- CamelCase extension tools such as `mcpScript` retain their exact spelling.
+  Tool allowlists and exclusions are consistently case-sensitive, including
+  builtin names (`read`, not `Read`).
+- Theme preference commits acknowledge their exact applied write, avoiding the
+  redundant resource reload that retired composed Pi editor/footer mounts;
+  independent resource changes still reload and native TOML appearance remains.
+- Pi startup callbacks can await late-tool catalog acknowledgements without a
+  lifecycle-lock cycle; generation, reload and failed-ACK fences stay intact.
+- Live admitted commands read the actual native system prompt instead of a
+  missing cached snapshot. Retained/headless prompt access remains unqualified.
+- App-deferred headless startup receives credential-filtered model/scoped facts
+  and refreshed mirrored defaults; immediate pre-App/initialize-time starts
+  remain outside this repair, and unavailable facts still refuse explicitly.
+- Legacy raw `0x1f` matches Pi Ctrl+- undo; raw bytes are retained and explicit
+  Kitty Ctrl+7 stays distinct. Legacy bindings relying on that ambiguous byte
+  as Ctrl+7 change meaning. Original-editor guest replay remains open.
+
+### Fixed
+
+- Managed extension updates (`octet extension update`) work on
+  Windows instead of failing with "atomic directory exchange is unavailable on
+  this platform". Validated candidates use locked, recoverable replacement;
+  failed publication restores the previous bundle, or retains its backup with
+  recovery instructions if Windows blocks restoration. Listing and global managed
+  discovery recover interrupted updates. Linux/macOS keep atomic exchange.
+
+### Changed
+
+- Startup reuses the static CLI parser, and endpoint matching parses the selected
+  URL once before comparing builtin provider declarations.
+- Full session listings load cached catalog summaries in one query rather than
+  one per session. Latest-only lookup and transcript fingerprint checks remain.
+- Settling a disposable partial-assistant journal no longer syncs the file just
+  before reading and deleting it. Authoritative session appends retain their
+  existing durability; Linux executable ASLR is unchanged.
+
+### Known limitations
+
+- Individual API gaps are recorded in the [API ledger](docs/pi-extension-api.md).
+  Compatibility targets Pi 1.4's public extension API (managed Pi 1.0.2 through
+  1.4.x), not its private internals or complete CLI. Windows remains preview; Bun is unqualified.
+- Live provider/audio and model-quality acceptance are not part of this launch.
+  The versioned release page records actual distribution-channel availability.
+- Product/installer and Python/TypeScript source identities target 0.10.0;
+  independent Rust SDK 0.8.2, Pi 1.0.2, private adapter npm 0.1.0, API/schema and
+  example fixture versions stay unchanged.
+
 ## [0.9.6] - Unreleased
 
 The [release notes](docs/releases/v0.9.6.md) record shipped scope, qualification
@@ -556,12 +867,10 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
   absolute load deadline (22 s) instead of each getting a minimum wait after the
   20 s budget runs out, so many stalled factories can no longer push the load past
   the host's 30 s limit.
-- Starting with `octet-pi-compat` enabled no longer keeps the screen blank for
-  seconds. The Pi mirror loaded every factory up to three times before the first
-  frame (about 7-11 s for a 20-extension setup) on every start. It now reuses its
-  captured catalog while your Pi setup, its factories, the adapter, Node and the
-  installed Pi are unchanged, and otherwise captures them in one warm process:
-  the same setup draws its first frame in about half a second.
+- Starting with `octet-pi-compat` enabled shows a typeable loading status during
+  mirror preparation. The mirror reuses its captured catalog when the Pi setup,
+  factories, adapter, Node and installed Pi are unchanged; cold capture still
+  precedes the fully initialized frame and Pi-equivalent timing is not established.
 - The Pi mirror applies its skills, prompts and theme again when the interactive
   shell attaches it after the first frame. Its `session_start` arrived before the
   session it belongs to was shared with it, so an extension that read
@@ -569,27 +878,23 @@ has open issues such as [#572](https://github.com/skaft-software/octet/issues/57
   startup ended with `reload failed: … requires successful settled session_start`
   while the Pi footer still drew over octet's theme. A Pi default model served by
   one of your extensions' providers is also selected now.
-- Prompts no longer fail with `extension input hook timed out` or `before_prompt
-  hook exceeded 5s` when a Pi extension supplies the editor. Its editor calls are
-  answered by the terminal, which did not serve them while waiting for those
-  hooks, so both sides waited out the deadline; Enter pressed meanwhile showed
-  `operation in progress`.
+- The terminal now serves a Pi editor's calls while waiting for prompt hooks,
+  avoiding a prior deadlock that produced `extension input hook timed out` or
+  `before_prompt hook exceeded 5s` and left Enter showing `operation in progress`.
+  Other delays can still exceed the native deadline.
 - The model picker and `--list-models` show the current OpenCode and OpenCode Go
   model lists instead of only the built-in ones; the live list used to arrive
   only on a later launch, and a failed fetch is now reported.
 - `[Extension issues]` names the error code an extension stopped with (for
   example `pi_anthropic_attribution_host_adapter_missing`) instead of only
   saying its details were redacted; the message itself is still never shown.
-- A stalled Pi extension no longer takes the mirror down with it. Every Pi hook
-  runs on one ordered queue, so one factory whose handler never settled (a network
-  call, a child process, an MCP connection) held it forever: startup failed with
-  `resources_discover failed … requires successful settled session_start`,
-  `/reload` failed, and the next prompt failed with `before_prompt hook exceeded
-  5s` and stayed in the composer. A handler now has a time budget (5 s for
-  lifecycle events; 2 s each and 4 s in total for the prompt hooks). One that
-  outlives it keeps running, is named once in `[Extension issues]`, and is skipped
-  while it stays busy; a tool guard that cannot answer in time blocks the call
-  rather than letting it through. A prompt sent while an extension is still
+- Stalled Pi callbacks now have a bounded wait on the ordered hook queue. A
+  callback that outlives its budget keeps running, is named once in `[Extension
+  issues]`, and is skipped while it stays busy; a tool guard that cannot answer
+  in time blocks the call. Prompt phases each allow 2 s per callback and 4 s
+  total; resource discovery allows 4 s total. Queueing, transport, synchronous
+  JavaScript and the flush of tracked host operations are not covered, so a
+  native deadline can still expire. A prompt sent while an extension is still
   starting waits up to 12 s for it, then continues without it. With
   `OCTET_STARTUP_TRACE=1`, each handler prints one `pi-compat.handler` line with
   its factory and duration, which names the slow one.

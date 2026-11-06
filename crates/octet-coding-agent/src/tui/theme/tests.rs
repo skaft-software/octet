@@ -15,6 +15,8 @@ fn config(workspace: PathBuf) -> Config {
         model_explicit: false,
         reasoning: None,
         reasoning_explicit: false,
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
@@ -60,6 +62,71 @@ fn config(workspace: PathBuf) -> Config {
     }
 }
 
+#[test]
+fn one_toml_controls_ansi_chrome_surfaces_density_and_native_palette_snapshot() {
+    let source = r##"
+        [metadata]
+        name = "One file"
+        [colors]
+        accent = "#44aa88"
+        composer = "framed"
+        composer_border = "#6688aa"
+        [roles."surface.tool"]
+        background = "#203040"
+        [surfaces.tool]
+        chrome = "band"
+        padding = 2
+        [layout]
+        density = "airy"
+        composer_padding = 2
+    "##;
+    let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    let theme = load_theme_source_for(
+        source,
+        "one-file.toml",
+        ThemeSource::File(PathBuf::from("one-file.toml")),
+        "One file",
+        capabilities,
+        TerminalBackground::Dark,
+    )
+    .expect("one file compiles");
+
+    assert_eq!(
+        theme.resolve::<String>("accent").as_deref(),
+        Some("#44aa88")
+    );
+    assert_eq!(
+        theme.resolve::<String>("composer").as_deref(),
+        Some("framed")
+    );
+    assert_eq!(
+        theme.resolve::<String>("composer_border").as_deref(),
+        Some("#6688aa")
+    );
+    assert_eq!(theme.layout().density, ThemeDensity::Airy);
+    let tool = theme.surface_for_width("tool", 80);
+    assert_eq!(tool.chrome, ThemeSurfaceChrome::Band);
+    assert_eq!(tool.padding, 2);
+    assert_eq!(
+        theme.semantic_style("surface.tool").background,
+        Color::Rgb(32, 48, 64)
+    );
+
+    // Tern resolves dark/light variants from this admitted source; it does not
+    // reparse the TOML as a different theme format.
+    let native = theme
+        .for_native_background(TerminalBackground::Light)
+        .expect("native snapshot resolves");
+    assert_eq!(
+        native.resolve::<String>("accent").as_deref(),
+        Some("#44aa88")
+    );
+    assert_eq!(
+        native.resolve::<String>("composer_border").as_deref(),
+        Some("#6688aa")
+    );
+}
+
 fn contrast(left: Rgb, right: Rgb) -> f64 {
     let (dark, light) = if relative_luminance(left) < relative_luminance(right) {
         (left, right)
@@ -67,6 +134,57 @@ fn contrast(left: Rgb, right: Rgb) -> f64 {
         (right, left)
     };
     (relative_luminance(light) + 0.05) / (relative_luminance(dark) + 0.05)
+}
+
+#[test]
+fn unknown_background_reasoning_preserves_terminal_foreground() {
+    for color in [
+        ColorDepth::None,
+        ColorDepth::Ansi16,
+        ColorDepth::Ansi256,
+        ColorDepth::TrueColor,
+    ] {
+        let theme = default_theme_for(
+            TerminalBackground::Unknown,
+            TerminalCapabilities::test(true, true, color),
+        );
+        let thinking = theme.semantic_style("thinking");
+        assert_eq!(thinking.foreground, Color::Default, "{color:?}");
+        assert!(!thinking.attributes.dim);
+        let renderer = theme.reasoning_renderer();
+        for role in REASONING_PROSE_ROLES {
+            assert_eq!(renderer.theme().style(*role).foreground, Color::Default);
+        }
+    }
+}
+
+#[test]
+fn reasoning_foreground_retains_known_profiles_and_explicit_overrides() {
+    let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+        let theme = default_theme_for(background, capabilities);
+        let color = parse_hex_color(&balance_foreground("#777777", background)).unwrap();
+        assert_eq!(
+            theme.semantic_style("thinking").foreground,
+            Color::Rgb(color.red, color.green, color.blue)
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reasoning.toml");
+    std::fs::write(&path, "[roles.thinking]\nforeground = '#123456'\n").unwrap();
+    let theme = load_theme_path_for(&path, capabilities, TerminalBackground::Unknown).unwrap();
+    assert_eq!(
+        theme.semantic_style("thinking").foreground,
+        Color::Rgb(0x12, 0x34, 0x56)
+    );
+    assert_eq!(
+        theme
+            .reasoning_renderer()
+            .theme()
+            .style(TextRole::Text)
+            .foreground,
+        Color::Rgb(0x12, 0x34, 0x56)
+    );
 }
 
 #[test]
@@ -762,6 +880,32 @@ fn resolver_selected_theme_paths_are_bounded_validated_and_reloadable() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("too large"));
+}
+
+#[test]
+fn file_reload_recompiles_pi_profile_transcript_overrides() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("profile.toml");
+    std::fs::write(&path, "[metadata]\nprofile = 'pi'\n").unwrap();
+    let theme = load_theme_path_for(
+        &path,
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        TerminalBackground::Dark,
+    )
+    .unwrap();
+    assert_eq!(theme.layout().block_padding_x, Some(1));
+    assert!(theme.semantic_style("thinking").attributes.italic);
+    assert_eq!(theme.glyph("list_bullet"), "-");
+    std::fs::write(&path, "[metadata]\nprofile = 'pi'\n[layout]\nblock_padding_x = 3\n[roles.thinking]\nitalic = false\n[glyphs]\nlist_bullet = '*'\n").unwrap();
+    let reloaded = theme.reload().unwrap();
+    assert_eq!(reloaded.layout().block_padding_x, Some(3));
+    assert!(!reloaded.semantic_style("thinking").attributes.italic);
+    assert_eq!(reloaded.glyph("list_bullet"), "*");
+    assert_eq!(
+        theme.layout().block_padding_x,
+        Some(1),
+        "old snapshot remains unchanged"
+    );
 }
 
 #[cfg(unix)]

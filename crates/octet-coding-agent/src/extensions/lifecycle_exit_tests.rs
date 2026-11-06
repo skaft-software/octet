@@ -38,16 +38,24 @@ for line in sys.stdin:
         reply(request["id"], {"content":[{"type":"text", "text":"callable"}],
             "is_error":False, "metadata":{}})
     elif method == "hook/run":
-        record({"hook":params["hook"], "payload":params["payload"]})
+        context = params.get("context", {})
+        record({"hook":params["hook"], "payload":params["payload"],
+            "has_ui":context.get("host", {}).get("has_ui"),
+            "mode":context.get("host", {}).get("mode"),
+            "owner":context.get("resource_owner")})
         if params["hook"] == "session_start":
             reply(request["id"], {})
         else:
             end_id = request["id"]
             send({"jsonrpc":"2.0", "method":"notification", "params":{"message":"end-entered"}})
-            if mode == "ui-cleanup":
+            if mode == "ui-cleanup" or (mode == "guarded-ui-cleanup" and context["host"]["has_ui"]):
                 send({"jsonrpc":"2.0", "id":"end-cleanup", "method":"ui/chrome", "params":{
                     "parent_request_id":end_id, "resource_owner":params["context"]["resource_owner"],
                     "chrome":{"kind":"working_message", "message":None}}})
+            elif mode == "guarded-ui-cleanup":
+                record({"guarded_cleanup_skipped":True})
+                reply(end_id, {})
+                end_id = None
     elif request.get("id") == "end-cleanup" and ("result" in request or "error" in request):
         record({"end_ui_response":request})
         reply(end_id, {})
@@ -312,6 +320,41 @@ async fn shutdown_closes_fleet_admission_before_awaiting_session_end() {
             .count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_end_reports_no_ui_without_changing_mode_owner_or_shared_host_facts() {
+    let mut f = fixture("guarded-ui-cleanup").await;
+    tokio::time::timeout(Duration::from_secs(3), f.extensions.shutdown())
+        .await
+        .unwrap();
+    let wire = records(&f.log);
+    let starts = wire
+        .iter()
+        .filter(|entry| entry["hook"] == "session_start")
+        .collect::<Vec<_>>();
+    let ends = wire
+        .iter()
+        .filter(|entry| entry["hook"] == "session_end")
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1, "{wire:?}");
+    assert_eq!(ends.len(), 1, "{wire:?}");
+    assert_eq!(starts[0]["has_ui"], true);
+    assert_eq!(ends[0]["has_ui"], false);
+    assert_eq!(starts[0]["mode"], "tui");
+    assert_eq!(ends[0]["mode"], "tui");
+    assert_eq!(ends[0]["owner"], starts[0]["owner"]);
+    assert!(wire
+        .iter()
+        .any(|entry| entry["guarded_cleanup_skipped"] == true));
+    assert!(wire.iter().any(|entry| entry["shutdown"] == true));
+    assert!(!wire
+        .iter()
+        .any(|entry| entry.get("end_ui_response").is_some() || entry.get("cancelled").is_some()));
+    // The end-hook snapshot is request-local, not a change to another live owner.
+    let host = f.process.current_context().host;
+    assert_eq!(host.has_ui, Some(true));
+    assert_eq!(host.mode.as_deref(), Some("tui"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

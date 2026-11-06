@@ -1,4 +1,4 @@
-import { accessSync, constants, mkdirSync } from 'node:fs';
+import { accessSync, chmodSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import module from 'node:module';
@@ -38,6 +38,14 @@ export function startupCacheDirectory() {
 function ensure(directory) {
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // Cached transforms and resolutions are executed code, so the directory must
+    // be this user's alone. A pre-existing directory is not trusted just because
+    // it is writable: another owner's is refused and loose modes are tightened.
+    if (typeof process.getuid === 'function') {
+      const info = statSync(directory);
+      if (!info.isDirectory() || info.uid !== process.getuid()) return undefined;
+      if (info.mode & 0o077) chmodSync(directory, 0o700);
+    }
     accessSync(directory, constants.W_OK | constants.X_OK);
     return directory;
   } catch {
@@ -47,8 +55,7 @@ function ensure(directory) {
 
 /// Enables Node's module compile cache for every module compiled from now on.
 ///
-/// The adapter's own static imports are already loaded, but every factory and
-/// dependency jiti compiles afterwards benefits. Best effort by contract: an
+/// Best effort by contract: an
 /// unavailable or unwritable cache only means the process starts a little
 /// slower, never that startup fails.
 export function enableModuleCompileCache() {
@@ -70,4 +77,55 @@ export function enableModuleCompileCache() {
 export function jitiCacheOptions() {
   const directory = startupCacheDirectory();
   return directory ? { fsCache: join(directory, 'jiti') } : {};
+}
+
+// A process killed between the write and the rename leaves `<name>.<pid>.tmp`
+// behind, and because the name carries the pid nothing would ever reuse it.
+// Temporaries of this document older than a write could plausibly take go.
+const STALE_TEMPORARY_MS = 10 * 60 * 1000;
+function sweepStaleTemporaries(directory, name) {
+  try {
+    const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.tmp$`);
+    for (const entry of readdirSync(directory)) {
+      if (!pattern.test(entry)) continue;
+      const file = join(directory, entry);
+      try { if (Date.now() - statSync(file).mtimeMs > STALE_TEMPORARY_MS) unlinkSync(file); } catch { /* raced with its owner */ }
+    }
+  } catch { /* housekeeping only */ }
+}
+
+/// Reads one persisted JSON document from the startup cache directory.
+///
+/// Persisted maps are optimizations: a missing, oversized, unreadable or
+/// wrong-schema file is `undefined` and the caller recomputes.
+export function readPersisted(name, schema, maxBytes = 16 * 1024 * 1024) {
+  try {
+    const directory = startupCacheDirectory();
+    if (!directory) return undefined;
+    const file = join(directory, name);
+    if (statSync(file).size > maxBytes) return undefined;
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    return value?.schema === schema ? value : undefined;
+  } catch { return undefined; }
+}
+
+/// Atomically replaces one persisted document (private mode, rename). Best effort.
+export function writePersisted(name, value, maxBytes = 16 * 1024 * 1024) {
+  try {
+    const directory = startupCacheDirectory();
+    if (!directory) return false;
+    const text = JSON.stringify(value);
+    if (Buffer.byteLength(text) > maxBytes) return false;
+    const file = join(directory, name), temporary = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, text, { mode: 0o600 });
+      renameSync(temporary, file);
+    } catch (error) {
+      // The name is per process, so a leftover from a full disk would never be reused.
+      try { unlinkSync(temporary); } catch { /* nothing was written */ }
+      throw error;
+    }
+    sweepStaleTemporaries(directory, name);
+    return true;
+  } catch { return false; }
 }

@@ -59,7 +59,9 @@ provenance is not a new persisted `ModelSpec`/native-host protocol field. See th
 Gemini Developer API, Vertex AI, and declared Google-compatible routes select the
 same native codec. It constructs the fixed `models/<safe-api-name>:streamGenerateContent`
 path under a trusted endpoint, uses Google content/function declarations and native
-JSON-schema fields, and decodes SSE candidate snapshots into canonical deltas.
+JSON-schema fields, and decodes SSE chunks into canonical events. Text and
+thought chunks are appended as deltas, including repeated or prefix-related
+chunks; only function-call argument objects use cumulative snapshot merging.
 Google's opaque `thoughtSignature` is retained as position-bound
 `ProviderMetadata` immediately before its text, reasoning, or function-call part.
 It is replayed only to the same Google model; transformations to any other model

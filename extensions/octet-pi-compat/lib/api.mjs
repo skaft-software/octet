@@ -1,7 +1,7 @@
 import { withContextLimits } from './context-limits.mjs';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, parse, resolve } from 'node:path';
-import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, rpcError, unsupported } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
@@ -13,6 +13,8 @@ import { Editor } from './editor.mjs';
 import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
 import { compactionCallbackStore, requestCompaction } from './compaction.mjs';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
+import { truncateToWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
+import { safeLines } from './remote-ui.mjs';
 import { contextFacts, getSettings } from './context-api.mjs';
 import { sessionMethods, sessionHeader } from './session-methods.mjs';
 import { customMessageParams, userMessageParams } from './custom-messages.mjs';
@@ -29,7 +31,7 @@ export const hookEvents = {
 };
 export const notificationEvents = {
   'turn/started': 'agent_start', 'turn/settled': 'agent_end',
-  'tool/started': 'tool_execution_start', 'tool/settled': 'tool_execution_end',
+  'tool/started': 'tool_execution_start', 'tool/updated': 'tool_execution_update', 'tool/settled': 'tool_execution_end',
   'message/started': 'message_start', 'message/updated': 'message_update', 'message/settled': 'message_end',
   'compaction/failed': 'session_compact_failed',
   'session/info_changed': 'session_info_changed', 'dialog/started': 'ui_prompt_start', 'dialog/settled': 'ui_prompt_end',
@@ -50,12 +52,12 @@ function register(runtime, map, key, definition, factory) {
     if (previous.factory !== factory) invalid(`registration ${key} belongs to another factory`);
     // Replacing local callbacks is live; changing native catalog metadata is not.
     // Refuse before touching the registry rather than claim an inert success.
-    for (const field of ['description', 'usage', 'type', 'default']) {
+    for (const field of map === runtime.commands ? ['description'] : ['description', 'usage', 'type', 'default']) {
       if (definition[field] !== previous.definition[field]) unsupported(`runtime registration ${key}.${field}`, 'native catalog metadata is immutable after initialization');
     }
   }
   if (!runtime.loaded && map.has(key)) invalid(`duplicate registration ${key}`);
-  map.set(key, { definition, factory });
+  map.set(key, { ...map.get(key), definition, factory });
 }
 function gitBranch(cwd) {
   try {
@@ -73,7 +75,7 @@ function snapshot(host, key, api) {
   if (!(key in host)) unsupported(api, `${key} snapshot not supplied by the host`);
   return host[key];
 }
-function humanizeExtensionName(value) {
+export function humanizeExtensionName(value) {
   let name = value.trim();
   const parts = name.split('/');
   if (name.startsWith('@') && parts.length > 1) name = parts[1] === 'pi' ? parts[0].slice(1) : parts[1];
@@ -81,7 +83,8 @@ function humanizeExtensionName(value) {
   return name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[._-]+/g, ' ')
     .replace(/\b\w/g, character => character.toUpperCase());
 }
-export function extensionDisplayName(entry) {
+// The declared or humanized name of the package an entry belongs to, if any.
+export function packageDisplayName(entry) {
   let directory = dirname(resolve(entry));
   for (;;) {
     try {
@@ -91,11 +94,15 @@ export function extensionDisplayName(entry) {
       if (typeof manifest.name === 'string' && manifest.name.trim()) return bounded(humanizeExtensionName(manifest.name), 'extension display name', 128);
     } catch {}
     const parent = dirname(directory);
-    if (parent === directory || directory === parse(directory).root) break;
+    if (parent === directory || directory === parse(directory).root) return undefined;
     directory = parent;
   }
-  return bounded(humanizeExtensionName(basename(dirname(resolve(entry)))), 'extension display name', 128);
 }
+export function extensionDisplayName(entry) {
+  return packageDisplayName(entry) ?? bounded(humanizeExtensionName(basename(dirname(resolve(entry)))), 'extension display name', 128);
+}
+const actionMethods = new Set(['sendMessage', 'sendUserMessage', 'appendEntry', 'setSessionName', 'getSessionName', 'setLabel',
+  'getActiveTools', 'getAllTools', 'getSettings', 'setActiveTools', 'getCommands', 'getThinkingLevel', 'setThinkingLevel']);
 export function createAPI(runtime, factory) {
   const store = () => runtime.current(factory);
   const sessionStore = () => { const s = runtime.scope.getStore(); runtime.assertSessionOwner(s); return { ...s, factory }; };
@@ -115,18 +122,46 @@ export function createAPI(runtime, factory) {
     registerVirtualModel() { unsupported('pi.registerVirtualModel'); },
     unregisterVirtualModel() { unsupported('pi.unregisterVirtualModel'); },
     registerCommand(key, definition) {
-      name(key, 'command name'); fields(definition, ['description', 'handler', 'usage', 'getArgumentCompletions'], 'command');
+      name(key, 'command name');
+      if (!definition || typeof definition !== 'object' || Array.isArray(definition)) invalid('command must be an object');
       if (typeof definition.handler !== 'function') invalid('command handler');
       if (definition.getArgumentCompletions !== undefined && typeof definition.getArgumentCompletions !== 'function') invalid('command.getArgumentCompletions must be a function');
       if (definition.description !== undefined) bounded(definition.description, 'command description', 4096);
       if (runtime.loaded && definition.getArgumentCompletions) runtime.require('autocomplete');
-      register(runtime, runtime.commands, key, definition, factory);
+      if (runtime.loaded && runtime.features.has('runtime_command_registration_v1')) {
+        runtime.require('runtime_commands');
+        const previous = runtime.commands.get(key);
+        if (previous && previous.factory !== factory) invalid(`registration ${key} belongs to another factory`);
+        const s = store();
+        if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+        s.controller.signal.throwIfAborted();
+        const result = runtime.transport.requestSync('commands/register', {
+          parent_request_id: s.id, resource_owner: s.state.owner,
+          commands: [{ name: key, description: definition.description?.trim() ? definition.description : key }],
+        }, { parent: s.live ? s.id : undefined, signal: s.controller.signal });
+        fields(result, ['commands'], 'command registration acknowledgement');
+        if (!Array.isArray(result.commands) || !result.commands.includes(key)) invalid('host did not publish registered command');
+        runtime.commands.set(key, { definition, factory });
+      } else register(runtime, runtime.commands, key, definition, factory);
     },
     registerShortcut(key, definition) {
       fields(definition, ['description', 'handler'], 'shortcut'); bounded(key, 'shortcut key', 128);
       if (typeof definition.handler !== 'function') invalid('shortcut handler');
       if (key.split('+').includes('ctrl') && ['g', 'd'].includes(key.split('+').at(-1).toLowerCase())) unsupported(`shortcut ${key}`, 'reserved host rescue/shutdown control');
-      register(runtime, runtime.shortcuts, key, definition, factory);
+      if (runtime.loaded && !runtime.shortcuts.has(key)) {
+        runtime.assertFactory(factory);
+        runtime.require('shortcuts');
+        const s = store();
+        if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+        s.controller.signal.throwIfAborted();
+        const nativeName = `pi-runtime-shortcut-${runtime.shortcuts.size}`;
+        const result = runtime.transport.requestSync('shortcut/register', {
+          parent_request_id: s.id, resource_owner: s.state.owner,
+          id: nativeName, key, description: definition.description?.trim() ? definition.description : key,
+        }, { parent: s.live ? s.id : undefined, signal: s.controller.signal });
+        fields(result, [], 'shortcut registration acknowledgement');
+        runtime.shortcuts.set(key, { definition, factory, nativeName });
+      } else register(runtime, runtime.shortcuts, key, definition, factory);
     },
     registerFlag(key, definition) {
       fields(definition, ['description', 'type', 'default'], 'flag');
@@ -171,14 +206,44 @@ export function createAPI(runtime, factory) {
     getThinkingLevel() { return thinkingLevel(store().state.host); },
     setModel(model) { return setModel(runtime, store(), model); },
     setThinkingLevel(level) { setThinkingLevel(runtime, store(), level); },
-    getCommands() { return [...runtime.commands].map(([name, d]) => ({ name, description: d.definition.description || name, source: 'extension' })); },
+    getCommands() {
+      runtime.require('command_catalog_v1');
+      const s = store();
+      if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+      s.controller.signal.throwIfAborted();
+      const result = runtime.transport.requestSync('commands/snapshot', {
+        parent_request_id: s.id, resource_owner: s.state.owner,
+      }, { parent: s.live ? s.id : undefined, signal: s.controller.signal });
+      fields(result, ['commands'], 'command catalog');
+      const commands = plainJSON(result.commands, 'command catalog', 524288);
+      if (!Array.isArray(commands)) invalid('command catalog must be an array');
+      return commands.map(({ extension, registeredName, ...command }) => {
+        // Native resolves invocation names and membership. Only this bridge can
+        // identify its own registered factory; it never adds a command here.
+        const local = extension === runtime.namespace ? runtime.commands.get(registeredName) : undefined;
+        if (!local) return command;
+        const path = runtime.entrypoint(local.factory);
+        command.sourceInfo = { ...(runtime.commandSourceInfos?.[path] ?? {
+          path, source: 'local', scope: 'temporary', origin: 'top-level', baseDir: dirname(path),
+        }) };
+        if (local.definition.description === undefined) delete command.description;
+        return command;
+      });
+    },
   };
   const methods = new Map();
   return new Proxy(api, {
     get(target, key, receiver) {
       const value = Reflect.get(target, key, receiver);
       if (typeof value !== 'function') return value;
-      if (!methods.has(key)) methods.set(key, (...args) => { runtime.assertFactory(factory); return value(...args); });
+      if (!methods.has(key)) methods.set(key, (...args) => {
+        runtime.assertFactory(factory);
+        if (!runtime.actionsInitialized && !runtime.foreground) {
+          if (key === 'setModel') return Promise.reject(new Error('Extension runtime not initialized'));
+          if (actionMethods.has(key)) throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.');
+        }
+        return value(...args);
+      });
       return methods.get(key);
     },
   });
@@ -212,14 +277,39 @@ export function createContext(runtime, store, replaced = false) {
     runtime.require('remote_ui'); foreground();
     if (factory !== undefined && typeof factory !== 'function' && !Array.isArray(factory)) invalid(`${slot} factory`);
     const action = async () => {
-      if (factory === undefined) return runtime.ui.clearSlot(store, slot);
-      const make = Array.isArray(factory) ? () => ({ render: () => factory, invalidate() {} }) : factory;
-      return runtime.ui.mount(store, placement, slot, slot === 'footer' ? (tui, t) => make(tui, t, footerData) : make, { slot, ...options });
+      let result;
+      if (factory === undefined) result = await runtime.ui.clearSlot(store, slot);
+      else {
+        const make = Array.isArray(factory) ? () => ({ render: () => factory, invalidate() {} }) : factory;
+        result = await runtime.ui.mount(store, placement, slot, slot === 'footer' ? (tui, t) => make(tui, t, footerData) : make, { slot, ...options });
+      }
+      if (slot === 'footer') await syncStatuses();
+      return result;
     };
     const key = slot, prev = store.state.uiQueues.get(key) || Promise.resolve();
     const promise = prev.then(action); store.state.uiQueues.set(key, promise.catch(() => {}));
     return runtime.track(promise, store);
   };
+  const syncStatuses = () => {
+    if (!runtime.features.has('remote_ui')) return;
+    const state = foreground(), slot = 'statuses';
+    if (state.host.has_ui === false) return;
+    const action = async () => {
+      runtime.assertOwner(store); store.controller.signal.throwIfAborted();
+      if (state.host.has_ui === false) return;
+      if (!state.statuses.size || runtime.ui.slots.has(`${state.key}:footer`)) return runtime.ui.clearSlot(store, slot);
+      const surface = runtime.ui.slots.get(`${state.key}:${slot}`);
+      if (surface) { surface.requestRender(); return; }
+      return runtime.ui.mount(store, 'below_editor', 'Extension statuses', () => ({
+        render: width => [truncateToWidth([...state.statuses].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, text]) => text).join(' '), width)],
+        invalidate() {},
+      }), { slot });
+    };
+    const previous = state.uiQueues.get(slot) || Promise.resolve();
+    const promise = previous.then(action); state.uiQueues.set(slot, promise.catch(() => {}));
+    return runtime.track(promise, store);
+  };
+  const userAnswer = promise => store.userWait?.track(promise) ?? promise;
   const custom = (factory, options = {}) => {
     runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
     if (typeof factory !== 'function') invalid('ui.custom factory');
@@ -229,6 +319,7 @@ export function createContext(runtime, store, replaced = false) {
     const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
     const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle });
     runtime.track(mounting, store);
+    userAnswer(result);
     return Promise.all([mounting, result]).then(([, value]) => value);
   };
   const ui = facade({
@@ -241,12 +332,21 @@ export function createContext(runtime, store, replaced = false) {
     },
     ...dialogAPI(custom, {
       async confirm(title, message) {
-        foreground();
-        return (await runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store)).confirmed;
+        const state = foreground();
+        // Hook requests do not have the command-owned confirmation broker. Use
+        // the real foreground surface for Pi's own guard question instead; this
+        // does not approve or bypass the host's separate tool-effect policy.
+        // Default to No, and let cancellation/retirement refuse the guard.
+        if (store.hook === 'before_tool_call' && state.host.has_ui === true && runtime.features.has('remote_ui')) {
+          const heading = bounded(title, 'confirmation', 16384);
+          const detail = message === undefined ? '' : bounded(message, 'confirmation detail', 16384, { controls: true });
+          return await dialogAPI(custom).select(`${heading}\n${detail}`, ['No', 'Yes']) === 'Yes';
+        }
+        return (await userAnswer(runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store))).confirmed;
       },
       async input(title) {
         foreground();
-        return (await runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store)).value ?? undefined;
+        return (await userAnswer(runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store))).value ?? undefined;
       },
     }),
     custom,
@@ -274,8 +374,16 @@ export function createContext(runtime, store, replaced = false) {
     ...chromeAPI(runtime, store),
     onTerminalInput: handler => runtime.terminalInput.add(handler, store),
     setStatus(key, text) {
-      bounded(key, 'status key', 64); const state = foreground();
-      if (text === undefined) state.statuses.delete(`${store.factory}:${key}`); else state.statuses.set(`${store.factory}:${key}`, bounded(text, 'status', 4096, { controls: true }));
+      bounded(key, 'status key', 64); const state = foreground(); store.controller.signal.throwIfAborted();
+      const statusKey = `${store.factory}:${key}`;
+      if (text === undefined) state.statuses.delete(statusKey);
+      else {
+        const value = safeLines([bounded(text, 'status', 4096, { controls: true }).replace(/[\r\n\t]+/g, ' ')])[0];
+        if (!state.statuses.has(statusKey) && state.statuses.size >= 64) invalid('status entry limit 64 reached');
+        state.statuses.set(statusKey, value);
+      }
+      if (state.host.has_ui === false) return;
+      syncStatuses();
       for (const surface of runtime.ui.surfaces.values()) if (surface.store.state === state) surface.requestRender();
     },
     // Before the host's first editor-state snapshot the composer is empty, as
@@ -301,7 +409,7 @@ export function createContext(runtime, store, replaced = false) {
       // Without a custom component the cursor is host-owned; do not invent it.
       return operation('composer/insert', { text }, 'composer');
     },
-  }, 'ctx.ui');
+  }, 'ctx.ui', store.state.uiSymbols ??= new Map());
   // Lazy translation: a UI/resource-only factory must not fail merely because
   // an unrelated native history contains media this Pi message profile cannot map.
   const sessionState = () => {
@@ -313,7 +421,11 @@ export function createContext(runtime, store, replaced = false) {
   };
   const sessionEntries = key => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopies(snapshot(sessionState().host, key, `ctx.sessionManager.${key}`), runtime.namespace));
   const sessionEntry = id => withContextLimits(runtime.sessionTransport?.profile, () => sessionEntryCopy(snapshot(sessionState().host, 'session_entries', 'ctx.sessionManager.session_entries'), runtime.namespace, id));
-  const sessionManager = strict({
+  const sessionManager = facade({
+    ...Object.fromEntries(['setSessionFile', 'newSession', 'appendMessage', 'appendThinkingLevelChange', 'appendModelChange',
+      'appendUsage', 'appendCompaction', 'appendCustomEntry', 'appendSessionInfo', 'appendCustomMessageEntry',
+      'appendContextEdit', 'appendLabelChange', 'branch', 'resetLeaf', 'branchWithSummary', 'createBranchedSession']
+      .map(method => [method, () => { sessionState(); unsupported(`ctx.sessionManager.${method}`, 'use the host-owned context and Pi action methods'); }])),
     getCwd: () => sessionState().workspace,
     getSessionId: () => sessionState().host.session_id ?? undefined,
     getHeader: () => sessionHeader(sessionState().host) ?? null,
@@ -360,9 +472,9 @@ export function createContext(runtime, store, replaced = false) {
     isProjectTrusted() { return contextFacts(runtime, store).isProjectTrusted(); },
     getSystemPromptOptions() { return contextFacts(runtime, store).getSystemPromptOptions(); },
     get hasUI() { const state = current(); return runtime.features.has('remote_ui') && state === runtime.foreground && state.alive && state.host.has_ui !== false; },
-    get model() { return currentModel(current().host); },
+    get model() { return currentModel(current().host, runtime); },
     get thinkingLevel() { return thinkingLevel(current().host, true); },
-    get scopedModels() { return scopedModels(current().host); },
+    get scopedModels() { return scopedModels(current().host, runtime); },
     ui, sessionManager,
     modelRegistry: modelRegistry(() => current().host, runtime),
     getContextUsage() {
@@ -375,9 +487,13 @@ export function createContext(runtime, store, replaced = false) {
       if (host.model_view?.context_window) return { tokens: null, contextWindow: host.model_view.context_window, percent: null };
       return undefined;
     },
-    isIdle: () => snapshot(current().host, 'is_idle', 'ctx.isIdle'),
+    isIdle: () => {
+      const state = current();
+      if (Object.hasOwn(state.host, 'is_idle')) return state.host.is_idle;
+      return !state.runActive && !state.compacting;
+    },
     hasPendingMessages: () => snapshot(current().host, 'has_pending_messages', 'ctx.hasPendingMessages'),
-    getSystemPrompt: () => snapshot(current().host, 'system_prompt', 'ctx.getSystemPrompt'),
+    getSystemPrompt: () => contextFacts(runtime, store).getSystemPrompt(),
     get signal() { return compactionCallbackStore(runtime, store).controller.signal; },
     waitForIdle() {
       if (store.method !== 'command/execute') unsupported('ctx.waitForIdle', 'requires a live command, never a hook waiting on its own run');

@@ -12,6 +12,15 @@ mod copilot;
 #[path = "../src/output.rs"]
 mod output;
 
+/// The fixture never launches a browser; the production opener is shared auth code.
+mod auth {
+    pub mod subscription {
+        pub mod login {
+            pub fn open_browser(_url: &str) {}
+        }
+    }
+}
+
 mod providers {
     pub use octet_sdk::provider::{
         CopilotAvailabilityError, CopilotCredentialScheme, CopilotDeviceLogin,

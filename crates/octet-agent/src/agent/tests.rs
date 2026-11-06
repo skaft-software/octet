@@ -4,6 +4,8 @@ use base64::Engine as _;
 
 #[path = "builtin_override_replay_tests.rs"]
 mod builtin_override_replay;
+#[path = "pending_messages_tests.rs"]
+mod pending_messages_tests;
 
 fn image_input_fixture(large: bool) -> InputPart {
     let encoded = if large {
@@ -211,6 +213,7 @@ fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) 
             admission: Arc::new(Mutex::new(true)),
             tx,
             pending_count: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
+            pending_messages: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROL_INPUTS)),
             pending_bytes: Arc::new(tokio::sync::Semaphore::new(byte_limit)),
             abort: Arc::new(AbortFlag::default()),
         },
@@ -248,6 +251,7 @@ fn run_drop_fences_cache_warming_before_releasing_the_event_stream() {
         lifecycle: Arc::new(RunLifecycle {
             finished: AtomicBool::new(false),
             dropped: AtomicBool::new(false),
+            trailing_inference: Mutex::new((Usage::default(), 0)),
         }),
         context: Arc::new(ContextTracker::default()),
         delegation: None,
@@ -1279,6 +1283,7 @@ async fn steering_receipt_racing_recall_and_claim_have_exactly_one_winner() {
 #[tokio::test]
 async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delivery() {
     let (control, mut rx) = test_run_control(MAX_PENDING_CONTROL_BYTES);
+    assert!(!control.has_pending_messages());
     let mut pending = Vec::new();
     for index in 0..MAX_PENDING_CONTROL_INPUTS {
         control.follow_up(format!("input-{index}")).await.unwrap();
@@ -1288,6 +1293,7 @@ async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delive
         pending.push(input);
     }
     assert_eq!(control.pending_count.available_permits(), 0);
+    assert!(control.has_pending_messages());
     assert!(matches!(
         control.steer("rejected").await,
         Err(AgentError::ControlQueueFull)
@@ -1340,6 +1346,7 @@ async fn pending_controls_stay_reserved_after_ingress_drain_until_durable_delive
             .collect::<Vec<_>>()
     );
     assert_eq!(session.entries().len(), MAX_PENDING_CONTROL_INPUTS);
+    assert!(!control.has_pending_messages());
     assert_eq!(
         control.pending_count.available_permits(),
         MAX_PENDING_CONTROL_INPUTS
@@ -2134,11 +2141,73 @@ fn provider_retry_diagnostics_include_bounded_operational_details() {
 }
 
 #[test]
+fn payload_size_rejections_do_not_trigger_token_compaction() {
+    for code in [None, Some("413"), Some("request_too_large")] {
+        let error = AiError::Http(octet_ai::HttpError {
+            status: http::StatusCode::PAYLOAD_TOO_LARGE,
+            request_id: None,
+            retry_after: None,
+            provider_code: code.map(str::to_owned),
+            body_snippet: Some("request too large for AI studio".into()),
+            retryable: false,
+        });
+        assert!(!looks_like_context_error(&error), "{error:?}");
+        assert!(!retryable_before_generation(&error));
+        assert!(!retryable_stream_start(&error));
+        assert_eq!(provider_retry_limit(&error), 0);
+    }
+    for (code, kind) in [
+        (None, None),
+        (Some("request_too_large"), None),
+        (None, Some("request_too_large")),
+        (Some("413"), None),
+    ] {
+        let error = AiError::Provider(octet_ai::ProviderError {
+            code: code.map(str::to_owned),
+            kind: kind.map(str::to_owned),
+            message: "request_too_large".into(),
+            request_id: None,
+        });
+        assert!(!looks_like_context_error(&error), "{error:?}");
+        assert!(!retryable_stream_start(&error));
+        assert_eq!(provider_retry_limit(&error), 0);
+    }
+}
+
+#[test]
+fn public_payload_size_failure_explains_media_replay_and_recovery() {
+    for body in [
+        None,
+        Some("<html>413 Request Entity Too Large</html>".to_owned()),
+        Some(serde_json::json!({"error": {
+            "code": "request_too_large",
+            "message": format!("request too large for AI studio sk-private {}", "界".repeat(2000))
+        }}).to_string()),
+    ] {
+        let error = AgentError::Ai(AiError::Http(octet_ai::HttpError {
+            status: http::StatusCode::PAYLOAD_TOO_LARGE,
+            request_id: Some("req-413".into()),
+            retry_after: None,
+            provider_code: Some("request_too_large".into()),
+            body_snippet: body,
+            retryable: false,
+        }));
+        let diagnostic = public_error_diagnostic(&error, "openrouter", "gemini-audio");
+        assert!(diagnostic.contains("status=413 (request too large)"), "{diagnostic}");
+        assert!(diagnostic.contains("Earlier media is re-sent with history"), "{diagnostic}");
+        assert!(diagnostic.contains("fresh session with fewer or smaller attachments"), "{diagnostic}");
+        assert!(diagnostic.contains("request_id=req-413"), "{diagnostic}");
+        assert!(!diagnostic.contains("sk-private"));
+        assert!(!diagnostic.contains("<html>"));
+        assert!(diagnostic.len() <= MAX_PUBLIC_PROVIDER_DIAGNOSTIC_BYTES);
+    }
+}
+
+#[test]
 fn provider_context_limit_variants_are_classified_as_overflow() {
     for message in [
         "model_context_window_exceeded",
         "prompt is too long",
-        "request_too_large",
         "context window exceeds limit",
     ] {
         let error = AiError::Provider(octet_ai::ProviderError {
@@ -4772,4 +4841,353 @@ fn set_active_tool_names_bump_the_revision_the_run_host_observes() {
             .collect::<Vec<_>>(),
         ["beta"]
     );
+}
+
+mod prepared_authority {
+    use super::*;
+
+    fn script() -> Arc<ToolBudgetTransport> {
+        Arc::new(ToolBudgetTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            expected_tool_count: 0,
+        })
+    }
+
+    async fn finish(
+        agent: &mut Agent,
+        prompt: PreparedHostPrompt,
+        mode: PreparedPromptMode,
+    ) -> Result<FinishReason, AgentError> {
+        let mut run = agent.prompt_prepared(prompt, mode).await?;
+        let mut terminal = None;
+        while let Some(event) = run.next().await {
+            if let AgentEvent::RunFinished { reason, .. } = event {
+                assert!(terminal.is_none());
+                terminal = Some(reason);
+            }
+        }
+        match terminal.expect("exactly one terminal") {
+            FinishReason::Failed(error) => Err(error),
+            reason => Ok(reason),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_prompt_refuses_wrong_agent_session_owner_endpoint_and_same_protocol_model() {
+        for mutation in [
+            "agent",
+            "session",
+            "raw-session",
+            "owner",
+            "endpoint",
+            "model",
+            "protocol",
+            "pricing",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut agent = active_tool_test_agent(
+                dir.path(),
+                Session::create(dir.path().join("first.jsonl")).unwrap(),
+                ExtensionHost::new(),
+            );
+            let transport = script();
+            let prompt = agent.prepare_host_prompt(UserInput::from("same text"), transport.clone());
+            match mutation {
+                "agent" => {
+                    agent = active_tool_test_agent(
+                        dir.path(),
+                        Session::create(dir.path().join("second.jsonl")).unwrap(),
+                        ExtensionHost::new(),
+                    )
+                }
+                "session" => agent
+                    .replace_session_at_idle(
+                        Session::create(dir.path().join("second.jsonl")).unwrap(),
+                    )
+                    .unwrap(),
+                "raw-session" => {
+                    *agent.session_mut() = Session::create(dir.path().join("second.jsonl")).unwrap()
+                }
+                "owner" => agent.resource_owner.push_str("-other"),
+                "endpoint" => Arc::make_mut(&mut agent.model.endpoint)
+                    .id
+                    .0
+                    .push_str("-other"),
+                "model" => Arc::make_mut(&mut agent.model.spec).id.0.push_str("-other"),
+                "protocol" => {
+                    Arc::make_mut(&mut agent.model.spec).protocol = Protocol::OpenAiResponses
+                }
+                "pricing" => Arc::make_mut(&mut agent.model.spec).pricing = None,
+                _ => unreachable!(),
+            }
+            let head = agent.session.head();
+            let result = finish(&mut agent, prompt, PreparedPromptMode::Normal).await;
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("no longer matches"),
+                "{mutation}"
+            );
+            assert_eq!(agent.session.head(), head, "{mutation}");
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 0, "{mutation}");
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_prompt_modes_use_request_local_fetch_and_leave_unbound_api_fresh() {
+        for mode in [
+            PreparedPromptMode::Normal,
+            PreparedPromptMode::WithoutTools,
+            PreparedPromptMode::ResponsesPrewarm,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut agent = active_tool_test_agent(
+                dir.path(),
+                Session::create(dir.path().join("session.jsonl")).unwrap(),
+                ExtensionHost::new(),
+            );
+            let bound = script();
+            let fresh = script();
+            agent
+                .client
+                .register_host_stream_transport(agent.model.endpoint.id.clone(), fresh.clone());
+            let prompt = agent.prepare_host_prompt(UserInput::from("same text"), bound.clone());
+            assert_eq!(bound.calls.load(Ordering::SeqCst), 0);
+            let fresh_result = agent.complete("same text").await.unwrap();
+            assert!(matches!(fresh_result.reason, FinishReason::Completed));
+            assert_eq!(fresh.calls.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                finish(&mut agent, prompt, mode).await.unwrap(),
+                FinishReason::Completed
+            ));
+            assert_eq!(bound.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fresh.calls.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                agent.complete("same text").await.unwrap().reason,
+                FinishReason::Completed
+            ));
+            assert_eq!(fresh.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    struct RetryBound {
+        attempts: std::sync::atomic::AtomicUsize,
+        reject_after_retry: bool,
+        success: Arc<ToolBudgetTransport>,
+    }
+
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for RetryBound {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            diagnostics: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(AiError::NetworkUnavailable(octet_ai::TransportError {
+                    phase: octet_ai::TransportPhase::Connect,
+                    timeout: false,
+                    message: "synthetic pre-send network loss".into(),
+                }));
+            }
+            if self.reject_after_retry {
+                return Err(AiError::Config(octet_ai::ConfigError::Parse(
+                    "original prepared authority revoked".into(),
+                )));
+            }
+            octet_ai::HostStreamTransport::stream(
+                self.success.as_ref(),
+                model,
+                request,
+                diagnostics,
+            )
+            .await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepared_prompt_retry_retains_original_fetch_without_refreshing_authority() {
+        for reject_after_retry in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut agent = active_tool_test_agent(
+                dir.path(),
+                Session::create(dir.path().join("session.jsonl")).unwrap(),
+                ExtensionHost::new(),
+            );
+            let fresh = script();
+            agent
+                .client
+                .register_host_stream_transport(agent.model.endpoint.id.clone(), fresh.clone());
+            let bound = Arc::new(RetryBound {
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+                reject_after_retry,
+                success: script(),
+            });
+            let prompt = agent.prepare_host_prompt(UserInput::from("retry"), bound.clone());
+            let result = finish(&mut agent, prompt, PreparedPromptMode::Normal).await;
+            assert_eq!(bound.attempts.load(Ordering::SeqCst), 2);
+            assert_eq!(fresh.calls.load(Ordering::SeqCst), 0);
+            if reject_after_retry {
+                assert!(result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("original prepared authority revoked"));
+                assert_eq!(bound.success.calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert!(matches!(result.unwrap(), FinishReason::Completed));
+                assert_eq!(bound.success.calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_prompt_same_model_compaction_uses_bound_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from(["must stay unused".into()])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(dir.path(), global.clone());
+        let bound = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from([
+                "bound summary".into(),
+                "bound reply".into(),
+            ])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let prompt = agent.prepare_host_prompt(UserInput::from("new task"), bound.clone());
+        assert!(matches!(
+            finish(&mut agent, prompt, PreparedPromptMode::Normal)
+                .await
+                .unwrap(),
+            FinishReason::Completed
+        ));
+        assert_eq!(global.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(bound.requests.load(Ordering::SeqCst), 2);
+        assert!(agent
+            .session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+    }
+
+    #[tokio::test]
+    async fn prepared_prompt_distinct_compaction_model_does_not_borrow_main_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from(["separate model summary".into()])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(dir.path(), global.clone());
+        let mut summary_model = agent.model.clone();
+        Arc::make_mut(&mut summary_model.spec)
+            .id
+            .0
+            .push_str("-summary");
+        agent.set_compaction_model(Some(summary_model));
+        let bound = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from(["main reply".into()])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let prompt = agent.prepare_host_prompt(UserInput::from("new task"), bound.clone());
+        assert!(matches!(
+            finish(&mut agent, prompt, PreparedPromptMode::Normal)
+                .await
+                .unwrap(),
+            FinishReason::Completed
+        ));
+        assert_eq!(global.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(bound.requests.load(Ordering::SeqCst), 1);
+    }
+
+    struct SummaryThenRevoked {
+        attempts: std::sync::atomic::AtomicUsize,
+        summary: Arc<CompactionSummaryScript>,
+    }
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for SummaryThenRevoked {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            request: Request,
+            diagnostics: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                octet_ai::HostStreamTransport::stream(
+                    self.summary.as_ref(),
+                    model,
+                    request,
+                    diagnostics,
+                )
+                .await
+            } else {
+                Err(AiError::Config(octet_ai::ConfigError::Parse(
+                    "original authority revoked after summary".into(),
+                )))
+            }
+        }
+    }
+    #[tokio::test]
+    async fn prepared_prompt_successful_summary_does_not_refresh_initial_main_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::from(["must stay unused".into()])),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(dir.path(), global.clone());
+        let bound = Arc::new(SummaryThenRevoked {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            summary: Arc::new(CompactionSummaryScript {
+                responses: Mutex::new(VecDeque::from(["bound summary".into()])),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        });
+        let prompt = agent.prepare_host_prompt(UserInput::from("new task"), bound.clone());
+        let error = finish(&mut agent, prompt, PreparedPromptMode::Normal)
+            .await
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("original authority revoked after summary"));
+        assert_eq!(global.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(bound.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(bound.summary.requests.load(Ordering::SeqCst), 1);
+        assert!(agent
+            .session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+    }
+
+    #[tokio::test]
+    async fn prepared_prompt_opaque_native_compact_refuses_without_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = Arc::new(CompactionSummaryScript {
+            responses: Mutex::new(VecDeque::new()),
+            requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = compaction_test_agent(dir.path(), global.clone());
+        Arc::make_mut(&mut agent.model.spec).protocol = Protocol::OpenAiResponses;
+        agent.auto_compaction_mode = AgentCompactionMode::NativeResponses;
+        let bound = script();
+        let prompt = agent.prepare_host_prompt(UserInput::from("new task"), bound.clone());
+        let error = finish(&mut agent, prompt, PreparedPromptMode::Normal)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains(
+                "native Responses compact is unsupported for a prepared opaque host route"
+            ),
+            "{error}"
+        );
+        assert_eq!(global.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(bound.calls.load(Ordering::SeqCst), 0);
+    }
 }

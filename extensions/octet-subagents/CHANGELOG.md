@@ -68,6 +68,9 @@
 
 ### Fixed
 
+- Live status no longer waits behind a long-poll worker wait. Wait responses
+  trigger a fresh, serialized host list rather than replaying an older snapshot
+  over newer worker state; cancellation still leaves workers running.
 - Multiplexer commands no longer inherit the extension's protocol stdin. On
   Windows a child that shares that pipe can stall at startup while octet's
   reader waits on it.

@@ -23,6 +23,19 @@ octet --mode rpc                            # JSONL for automation
 On native Windows, the console (Windows Terminal or conhost), not `TERM`, picks
 the frontend. See [Windows](windows.md#terminal).
 
+Tern's `TERM=stencil-term` is recognized on Unix and VT-enabled Windows
+consoles, so its own terminal identifier does not force the plain frontend.
+`TERM_PROGRAM=tern` then selects native surface negotiation; `--tern off` keeps
+the ordinary formatted ANSI UI. This detection support does not qualify every
+Tern version's native protocol or Windows terminal rendering.
+
+If a capable terminal unexpectedly shows plain output, check `TERM`, `NO_COLOR`,
+`OCTET_COLOR` and the `plain` configuration/`--plain` flag. `TERM=dumb`, unknown
+terminal identifiers and redirected input/output retain conservative fallback;
+forcing `--color always` does not enable cursor control. `NO_COLOR` suppresses
+styling without disabling the interactive layout. Preserve the terminal's real
+identifier rather than globally overriding `TERM` to hide a detection problem.
+
 The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
 want none. Plain and print send readiness diagnostics to stderr.
@@ -84,6 +97,48 @@ timeout or an unsupported reply keeps the initial theme.
 
 </details>
 
+## Tab identity and activity
+
+The interactive frontend reports `app=octet` and its actual host-owned activity
+using [OSC 7501 v0.4](https://www.superlogical.com/rex/docs/build/program-status):
+`idle`, `working`, `blocked` (`permission`, `question`, or `auth`), `done`, and
+`error`. Provider waits/retries remain working, not blocked. Tool/extension input
+is a question, including private input; a secret field alone does not prove a
+login. ChatGPT browser/device authorization reports auth while awaiting the user,
+then working while exchanging/saving and reloading the model catalog. The login
+operation reports done only once Codex models are ready, or error if reload fails.
+Only authoritative run or foreground operation settlement reports done/error;
+cancellation reports idle. Ordinary reports and pickers do not block an otherwise
+running agent.
+
+Reports are deduplicated across frames and renderer replacement, not across
+separate foreground operations that finish between paints. Suspension and
+exit retire live working/blocked activity to idle, but preserve done/error for
+the terminal to acknowledge. Resumption reasserts live activity. Changing between
+primary and alternate screens does not clear the terminal's record. Progress is
+indeterminate: no percentage, completion metric, prompt, tool argument, private
+approval detail, error text, login URL or OAuth code is sent. OSC 2 still carries
+the existing session/window title, independently of activity.
+
+No detection query, input reader or startup wait is added. Unsupported terminals
+ignore the OSC. Plain, print, RPC and redirected output remain free of these
+controls. A multiplexer must forward/support the protocol; octet does not change
+shell or multiplexer configuration.
+
+| Terminal | Native identity/status | octet logo in tab |
+| --- | --- | --- |
+| OSC 7501 terminal | Stable `app=octet`; full activity states/kinds | The protocol identifies an app; it does **not** carry an image. |
+| Superlogical Rex | Real local Rex Beta build 1541 server recorded `app=octet` with idle, working, blocked/permission, done and error. Quitting live working/blocked activity reports idle; done/error survive child exit. | The installed block-glyph catalog has no `octet` asset, and no supported runtime icon registration route was found. A branded mapping belongs in Rex and should use the [canonical mark](assets/octet/README.md). `app=` identifies the app; it is not image data. |
+| Tern | Existing TSP `hello.app=octet` identifies a listening surface's pane; OSC 2 keeps the session title. Tern's documented OSC 9;4 channel additionally receives indeterminate working, paused user gates, error, or inactive. OSC 7501 is also emitted; Tern support for that newer protocol is not assumed. | Its built-in app/icon catalog must add/map octet's mark. A welcome image is **not** a tab icon. See [Tern](tern.md#tab-and-pane-identity). |
+
+Rex and Tern choose their own tab presentation. App-side wire/PTY tests do not
+qualify a specific terminal version's pixels, notifications, or interaction.
+Rex Beta build 1541's server-side records were checked using task-owned blocks
+and a frozen diagnostic octet candidate, not a released build. Its rendered tab
+glyph, unfocused-tab indicators and OS notification delivery were not observed.
+No terminal plugin, global theme, proprietary escape sequence, or replacement
+logo is installed.
+
 ## Input and active work
 
 Type `/` for [commands](commands.md) and `@` for file mentions (`.gitignore` is
@@ -122,6 +177,9 @@ While octet works:
 Pi custom editors use the same native submission rules, including slash and
 extension commands. Their resolved Enter/follow-up keybindings are honored, and
 a rejected submission retains the genuine Pi Editor's draft, pastes and undo.
+Terminal bracketed paste into a Pi custom editor normalizes CR and CRLF line
+endings to newlines, without submitting the draft. The original byte bound and
+rejection of other terminal controls remain enforced.
 The custom editor occupies the composer slot, not the screen: Octet keeps the
 transcript, chrome, queue indicators and one native slash popup. Native, executable
 extension and Pi commands share that popup; later name collisions are owner-qualified
@@ -153,7 +211,10 @@ the height of the content, not a fixed full-screen composer and footer; it loads
 the complete resumed branch and appends to native scrollback. Explicit
 `--mouse app` (or `mouse = "app"` in configuration) opts inline sessions into the
 bounded semantic viewport as well, and lets a resumed session load newest-first.
-Explicit CLI choices take precedence over configured mouse policy.
+Explicit CLI choices take precedence over configured mouse policy. Switching
+surfaces with `/settings tui fullscreen` or `/settings tui inline` immediately
+reapplies that policy: `auto` starts or stops capture with the surface, while
+`app`, `terminal`, and `off` keep their explicit ownership.
 
 A `pi` theme changes presentation, not viewport ownership. Native Tern surfaces
 negotiate their own inline layout and leave ANSI mouse reporting off, including
@@ -165,17 +226,31 @@ report overlays do not change the ordinary ANSI launch default.
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release
-copies it, or use Ctrl+Shift+C to copy the current selection again; Ctrl+C keeps
+copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
+a stationary pointer does not expand the selected range on release; a displaced
+release still counts as movement when terminals coalesce drag events. Ctrl+C keeps
 its draft-clear/interrupt meaning. Composer, footer and separator rows are not
-transcript text. Shift+drag remains your terminal's native selection override
+transcript text. Shell selections include the retained, progress-normalized,
+sanitized command output, rather than mapping output rows to the command header.
+Each wrapped output row maps only its visible fragment, including wide Unicode
+text; selecting a continuation does not jump back to the first row. Compact-tail
+selection starts at the retained source boundary, not at matching text in omitted
+output. Elision labels and empty-output placeholders are not copyable source.
+Shift+drag remains your terminal's native selection override
 where the terminal supports it.
 
+Literal whitespace-delimited HTTP(S) URLs in shell output retain their complete
+targets across wrapping, without interpreting output as Markdown. Encoded targets
+over 2 KiB stay plain; decoration also has a 64 KiB wrapped OSC-payload budget per
+shell output render, after which additional URLs stay plain.
 With capture on, a plain left-click on an HTTP(S) transcript link opens it in
 an available system browser on release, without Shift or Ctrl. Dragging a link
 selects/copies instead; moving away and back does not activate it. Resize,
 scrolling, focus changes and intervening input cancel the pending click. Octet
 never launches local-file or application-protocol links this way. With capture
-off, including native Tern, link gestures remain terminal-owned.
+off, including native Tern, link gestures remain terminal-owned. Captured clicks
+also work without terminal OSC 8 support; unsupported hyperlink controls are
+omitted from terminal output, not from Octet's retained hit targets.
 
 Copy writes to an available local clipboard helper and emits OSC 52 to the
 terminal, so SSH/remote sessions can reach the client clipboard. The terminal must
@@ -270,6 +345,11 @@ off by default and works on Kitty-compatible terminals. Others fall back to
 text. It never loads a URL or path, copied, plain and print output never contain
 image data, and it doesn't upload anything or replace [attachment
 consent](media.md#attach-explicitly). The model must still support the format.
+
+Fullscreen image crops keep the original tool gutter when their first row scrolls
+above the viewport. Only the visible image rows are placed, leaving the composer
+and footer outside the placement. Terminal-specific pixels still require separate
+qualification; protocol and retained-row tests are not Rex or Ghostty verification.
 
 Ctrl+O and `/verbose [on|off]` reveal reasoning, compaction, subagent activity,
 bounded search and shell output, and edit and write diffs. They can't recover

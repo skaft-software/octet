@@ -943,6 +943,46 @@ async fn children_spawned_after_a_prompt_update_inherit_the_current_system_promp
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn children_spawned_after_an_idle_model_selection_inherit_the_selected_model() {
+    let server = MockServer::start().await;
+    let state = Arc::new(ScriptState::default());
+    mount_script(
+        &server,
+        PromptInheritanceScript {
+            state: state.clone(),
+        },
+    )
+    .await;
+
+    let mut harness = build_enabled_agent(&server, DelegationLimits::default());
+    let mut selected = scripted_model(&server.uri());
+    let spec = Arc::make_mut(&mut selected.spec);
+    spec.id = ModelId("delegation-selected".into());
+    spec.api_name = "delegation-selected".into();
+    harness
+        .agent
+        .select_model_at_idle(selected, ReasoningConfig::Off, "off".into())
+        .expect("a bound delegation template follows an idle model selection");
+    let output = harness
+        .agent
+        .complete("spawn with current prompt")
+        .await
+        .unwrap();
+    assert_eq!(output.text, "prompt inheritance complete");
+    assert!(state.unexpected.lock().unwrap().is_empty());
+
+    let requests = state.requests.lock().unwrap();
+    let child = requests
+        .iter()
+        .find(|request| request_system(request).contains("You are /root/current"))
+        .expect("child request");
+    assert_eq!(child["model"], "delegation-selected", "{child}");
+    assert!(requests
+        .iter()
+        .all(|request| request["model"] == "delegation-selected"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn accepted_followups_survive_interruption() {
     let server = MockServer::start().await;
     let state = Arc::new(ScriptState::default());

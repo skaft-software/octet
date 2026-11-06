@@ -64,7 +64,7 @@ fn fixture() -> Fixture {
     sandbox.allow_shell = true;
     sandbox.allow_edit = true;
     sandbox.allow_write = true;
-    sandbox.bash_timeout = Duration::from_secs(30);
+    sandbox.bash_timeout = Some(Duration::from_secs(30));
     Fixture {
         _dir: dir,
         workspace,

@@ -67,6 +67,7 @@ pub(super) fn protocol_name(protocol: &Protocol) -> &'static str {
         Protocol::GoogleGenerativeAi => "google-generative-ai",
         Protocol::MistralConversations => "mistral-conversations",
         Protocol::PiMessages => "pi-messages",
+        Protocol::ExtensionStream => "extension-stream",
     }
 }
 

@@ -257,13 +257,7 @@ pub(super) fn dispatch_session_control(
             | ExtensionSessionLifecycleOperation::Fork { .. }
             | ExtensionSessionLifecycleOperation::Switch { .. }
     ) {
-        replacement::queue_replacement(
-            state,
-            admitted,
-            request.parent_request_id,
-            operation,
-            response_state,
-        )
+        replacement::queue_replacement(state, admitted, operation, response_state)
     } else {
         queue_registered_session_lifecycle_operation(
             state,

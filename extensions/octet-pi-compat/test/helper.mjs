@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeEditorHost } from './native-editor-host.mjs';
 export const root = fileURLToPath(new URL('../', import.meta.url));
+// A JavaScript expression for `value`, safe to splice into generated fixture
+// source: JSON.stringify plus escapes for the characters that can end a script or
+// a line early (`<`, `>`, `/`, U+2028, U+2029). Only string content can contain
+// them, and `\uXXXX` is equivalent inside a string literal.
+const unsafeLiteralCharacters = { '<': '\\u003C', '>': '\\u003E', '/': '\\u002F', '\u2028': '\\u2028', '\u2029': '\\u2029' };
+export const jsLiteral = value => JSON.stringify(value).replace(/[<>/\u2028\u2029]/g, character => unsafeLiteralCharacters[character]);
 // Tests never read the developer's real Pi setup: the agent directory defaults to
 // a path that does not exist, and a test that wants one passes its own.
 export const noPiAgent = join(root, 'test/fixtures/no-pi-agent');
@@ -74,6 +80,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
       else if (frame.method === 'ui/autocomplete/register') result = { accepted: options.completionAccepted ?? true };
       else if (frame.method === 'composer/get') result = { text: options.composer ?? 'existing draft' };
       else if (frame.method === 'session/append_entry') result = { entry_id: 'host-entry' };
+      else if (frame.method === 'session/set_name') result = { name: frame.params.name.trim() || null };
       else if (frame.method === 'provider/credentials') result = frame.params.provider === 'test' && frame.params.model === 'test-model'
         ? { ok: true, apiKey: 'fixture-secret', headers: { authorization: 'Bearer fixture-secret' } }
         : { ok: false, error: `No API key found for "${frame.params.provider}"` };
@@ -81,7 +88,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
         const { input_revision, checkpoint_revision } = frame.params.editor_checkpoint;
         result = { input_revision, checkpoint_revision };
       }
-      else if (['ui/close', 'composer/set', 'composer/insert', 'composer/history', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
+      else if (['ui/close', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
       if (result !== undefined) send({ jsonrpc: '2.0', id: frame.id, result });
     }
     const at = waiters.findIndex(w => w.match(frame));

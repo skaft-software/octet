@@ -272,6 +272,16 @@ the native slash popup remains available around their projected rows.
   carries the host's bounded, secret-free session/model state to retained
   components. A complete current owner is mandatory. It grants no extra service
   authority and must not replace the state of another retained session.
+  With paired `session_owner_routes_v1`/`session_snapshot_transport_v1`, the host
+  may also publish the narrow `{has_pending_messages: boolean}` observation to
+  the issued current session owner without a UI mount. It reflects actual shell
+  and active-run steering/follow-up queues, including drained but undelivered
+  input; `nextTurn` and context-only messages are excluded. This read-only fact
+  grants no UI authority. Hosts without a queue consumer omit the optional fact
+  rather than inventing an empty queue. A read-only `session/snapshot/prepare`
+  may seed missing host facts for its exact owner, but does not replace that
+  owner's known live facts with captured metadata. History still advances through
+  the separately checked snapshot revision and head.
 
 Focused component keys/mouse gestures do not also edit the composer or reach
 ordinary terminal-input observers. Host confirmation/input panels retain

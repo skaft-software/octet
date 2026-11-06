@@ -238,6 +238,28 @@ fn variant(theme: &OctetTheme) -> Map<String, Value> {
             );
         }
     }
+    // Transcript overrides are the renderer's authoritative colors. Apply
+    // them after any Pi palette so a user's explicit per-state style wins.
+    for (token, role, background) in [
+        ("thinkingText", "thinking", false),
+        ("toolPendingBg", "surface.tool.pending", true),
+        ("toolSuccessBg", "surface.tool.success", true),
+        ("toolErrorBg", "surface.tool.error", true),
+    ] {
+        if theme.has_semantic_style(role) {
+            let style = theme.semantic_style(role);
+            out.remove(token);
+            put(
+                &mut out,
+                token,
+                if background {
+                    style.background
+                } else {
+                    style.foreground
+                },
+            );
+        }
+    }
     out
 }
 
@@ -400,6 +422,75 @@ background = "#203040"
         let palette = native.palette.dark.unwrap();
         assert_eq!(palette["userMessageBg"], "#203040");
         assert_eq!(palette["selectedBg"], "#123456");
+    }
+
+    #[test]
+    fn imported_pi_palette_keeps_every_distinct_token_across_models_and_appearances() {
+        let mut document =
+            crate::extensions::resource_paths::pi_theme::fixture("Distinct Pi", "#123456");
+        for (index, (_, value)) in document["colors"]
+            .as_object_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            *value = Value::String(format!("#{:06x}", 0x102030 + index * 0x010203));
+        }
+        for token in ["selectedBg", "customMessageBg"] {
+            document["colors"][token] = Value::String(String::new());
+        }
+        let json = document.to_string();
+        let source = crate::extensions::resource_paths::pi_theme::native_source(
+            std::path::Path::new("distinct.json"),
+            &json,
+        )
+        .unwrap();
+        let theme = crate::tui::theme::test_theme_source_with(
+            &source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme.clone());
+        for (lab, provider, model) in [
+            (ModelLab::Anthropic, "anthropic", "claude-sonnet-4"),
+            (ModelLab::OpenAi, "openai", "gpt-5"),
+        ] {
+            shell.set_identity(provider, model, "max");
+            let helper = shell.extension_theme_get(None).unwrap();
+            let native = NativeTheme::resolve(&theme, Some(lab), "test").unwrap();
+            for (token, expected) in document["colors"].as_object().unwrap() {
+                assert_eq!(&helper["colors"][token], expected, "helper {token}");
+                for variant in [&native.palette.dark, &native.palette.light] {
+                    let variant = variant.as_ref().unwrap();
+                    if expected == "" {
+                        assert!(!variant.contains_key(token), "terminal default {token}");
+                    } else {
+                        assert_eq!(&variant[token], expected, "native {token}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_transcript_colors_reach_native_and_extension_palettes() {
+        for profile in ["", "[metadata]\nprofile = 'pi'\n[roles.\"extension.pi.accent\"]\nforeground = '#123456'\n[roles.\"extension.pi.thinkingText\"]\nforeground = '#111111'\n[roles.\"extension.pi.toolSuccessBg\"]\nbackground = '#222222'\n"] {
+            let source = format!("{profile}\n[roles.thinking]\nforeground = '#123abc'\n[roles.\"surface.tool.success\"]\nbackground = '#456def'\n");
+            let theme = crate::tui::theme::test_theme_source_with(
+                &source,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Dark,
+            );
+            let shell = super::super::InteractiveShell::test_shell_with_theme(theme.clone());
+            let helper = shell.extension_theme_get(None).unwrap();
+            let native = NativeTheme::resolve(&theme, None, "test").unwrap();
+            assert_eq!(helper["colors"]["thinkingText"], "#123abc");
+            assert_eq!(helper["colors"]["toolSuccessBg"], "#456def");
+            for palette in [native.palette.dark.unwrap(), native.palette.light.unwrap()] {
+                assert_eq!(palette["thinkingText"], "#123abc");
+                assert_eq!(palette["toolSuccessBg"], "#456def");
+            }
+        }
     }
 
     #[test]

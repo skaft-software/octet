@@ -1,8 +1,8 @@
 # SPICE extension source demonstration (F)
 
-**F01 and F02 are BLOCKED, not passed.** Real `ngspice` is absent in the
-implementation environment; installing/downloading it is not authorized. There
-is no fallback solver or generated waveform. Parser tests are not simulator or
+**F01 and F02 are not yet qualified.** Real `ngspice` 42 is available in the
+release Space; an isolated direct backend run succeeded, but is not production-host
+acceptance. There is no fallback solver or generated waveform. Parser tests are not simulator or
 host acceptance. The example uses the actual working-tree Python SDK resource,
 BlobRef and bounded bulk helpers; no second RPC implementation or compatibility
 adapter is embedded.
@@ -97,7 +97,7 @@ to test terminate/wait/kill and barrier mechanics; they never impersonate ngspic
 or generate waveform data. They are not F acceptance. No skips turn missing
 prerequisites green. Extension startup also exits 2 with BLOCKED if ngspice is absent.
 
-## Production-host harness (compiled; execution blocked)
+## Production-host harness (execution not yet qualified)
 
 `host-smoke/tests/spice.rs` supplies stable `f01_spice_acceptance` and
 `f02_spice_interrupt` tests against the production `ExtensionProcess` and this
@@ -150,10 +150,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 examples/extensions/spice/run_conformance.py \
   --evidence examples/extensions/spice/evidence-next
 ```
 
-The prerequisite guard currently exits **2**, explicitly listing both F01/F02 as
-BLOCKED **before running Cargo or creating evidence/target directories**. Nothing
-installs or downloads ngspice. With prerequisites available and the build slot
-approved, it runs the two Rust tests offline, one Cargo job/test thread, `ci-test`
+If ngspice is missing, the prerequisite guard exits **2**, explicitly listing
+both F01/F02 as BLOCKED **before running Cargo or creating evidence/target
+directories**. The runner never installs or downloads ngspice. With prerequisites
+available and the build slot approved, it runs the two Rust tests offline, one
+Cargo job/test thread, `ci-test`
 profile, reusing the chosen target. Its checked-in standalone lockfile was
 resolved offline from cached dependencies; the runner uses `--offline --locked`.
 Metadata resolution is not compilation or simulator acceptance. A missing
@@ -162,9 +163,10 @@ The runner retains source hashes and the harness writes bounded PID-bearing logs
 model requests and measurement evidence. Calling the Rust tests directly also
 fails on missing ngspice; neither test is ignored or returns early as success.
 
-**Current evidence:** 14 Python source/utility checks and an offline, locked Rust
-harness build (`cargo test --no-run`) passed. No ngspice execution, host F test,
-or local/external provider call was run. Compilation does not qualify the
-runtime assertions. F01/F02 remain BLOCKED; F03/Pi and prior A–E gates belong to
-their separate suites.
+**Current evidence:** 14 Python source/utility checks and an earlier offline,
+locked Rust harness build (`cargo test --no-run`) passed. A direct real-ngspice
+backend run produced a valid 511-sample transient, but did not exercise the
+production host. The updated host harness has not been built or run; its runtime
+assertions, including refusal and post-release projection, remain unqualified.
+F03/Pi and prior A–E gates belong to their separate suites.
 See [VERIFICATION.md](VERIFICATION.md) for the observed source-check commands.

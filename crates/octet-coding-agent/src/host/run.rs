@@ -22,7 +22,7 @@ pub(crate) enum RunRequestOutcome {
 
 pub(crate) async fn drive_idle_cache_warming(
     app: Option<&mut crate::app::App>,
-) -> Result<(), octet_agent::AgentError> {
+) -> Result<(), Box<octet_agent::AgentError>> {
     let Some(app) = app else {
         return std::future::pending().await;
     };
@@ -111,6 +111,9 @@ pub(crate) async fn run_request(
             .await?;
     }
     let pending_context_count = composition.pending_context_count;
+    let input = load_user_input(&request, composition.prompt, &app.model.spec)?;
+    let prior_cache_misses = crate::commands::cache_miss_count(&app);
+    let (submission, diagnostics) = app.prepare_submission(input)?;
     app.agent.set_system_prompt(composition.system);
     app.agent.set_prompt_display_text(Some(
         request
@@ -118,9 +121,13 @@ pub(crate) async fn run_request(
             .clone()
             .unwrap_or_else(|| request.prompt.clone()),
     ));
-    let input = load_user_input(&request, composition.prompt, &app.model.spec)?;
-    let prior_cache_misses = crate::commands::cache_miss_count(&app);
-    let mut run = match app.agent.prompt(input).await {
+    for diagnostic in diagnostics {
+        crate::output::stderr_multiline(diagnostic);
+    }
+    let mut run = match submission
+        .start(&mut app.agent, octet_agent::PreparedPromptMode::Normal)
+        .await
+    {
         Ok(run) => run,
         Err(error) => anyhow::bail!(
             "{}",

@@ -122,7 +122,8 @@ export function buildSessionProjection(entries, leafId, byId) {
     if (entry.type === 'thinking_level_change') thinkingLevel = entry.thinkingLevel;
     else if (entry.type === 'model_change') model = { provider: entry.provider, modelId: entry.modelId };
     else if (entry.type === 'message' && entry.message.role === 'assistant') {
-      model = { provider: entry.message.provider, modelId: entry.message.model };
+      model = { provider: Object.hasOwn(entry.message, 'provider') ? entry.message.provider : undefined,
+        modelId: Object.hasOwn(entry.message, 'model') ? entry.message.model : undefined };
     }
   }
   const contextEntries = contextEntriesForPath(path);

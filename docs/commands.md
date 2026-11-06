@@ -102,8 +102,9 @@ a user message. `!!command` takes the same path but durably records the result
 mid-run result is appended at the next idle point, after any pending tool call
 settles, so a call is never separated from its result. `--no-process` or
 `--no-shell` turns the escape off, and a denial is reported, never dropped
-silently. Capture is bounded by `max_output_bytes` and `bash_timeout_secs`, and
-it isn't a persistent shell session.
+silently. Capture is bounded by `max_output_bytes`; `bash_timeout_secs` imposes
+an optional execution deadline. There is no timeout by default, and cancellation
+still stops the command. It isn't a persistent shell session.
 
 ## Priority and compaction boundaries
 

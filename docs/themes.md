@@ -123,6 +123,52 @@ also change perceived contrast.
 
 </details>
 
+### Extension rendering boundary
+
+Model accents and the max/ultra `Working` rainbow belong to Octet's native
+activity/chrome renderer. They are not a filter over extension output. A mounted
+Pi editor, header, footer or widget supplies its own validated styled rows,
+including foregrounds and backgrounds; Octet clips and composes them without
+model recoloring. Tern receives those rows as native ANSI content, not a second
+terminal renderer. Extension titles are owner-scoped terminal-safe text, not theme
+colors. Removing a mount restores the native surface.
+
+The built-in `pi` and imported Pi palettes default to disabling native label
+shimmer/rainbow and model recoloring. Explicit native theme overrides still win.
+Selecting a different native theme changes native chrome;
+the admitted Pi adapter also receives the active palette for its helper callbacks
+and component rerenders. Extensions with hard-coded colors still own those colors.
+A model switch uses the validated theme snapshot, not a fresh file read. Active
+file-theme reload validates edits before replacement and retains the last good
+palette on invalid edits.
+
+Reduced motion keeps Octet's working marker static, including extension-supplied
+working-indicator frames animated by the host. It does not stop arbitrary timers
+inside an extension's custom editor or widget. Original extension combinations
+and terminal pixels require separate qualification; palette and cached-row tests
+are not full Pi customization parity.
+
+Native controls remain in one TOML file; enabling a Pi extension does not change
+its presentation policy:
+
+| Area | Native theme controls |
+| --- | --- |
+| Tool/activity gutter | `[colors] margin_markers`, `event_marker_gutter`, `tool_dot_breathing`, `tool_dot_dim`, `tool_dot_bright` |
+| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[glyphs]` border characters |
+| Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, tool/shell state roles, `[surfaces.user]`, `[surfaces.tool]` |
+| Thinking/tool text and animation | `[roles.thinking]`, `[roles.tool_header]`, `[roles.scroll_hint]`; `[colors] activity_shimmer`, `thinking_spinner` |
+| Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `block_padding_x`, `tool_body_indent`, `composer_padding`, `narrow_*`; per-surface `padding`, `narrow_padding`, `marker_gutter`, `prompt_marker` |
+| Model colors | `[model] use_lab_color` and per-family colors |
+
+These are not controls for every rendered pixel. The host keeps one neutral
+separator around notice, outcome, Subagent lifecycle and status events; it is
+separate from a surface's painted cushion rows and is not a theme token. `density`
+and `block_padding_x` still control ordinary transcript surfaces. Tern owns native
+widget geometry.
+A custom tool renderer may own its entire shell (`renderShell: "self"`), omitting
+native gutters/frames without changing the surrounding theme. A renderer that
+keeps the native shell retains its selected theme's decoration.
+
 ## Tool call and thinking verbosity
 
 A theme chooses how much of the agent's work the transcript shows by default.
@@ -131,11 +177,17 @@ Both settings are boolean tokens in the theme's `[colors]` table:
 | Token | Default | Effect |
 | --- | --- | --- |
 | `quiet_tool_summaries` | `false` | Groups consecutive read-only tool calls into one summary row such as `Explored 3 files · 1 command`, with edits, web, MCP and other activity summarized the same way. `Still` sets it. Press Ctrl+O to open the individual calls. |
-| `thinking_expanded` | `false` | Shows the model's thinking trace as it streams, and when you resume a session, instead of a collapsed `Thinking` line. The built-in `pi` theme and every Pi palette projection set it, as Pi does. |
+| `thinking_expanded` | `false` | Shows the model's thinking trace as it streams, and when you resume a session, instead of a collapsed `Thinking` line. Pi profiles default to it, as Pi does; explicit overrides win. |
 
 The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+O
 expands it. A theme that sets `thinking_expanded = true` starts every thinking
 trace open, and `[layout] show_reasoning = false` still hides thinking entirely.
+
+Expanded reasoning prose uses a balanced neutral gray on known light/dark
+profiles. When the background is unknown, it keeps the terminal's default
+foreground without dimming instead of guessing a universal gray. Explicit
+`[roles.thinking]` colors and attributes, including imported Pi styles, still
+win. This fallback is not a contrast guarantee for arbitrary terminal palettes.
 
 ```toml
 [colors]
@@ -219,6 +271,48 @@ refreshes the active `pi` palette. Native Windows, non-TTY and no-color output
 keep the no-query policy; an explicit `OCTET_COLOR_SCHEME` skips querying too.
 Tern receives separately resolved light/dark palettes with Pi's thinking colors.
 The `pi` stem is reserved and cannot be shadowed by a local theme file.
+
+### Pi presentation profile
+
+A native TOML theme can opt into Pi's non-color presentation defaults without
+loading an extension or replacing its palette:
+
+```toml
+[metadata]
+name = "My flat theme"
+profile = "pi"
+
+[colors]
+activity_shimmer = false
+
+[layout]
+# This controls surface interiors, not the host-owned neutral event separator.
+block_padding_x = 2
+tool_body_indent = 0
+
+[roles.thinking]
+italic = false
+
+[roles.tool_header]
+bold = false
+
+[roles."surface.tool.success"]
+background = "default"
+```
+
+`profile` accepts `octet` (the default) or `pi`. The Pi defaults are listed in
+[`examples/themes/pi-profile.toml`](../examples/themes/pi-profile.toml); that
+file is the embedded defaults fragment, not a complete example palette. The
+selected background variant is resolved first, then explicit file values
+recursively override the profile. Explicit `false` and terminal-default colors
+are retained. Existing adapter snapshots without a profile keep their legacy
+layout and fills rather than silently adopting the new defaults.
+
+`[model] use_lab_color = true` can re-enable model colors independently of the
+profile. `activity_shimmer` controls native label animation; reduced-motion and
+terminal capability limits still apply. Host event separators remain distinct
+from a filled prompt or tool surface's painted cushion rows. Tern still owns
+native geometry; this profile does not establish exact Pi pixel parity.
 
 ### Cards
 
@@ -312,8 +406,9 @@ Three optional top-level tokens shape the startup splash:
 A native theme file is a bounded TOML document (256 KiB) with these typed sections:
 
 - `[metadata]`: `name`, `description`, `author`, `version`, `terminal`
-  (`light-dark`, `dark`, `light` or `any`), and optional `adaptive` to rebalance
-  RGB foregrounds and surfaces for the detected terminal background.
+  (`light-dark`, `dark`, `light` or `any`), `profile` (`octet` or `pi`), and
+  optional `adaptive` to rebalance RGB foregrounds and surfaces for the detected
+  terminal background.
 - `[colors]` / `[tokens]`: flat or nested color and token values. `"default"`
   means the terminal's own color.
 - `[roles.<name>]`: per-role `foreground`, `background`, `bold`, `dim`,
@@ -323,7 +418,8 @@ A native theme file is a bounded TOML document (256 KiB) with these typed sectio
 - `[surfaces.<kind>]`: bounded layout recipes for the `user`, `assistant`,
   `reasoning`, `tool`, `notice`, `outcome`, `shell` and `compaction` transcript
   surfaces.
-- `[layout]`: density, shell visibility and narrow-terminal overrides.
+- `[layout]`: density, shell visibility, horizontal `block_padding_x`,
+  `tool_body_indent`, and narrow-terminal overrides.
 - `[variants.*]`: background overlays, described next.
 
 `[variants.universal]`, `[variants.dark]` and `[variants.light]` merge
@@ -334,8 +430,13 @@ the whole table. `[variants.unknown]` applies when detection fails.
 
 Theme files reject terminal control bytes, unknown sections and fields, invalid
 role names, non-ASCII ASCII-fallbacks, wide or empty structural glyphs and
-oversized values. Unknown or partial files fall back to the compiled default
-rather than starting with a broken shell.
+oversized values. Invalid files fall back to the compiled default rather than
+starting with a broken shell. Invalid edits to an active file are
+reported without replacing its last good theme. Retention requires normal
+discovery to still select that same source; removing it, withdrawing its root or
+shadowing it with another file uses normal fallback rather than keeping a stale
+palette. Root scalar tokens and the legacy `[model]`, `[spacing]` and `[icons]`
+sections remain supported.
 
 ## Pi JSON themes
 
@@ -391,6 +492,16 @@ so on) resolve to the same underlying role.
 `syntax_type`, `syntax_operator`, `syntax_punctuation`.
 
 </details>
+
+### Transcript roles
+
+In addition to the text-role vocabulary above, `thinking`, `tool_header` and
+`scroll_hint` accept the same style fields. Surface roles use
+`[roles."surface.<kind>"]`, including `surface.activity`; activity falls back to
+reasoning styling when not configured. Tool and shell states can override their
+base role with `surface.tool.pending`, `surface.tool.success`,
+`surface.tool.error` and the corresponding `surface.shell.*` names. Omitted
+attributes inherit; explicit `false` attributes and `"default"` colors do not.
 
 ## Extension-contributed themes and roles
 

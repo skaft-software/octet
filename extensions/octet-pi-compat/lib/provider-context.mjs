@@ -64,6 +64,19 @@ function contentToPi(part, label) {
 // one-message conversion; they cannot claim the original native boundary.
 const projectionOrigins = new WeakMap();
 
+// Isolate each handler, including detached timeouts, from the last accepted
+// context. Carry native replay provenance to the clones rather than letting a
+// failed callback mutate the next handler's input or opaque native history.
+function copyContext(messages) {
+  return messages.map(message => {
+    const copy = structuredClone({ ...message });
+    const origin = projectionOrigins.get(message);
+    const isolated = message.role === 'system' ? strict(copy, 'system message') : copy;
+    if (origin) projectionOrigins.set(isolated, origin);
+    return isolated;
+  });
+}
+
 export function canonicalToPi(messages, calls = new Map(), { observation = false, replay = false } = {}) {
   const output = [];
   for (const message of array(messages, 'canonical messages')) {
@@ -281,6 +294,14 @@ export async function projectContext(runtime, params, store) {
   if (preparation.head !== null && !name(preparation.head)) invalid('context preparation head');
   runtime.bind(params, store, { requireLeaf: 'provider_context', preparationHead: preparation.head });
   store.providerContext = true;
+  // Keep each live session's bounded ledger aligned with registered context
+  // factories when registrations change.
+  const seen = store.state.contextFailureNotices;
+  if (seen?.size) {
+    const active = new Set(['context', 'context_with_system'].flatMap(event =>
+      (runtime.events.get(event) || []).map(entry => runtime.config.extensions[entry.factory])));
+    for (const path of seen) if (!active.has(path)) seen.delete(path);
+  }
   const signal = store.controller.signal;
   const live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return runtime.queued(store, async () => {
@@ -297,17 +318,18 @@ export async function projectContext(runtime, params, store) {
     // context event hides system messages, retaining the real native system.
     const contextBudget = new HookBudget(runtime, store, 'context');
     for (const entry of [...runtime.events.get('context') || []]) {
-      live(); const child = { ...store, factory: entry.factory }, visible = messages.slice();
+      live(); const child = { ...store, factory: entry.factory }, visible = copyContext(messages);
       let result;
       try {
         const run = await contextBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
           facade({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))));
+        if (store.errors.length) throw store.errors[0];
         if (!run.ran) continue; // a stalled context callback leaves the messages as they are
         result = run.value;
       }
       catch (error) {
-        live(); if (Number.isInteger(error?.code)) throw error;
-        runtime.reportCallbackError('context', entry.factory, error);
+        live(); if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        runtime.reportCallbackError('context', entry.factory, error, store.state);
         continue;
       }
       live();
@@ -326,23 +348,26 @@ export async function projectContext(runtime, params, store) {
       });
       const originalTools = JSON.stringify(tools);
       let full = [strict({ role: 'system', content: system ?? '', toolsAdded: tools, sections: undefined, toolsRemoved: undefined }, 'system message'), ...messages];
-      const fullBudget = new HookBudget(runtime, store, 'context_with_system');
+      // Both context phases run inside the same host request and deadline.
+      const fullBudget = new HookBudget(runtime, store, 'context_with_system', contextBudget.started);
       for (const entry of [...runtime.events.get('context_with_system') || []]) {
-        live(); const child = { ...store, factory: entry.factory };
+        live(); const child = { ...store, factory: entry.factory }, visible = copyContext(full);
         let result;
         try {
           const run = await fullBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
-            facade({ type: 'context_with_system', messages: full }, 'context_with_system event'), createContext(runtime, child))));
+            facade({ type: 'context_with_system', messages: visible }, 'context_with_system event'), createContext(runtime, child))));
+          if (store.errors.length) throw store.errors[0];
           if (!run.ran) continue;
           result = run.value;
         }
         catch (error) {
-          live(); if (Number.isInteger(error?.code)) throw error;
-          runtime.reportCallbackError('context_with_system', entry.factory, error);
+          live(); if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+          runtime.reportCallbackError('context_with_system', entry.factory, error, store.state);
           continue;
         }
         live();
-        if (result !== undefined) { record(result, ['messages'], 'context_with_system result'); if (result.messages != null) full = array(result.messages, 'context_with_system messages'); }
+        if (result !== undefined) { record(result, ['messages'], 'context_with_system result'); full = result.messages != null ? array(result.messages, 'context_with_system messages') : visible; }
+        else full = visible;
         const leading = full[0]?.role === 'system' ? full[0] : undefined;
         if (!leading && originalTools !== '[]') unsupported('context_with_system removed tool declarations', 'native preparation cannot replace the advertised tool snapshot');
         if (leading) {
@@ -361,6 +386,7 @@ export async function projectContext(runtime, params, store) {
         if (messages.some(message => message.role === 'system')) unsupported('context_with_system later system messages', 'native canonical messages cannot represent mid-transcript system changes');
         piToCanonical(messages);
       }
+      fullBudget.finish();
     }
     await cancellable(runtime.flush(store), signal); live();
     return { disposition: { action: 'continue' }, context: [], notifications: [],

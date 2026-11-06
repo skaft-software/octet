@@ -40,7 +40,7 @@ impl Default for CacheTraceState {
         // RandomState supplies process-private OS-seeded keys without introducing
         // a new dependency. Never export this salt or an unkeyed content digest.
         let mut salt = [0; 32];
-        for chunk in salt.chunks_exact_mut(8) {
+        for chunk in salt.as_chunks_mut::<8>().0 {
             let state = std::collections::hash_map::RandomState::new();
             chunk.copy_from_slice(&state.build_hasher().finish().to_ne_bytes());
         }

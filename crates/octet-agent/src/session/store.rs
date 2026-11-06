@@ -85,7 +85,10 @@ impl Session {
             usage_uncertainty_records: Vec::new(),
             usage_uncertainty_bounds: Vec::new(),
             cache_warm_records: Vec::new(),
+            next_tool_inference_attempt: 0,
+            tool_inference_attempts: BTreeMap::new(),
             entry_labels: BTreeMap::new(),
+            context_failure_notices: BTreeSet::new(),
         })
     }
 
@@ -231,6 +234,8 @@ impl Session {
         let mut usage_uncertainty_records = Vec::new();
         let mut usage_uncertainty_bounds = Vec::new();
         let mut cache_warm_records: Vec<CacheWarmRecord> = Vec::new();
+        let mut next_tool_inference_attempt = 0u64;
+        let mut tool_inference_attempts = BTreeMap::new();
         let restored_invocations = DurableInvocationStore::new();
         let mut invocation_entries = InvocationEntryIndex::default();
         let restored_deferred_runs = DeferredRunStore::new();
@@ -509,6 +514,39 @@ impl Session {
                         run_cost_microdollars,
                     });
                 }
+                SessionRecord::ToolInferenceStarted {
+                    attempt,
+                    parent,
+                    endpoint,
+                    model,
+                } => {
+                    let record = tool_inference::ToolInferenceAttempt {
+                        attempt,
+                        parent,
+                        endpoint,
+                        model,
+                    };
+                    record.validate().map_err(|_| SessionError::Corrupt {
+                        line: line_no,
+                        message: "invalid tool inference attempt".into(),
+                    })?;
+                    if next_tool_inference_attempt.checked_add(1) != Some(attempt) {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: "invalid tool inference attempt sequence".into(),
+                        });
+                    }
+                    next_tool_inference_attempt = attempt;
+                    tool_inference_attempts.insert(attempt, record);
+                }
+                SessionRecord::ToolInferenceSettled { attempt } => {
+                    if tool_inference_attempts.remove(&attempt).is_none() {
+                        return Err(SessionError::Corrupt {
+                            line: line_no,
+                            message: "settled tool inference attempt is not pending".into(),
+                        });
+                    }
+                }
                 SessionRecord::CacheWarm { record } => {
                     let valid = record.attempt > 0
                         && UsageUncertaintyRecord {
@@ -553,6 +591,21 @@ impl Session {
                     usage_uncertainty_bounds.push(bound);
                 }
                 SessionRecord::Usage { record } => {
+                    if let UsageRecordKind::ToolInference { attempt, parent } = &record.kind {
+                        let valid = tool_inference_attempts.get(attempt).is_some_and(|pending| {
+                            &pending.parent == parent
+                                && record.endpoint.as_ref() == Some(&pending.endpoint)
+                                && record.model.as_ref() == Some(&pending.model)
+                        });
+                        if !valid {
+                            return Err(SessionError::Corrupt {
+                                line: line_no,
+                                message: "tool inference usage does not match a pending attempt"
+                                    .into(),
+                            });
+                        }
+                        tool_inference_attempts.remove(attempt);
+                    }
                     if let UsageRecordKind::AssistantTurn { assistant } = &record.kind {
                         let valid_assistant = index
                             .get(assistant)
@@ -670,7 +723,10 @@ impl Session {
             usage_uncertainty_records,
             usage_uncertainty_bounds,
             cache_warm_records,
+            next_tool_inference_attempt,
+            tool_inference_attempts,
             entry_labels,
+            context_failure_notices: BTreeSet::new(),
         })
     }
 

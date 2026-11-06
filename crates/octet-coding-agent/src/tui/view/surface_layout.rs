@@ -20,6 +20,8 @@ pub(super) struct SurfacePlan<'a> {
     pub(super) label: Option<&'a str>,
     pub(super) user_model_lab: Option<ModelLab>,
     pub(super) padding: u16,
+    /// An explicitly disabled gutter also suppresses its event marker.
+    pub(super) marker_enabled: bool,
     /// Host-owned event breathing rows, not painted surface cushions.
     pub(super) event_spacing: bool,
     pub(super) frame_left: u16,
@@ -74,8 +76,25 @@ fn uses_event_marker_gutter(block: &TranscriptBlock) -> bool {
     )
 }
 
-pub(super) fn surface_roles(kind: &str) -> (&'static str, &'static str, &'static str) {
+pub(super) fn surface_roles(
+    kind: &str,
+    theme: &OctetTheme,
+) -> (&'static str, &'static str, &'static str) {
     match kind {
+        "activity" => {
+            let choose = |activity: &'static str, reasoning: &'static str| -> &'static str {
+                if theme.has_semantic_style(activity) {
+                    activity
+                } else {
+                    reasoning
+                }
+            };
+            (
+                choose("surface.activity", "surface.reasoning"),
+                choose("surface.activity.border", "surface.reasoning.border"),
+                choose("surface.activity.label", "surface.reasoning.label"),
+            )
+        }
         "user" => ("surface.user", "surface.user.border", "surface.user.label"),
         "assistant" => (
             "surface.assistant",
@@ -192,12 +211,10 @@ fn has_event_spacing(block: &TranscriptBlock, expanded_reasoning: bool) -> bool 
                 && (!expanded_reasoning
                     || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
         }
-        TranscriptBlock::Outcome(_)
+        TranscriptBlock::Subagents(_)
+        | TranscriptBlock::Outcome(_)
         | TranscriptBlock::Notice(_)
-        | TranscriptBlock::NoticeStatus {
-            tone: super::NoticeTone::Success | super::NoticeTone::Error,
-            ..
-        }
+        | TranscriptBlock::NoticeStatus { .. }
         | TranscriptBlock::UpdateAvailable(_) => true,
         _ => false,
     }
@@ -241,7 +258,14 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     let layout = theme.layout_for_width(outer_width);
     let presentation = PresentationLayout::new(theme, outer_width);
     let kind = transcript_surface_kind(block);
-    let resolved = theme.surface_for_width(kind, outer_width);
+    let surface_kind = if matches!(block, TranscriptBlock::Reasoning(reasoning)
+        if !reasoning.finished && !reasoning.reasoning_expanded && !expanded_reasoning)
+    {
+        "activity"
+    } else {
+        kind
+    };
+    let resolved = theme.surface_for_width(surface_kind, outer_width);
     // File themes paint full-width user surfaces (bands/rails/cards) that
     // would otherwise start one gutter left of every marker-aligned block.
     // Reserve the shared gutter so prompt cards align edge to edge with
@@ -262,22 +286,20 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         && theme
             .resolve::<bool>("quiet_tool_summaries")
             .unwrap_or(false);
-    let needs_marker_gutter = if theme.is_pi_theme() {
-        // The loader alone owns a two-cell spinner/label grid. Cards and prose
-        // use Pi's one-cell padding, without Octet's event-marker gutter.
-        matches!(block, TranscriptBlock::Reasoning(reasoning)
-            if !reasoning.finished && !reasoning.reasoning_expanded && !expanded_reasoning)
-    } else {
+    let needs_marker_gutter = resolved.marker_gutter.unwrap_or_else(|| {
         uses_event_marker_gutter(block)
             || (full_width_user && !still_user_band)
             || (flush_rails && resolved.chrome != ThemeSurfaceChrome::Rail)
-    };
+    });
     let marker_gutter_width = theme
         .resolve::<u16>("event_marker_gutter")
         .unwrap_or(PRIMARY_TEXT_GUTTER)
         .max(PRIMARY_TEXT_GUTTER)
         .min(presentation.content_width.saturating_sub(1));
-    let event_gutter = if flush_rails && resolved.chrome == ThemeSurfaceChrome::Rail {
+    let event_gutter = if resolved.marker_gutter.is_none()
+        && flush_rails
+        && resolved.chrome == ThemeSurfaceChrome::Rail
+    {
         0
     } else if needs_marker_gutter && presentation.content_width > PRIMARY_TEXT_GUTTER {
         marker_gutter_width
@@ -415,23 +437,22 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     } else {
         (0, 0)
     };
-    let content_role = if theme.is_pi_theme() {
-        match block {
-            TranscriptBlock::Tool(panel) if !panel.finished => "extension.pi.toolPendingBg",
-            TranscriptBlock::Tool(panel) if panel.is_error => "extension.pi.toolErrorBg",
-            TranscriptBlock::Tool(_) => "extension.pi.toolSuccessBg",
-            TranscriptBlock::Shell(shell) if shell.running => "extension.pi.toolPendingBg",
-            TranscriptBlock::Shell(shell) if shell.exit_code != 0 => "extension.pi.toolErrorBg",
-            TranscriptBlock::Shell(_) => "extension.pi.toolSuccessBg",
-            _ => surface_roles(kind).0,
-        }
-    } else {
-        surface_roles(kind).0
+    let state_role = match block {
+        TranscriptBlock::Tool(panel) if !panel.finished => Some("surface.tool.pending"),
+        TranscriptBlock::Tool(panel) if panel.is_error => Some("surface.tool.error"),
+        TranscriptBlock::Tool(_) => Some("surface.tool.success"),
+        TranscriptBlock::Shell(shell) if shell.running => Some("surface.shell.pending"),
+        TranscriptBlock::Shell(shell) if shell.exit_code != 0 => Some("surface.shell.error"),
+        TranscriptBlock::Shell(_) => Some("surface.shell.success"),
+        _ => None,
     };
+    let content_role = state_role
+        .filter(|role| theme.has_semantic_style(role))
+        .unwrap_or_else(|| surface_roles(surface_kind, theme).0);
     // Row counts are decided below, once the neighbouring seams are known; the
     // draft only needs what the painter reads to answer "is my cushion filled?".
     let mut surface = SurfacePlan {
-        kind,
+        kind: surface_kind,
         content_role,
         chrome,
         heading,
@@ -441,6 +462,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             _ => None,
         },
         padding,
+        marker_enabled: resolved.marker_gutter != Some(false),
         event_spacing,
         frame_left,
         frame_width,
@@ -452,6 +474,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             trailing_rows: 0,
             content_left,
             content_width,
+            shell_output: None,
         },
     };
     // A filled cushion row is part of the surface (the card's own top and
@@ -568,6 +591,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         trailing_rows,
         content_left,
         content_width,
+        shell_output: None,
     };
     surface
 }
@@ -806,6 +830,61 @@ mod tests {
         }))
     }
 
+    fn assert_planned_geometry(
+        block: &TranscriptBlock,
+        rendered: SurfaceGeometry,
+        planned: SurfaceGeometry,
+    ) {
+        assert_eq!(planned.shell_output, None);
+        assert_eq!(
+            rendered.shell_output.is_some(),
+            matches!(block, TranscriptBlock::Shell(_))
+        );
+        assert_eq!(
+            SurfaceGeometry {
+                shell_output: None,
+                ..rendered
+            },
+            planned
+        );
+    }
+
+    #[test]
+    fn shell_source_receipts_preserve_planned_geometry_and_exact_tail_boundaries() {
+        use super::super::transcript_cache::ShellOutputSource;
+
+        let theme = test_theme();
+        let renderer = theme.rich_renderer();
+        for width in [46, 80, 120] {
+            for verbose in [false, true] {
+                for (output, start, metadata_rows) in [
+                    ("row-0", 0, 0),
+                    (
+                        "row-0\nrow-1\nrow-2\nrow-3\nrow-4\nrow-5\nrow-6",
+                        if verbose { 0 } else { 18 },
+                        usize::from(!verbose),
+                    ),
+                    ("", 0, 1),
+                ] {
+                    let block = shell("printf fixture", output);
+                    let planned = compile_surface_plan(None, &block, &theme, width);
+                    let rendered = render_block_planned(
+                        None, &block, &theme, &renderer, &renderer, width, verbose, 0, 0,
+                    );
+                    assert_planned_geometry(&block, rendered.geometry, planned.geometry);
+                    assert_eq!(
+                        rendered.geometry.shell_output,
+                        Some(ShellOutputSource {
+                            start,
+                            metadata_rows,
+                        }),
+                        "width={width}, verbose={verbose}, output={output:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn rendered_with_gutter(
         block: &TranscriptBlock,
         theme: &OctetTheme,
@@ -821,7 +900,7 @@ mod tests {
         let rendered = render_block_planned(
             None, block, theme, &renderer, &renderer, width, verbose, 0, 0,
         );
-        assert_eq!(rendered.geometry, plan.geometry);
+        assert_planned_geometry(block, rendered.geometry, plan.geometry);
         let rows = rendered
             .lines
             .iter()
@@ -897,7 +976,7 @@ mod tests {
         assert_eq!(panel.output, output);
         assert_eq!(
             block_copy_text(&local_shell),
-            format!("$ {command} [completed]")
+            format!("$ {command} [completed]\n{output}")
         );
     }
 
@@ -1280,7 +1359,7 @@ mod tests {
                 let rendered = render_block_planned(
                     None, &block, &theme, &renderer, &renderer, width, true, 0, 0,
                 );
-                assert_eq!(rendered.geometry, plan.geometry);
+                assert_planned_geometry(&block, rendered.geometry, plan.geometry);
                 for row in rendered.lines {
                     assert!(
                         visible_width(&row) <= usize::from(width),
@@ -1363,7 +1442,7 @@ mod tests {
                 0,
                 0,
             );
-            assert_eq!(rendered.geometry, plan.geometry);
+            assert_planned_geometry(&local_shell, rendered.geometry, plan.geometry);
             assert!(rendered
                 .lines
                 .iter()

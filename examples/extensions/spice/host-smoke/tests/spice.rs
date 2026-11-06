@@ -272,7 +272,7 @@ async fn f01_spice_acceptance() {
                         .clone()
                         .expect("admitted typed waveform"),
                 ))),
-                3 => turn(None),
+                3 | 4 => turn(None),
                 _ => panic!("unexpected scripted model request"),
             },
         )
@@ -346,6 +346,41 @@ async fn f01_spice_acceptance() {
     discover(&host, &owner, &native, "spice_transient", "/session");
     *selected.lock().unwrap() = Some(native.clone());
 
+    // Refusals go through the production process and discovery, before any
+    // target handler runs. Use a live Circuit in the Session slot rather than
+    // a fabricated token, and a different owner for a valid Session token.
+    let before = f.log();
+    assert!(f
+        .process
+        .call_tool(
+            "spice_transient",
+            json!({"session":circuit}),
+            f.process.current_context_for_resource_owner(&owner),
+        )
+        .await
+        .is_err());
+    assert!(f
+        .process
+        .call_tool(
+            "spice_transient",
+            json!({"session":native}),
+            f.process
+                .current_context_for_resource_owner("foreign-spice-owner"),
+        )
+        .await
+        .is_err());
+    assert!(host
+        .applicable_operations(
+            "foreign-spice-owner",
+            ApplicableOperationsRequest {
+                resource: native.clone(),
+                limit: None,
+                cursor: None,
+            },
+        )
+        .is_err());
+    assert_eq!(f.log(), before, "invalid inputs reached the domain handler");
+
     let mut run = agent
         .prompt("run and measure the selected RC session")
         .await
@@ -405,7 +440,7 @@ async fn f01_spice_acceptance() {
         waveform["blob"]["bytes"].as_u64().unwrap(),
         16 * waveform["samples"].as_u64().unwrap()
     );
-    let requests: Vec<Value> = server
+    let mut requests: Vec<Value> = server
         .received_requests()
         .await
         .unwrap()
@@ -440,6 +475,16 @@ async fn f01_spice_acceptance() {
     }
     assert!(f.process.release_resource(&owner, &native).unwrap().retired);
     f.event("disposed_SimulationSession").await;
+    assert!(host
+        .applicable_operations(
+            &owner,
+            ApplicableOperationsRequest {
+                resource: native.clone(),
+                limit: None,
+                cursor: None,
+            },
+        )
+        .is_err());
     let before = f.log().len();
     assert!(f
         .process
@@ -455,6 +500,35 @@ async fn f01_spice_acceptance() {
         before,
         "released resource reached the domain handler"
     );
+    // A retired selected receiver must also disappear from the next real
+    // provider request, rather than merely failing direct invocation.
+    let mut after_release = agent.prompt("inspect after release").await.unwrap();
+    let mut after_release_completed = false;
+    while let Some(event) = after_release.next().await {
+        match event {
+            AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. } => {
+                panic!("post-release projection probe must not invoke a tool")
+            }
+            AgentEvent::RunFinished { reason, .. } => {
+                assert!(matches!(reason, FinishReason::Completed));
+                after_release_completed = true;
+            }
+            _ => {}
+        }
+    }
+    drop(after_release);
+    assert!(after_release_completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    let captured = server.received_requests().await.unwrap();
+    assert_eq!(captured.len(), 5);
+    let post_release: Value = captured[4].body_json().unwrap();
+    assert!(!post_release["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "spice_transient"));
+    assert_eq!(f.log().len(), before);
+    requests.push(post_release);
     assert!(
         f.process
             .release_resource(&owner, &circuit)

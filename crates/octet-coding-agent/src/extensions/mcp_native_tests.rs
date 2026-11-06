@@ -507,14 +507,39 @@ async fn pi_mcp_native_app_register_replace_call_remove_and_owner_cleanup() {
     assert!(denied.is_error);
     assert!(!app.config.workspace.join("calls.jsonl").exists());
     let starts = std::fs::read_to_string(app.config.workspace.join("starts.jsonl")).unwrap();
+    let mut events = app
+        .executable_extensions
+        .processes
+        .iter()
+        .find(|process| process.descriptor().manifest.name == "octet-pi-compat")
+        .unwrap()
+        .subscribe();
     app.executable_extensions.effect_policy = octet_agent::EffectPolicy::Controlled;
-    let refused = mcp_command(&mut app, "replace-mcp").await.unwrap_err();
-    assert!(
-        refused
-            .to_string()
-            .contains("transient MCP process startup requires unsafe_host"),
-        "the real process-policy gate must refuse registration, not an unrelated API: {refused:#}"
+    mcp_command(&mut app, "replace-mcp").await.unwrap();
+    let failures: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            octet_agent::extension_process::ExtensionEvent::Notification { notification }
+                if notification.title.as_deref() == Some("Pi compatibility error") =>
+            {
+                Some(notification.message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failures,
+        ["MCP servers: connection_unavailable (details: /extensions)"]
     );
+    assert_eq!(
+        resident
+            .tool_definitions()
+            .iter()
+            .map(|tool| &tool.name)
+            .collect::<Vec<_>>(),
+        tools.iter().map(|tool| &tool.name).collect::<Vec<_>>(),
+        "refused replacement must retain the real previously admitted catalog"
+    );
+    assert!(!app.config.workspace.join("calls.jsonl").exists());
     assert_eq!(
         std::fs::read_to_string(app.config.workspace.join("starts.jsonl")).unwrap(),
         starts
@@ -522,6 +547,11 @@ async fn pi_mcp_native_app_register_replace_call_remove_and_owner_cleanup() {
     app.executable_extensions.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
     mcp_command(&mut app, "replace-mcp").await.unwrap();
     catalog(&mut app, 3).await;
+    assert_ne!(
+        std::fs::read_to_string(app.config.workspace.join("starts.jsonl")).unwrap(),
+        starts,
+        "the same replacement must really restart the server after policy permits it"
+    );
     app.client.register_host_stream_transport(
         app.model.endpoint.id.clone(),
         Arc::new(LocalInference {
@@ -574,13 +604,40 @@ async fn pi_mcp_native_missing_resident_never_starts_or_persists_a_server() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let mut app = app(&root, false);
-    let _ = app.refresh_resource_paths_headless().await;
-    let refused = mcp_command(&mut app, "replace-mcp").await.unwrap_err();
+    let mut events = app
+        .executable_extensions
+        .processes
+        .iter()
+        .find(|process| process.descriptor().manifest.name == "octet-pi-compat")
+        .unwrap()
+        .subscribe();
+    app.refresh_resource_paths_headless().await.unwrap();
+    mcp_command(&mut app, "replace-mcp").await.unwrap();
+    let failures: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            octet_agent::extension_process::ExtensionEvent::Notification { notification }
+                if notification.title.as_deref() == Some("Pi compatibility error") =>
+            {
+                Some(notification.message)
+            }
+            _ => None,
+        })
+        .collect();
     assert!(
-        refused
-            .to_string()
-            .contains("resident octet-mcp is not enabled"),
-        "the missing resident must refuse registration, not an unrelated API: {refused:#}"
+        !failures.is_empty(),
+        "the real missing-resident failure must be reported"
+    );
+    assert!(
+        failures
+            .iter()
+            .all(|message| message == "MCP servers: connection_unavailable (details: /extensions)"),
+        "only sanitized connection diagnostics may escape: {failures:?}"
+    );
+    assert!(
+        std::fs::read_to_string(app.config.workspace.join("session-starts.jsonl"))
+            .unwrap()
+            .contains("started"),
+        "MCP failure must not skip session_start callbacks"
     );
     assert!(!app.config.workspace.join("calls.jsonl").exists());
     assert!(!app.config.workspace.join("starts.jsonl").exists());

@@ -65,15 +65,22 @@ pub enum UnorderedListMarker {
     #[default]
     Bullet,
     Dash,
+    /// Caller-supplied Unicode and conservative ASCII one-column markers.
+    Custom {
+        unicode: char,
+        ascii: char,
+    },
 }
 
 impl UnorderedListMarker {
-    const fn glyph(self, capabilities: TerminalCapabilities) -> &'static str {
+    const fn glyph(self, capabilities: TerminalCapabilities) -> char {
         match (self, capabilities.unicode && !capabilities.plain) {
-            (Self::Bullet, true) => "•",
-            (Self::Bullet, false) => "*",
-            (Self::Dash, true) => "—",
-            (Self::Dash, false) => "-",
+            (Self::Bullet, true) => '•',
+            (Self::Bullet, false) => '*',
+            (Self::Dash, true) => '—',
+            (Self::Dash, false) => '-',
+            (Self::Custom { unicode, .. }, true) => unicode,
+            (Self::Custom { ascii, .. }, false) => ascii,
         }
     }
 }

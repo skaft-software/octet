@@ -1,7 +1,7 @@
 name = "octet-computer-use"
-version = "0.9.6"
+version = "0.10.0"
 api_version = "0.4"
-requires_octet = "=0.9.6"
+requires_octet = "=0.10.0"
 description = "Native computer use through Cua Driver with window-scoped cursor feedback and Octet's effect-confirmation policy"
 
 [entrypoint]

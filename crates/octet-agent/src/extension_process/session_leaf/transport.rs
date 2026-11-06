@@ -3,11 +3,15 @@
 //! The encoded representation is the native view. One Arc has one reservation,
 //! retained until both current publication and every invocation have released it.
 use super::*;
-use base64::Engine as _;
 use serde_json::{json, Value};
 
+mod append;
+#[cfg(all(test, unix))]
+mod append_tests;
 mod dispatch;
 mod history;
+#[cfg(all(test, unix))]
+mod reload_tests;
 pub(in crate::extension_process) use dispatch::attach;
 pub(in crate::extension_process) use dispatch::{publish, stage, PublicationPump, Staged};
 pub(super) mod receipt;
@@ -15,8 +19,22 @@ mod wire;
 pub use wire::SessionSnapshotProfile;
 pub(in crate::extension_process) use wire::{Descriptor, Preparation};
 
+pub(in crate::extension_process) fn publication_changed(
+    mailbox: &SessionLeafMailbox,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let mut receiver = lock_std_mutex(&mailbox.snapshot_publication)
+        .as_ref()
+        .map(|(_, sender)| sender.subscribe());
+    async move {
+        if let Some(receiver) = &mut receiver {
+            let _ = receiver.changed().await;
+        }
+    }
+}
+
 pub(crate) const OWNER_ROUTES: &str = "session_owner_routes_v1";
 pub(crate) const SNAPSHOT_TRANSPORT: &str = "session_snapshot_transport_v1";
+pub(crate) const APPEND_RECEIPTS: &str = "session_append_receipts_v1";
 pub(in crate::extension_process) const PREPARE: &str = "session/snapshot/prepare";
 const READ: &str = "session/snapshot/read";
 const RELEASE: &str = "session/snapshot/release";
@@ -77,13 +95,20 @@ struct Projection {
     committed: bool,
     _reservation: Reservation,
 }
+pub(super) struct ParentView {
+    pub(super) owner: ExtensionResourceOwner,
+    pub(super) preparation: Option<Preparation>,
+    pub(super) revision: u64,
+    pub(super) head: Option<String>,
+}
+
 #[derive(Default)]
 pub(in crate::extension_process) struct Store {
     accounting: Arc<StdMutex<Accounting>>,
     revision: u64,
     pub(in crate::extension_process) current: HashMap<ExtensionResourceOwner, Option<Arc<View>>>,
     transfers: HashMap<String, Transfer>,
-    pub(super) parents: HashMap<u64, (ExtensionResourceOwner, Option<Preparation>)>,
+    pub(super) parents: HashMap<u64, ParentView>,
     projections: HashMap<String, Projection>,
 }
 
@@ -189,6 +214,91 @@ impl Store {
         )
     }
 
+    pub(in crate::extension_process) fn rebind_parent(
+        &mut self,
+        parent_id: u64,
+        previous: &ExtensionResourceOwner,
+        mirror: &SessionMirror,
+        mailbox: &SessionLeafMailbox,
+    ) -> Result<bool, ExtensionRuntimeError> {
+        let parent = self.parents.get(&parent_id).ok_or_else(unavailable)?;
+        if parent.owner != *previous || parent.preparation.is_some() {
+            return Err(unavailable());
+        }
+        let publication = lock_std_mutex(&mailbox.snapshot_publication);
+        let revision = match publication.as_ref() {
+            Some((owner, sender)) if owner == &mirror.owner => match sender.borrow().clone() {
+                SnapshotPublicationState::Pending { .. } => return Ok(false),
+                SnapshotPublicationState::Prepared { revision } => revision,
+                SnapshotPublicationState::Failed { .. } => return Err(unavailable()),
+            },
+            _ => return Err(unavailable()),
+        };
+        let view = self
+            .current
+            .get(&mirror.owner)
+            .and_then(Option::as_ref)
+            .ok_or_else(unavailable)?;
+        let descriptor = &view.descriptor;
+        let facts = mirror.value.as_ref().ok_or_else(unavailable)?;
+        if descriptor.owner != mirror.owner
+            || descriptor.preparation.is_some()
+            || facts.get("session_view_revision").and_then(Value::as_u64)
+                != Some(descriptor.view_revision)
+            || facts.get("session_leaf_id") != Some(&json!(descriptor.head))
+            || revision != descriptor.view_revision
+        {
+            return Err(unavailable());
+        }
+        self.parents.insert(
+            parent_id,
+            ParentView {
+                owner: mirror.owner.clone(),
+                preparation: None,
+                revision: descriptor.view_revision,
+                head: descriptor.head.clone(),
+            },
+        );
+        Ok(true)
+    }
+
+    pub(in crate::extension_process) fn rebind_current(
+        &mut self,
+        previous: &Self,
+        owner: &ExtensionResourceOwner,
+        generation: u64,
+        profile: &SessionSnapshotProfile,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let mut replacement_owner = owner.clone();
+        replacement_owner.process_generation = generation;
+        self.current.insert(replacement_owner.clone(), None);
+        let current = previous.current.get(owner).ok_or_else(unavailable)?;
+        if let Some(view) = current {
+            let reservation = self.reserve(
+                profile,
+                view.bytes.len(),
+                view.descriptor.entry_count + view.descriptor.branch_count,
+                false,
+            )?;
+            let descriptor = Descriptor {
+                owner: replacement_owner.clone(),
+                transfer_id: String::new(),
+                preparation: None,
+                ..view.descriptor.clone()
+            };
+            self.revision = self.revision.max(descriptor.view_revision);
+            self.current.insert(
+                replacement_owner,
+                Some(Arc::new(View {
+                    bytes: view.bytes.clone(),
+                    descriptor,
+                    _reservation: reservation,
+                })),
+            );
+        }
+        Ok(())
+    }
+
     pub(in crate::extension_process) fn invocation(
         &mut self,
         payload: &Value,
@@ -239,6 +349,32 @@ impl Store {
             },
         );
         Ok(descriptor)
+    }
+
+    /// Lease a live parent exactly the view it is pinned to (owner, revision
+    /// and head), as a counted parent-bound transfer. The adapter validates
+    /// that parent's append receipts against this same document, so a later
+    /// owner republication can never race the receipt chain.
+    pub(in crate::extension_process) fn lease_parent(
+        &mut self,
+        parent: u64,
+        profile: &SessionSnapshotProfile,
+    ) -> Result<Descriptor, ExtensionRuntimeError> {
+        let pin = self.parents.get(&parent).ok_or_else(unavailable)?;
+        let view = self
+            .current
+            .get(&pin.owner)
+            .and_then(Option::as_ref)
+            .filter(|view| {
+                view.descriptor.owner == pin.owner
+                    && view.descriptor.preparation.is_none()
+                    && pin.preparation.is_none()
+                    && view.descriptor.view_revision == pin.revision
+                    && view.descriptor.head == pin.head
+            })
+            .cloned()
+            .ok_or_else(unavailable)?;
+        self.transfer(parent, view, profile)
     }
 
     pub(in crate::extension_process) fn settle(&mut self, parent: u64) {

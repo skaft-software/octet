@@ -1,0 +1,72 @@
+# Non-colour defaults shared by built-in Pi, Pi JSON, and opt-in TOML themes.
+[colors]
+prompt_wash = false
+margin_markers = false
+# Place the activity spinner at column 1 and its label at column 3.
+event_marker_gutter = 3
+thinking_spinner = true
+activity_shimmer = false
+thinking_expanded = true
+splash_compact = true
+prompt_rail_model_adaptive = false
+splash_model_adaptive = false
+md_code_bg = "default"
+md_code_inline_bg = "default"
+reasoning_text = "muted"
+# Keep the profile default in the lowest-precedence token section so an
+# explicit [colors], [tokens], or [model] value can override it.
+model.use_lab_color = false
+
+[layout]
+transcript_inset = 0
+block_padding_x = 1
+tool_body_indent = 0
+
+[roles.thinking]
+foreground = "reasoning_text"
+italic = true
+
+[roles.tool_header]
+foreground = "tool_title"
+
+[glyphs]
+list_bullet = "-"
+
+[glyphs_ascii]
+list_bullet = "-"
+
+[surfaces.user]
+chrome = "band"
+narrow_chrome = "band"
+marker_gutter = false
+prompt_marker = false
+
+[surfaces.assistant]
+marker_gutter = false
+
+[surfaces.reasoning]
+marker_gutter = false
+
+[surfaces.activity]
+# The marker gutter already separates the spinner from its label.
+marker_gutter = true
+padding = 0
+
+[surfaces.tool]
+chrome = "band"
+narrow_chrome = "band"
+marker_gutter = false
+
+[surfaces.shell]
+chrome = "band"
+narrow_chrome = "band"
+marker_gutter = false
+
+[surfaces.notice]
+marker_gutter = false
+
+[surfaces.outcome]
+marker_gutter = false
+
+[surfaces.compaction]
+marker_gutter = false

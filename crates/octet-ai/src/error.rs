@@ -290,6 +290,10 @@ pub enum StreamProtocolError {
 /// Description of unsupported capabilities.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedError {
+    /// The model's stream is produced by its own extension process; the host
+    /// has no wire request or response codec for it.
+    #[error("The model's stream is owned by its extension process")]
+    ExtensionStream,
     /// Images are not supported by the model or protocol.
     #[error("Image input is unsupported")]
     Image,

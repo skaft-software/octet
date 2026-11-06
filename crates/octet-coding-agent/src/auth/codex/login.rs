@@ -10,7 +10,6 @@
 //! whenever an authorize parameter changes.
 
 use std::io::{self, IsTerminal as _};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -37,6 +36,7 @@ pub(crate) enum LoginProgress {
         user_code: String,
         phase: DeviceLoginPhase,
     },
+    Exchanging,
     /// Authorization succeeded; waiting for the existing private-store lock.
     Saving,
     /// The credential commit has completed; cancellation cannot undo it.
@@ -73,6 +73,10 @@ fn publish_progress(progress: LoginProgress) {
     let _ = NATIVE_LOGIN_PROGRESS.try_with(|sender| sender.send_replace(progress));
 }
 
+pub(super) fn browser_exchange_started() {
+    publish_progress(LoginProgress::Exchanging);
+}
+
 fn native_presentation() -> bool {
     NATIVE_LOGIN_PROGRESS.try_with(|_| ()).is_ok()
 }
@@ -98,13 +102,7 @@ fn ssh_session() -> bool {
 }
 
 fn opener_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer.exe"
-    } else {
-        "xdg-open"
-    }
+    crate::auth::subscription::login::BROWSER_OPENER
 }
 
 fn opener_available() -> bool {
@@ -392,13 +390,7 @@ pub async fn logout(store: &CredentialStore) -> Result<()> {
 }
 
 fn open_browser(url: &str) -> bool {
-    let Ok(mut child) = Command::new(opener_name())
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+    let Ok(mut child) = crate::auth::subscription::login::browser_command(url).spawn() else {
         return false;
     };
     std::thread::spawn(move || {
@@ -419,6 +411,8 @@ mod tests {
         NATIVE_LOGIN_PROGRESS
             .scope(sender, async {
                 assert!(native_presentation());
+                browser_exchange_started();
+                assert_eq!(*receiver.borrow(), LoginProgress::Exchanging);
                 publish_progress(LoginProgress::Fallback(LoginFallback::NoBrowserOpener));
                 publish_progress(LoginProgress::Device {
                     user_code: "INERT-1234".into(),

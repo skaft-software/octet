@@ -467,6 +467,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
           cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
           if ($LASTEXITCODE -ne 0) { throw 'MSVC process qualification failed' }
+      - name: Qualify managed extension updates and recovery on MSVC
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib -- extension_bundle::tests extension_package:: resource_resolver::tests
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC extension package qualification failed' }
       - name: Package and qualify the MSVC archive
         working-directory: source
         shell: pwsh

@@ -47,6 +47,21 @@ class MetadataRefreshTests(unittest.TestCase):
         catalog["deepseek"]["models"]["example"]["reasoning"] = None
         self.assertIsNone(refresh.capabilities_snapshot(catalog)["deepseek/example"]["reasoning"])
 
+    def test_new_model_refresh_keeps_all_source_modalities_and_thinking_options(self):
+        model = {
+            "name": "Future Model", "reasoning": True,
+            "modalities": {"input": ["text", "image", "audio", "pdf", "video"],
+                           "output": ["text", "image", "audio"]},
+            "reasoning_options": [{"type": "effort",
+                                   "values": ["none", "low", "max"],
+                                   "default": "max"}],
+        }
+        for model_id in ("gpt-6.1-terra", "future-model"):
+            with self.subTest(model_id=model_id):
+                records = refresh.capabilities_snapshot(
+                    {"openai": {"models": {model_id: model}}})
+                self.assertEqual(records, {f"openai/{model_id}": model})
+
     def test_token_plan_and_coding_providers_keep_upstream_catalog_membership(self):
         model = {
             "name": "Example", "reasoning": True,

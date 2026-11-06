@@ -1,23 +1,37 @@
-# Optional Pi factory compatibility
+# Pi extension compatibility
 
-> **Experimental and unstable source-only work; excluded from v0.9.6.** No Pi compatibility
-> bundle is shipped or offered in this release's catalog. Instructions below
-> describe development setup, not a qualified release integration.
+**The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
+Import your existing Pi setup (managed Pi 1.0.2 through 1.4.x) or select
+extension entrypoints manually.
+One Node process loads unchanged extension factories; Rust owns the agent,
+sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
+fallback loads helpers in that process, not a second Pi agent.
 
-One optional Node/Bun process loads unchanged Pi extension factories after explicit
-review. Import an enabled Pi 1.0.2 setup, or supply entrypoints manually. Rust
-still owns octet's agent, sessions, approvals, terminal, keyboard focus and
-shutdown. The installed-Pi fallback loads helpers inside this process, not a
-second Pi CLI or agent loop. It is not an OS sandbox or universal Pi compatibility claim.
-Full stable Pi 1.0.2 compatibility remains the target; this source preview does
-not qualify that target, and new generic resource APIs do not substitute for Pi
-parity.
+See [getting started](../../docs/pi-compatibility.md) and the
+[API coverage ledger](../../docs/pi-extension-api.md). Extension execution uses
+your OS permissions; it is not a sandbox.
+See [native-mediated Pi settings](SETTINGS.md) for the bounded
+`SettingsManager.create` contract and its native policy requirements.
 
 ## Local setup and configuration
 
-Requires Node 22.19+ or Bun. Source dependency setup uses npm; release bundles
-include the dependencies. Nothing executes during extension discovery, and
-neither helper enables an extension or writes host configuration/trust:
+Requires Node **22.19.0 or newer**. Entrypoints reject older Node versions before
+loading adapter dependencies or factories. Bun's existing path is retained but
+separately unqualified. Source dependency setup uses npm; release archives
+include locked production dependencies. Installation/discovery are inert.
+Enabling the stock bundle automatically mirrors this
+machine's enabled Pi setup and runs its factories with OS permissions. Native
+provider-credential disclosure remains a separate reviewed opt-in, and native
+TOML appearance is independent. With octet 0.10.0 or later:
+
+```sh
+octet extension install octet-pi-compat
+# Only after reviewing this machine's enabled Pi factories and imports:
+octet --enable-extension octet-pi-compat
+```
+
+For source development, the commands below generate a separate reviewed bridge;
+neither helper enables it or writes host configuration/trust:
 
 ```sh
 node extensions/octet-pi-compat/setup.mjs
@@ -28,20 +42,28 @@ node extensions/octet-pi-compat/configure.mjs --reviewed --from-pi \
 octet --extension-dir /absolute/local-extensions --enable-extension octet-pi-compat
 ```
 
-`--from-pi` uses the installed Pi 1.0.2 resolver, probes each enabled factory on
+`--from-pi` uses the installed Pi's own resolver, probes each enabled factory on
 octet's emulated path, then automatically tries installed Pi when loading fails
-or a bounded source scan detects direct Pi tool execution, such as hashline's
-image-read branch. Child-tool descriptors alone stay on the emulated path.
+or a bounded source scan finds an installed-only helper. Tool factories on both
+routes use the same native broker; direct execution is not an installed-route grant.
 Setup prints each route or skip reason and records the Pi installation path.
+The recorded agent directory also supplies `PI_CODING_AGENT_DIR` before imports
+and factory execution, overriding ambient directory selectors when HOME changes.
+This maps reviewed configuration inside the adapter, not native environment passthrough.
 Broken factories and unsupported schemas are diagnosed; constraints are never
 stripped to make a tool load. Static registration collisions require explicit
 ownership and fresh review, refusing a partial setup rather than silently dropping
 other commands. Installed native manifests alone do not prove active ownership;
 only explicit host-active tools conflict. Reviewed builtin tool replacements require
 exact manifest grants and negotiated native `builtin_tool_overrides_v1` admission.
-For a manual list, replace `--from-pi` with absolute entrypoint paths. Replace
-`node` with `bun` to reuse Bun; configure records that executable. A load pass
+For a manual list, replace `--from-pi` with absolute entrypoint paths. Configure
+records the executable; selecting Bun does not qualify that runtime. A load pass
 does not qualify commands, hooks or UI behavior.
+
+Runner and configure enable the best-effort private Node compile cache before
+loading the adapter graph. Existing `NODE_COMPILE_CACHE` overrides remain authoritative;
+unavailable caches do not block startup. Review capture and live factory execution
+remain separate and unchanged.
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
 with safe `pi-*` native selectors. Enabling this reviewed bridge contributes these
@@ -74,9 +96,15 @@ without substituting model-family colors. This is palette projection, not copied
 Pi renderer geometry or full original-package qualification.
 
 Failing lifecycle observation callbacks are reported with their factory and event
-while later callbacks continue. Permission/veto hooks, owner fences, cancellation
-and failed host mutations still fail closed. This is isolation, not API parity.
-Print and JSON output both use the native `print` context mode, without a UI.
+while later callbacks continue. Permission/veto hooks and owner fences continue
+to fail closed; cancellation remains enforced. A later callback timeout does not
+discard host-operation failures already recorded at the live boundary, but an
+operation failure arriving after that boundary settles cannot retroactively
+change its response. Callback wait budgets do not bound a subsequent flush of
+pending tracked host operations, transport or synchronously blocked JavaScript;
+the native deadline can still expire. See [slow or stalled extensions](../../docs/pi-compatibility.md#slow-or-stalled-extensions). This is
+isolation, not API parity. Print and JSON output both use the native `print`
+context mode, without a UI.
 
 `--reviewed` authorizes executing the selected factories and their imports during
 routing and capture, including installed Pi code on the fallback route. Review
@@ -88,9 +116,8 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The release catalog now includes this adapter with locked npm dependencies and
-an empty factory configuration. Publication is still a separate gate. When using
-an installed bundle, generate configuration in a separate directory rather than
+The 0.10.0 release catalog includes this adapter. For an installed bundle,
+generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
 The runner accepts `node runner.mjs --config /absolute/bridge.json`, with:
@@ -107,23 +134,70 @@ skips a changed factory. Late tools use the negotiated host-acknowledged catalog
 Static shortcut declarations stay reserved when a factory is
 skipped, but their missing handlers refuse execution; reconfigure to remove them.
 These hashes are change detection, not a sandbox or
-an integrity claim over an extension's entire import graph. The shipped config
-is empty and does not discover/import any Pi user installation.
+an integrity claim over an extension's entire import graph. The stock `bridge.json`
+is empty, but its manifest sets `OCTET_PI_AUTO_MIRROR=1`: explicit enablement
+prepares a private session catalog and discovers/runs enabled Pi factories.
+An empty config therefore does not mean stock activation is inert. Installation
+and discovery alone still execute nothing and never import credentials.
 
-octet 0.9.6 is pinned to **Pi 1.0.2**. Dependencies are the exact versions Pi
-1.0.2 ships: jiti 2.7.0, `typebox` 1.3.27 and selected MIT Pi TUI 1.0.2 modules.
-Imports resolve through the same module table as Pi 1.0.2's extension loader:
+octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
+through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
+2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
+resolve through the same module table as Pi 1.4's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
-root and `pi-ai/compat` share one entry, and both `@earendil-works` and old
-`@mariozechner` Pi imports alias to the same host facades. `pi-agent-core`,
-`pi-ai/oauth` and `pi-ai/providers/all` come only from the installed Pi 1.0.2.
+root, `pi-ai/compat` and `pi-ai/models` share one entry, and both
+`@earendil-works` and old `@mariozechner` Pi imports alias to the same host
+facades. `pi-agent-core` resolves to explicit host-owned-runtime refusals;
+its type-only imports work without starting a second agent. `pi-ai/providers/all`
+provides static model inventory and guarded native-provider delegates.
+`pi-ai/oauth` remains installed-Pi-only.
 Setup uses `npm ci --ignore-scripts`, without global installs, asset downloads,
 providers or model calls. There is no coding-agent npm dependency. jiti keeps
 its default content-hashed transpile cache, as in Pi. Pure context helpers and
 command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 `v1.0.2`, commit `cd32f7725fdbddbaecdff5b1e68491563394e0ca`) under its [MIT
 license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
-runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
+runtime. The [Pi 1.0.2 export inventory](shims/pi-1.0.2/README.md) records
+all public root/compat/core/TUI names, their pure/local or host binding, and
+explicit refusals. Additional reviewed local helpers lazily load individual
+installed Pi dist modules and require a supported local/managed installation.
+Static `getModel`/`getModels` describe Pi's generated catalog, not native selected
+or authenticated models. The explicit installed-Pi route loads the managed Pi's own packages.
+Its native ESM imports finish sequentially before the synchronous overlays are
+published; an in-flight package graph is never read with `require()`. The shim
+precedence and denied-export boundaries are unchanged.
+
+Automatic-mirror catalog reuse does not retain exclusions caused by missing
+factory dependencies, unavailable installed-Pi modules or timed-out setup. Those
+factories are retried on the next launch, even if their sources did not change.
+Dependencies are never installed automatically. Automatic mirrors pin the live
+runner to the same persistent transform/compile-cache directory as capture,
+rather than a generated per-launch directory. Cold automatic capture also covers
+single-factory setups and selects the already-required installed-Pi route for
+statically detected installed-only helper imports before running any factory. A successful
+mixed capture can therefore supply the catalog without replaying the entire setup.
+If an executed factory fails, accepted-only recapture still starts in a clean
+process so its shared mutations cannot contaminate the reviewed catalog. The live
+runner still loads accepted factories separately, after native admission.
+Interactive deferred startup captures the cold catalog in owned background work,
+so returning the native fleet no longer waits for Pi factory capture. Until Pi's
+hook catalog is known, prompt submission waits rather than skipping its hooks;
+activation still requires the validated catalog and original source/trust identity.
+Retiring the fleet aborts capture. Print/RPC/headless startup stays synchronous.
+These ordering changes and work reductions do not qualify cold-start parity:
+actual first-frame and fully initialized timings still require measured journeys.
+
+`ctx.isProjectTrusted()` requires the authoritative native trust snapshot, then
+applies Pi 1.0.2's no-project-resources rule for already enabled factories: a newly
+bound plain repo can report true if it has no trust-requiring `.pi` entries or
+project/ancestor `.agents/skills` (user-global `~/.agents/skills` is excluded).
+An added resource can narrow that signal; removing it cannot silently restore the
+signal within the same owner, and native trust revocation takes precedence. A
+replacement owner reevaluates it. This conservative lifecycle behavior differs
+from Pi's retained trust setting. Extensions may start language servers there,
+including servers that execute project code. Only the Pi context signal changes:
+mirror discovery, `pi.getSettings()`, native resource admission, tool policy and
+native workspace trust keep their original host gate.
 
 ## Implemented surface
 
@@ -137,14 +211,18 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   Members Pi 1.0.2 has but Octet deliberately does not honor stay explicit
   refusing functions (`ctx.abort`, `ctx.shutdown`,
   `pi.events.clear`, the unemulated provider/session factories), so an
-  unsupported *operation* still fails loudly. Octet-built data objects (observed
+  unsupported *operation* still fails loudly. Extension-owned Symbol metadata on
+  `ctx.ui` survives callback boundaries within one host-issued session owner, so
+  footer ownership tokens can be checked and cleared. It is not inherited by a
+  replacement owner; action methods keep their own request and cancellation fences.
+  Octet-built data objects (observed
   assistant messages and their usage, native receipts, stream options) keep the
   opposite rule: an unavailable fact refuses instead of reading as absent.
 - Pi 1.0.2 `config.ts` package helpers (`getPackageDir`, `getPackageJsonPath`,
-  `getReadmePath`) resolved against the package that provides the
-  `pi-coding-agent` module: this adapter package on the emulated path, the
-  managed Pi release on the installed-Pi route. `docs/` and `examples/` get no
-  helper because this package ships no such directories.
+  `getReadmePath`, `getDocsPath`, `getExamplesPath`) resolved against the
+  package that provides the `pi-coding-agent` module: this adapter package on
+  the emulated path, the managed Pi release on the installed-Pi route. Path
+  helpers do not guarantee that documentation/example directories are shipped.
 - Pi 1.0.2 `CURRENT_SESSION_VERSION` (3) and the `keybinding-hints` helpers
   `keyText`, `keyHint` and `rawKeyHint`, implemented from Pi's source against
   the pinned Pi TUI keybindings (host-supplied bindings on the installed route).
@@ -153,8 +231,10 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   `getResolvedBindings` and Pi coding-agent's `getEffectiveConfig`; the latter
   two return the native host's complete effective snapshot, including overrides
   and reloads. Pi's remaining instance methods are
-  explicit gaps on this injected facade: `getDefinition`, `getConflicts` and
-  `getUserBindings` need definitions/override provenance not supplied by the host;
+  explicit gaps on this injected facade: `getDefinition` and `getConflicts`
+  need definitions/override provenance not supplied by the host, and
+  `getUserBindings` reads as an absent optional member (extensions probe it with
+  `getUserBindings?.()`; throwing there took the host down on pi-mcp-adapter's `/mcp`);
   `setUserBindings` and `reload` would contradict host ownership and are not
   supported. This does not restrict extensions constructing their own standalone
   `KeybindingsManager` from the pinned TUI package.
@@ -167,7 +247,15 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   captured before activation. Late tool registration/replacement requires
   `dynamic_tools` and waits synchronously for the native catalog ACK; refusal
   leaves the accepted tool unchanged. Late `on` callbacks can use already
-  subscribed native hooks. New command/shortcut/flag names remain startup-bound.
+  subscribed native hooks. Late commands additionally require `runtime_commands`
+  and `runtime_command_registration_v1`; the owner-fenced synchronous native ACK
+  precedes the local callback/catalog update. Late shortcut names require
+  `shortcuts` and the existing owner-bound `shortcut/register` native ACK before
+  installing their trigger handler. Native key conflicts, rescue bindings,
+  quotas and generation checks remain authoritative. Mirrors retain their
+  reviewed static-registration fence; new flag names remain startup-bound.
+  Unknown command options are ignored;
+  only Pi's description, handler and argument-completion options are consumed.
 - Reviewed builtin overrides use exact `capabilities.builtin_tool_overrides`
   grants for captured names among `read`, `edit`, `write`, `bash` and
   `powershell`. Startup and late registrations must match the native initialize
@@ -176,6 +264,28 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   unsafe replay classification, not the displaced builtin's privileges. Native
   retirement restores the builtin without retargeting frozen calls or replaying
   unsafe historical calls. First-party external tool conflicts remain refused.
+- `createReadTool`, `createWriteTool`, `createEditTool`, `createBashTool`,
+  `createPowerShellTool` and their `*ToolDefinition` counterparts construct local
+  Pi metadata without an installation. Execution requires an admitted live tool
+  parent and `tool_composition_v1` plus `composition_builtin_tools_v1`. Native
+  dispatch selects the frozen genuine builtin, not an extension replacement with
+  the same name, and retains schema, hooks, effects, scheduling, cancellation,
+  journaling and metering. Pi cwd/path and shell timeout arguments are translated;
+  private native read/shell payloads supply Pi text and structured output without
+  exposing native numbered read presentation. Native result-hook replacement wins.
+  No raw installed-Pi tool execute function is exported. grep/find/ls definitions
+  construct, but execution refuses because those native builtins do not exist.
+- The host-owned `ExtensionRunner` instance participates in live registration
+  catalog refresh and execution. Interception sees real definition/anchor and
+  source identities; captured execute functions are native-admitted proxies.
+  `emitToolCall` uses negotiated `composition_preflight_v1` to run real native
+  preparation/schema/hooks without effects, mutates the Pi input to the prepared
+  arguments, and binds a bounded single-use receipt. Execution must match that
+  receipt; `emitToolResult` returns the settled native result without rerunning
+  hooks. Construction of an independent runner and execution outside a live tool
+  remain refused. This does not mediate arbitrary extension-owned filesystem
+  implementations: Fabric's custom preview-write execute replaces the factory
+  implementation and remains an unqualified path, not a native builtin write.
 - Real sync/async `getArgumentCompletions` callbacks through negotiated native
   `autocomplete`. Registration follows initialization and requires admission.
   Callbacks receive Pi's complete raw argument prefix, with whitespace/quotes and
@@ -189,6 +299,15 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   Declaring either field, even empty, requires the feature. Limits: 1024 UTF-8 bytes
   per string, at most 16 guidelines, C0/C1 forbidden except newline/tab. Pi projection
   trimming and aggregate catalog-budget enforcement remain native responsibilities.
+- Synchronous `pi.getCommands()` requires native `command_catalog_v1`: resolved
+  extension commands, then admitted prompts, then **available**, not activated,
+  skills named `skill:<name>`, with original Pi `sourceInfo` where imported.
+  Built-in slash commands are excluded. Membership comes only from native
+  registries; the adapter restores its own factory provenance without adding
+  entries. Retained same-owner callbacks request a fresh snapshot; unbound,
+  retired, cancelled, draining or unsettled-resource contexts refuse rather than
+  inventing an empty catalog. Complete results are bounded to 512 KiB. See the
+  [native contract](../../docs/extensions/resource-paths.md#available-command-catalog).
 - Adapter-side `resources_discover` behind `resource_paths_v1`: ordered awaited
   factory callbacks, normalized filesystem roots and the dedicated native reply.
   Native activation must remain off without the complete App consumer described
@@ -206,6 +325,8 @@ runtime. The explicit installed-Pi route loads its managed 1.0.2 packages.
   use the same bounded request-local channel and never publish into the transcript.
   Synchronous `ctx.tools` reads the actual frozen native composition catalog;
   `ctx.executeTool` requests host-issued full outcomes through normal admission.
+  See [tool schema and exposure contracts](SCHEMAS-AND-EXPOSURE.md) for the bounded
+  keyword profile and distinct model/callable surfaces.
   Nested recursion, aggregate usage conversion, parallel/exposure behavior, and
   complete Pi execution-event parity remain unqualified; adapter tests alone do
   not qualify this native integration.
@@ -248,10 +369,20 @@ deliberate differences from Pi's unbounded, blocking chain.
   composer slot; native chrome and slash discovery stay visible. JS components,
   callbacks and timers stay live in this process. Only printable text and bounded safe SGR snapshots
   cross the wire; the adapter strips balanced, bounded file/http/https OSC 8 link wrappers and keeps
-  their visible labels as plain text. Other terminal escapes remain rejected. Rust paints cached lines and never calls JS synchronously.
-- `setStatus` is local footer-provider metadata, not an assertion that every
-  frontend displays ambient chrome. The compatibility palette is local, not a
-  claim to reproduce octet's host theme; unknown roles are explicit errors.
+  their visible labels as plain text. Other terminal escapes remain rejected. Oversized Pi render
+  snapshots are clipped to the existing row, per-line and aggregate wire bounds at UTF-8/SGR
+  boundaries, with an ellipsis. Rust paints cached lines and never calls JS synchronously.
+- `setStatus` retains footer-provider metadata and, without a custom Pi footer,
+  projects one width-clipped status row below the native footer through an
+  owner-fenced `below_editor` slot. Keys sort deterministically; setting an
+  existing key replaces it and `undefined` clears it. A custom Pi footer owns
+  status presentation without a duplicate row; clearing it restores ambient
+  statuses. Limits are 64 entries per owner, 64-byte keys and 4096-byte text;
+  newlines become spaces and only safe frame text/SGR is admitted. Headless mode
+  retains metadata without opening a surface. Reload/owner retirement removes
+  the old slot through ordinary remote-UI fences. The compatibility palette is
+  local, not a claim to reproduce octet's host theme; unknown roles are explicit
+  errors.
 - Selected Pi TUI components/utilities, with `Editor` and `CustomEditor` sharing
   a synchronous native-backed facade rather than Pi's editing class. Rust owns
   text/caret/undo/history/paste and autocomplete state; JS retains presentation,
@@ -288,16 +419,24 @@ deliberate differences from Pi's unbounded, blocking chain.
   editor, ordinary native composer/set/insert behavior is unchanged.
 
 Hook registration maps `session_start`/`session_end`/`session_shutdown` to paired
-API 0.4 lifecycle hooks, `tool_call`/`tool_result` to tool hooks, and
+API 0.4 lifecycle hooks; `session_shutdown.reason` is Pi's `reload` when the host
+ends the session for a reload and `quit` otherwise. `tool_call`/`tool_result` map to tool hooks, and
 `input`/`before_agent_start`/`after_response` to available prompt/response hooks.
 `turn_start`/`turn_end` use awaited native `model_turn_start`/`model_turn_end`
 callbacks with a real session-leaf consumer, not whole-run `turn/started` or
 `turn/settled` notifications. Whole-run observations remain `agent_start`/`agent_end`.
 Message observations now carry `message`, accumulated text updates carry
 `assistantMessageEvent`, and `agent_end.messages` contains the run-local observed
-messages. Message and `agent_end` observers request native `before_prompt` and
-`model_turn_end` hooks even without a Pi `turn_end` subscriber. These supply user
-text and committed assistant messages with paired tool results before `turn_end`.
+messages. A member Pi does not declare on these events reads as absent, as in Pi;
+unavailable assistant facts inside a message still refuse. Message and `agent_end` observers request native `before_prompt` and
+`model_turn_end` hooks even without a Pi `turn_end` subscriber. With negotiated
+`committed_message_events_v1`, system/user boundaries precede the first request,
+provider tool-call argument updates are forwarded, and the durable assistant
+message ends before its tools execute. Root tool execution events carry actual
+arguments, partial results, final results and error status; each tool-result
+message follows its execution end. The later model-turn hook supplies the
+committed entries without emitting these messages twice. Older peers retain the
+model-turn-end fallback.
 Tool-result media stays inside its Pi tool result message, which is what Pi 1.0.2
 itself holds, even though chat-completions lowering commits it as
 protocol-adjacent media beside the result: only the provider wire splits it into
@@ -318,8 +457,10 @@ returning a truncated transcript.
 
 This is not complete Pi event parity: subscriptions determine which facts the
 native host supplies, user/stream timestamps are adapter observation times, and
-tool-result message boundaries arrive with the model-turn end hook rather than
-each tool execution. Missing final usage/provider/stop metadata is not invented.
+older peers without the committed-message profile still deliver tool-result
+boundaries at model-turn end. Message-end replacement and boundary continuation
+transformations remain incomplete. Missing final usage/provider/stop metadata is
+not invented.
 Other negotiated tool/compaction/model/dialog observations are dispatched in order.
 Reading unavailable Pi fields or returning an unapplied transformation/veto fails
 explicitly. Command argument arrays join with spaces; the wire cannot reconstruct
@@ -327,7 +468,7 @@ original shell quoting.
 
 A synchronous reverse request that the host drops (it cancels the hook together
 with the child request it issued) no longer takes the extension down. A dropped
-*read-only* request (`tools/snapshot`, `composition/context`) is terminal
+*read-only* request (`commands/snapshot`, `tools/snapshot`, `composition/context`) is terminal
 cancellation: the factory thread is woken with `request cancelled` instead of
 waiting on a reply that will never arrive. A durable or effectful request keeps
 waiting for its native outcome, because only that outcome decides whether the
@@ -341,8 +482,20 @@ succeeds with native per-model-turn mappings; no whole-run aliases are installed
 to force registration through.
 `before_agent_start` uses the negotiated native `before_prompt_state_v1`
 applied-system contract; configure records `capabilities.system_prompt` for that
-factory. Registration capture and adapter fixtures do not qualify CLM's seven
-behavioral gates. Missing initial snapshots, unsupported projections/preparation
+factory. Handlers share normalized mutable `systemPromptOptions`, including the
+available skills and active-tool hints. An edited `selectedTools` list wins over
+`setActiveTools()`; otherwise the live loadout wins. The final prompt uses the
+host-acknowledged selection, not unknown or hidden requested tool names.
+`event.systemPrompt` and the hook's `ctx.getSystemPrompt()` render current
+mutations lazily; a returned scalar prompt
+sets `forceSystemPrompt`, including an empty string. Named sections replace an
+existing matching section or append in Pi order, without persisting native
+session state. Unchanged inputs retain the native base prompt. Tool-call hook
+blocks skip `tool_result` transformation while retaining error execution/result
+observations. MCP connection or capability failures are sanitized background
+diagnostics, not failed `session_start` callbacks; the registration stays visible.
+Registration capture and adapter fixtures do not qualify CLM's seven behavioral
+gates. Missing initial snapshots, unsupported projections/preparation
 fields and checkpoint bounds remain open compatibility work.
 
 **Rule A:** captured Pi breakages remain Octet-owned defects across the loader,
@@ -351,6 +504,27 @@ success, but is not a repair or closure. Qualification must match the original c
 candidate and security policy; historical passes do not qualify changed source.
 
 ## Native context, persistence and provider phases
+
+Outside `before_agent_start`'s lazy prompt composer, `ctx.getSystemPrompt()`
+reads the native disclosure service synchronously. With negotiated
+`run_system_prompt_read_v1`, `agent_start` and actual model-turn callbacks use
+an exact native run scope: the current Agent prompt is immutable for that run,
+so the read does not wait on the frontend borrowing the Agent. The lifecycle
+observer remains read-only and never acquires a fabricated live parent. Model
+callbacks retain their actual live parent/controller checks. Cancelled,
+completed, retired or replaced scopes refuse; neither cached host prompt text
+nor an older/newer run is a fallback. Idle live requests keep the existing
+frontend service. This implementation and its regression tests are not package
+or full-Pi qualification.
+
+`ctx.hasPendingMessages()` requires an actual native boolean; absent facts still
+refuse. With paired session transport, queue-only `runtime.updated` publications
+update an existing live exact owner's retained fact without `remote_ui` or a UI
+mount. They cannot change foreground ownership, history or editor/UI authority,
+and accept no additional host fields. Delayed publications for unknown or retired
+owners are ignored without creating state or reviving action authority; retained
+context actions still refuse retired owners. Native queue and original-package
+qualification remain separate from this adapter contract.
 
 `context` maps to the real API 0.4 `provider_context` preparation hook and requires
 `session_entries`, a matching native owner/preparation and actual top-level
@@ -367,8 +541,10 @@ invented. Native validation/budgeting remains authoritative.
 
 `appendEntry` is now **synchronous void**: an independent worker owns the sole
 physical stdin reader/serialized writer while the factory thread waits for the
-native durable receipt. Hook writes require the actual one-use session-leaf grant;
-only a known successor permits another append. No optimistic entry or Promise
+native durable receipt. Hook writes require an actual one-use session-leaf grant
+or the negotiated grant-less receipt path below. An exhausted or revoked grant
+cannot fall back to grant-less writes; only its known successor permits another
+append. No optimistic entry or Promise
 flush counts as persistence. Cancellation after claim waits for the actual outcome;
 transport loss means unknown outcome, terminal connection and no replay. Existing
 16 KiB/depth16/nodes256 private-entry bounds remain; large CLM checkpoints can be
@@ -377,11 +553,51 @@ parents and available timestamps, and expose only the initialized namespace's
 private custom state. Unrepresentable mixed-message entries refuse; other native
 markers retain their identities as `octet_native`, not fabricated Pi entries.
 
+Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
+both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appends
+from live hooks, commands, shortcuts and tools then publish the actual native durable
+entry into that invocation's pinned view before returning. Receipt revision,
+head, ancestry and view quotas must match; no session-leaf grant is minted.
+Immediate sessionManager getters therefore see the committed ID, parent and
+native timestamp. Older peers retain the exact entry-ID-only ACK contract.
+Adapter receipt tests do not establish native or original-package acceptance.
+
 Negotiated `pipeline_hooks_v1` dispatches actual `before_provider_request`,
 `before_provider_headers` and `after_provider_response`. These operate on encoded
 JSON, header mutation/deletion patches, and real status/header arrival respectively,
 not canonical context or inferred stream completion. Private callback exceptions
 are redacted. Native code polices reserved headers and effects before send.
+
+For extension-owned provider streams, negotiated API 0.4
+`provider_request_hooks_v1` (requiring `provider_proxy_v1`) relays installed Pi's
+actual payload and HTTP-response callbacks through the live stream job. Header
+transforms run before the provider callback, matching Pi's model runtime. The
+host retains one hook-chain identity, reserved-header validation and deadlines;
+withdrawal, cancellation and terminal settlement invalidate pending callbacks.
+Native delegation and the callback bridge cannot both consume the same attempt.
+A callback that omits real wire phases cannot report a successful hooked stream.
+No canonical request or synthetic completion substitutes for an HTTP boundary.
+Native delegates still refuse package-supplied response/header callbacks that
+lack wire forwarding; undefined optional callback fields remain accepted.
+
+`modelRegistry.getAll()` and `find()` use the host's full native and extension
+model inventory, including models without configured authentication.
+`getAvailable()` is the separately filtered configured-auth inventory, not a
+network reachability check. `hasConfiguredAuth()` reads provider-level native
+configuration facts without resolving or disclosing credentials. Catalog views
+are refreshed defensively; unrepresentable or oversized snapshots refuse rather
+than silently dropping models. Extension-owned custom models retain their full
+process-local metadata in defensive registry snapshots; private metadata is not
+added to the native host projection.
+
+Explicit string-form provider models preserve sparse `thinkingLevelMap` data in
+custom-stream and defensive model snapshots. Missing ordinary levels retain Pi's
+defaults, null excludes a level, and `xhigh`/`max` require their own non-null
+entries. Optional undefined map members are omitted, not converted to null.
+Only the resulting portable choices cross into native `ReasoningOptions`;
+provider-specific mapped strings stay in the adapter and the custom stream maps
+its unchanged portable `options.reasoning` itself. Malformed maps and maps with
+no selectable level refuse registration. Inherited native controls remain native.
 
 Provider credentials are withheld by default. Add `--provider-credentials` only
 when the reviewed factories need Pi 1.0.2 `modelRegistry.getApiKeyAndHeaders`;
@@ -391,11 +607,74 @@ the requested native provider/model. Returned secrets are available to the calli
 factory only; they are never included in extension status or host diagnostics.
 Request signers that cannot be represented as a Pi API key/header result are
 refused. Reconfigure and explicitly enable the capability only after reviewing
-all loaded factory code and its imports.
+all loaded factory code and its imports. `getApiKeyForProvider()` uses this same
+opt-in and exact-model broker; missing grants, unavailable providers, refusals or
+header-only authentication return `undefined`, not a fabricated key. Custom
+providers use only their own authentication callbacks and registered model headers,
+without native credential-disclosure permission or fallback to the native broker.
+Callback failures return a generic refusal without exposing exception text.
+String-form provider registrations can retrieve their own explicitly supplied
+key for a declared model without native disclosure permission. These reads use
+only the live process-owned registration; caller-supplied headers and undeclared
+models cannot select credentials.
 
-The original Anthropic-attribution provider remains blocked: builtin provider
-inheritance is unsupported, and its direct HTTP callback requires OAuth-specific
-request signing that Pi's raw key/header API cannot represent.
+When `nested_inference_v1` is negotiated, `modelRegistry.streamSimple()` is a
+host-owned, exact-model inference service available only during a live tool call.
+Its async iterator and stable `result()` promise expose bounded text/thinking
+stream events. Native routing, budgets, cancellation, and durable Session usage
+accounting remain authoritative; the selected session model is unchanged.
+Caller credentials, URLs, headers, fetch functions, tools, and session controls
+are not accepted. Cancellation waits for native settlement, including uncertain
+usage exposure when final provider usage is unavailable. This bounded profile
+admits one inference per tool execution and does not add usage to tool results.
+A tool may return an exact echo of its own settled native inference usage; that
+echo is validated against a private invocation-bound receipt and is not charged
+again as ToolOutput usage. Usage inside details/structured content is preserved.
+Unmatched, additional external, stale or cross-invocation usage remains explicitly
+unsupported rather than being silently discarded or combined.
+
+Provider overrides use separately negotiated `provider_inheritance_v1`, offered
+only with a native catalog and the provider proxy. Defined registration fields
+merge; omitted models inherit the host's native inventory. Single-object native
+provider wrappers can select from that inventory. Registration does not resolve
+authentication or invoke stream callbacks. Overlays retain the original native
+model identity, capabilities and pricing, and removal restores the original route.
+Google Generative AI inheritance additionally requires
+`provider_google_generative_ai_v1`. Its `google-generative-ai` identity maps only
+to the native Google codec (`google_generative_ai`), retaining the native endpoint
+and authentication. This does not admit Google Interactions, arbitrary custom
+Google HTTP transports, or additional API 0.3 protocols.
+
+Inside an admitted inherited callback, the guarded native transport delegates at
+most once through the current native client, retaining its credentials, request
+hooks, cancellation and accounting. Credentials are not passed to JavaScript;
+this delegation does not require credential-disclosure permission. Context and
+payload callbacks may shape messages/system, but cannot replace tools, routing,
+authentication, reasoning, cache or session authority. Unchanged native signed or
+redacted reasoning retains its host-owned replay state. Native deltas are relayed
+before the terminal response; final usage/cost remain native-owned. This is not
+permission to run installed Pi HTTP/auth runtimes, perform nested inference, or
+claim OAuth-dependent package behavior without an original-package journey.
+
+Custom stream preparation and inherited native delegation use the bundled pure Pi
+transcript helpers and timeout parser, without importing an installed Pi runtime.
+An extension that explicitly invokes a managed-local Pi helper still needs a
+supported installation; its version and authority checks are unchanged.
+`OCTET_STARTUP_TRACE=1` also reports data-free provider preparation/unfold timings
+and message/tool counts. These diagnostics are not benchmark qualification.
+
+Custom OpenAI HTTP delegation accepts Pi base URLs with or without a trailing
+path slash; only the private native endpoint projection adds the missing slash.
+URL-derived Chat defaults and OpenRouter affinity headers use parsed, case-insensitive
+hostnames with DNS-label boundaries, not substring matches in paths or unrelated
+hosts. Explicit provider IDs and compatibility overrides retain precedence.
+Native URL validation, unauthenticated routing and process-owned key isolation
+remain unchanged.
+
+Ordinary custom-provider streams receive canonical history when a supplied
+Responses replay is exactly equivalent to the native codec's canonical encoding
+and contains no additional controls. Opaque or control-bearing Responses replay
+is not discarded and remains explicitly unsupported by `streamSimple`.
 
 Actual awaited `session_before_compact`/`session_compact` and
 `session_before_tree`/`session_tree` hooks carry native session-leaf consumers.
@@ -447,7 +726,11 @@ recorded model, usage, optional native cost and optional stop reason from the
 matching persisted `UsageRecord`. The adapter validates entry/model correlation,
 preserves token totals and nonzero cache/reasoning subsets, and converts stored
 microdollar cost categories plus the total picodollar remainder to Pi dollars.
-Unpriced usage remains readable; reading unavailable cost explicitly refuses.
+Unpriced usage remains readable; reading unavailable cost explicitly refuses,
+including copied `ctx.sessionManager` entries/branches. A footer that assumes
+`message.usage.cost.total` always exists needs a priced model, or must handle
+unavailable cost. Unknown subscription pricing is not `$0`; the adapter never
+fabricates a price to satisfy footer arithmetic.
 `end_turn`, `stop_sequence` and `pause_turn` map to `stop`, `max_tokens` to `length`,
 `tool_use` to `toolUse`, and `refusal` to `error` with Pi's generic refusal message.
 Deferred/steered/unknown outcomes without a faithful Pi binding are reported,
@@ -652,6 +935,14 @@ EOF/crash exits and the host owns final process-tree cleanup. Trusted code can
 still access OS facilities directly: this isolation is protocol discipline,
 not security confinement.
 
+Synchronous replies also carry bounded observations of already-received `ui/closed`
+notifications in a separate 32 KiB worker buffer. Only the matching native surface
+is marked retired; the ordinary notification retains FIFO ownership of disposal
+after the component callback unwinds. Cleanup skips stale final-state reads and
+duplicate close requests. This does not reorder notification callbacks, accept stale
+native operations or classify arbitrary `-32002` errors as retirement. Incomplete
+input still reports failure; normal errors and authoritative reply outcomes remain intact.
+
 ### Transcript presentation
 
 Negotiated API 0.4 `transcript_render_v1` requires `remote_ui` and an installed
@@ -702,7 +993,7 @@ separate ownership guard pass **194/194 with zero skips**. See the
 coverage is distinct from actual App/adapter owner/admission/registry tests and
 real-terminal qualification. The earlier two-batch adapter run covered 566 tests
 with a disposable HOME: **539 passed, 27 skipped, zero failed**. The separate original-hashline/override run passed all
-8 tests: installed-route selection, native-style reviewed grants, session-start
+8 tests: historical installed-route selection, native-style reviewed grants, session-start
 active-tool ACKs, real hashed text read, anchored replacement and PNG execution
 with verified artifact bytes/digest. Its isolated file/network/child-process
 guards reported zero violations. This uses real original code and an adapter

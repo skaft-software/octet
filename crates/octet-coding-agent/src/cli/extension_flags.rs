@@ -20,7 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches, Parser};
+#[cfg(test)]
+use clap::Parser;
+use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches};
 use octet_agent::extension_process::{ExtensionFlag, ExtensionFlagType};
 
 use super::{
@@ -168,7 +170,12 @@ fn bootstrap_extension_config(args: &[OsString], cwd: &Path) -> Option<Config> {
 /// user-visible configuration diagnostics during the real final parse.
 fn build_config_for_extension_flags(cli: Cli, cwd: &Path) -> anyhow::Result<Config> {
     let global = global_config_path();
-    build_config_with_global_path_and_diagnostics(cli, cwd, global.as_deref(), false)
+    let mut config =
+        build_config_with_global_path_and_diagnostics(cli, cwd, global.as_deref(), false)?;
+    // Pi may activate an already-present admitted bundle before its flags exist
+    // in clap. This reads metadata only; no extension is imported or started.
+    super::apply_pi_codemode_settings(&mut config, &BTreeSet::new());
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -404,39 +411,81 @@ pub(super) fn invocation_has_top_level_subcommand(
 }
 
 fn parse_static_or_exit(args: Vec<OsString>) -> Cli {
-    match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
+    parse_static_with(None, args)
+}
+
+/// The static parse, reusing `command` when the caller already built it.
+fn parse_static_with(command: Option<Command>, args: Vec<OsString>) -> Cli {
+    // A bare `octet` sets nothing, so clap would only rebuild the defaults
+    // after constructing the whole command: most of the work of reaching the
+    // interactive frontend. `bare_invocation_parses_to_the_default_cli` keeps
+    // the two equal.
+    if args.len() <= 1 {
+        return Cli::default();
+    }
+    let mut matches = match command
+        .unwrap_or_else(Cli::command)
+        .try_get_matches_from(args)
+    {
+        Ok(matches) => matches,
         Err(error) => error.exit(),
+    };
+    match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(error) => error.format(&mut Cli::command()).exit(),
     }
 }
 
+type ParsedExtensionFlags = (Cli, ExtensionFlagValues, BTreeSet<(String, String)>);
+
 /// Parse the normal runtime command after adding trusted manifest-declared
 /// flags. Discovery reads only bounded manifests and never launches extensions.
+///
+/// `command` is the static command when [`parse_static_invocation`] already
+/// built it; the parse then reuses it instead of building it again.
 pub(crate) fn parse_with_extension_flags(
     args: Vec<OsString>,
     cwd: &Path,
-) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
+    command: Option<Command>,
+) -> anyhow::Result<ParsedExtensionFlags> {
     let declarations = bootstrap_extension_config(&args, cwd)
         .map(|config| crate::extensions::selected_extension_flag_declarations(&config))
         .unwrap_or_default();
-    parse_declared_extension_flags(args, declarations)
+    parse_declared_extension_flags_with(args, declarations, command)
 }
 
-fn parse_declared_extension_flags(
+#[cfg(test)]
+pub(super) fn parse_declared_extension_flags(
     args: Vec<OsString>,
     declarations: Vec<(String, ExtensionFlag)>,
-) -> anyhow::Result<(Cli, ExtensionFlagValues)> {
+) -> anyhow::Result<ParsedExtensionFlags> {
+    parse_declared_extension_flags_with(args, declarations, None)
+}
+
+fn parse_declared_extension_flags_with(
+    args: Vec<OsString>,
+    declarations: Vec<(String, ExtensionFlag)>,
+    command: Option<Command>,
+) -> anyhow::Result<ParsedExtensionFlags> {
     // Manifest discovery and its trust checks still run before this boundary.
     // Without declarations, there is nothing to register or scan around: use
     // the existing static parser without rebuilding its command for collision
     // enumeration and subcommand detection first.
     if declarations.is_empty() {
-        return Ok((parse_static_or_exit(args), BTreeMap::new()));
+        return Ok((
+            parse_static_with(command, args),
+            BTreeMap::new(),
+            BTreeSet::new(),
+        ));
     }
     let static_args = args.clone();
     let registered = register_extension_flags(declarations)?;
     if invocation_has_top_level_subcommand(&args, &registered) {
-        return Ok((parse_static_or_exit(static_args), BTreeMap::new()));
+        return Ok((
+            parse_static_or_exit(static_args),
+            BTreeMap::new(),
+            BTreeSet::new(),
+        ));
     }
     let mut command = extension_flag_command(&registered);
     let matches = match command.try_get_matches_from_mut(args) {
@@ -451,10 +500,25 @@ fn parse_declared_extension_flags(
         // Dynamic flags are not part of early-exit command contracts. If an
         // unknown option occurred before one, preserve the old static parser's
         // behavior rather than quietly accepting it on that path.
-        return Ok((parse_static_or_exit(static_args), BTreeMap::new()));
+        return Ok((
+            parse_static_or_exit(static_args),
+            BTreeMap::new(),
+            BTreeSet::new(),
+        ));
     }
     let values = resolve_extension_flag_values(&matches, &registered)?;
-    Ok((cli, values))
+    let explicit = registered
+        .iter()
+        .filter(|flag| {
+            supplied_by_command_line(&matches, &flag.argument_id)
+                || flag
+                    .negative_argument_id
+                    .as_deref()
+                    .is_some_and(|id| supplied_by_command_line(&matches, id))
+        })
+        .map(|flag| (flag.extension.clone(), flag.declaration.name.clone()))
+        .collect();
+    Ok((cli, values, explicit))
 }
 
 fn static_long_argument<'a>(command: &'a Command, name: &str) -> Option<&'a Arg> {
@@ -523,11 +587,42 @@ fn has_static_early_exit_option(args: &[OsString]) -> bool {
 /// clap with error recovery. Recovery stops at an unknown dynamic flag and can
 /// therefore misclassify later activation options or a positional prompt as a
 /// subcommand.
+#[cfg(test)]
 pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
     if has_static_early_exit_option(args) {
         return false;
     }
+    // A bare invocation has nothing to scan: it takes the runtime parser,
+    // which applies declared defaults, without building the command here.
+    args.len() <= 1 || scan_uses_runtime_parser(args, &static_extension_command())
+}
+
+/// How [`parse_static_invocation`] resolved an invocation.
+pub(crate) enum StaticInvocation {
+    /// No extension flag can occur; this is the parsed command line.
+    Parsed(Box<Cli>),
+    /// The invocation needs [`parse_with_extension_flags`]; the static
+    /// command is handed over when it was already built for the scan.
+    Runtime(Option<Box<Command>>),
+}
+
+/// Parse with the static command when no extension flag can occur, building
+/// that command once for both the scan and the parse.
+pub(crate) fn parse_static_invocation(args: &[OsString]) -> StaticInvocation {
+    if has_static_early_exit_option(args) {
+        return StaticInvocation::Parsed(Box::new(parse_static_or_exit(args.to_vec())));
+    }
+    if args.len() <= 1 {
+        return StaticInvocation::Runtime(None);
+    }
     let command = static_extension_command();
+    if scan_uses_runtime_parser(args, &command) {
+        return StaticInvocation::Runtime(Some(Box::new(command)));
+    }
+    StaticInvocation::Parsed(Box::new(parse_static_with(Some(command), args.to_vec())))
+}
+
+fn scan_uses_runtime_parser(args: &[OsString], command: &Command) -> bool {
     let mut index = 1;
     while index < args.len() {
         let Some(value) = args[index].to_str() else {
@@ -540,7 +635,7 @@ pub(crate) fn uses_runtime_extension_flag_parser(args: &[OsString]) -> bool {
             let (name, inline_value) = long
                 .split_once('=')
                 .map_or((long, false), |(name, _)| (name, true));
-            let Some(argument) = static_long_argument(&command, name) else {
+            let Some(argument) = static_long_argument(command, name) else {
                 // It may be a dynamic flag. Keep parsing on the runtime path
                 // rather than guessing how many following values it consumes.
                 return true;
@@ -577,6 +672,16 @@ mod fast_path_tests {
     use super::*;
 
     #[test]
+    fn bare_invocation_parses_to_the_default_cli() {
+        let parsed = Cli::try_parse_from(["octet"]).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{:?}", Cli::default()));
+        assert_eq!(
+            format!("{:?}", parse_static_or_exit(vec![OsString::from("octet")])),
+            format!("{parsed:?}")
+        );
+    }
+
+    #[test]
     fn no_declarations_preserve_static_parse_without_extension_command_builds() {
         for invocation in [
             vec!["octet"],
@@ -594,8 +699,10 @@ mod fast_path_tests {
                 .collect();
             let expected = Cli::try_parse_from(args.clone()).unwrap();
             EXTENSION_COMMAND_BUILDS.with(|count| count.set(0));
-            let (actual, values) = parse_declared_extension_flags(args, Vec::new()).unwrap();
+            let (actual, values, explicit) =
+                parse_declared_extension_flags(args, Vec::new()).unwrap();
             assert!(values.is_empty());
+            assert!(explicit.is_empty());
             assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
             EXTENSION_COMMAND_BUILDS.with(|count| assert_eq!(count.get(), 0));
         }
@@ -626,8 +733,9 @@ mod fast_path_tests {
                 .into_iter()
                 .map(OsString::from)
                 .collect();
-                let (cli, values) =
+                let (cli, values, explicit) =
                     parse_declared_extension_flags(args, declarations.clone()).unwrap();
+                assert!(explicit.contains(&("fixture".into(), "fixture-label".into())));
                 assert!(cli.command.is_none());
                 assert_eq!(cli.resume_picker, selector == "-r");
                 assert_eq!(cli.continue_, selector == "-c");
@@ -637,6 +745,77 @@ mod fast_path_tests {
                 assert_eq!(
                     values["fixture"]["fixture-label"],
                     serde_json::json!("doctor")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_values_equal_to_manifest_defaults_keep_command_line_provenance() {
+        let declarations = vec![
+            (
+                "octet-codemode".to_owned(),
+                ExtensionFlag {
+                    name: "codemode-mode".to_owned(),
+                    kind: ExtensionFlagType::String,
+                    default: serde_json::json!("on"),
+                    description: None,
+                },
+            ),
+            (
+                "octet-codemode".to_owned(),
+                ExtensionFlag {
+                    name: "codemode-inline-budget".to_owned(),
+                    kind: ExtensionFlagType::Integer,
+                    default: serde_json::json!(3000),
+                    description: None,
+                },
+            ),
+        ];
+        let args = [
+            "octet",
+            "--codemode-mode",
+            "on",
+            "--codemode-inline-budget",
+            "3000",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let (_, values, explicit) = parse_declared_extension_flags(args, declarations).unwrap();
+        assert_eq!(values["octet-codemode"]["codemode-mode"], "on");
+        assert_eq!(values["octet-codemode"]["codemode-inline-budget"], 3000);
+        assert!(explicit.contains(&("octet-codemode".into(), "codemode-mode".into())));
+        assert!(explicit.contains(&("octet-codemode".into(), "codemode-inline-budget".into())));
+    }
+
+    #[test]
+    fn boolean_spellings_retain_provenance_even_when_equal_to_defaults() {
+        for default in [false, true] {
+            let declarations = vec![(
+                "fixture".to_owned(),
+                ExtensionFlag {
+                    name: "fixture-enabled".to_owned(),
+                    kind: ExtensionFlagType::Boolean,
+                    default: serde_json::json!(default),
+                    description: None,
+                },
+            )];
+            for (spelling, expected) in [
+                (None, default),
+                (Some("--fixture-enabled"), true),
+                (Some("--no-fixture-enabled"), false),
+            ] {
+                let mut args = vec![OsString::from("octet")];
+                if let Some(spelling) = spelling {
+                    args.push(OsString::from(spelling));
+                }
+                let (_, values, explicit) =
+                    parse_declared_extension_flags(args, declarations.clone()).unwrap();
+                assert_eq!(values["fixture"]["fixture-enabled"], expected);
+                assert_eq!(
+                    explicit.contains(&("fixture".into(), "fixture-enabled".into())),
+                    spelling.is_some()
                 );
             }
         }
@@ -658,8 +837,9 @@ mod fast_path_tests {
             .map(OsString::from)
             .collect();
         EXTENSION_COMMAND_BUILDS.with(|count| count.set(0));
-        let (cli, values) = parse_declared_extension_flags(args, declarations).unwrap();
+        let (cli, values, explicit) = parse_declared_extension_flags(args, declarations).unwrap();
         assert_eq!(cli.message.as_deref(), Some("hello"));
+        assert!(explicit.contains(&("fixture".into(), "fixture-count".into())));
         assert_eq!(values["fixture"]["fixture-count"], serde_json::json!(-7));
         EXTENSION_COMMAND_BUILDS.with(|count| assert!(count.get() > 0));
     }

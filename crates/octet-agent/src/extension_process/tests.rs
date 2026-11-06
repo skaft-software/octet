@@ -10,8 +10,14 @@ mod builtin_overrides;
 mod cache_warming;
 #[path = "composer_history_tests.rs"]
 mod composer_history;
+#[cfg(unix)]
+#[path = "google_provider_tests.rs"]
+mod google_provider;
 #[path = "prompt_metadata_tests.rs"]
 mod prompt_metadata;
+#[cfg(unix)]
+#[path = "provider_admission_tests.rs"]
+mod provider_admission;
 
 const VALID_MANIFEST: &str = r#"
 name = "git-tools"
@@ -54,6 +60,7 @@ pub(super) fn protocol_read_state_for_test(
             pending: Arc::new(StdMutex::new(HashMap::new())),
             issued_resource_owners: Arc::new(StdMutex::new(HashSet::new())),
             session_leaf: Arc::new(session_leaf::SessionLeafMailbox::default()),
+            prompt_reads: Arc::new(prompt_read::Mailbox::default()),
             remote_ui: Arc::new(RemoteUiMailbox::new(None)),
             pending_changed: Arc::new(Notify::new()),
             closed: Arc::new(AtomicBool::new(false)),
@@ -85,12 +92,14 @@ pub(super) fn protocol_read_state_for_test(
             },
             provider_streams: Arc::new(StdMutex::new(HashMap::new())),
             tool_catalog: Arc::new(StdRwLock::new(Vec::new())),
+            command_catalog: Arc::new(StdRwLock::new(Vec::new())),
             catalog_updates,
             delegation_service: Arc::new(StdRwLock::new(None)),
             session_lifecycle: None,
             event_bus: None,
             approval_store: Arc::new(ExtensionApprovalStore::new()),
             secret_broker: None,
+            pi_settings: None,
             extension_identity: ExtensionIdentity {
                 name: "test-extension".into(),
                 version: "0.1.0".into(),
@@ -477,6 +486,92 @@ fn wave2_terminal_release_dispatch_stays_typed_and_bounded() {
 }
 
 #[test]
+fn command_catalog_snapshot_requires_negotiation_and_complete_issued_owner() {
+    let (events, mut received) = broadcast::channel(16);
+    let (state, mut frames) =
+        protocol_read_state_for_test(ManifestContributions::default(), events);
+    insert_test_parent(&state, 1, Some(test_resource_owner("session-a")));
+    let send = |id, params| {
+        handle_protocol_line(&wave1_line(id, "commands/snapshot", params), &state)
+            .expect("refusal must not close the reader");
+    };
+    send(700, serde_json::json!({"parent_request_id": 1}));
+    assert_eq!(
+        wave1_error(&frames.try_recv().unwrap()),
+        (-32601, "unsupported_feature".into())
+    );
+    wave1_negotiate(&state, &[EXTENSION_FEATURE_COMMAND_CATALOG]);
+    send(
+        701,
+        serde_json::json!({"parent_request_id": 1, "commands": []}),
+    );
+    assert_eq!(
+        wave1_error(&frames.try_recv().unwrap()),
+        (-32602, "invalid_request".into())
+    );
+    send(702, serde_json::json!({"parent_request_id": 1}));
+    match received.try_recv().expect("live catalog request") {
+        ExtensionEvent::ContextSnapshotRequested {
+            owner,
+            operation,
+            generation,
+            ..
+        } => {
+            assert_eq!(owner, Some(test_resource_owner("session-a")));
+            assert_eq!(generation, 1);
+            assert_eq!(operation, ExtensionContextOperation::Commands);
+        }
+        other => panic!("expected command catalog request, got {other:?}"),
+    }
+    lock_std_mutex(&state.pending)
+        .get(&1)
+        .unwrap()
+        .terminal
+        .store(REQUEST_COMPLETED, Ordering::Release);
+    // Settled callbacks need their genuinely issued complete owner. A dead
+    // parent alone or a guessed session/instance/generation cannot grant reads.
+    let genuine = serde_json::to_value(test_resource_owner("session-a")).unwrap();
+    let mut invalid = vec![serde_json::json!({"parent_request_id": 1})];
+    for (field, value) in [
+        ("session_id", serde_json::json!("session-b")),
+        (
+            "extension_instance_id",
+            serde_json::json!("foreign-instance"),
+        ),
+        ("process_generation", serde_json::json!(9)),
+    ] {
+        let mut owner = genuine.clone();
+        owner[field] = value;
+        invalid.push(serde_json::json!({"parent_request_id": 1, "resource_owner": owner}));
+    }
+    for (index, params) in invalid.into_iter().enumerate() {
+        send(703 + index as u64, params);
+        assert_eq!(
+            wave1_error(&frames.try_recv().unwrap()),
+            (-32002, "not_foreground_owner".into())
+        );
+    }
+    assert!(received.try_recv().is_err());
+    send(
+        707,
+        serde_json::json!({"parent_request_id": 1, "resource_owner": genuine}),
+    );
+    match received.try_recv().expect("retained catalog request") {
+        ExtensionEvent::ContextSnapshotRequested {
+            owner, operation, ..
+        } => {
+            assert_eq!(owner, Some(test_resource_owner("session-a")));
+            assert_eq!(operation, ExtensionContextOperation::Commands);
+        }
+        other => panic!("expected retained catalog request, got {other:?}"),
+    }
+    assert!(
+        frames.try_recv().is_err(),
+        "admitted reads must reach the host"
+    );
+}
+
+#[test]
 fn wave3_context_snapshot_dispatch_requires_feature_owner_and_bounds() {
     let (events, mut received) = broadcast::channel(16);
     let (state, mut frames) =
@@ -802,6 +897,7 @@ system_prompt = {system_prompt}
     let no_services = OfferedHostServices {
         transcript_render: false,
         provider_proxy: false,
+        provider_inheritance: false,
         resource_paths: false,
         provider_pipeline: false,
         bulk_objects: false,
@@ -812,6 +908,7 @@ system_prompt = {system_prompt}
         session_compaction: false,
         approvals: false,
         secrets: false,
+        pi_settings: false,
         max_message_bytes: 0,
     };
 
@@ -981,6 +1078,7 @@ provider_credentials = {provider_credentials}
     let no_services = OfferedHostServices {
         transcript_render: false,
         provider_proxy: false,
+        provider_inheritance: false,
         resource_paths: false,
         provider_pipeline: false,
         bulk_objects: false,
@@ -991,6 +1089,7 @@ provider_credentials = {provider_credentials}
         session_compaction: false,
         approvals: false,
         secrets: false,
+        pi_settings: false,
         max_message_bytes: 0,
     };
 
@@ -2544,12 +2643,14 @@ fn child_request(parent_request_id: u64, state: u8) -> ChildRequest {
     ChildRequest {
         exec_cancelled: false,
         remote_ui: None,
+        shortcut_registration: None,
         parent_request_id,
         response_state: Arc::new(ChildResponseState {
             state: AtomicU8::new(state),
             changed: Notify::new(),
             cancel_on_response_abort: StdMutex::new(None),
             composition_cancellation: StdMutex::new(None),
+            inference_id: StdMutex::new(None),
             session_leaf_cancel: StdMutex::new(None),
         }),
         policy_intent: None,
@@ -3174,6 +3275,7 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
 fn prospective_tool_catalog_has_one_input_and_output_schema_byte_budget() {
     let tool = |name: &str, bytes: usize| ToolDefinition {
         default_active: None,
+        exposure: None,
         nested_execution: false,
         prepare_arguments: false,
         prompt_snippet: None,
@@ -3227,7 +3329,7 @@ fn structured_validation_has_a_total_operation_budget() {
     assert!(
         validate_structured_content(&schema, &serde_json::Value::Null)
             .expect_err("validation must be bounded")
-            .contains("budget")
+            .contains("work limit")
     );
 }
 
@@ -3729,7 +3831,10 @@ fn extension_provider_protocols_reject_native_unmodeled_routes() {
         Some("anthropic_messages")
     );
     assert_eq!(provider_protocol_name(Protocol::BedrockConverse), None);
-    assert_eq!(provider_protocol_name(Protocol::GoogleGenerativeAi), None);
+    assert_eq!(
+        provider_protocol_name(Protocol::GoogleGenerativeAi),
+        Some("google_generative_ai")
+    );
     assert_eq!(provider_protocol_name(Protocol::MistralConversations), None);
 }
 
@@ -4117,6 +4222,7 @@ fn handshake_must_exactly_match_manifest_contribution_names() {
         api_version: manifest.api_version.clone(),
         tools: vec![ToolDefinition {
             default_active: None,
+            exposure: None,
             nested_execution: false,
             prepare_arguments: false,
             prompt_snippet: None,
@@ -4207,6 +4313,7 @@ flags = [{ name = "enabled", type = "boolean", default = true }]
         api_version: EXTENSION_API_VERSION_0_4.into(),
         tools: vec![ToolDefinition {
             default_active: None,
+            exposure: None,
             nested_execution: false,
             prepare_arguments: false,
             prompt_snippet: None,
@@ -4651,7 +4758,7 @@ providers = true
     })
     .await
     .expect("initial provider route");
-    let transport = process.provider_stream_transport("fixture-provider", "fixture-model");
+    let transport = process.provider_stream_transport(route.clone());
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         transport.stream(
@@ -4865,7 +4972,7 @@ providers = true
     .await
     .expect("initial provider route");
 
-    let transport = process.provider_stream_transport("alpha", "alpha-model");
+    let transport = process.provider_stream_transport(route.clone());
     let mut response = transport
         .stream(
             HostStreamModel {
@@ -4922,7 +5029,8 @@ providers = true
     );
 
     // The late provider is immediately usable: the next request routes to it.
-    let beta_transport = process.provider_stream_transport("beta", "beta-model");
+    let beta_transport =
+        process.provider_stream_transport(registry.resolve("beta", "beta-model").unwrap());
     let mut beta_response = beta_transport
         .stream(
             HostStreamModel {
@@ -5169,6 +5277,26 @@ hooks = ["session_start", "session_end"]
 #[cfg(unix)]
 #[tokio::test]
 async fn api_v03_session_hooks_settle_and_rebind_per_reload_generation() {
+    session_hooks_settle_and_rebind_per_reload_generation("0.3", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn api_v04_session_hooks_settle_and_rebind_with_reload_reasons() {
+    session_hooks_settle_and_rebind_per_reload_generation("0.4", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn api_v04_session_hook_binding_release_can_report_reload() {
+    session_hooks_settle_and_rebind_per_reload_generation("0.4", true).await;
+}
+
+#[cfg(unix)]
+async fn session_hooks_settle_and_rebind_per_reload_generation(
+    api_version: &str,
+    release_binding: bool,
+) {
     let temp = TempDir::new().expect("tempdir");
     let script_path = temp.path().join("session-hook-reload.py");
     let wire_log = temp.path().join("session-hook-reload.jsonl");
@@ -5198,19 +5326,24 @@ def send(value):
 
 
 initialize = receive()
-contract = initialize["params"]["contract"]
-selection = {
-    "schema": contract["schema"],
-    "encoding": contract["encoding"],
-    "capabilities": contract["required_capabilities"] + ["lifecycle_events"],
-    "methods": contract["required_methods"] + ["hook/run"],
-    "limits": contract["limits"],
-}
-send({
-    "jsonrpc": "2.0",
-    "id": initialize["id"],
-    "result": {"api_version": "0.3", "tools": [], "contract": selection},
-})
+api_version = os.environ["OCTET_EXTENSION_API_VERSION"]
+if api_version == "0.3":
+    contract = initialize["params"]["contract"]
+    selection = {
+        "schema": contract["schema"],
+        "encoding": contract["encoding"],
+        "capabilities": contract["required_capabilities"] + ["lifecycle_events"],
+        "methods": contract["required_methods"] + ["hook/run"],
+        "limits": contract["limits"],
+    }
+    result = {"api_version": api_version, "tools": [], "contract": selection}
+else:
+    result = {"api_version": api_version, "tools": [], "commands": [], "protocol": {
+        "version": api_version,
+        "features": initialize["params"]["protocol"]["required_features"] + ["lifecycle_events"],
+        "limits": {"max_concurrent_requests": 1},
+    }}
+send({"jsonrpc": "2.0", "id": initialize["id"], "result": result})
 
 while True:
     message = receive()
@@ -5220,7 +5353,7 @@ while True:
         send({
             "jsonrpc": "2.0",
             "id": message["id"],
-            "result": {"disposition": {"kind": "continue"}},
+            "result": {"disposition": {"kind": "continue"}} if api_version == "0.3" else {},
         })
     else:
         assert message["method"] == "shutdown", message
@@ -5228,29 +5361,49 @@ while True:
         break
 "#,
     );
-    let manifest = ExtensionManifest::parse(
-        r#"name = "api-v03-session-hook-reload"
+    let manifest_source = r#"name = "session-hook-reload"
 version = "0.3.0"
 api_version = "0.3"
 [entrypoint]
 command = "session-hook-reload.py"
 [contributes]
 hooks = ["session_start", "session_end"]
-"#,
-    )
-    .expect("API 0.3 reload manifest");
+"#;
+    let manifest = ExtensionManifest::parse(&manifest_source.replace(
+        "api_version = \"0.3\"",
+        &format!("api_version = {api_version:?}"),
+    ))
+    .expect("reload manifest");
     let process = ExtensionProcess::start(
         trusted_descriptor(temp.path(), manifest),
         ExtensionRuntimeConfig::new(temp.path()),
     )
     .await
-    .expect("start API 0.3 session hook process");
+    .expect("start session hook process");
     process
         .start_session_hook_binding("session-owner-reload")
         .await
         .expect("initial session start");
-    let report = process.reload().await.expect("reload session hook process");
-    assert_eq!(report.generation, 2);
+    if release_binding {
+        for _ in 0..2 {
+            process
+                .settle_session_hook_binding_with_reason(
+                    "session-owner-reload",
+                    ExtensionLifecycleOutcome::Interrupted,
+                    "reload",
+                )
+                .await
+                .expect("idempotent reload settlement");
+        }
+        process
+            .start_session_hook_binding_with_reason("session-owner-reload", "reload")
+            .await
+            .expect("replacement binding start");
+    } else {
+        let report = process.reload().await.expect("reload session hook process");
+        assert_eq!(report.generation, 2);
+    }
+    let replacement_generation = if release_binding { 1 } else { 2 };
     process
         .settle_session_hook_binding("session-owner-reload", ExtensionLifecycleOutcome::Completed)
         .await
@@ -5278,15 +5431,36 @@ hooks = ["session_start", "session_end"]
     assert_eq!(hooks[2]["params"]["hook"], "session_start");
     assert_eq!(
         hooks[2]["params"]["payload"]["binding"]["process_generation"],
-        2
+        replacement_generation
     );
     assert_eq!(hooks[3]["params"]["hook"], "session_end");
     assert_eq!(
         hooks[3]["params"]["payload"]["binding"]["process_generation"],
-        2
+        replacement_generation
     );
     assert_eq!(hooks[3]["params"]["payload"]["outcome"], "completed");
     assert_eq!(hooks[3]["params"]["payload"]["reason"], "shutdown");
+    if api_version == "0.4" {
+        assert_eq!(hooks[0]["params"]["payload"]["reason"], "startup");
+        assert_eq!(hooks[2]["params"]["payload"]["reason"], "reload");
+        for hook in &hooks {
+            let binding = &hook["params"]["payload"]["binding"];
+            let owner = &hook["params"]["context"]["resource_owner"];
+            assert_eq!(owner["session_id"], binding["session_id"]);
+            assert_eq!(
+                owner["extension_instance_id"],
+                binding["extension_instance_id"]
+            );
+            assert_eq!(owner["process_generation"], binding["process_generation"]);
+        }
+        assert_eq!(
+            hooks[0]["params"]["payload"]["binding"]["extension_instance_id"],
+            hooks[2]["params"]["payload"]["binding"]["extension_instance_id"],
+        );
+    } else {
+        assert!(hooks[0]["params"]["payload"].get("reason").is_none());
+        assert!(hooks[2]["params"]["payload"].get("reason").is_none());
+    }
 }
 
 #[cfg(unix)]
@@ -5372,6 +5546,11 @@ hooks = ["session_start", "session_end"]
     crashed.terminate().await;
     let report = process.reload().await.expect("recover crashed process");
     assert_eq!(report.generation, 2);
+    assert_eq!(
+        lock_std_mutex(&process.inner.session_hooks)["session-owner-crash"].start_reason,
+        "resume",
+        "crash recovery is not a deliberate reload",
+    );
     process
         .settle_session_hook_binding("session-owner-crash", ExtensionLifecycleOutcome::Cancelled)
         .await
@@ -7084,7 +7263,7 @@ fn process_scan_keeps_a_directly_owned_group_bound_during_handoff() {
             original_group_active: true,
             descendants: BTreeMap::new(),
             detached_bash: Some(DetachedBashSupervision {
-                deadline: Instant::now() + Duration::from_secs(1),
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
                 cancellation: CancellationToken::default(),
             }),
         },

@@ -387,6 +387,38 @@ test('host-resolved editing overrides reach the same slot; no adapter submit pat
   await peer.close();
 });
 
+for (const newline of ['\n', '\r', '\r\n']) test(`terminal paste normalizes ${JSON.stringify(newline)} without submission and keeps undo`, async t => {
+  const peer = launch(t, [await fixture(t)], {composer: 'seed', hold: ['composer/set']});
+  await peer.init(); await peer.start();
+  const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+  peer.notify('ui/editor-text', {surface_id: id, text: `café 日本語 🎹${newline}second line`, paste: true,
+    editor_input: {mount_id: `host-editor-${id}`, input_revision: 1}});
+  const pasted = await peer.wait(f => f.method === 'composer/set');
+  checkpoint(pasted, id, 1, 1); assert.equal(pasted.params.text, 'seedcafé 日本語 🎹\nsecond line');
+  ack(peer, pasted); await peer.wait(frame('second line'));
+  assert.equal(peer.seen.some(f => f.method === 'composer/submit' || f.method === 'session/send_user_message'), false);
+  peer.notify('ui/key', {surface_id: id, key: '-', kind: 'press', modifiers: ['control'],
+    editor_input: {mount_id: `host-editor-${id}`, input_revision: 2}});
+  const undone = await peer.wait(f => f.method === 'composer/set');
+  checkpoint(undone, id, 2, 2); assert.equal(undone.params.text, 'seed'); ack(peer, undone);
+  await peer.close();
+});
+
+for (const [text, paste] of [['bad\x1b[31m', true], ['bad\x00', true], ['bad\rtext', false], [42, true], ['x'.repeat(262145), true], ['\r\n'.repeat(131073), true]]) {
+  test(`terminal paste normalization preserves validation (${typeof text === 'string' ? JSON.stringify(text.slice(0, 16)) : text}, paste=${paste})`, async t => {
+    const peer = launch(t, [await fixture(t)], {composer: 'seed'});
+    await peer.init(); await peer.start();
+    const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
+    peer.notify('ui/editor-text', {surface_id: id, text, paste,
+      editor_input: {mount_id: `host-editor-${id}`, input_revision: 1}});
+    peer.editorKey(id, 'x');
+    const write = await peer.wait(f => f.method === 'composer/set');
+    checkpoint(write, id, 1, 1); assert.equal(write.params.text, 'seedx');
+    assert.equal(peer.seen.some(f => f.method === 'composer/submit' || f.method === 'session/send_user_message'), false);
+    await peer.close();
+  });
+}
+
 test('Ctrl+G is delivered and checkpointed in the composer before native clear and slash input', async t => {
   const make = `(tui,theme,kb) => {
     const c = new CustomEditor(tui,theme,kb), input = c.handleInput.bind(c);

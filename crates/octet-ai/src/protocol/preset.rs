@@ -245,11 +245,15 @@ pub(super) fn sampling(model: &Model, req: &Request, body: &mut Value) -> Result
         }
         _ => false,
     };
-    if qualified
-        && matches!(
-            model.spec.api_name.as_str(),
-            "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
-        )
+    let public_terra = model.spec.api_name == "gpt-6.1-terra"
+        && model.endpoint.id.0 == "openai"
+        && model.endpoint.base_url.host_str() == Some("api.openai.com");
+    if public_terra
+        || (qualified
+            && matches!(
+                model.spec.api_name.as_str(),
+                "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+            ))
     {
         let effective = match req
             .responses

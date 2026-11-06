@@ -692,8 +692,11 @@ impl SessionStore {
         F: Fn(&Path) -> anyhow::Result<TranscriptSummary>,
     {
         let mut catalog = SessionCatalog::open_recovering(&self.dir).ok();
-        // Latest only needs a valid newest entry. Catalog garbage collection
-        // belongs to full listing, not the first-paint resume selector.
+        // Latest only needs a valid newest entry and looks rows up one by one.
+        // A full listing reads every row, so it loads them in one query, and
+        // catalog garbage collection belongs to it, not the first-paint resume
+        // selector.
+        let mut preloaded = None;
         if !first_only {
             let current_ids = candidates
                 .iter()
@@ -710,6 +713,7 @@ impl SessionStore {
                     let stale_ids = cached_ids.difference(&current_ids).cloned().collect();
                     let _ = catalog.apply(&[], &stale_ids);
                 }
+                preloaded = catalog.load().ok();
             }
         }
         let mut updates = Vec::new();
@@ -745,9 +749,12 @@ impl SessionStore {
                 continue;
             };
             let fingerprint = catalog_fingerprint(&candidate);
-            let cached = catalog
-                .as_ref()
-                .and_then(|catalog| catalog.lookup(&id).ok().flatten());
+            let cached = match &mut preloaded {
+                Some(rows) => rows.remove(&id),
+                None => catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.lookup(&id).ok().flatten()),
+            };
             let summary = fingerprint
                 .and_then(|fingerprint| {
                     cached

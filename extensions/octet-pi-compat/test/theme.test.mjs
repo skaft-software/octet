@@ -54,6 +54,9 @@ test('palette schema/bounds reject malformed colors, invalid references and misl
     input => { input.vars = Array(257).fill(''); },
     input => { input.vars = Object.fromEntries(Array.from({ length: 257 }, (_, i) => [i, ''])); },
     input => { input.extra = true; },
+    input => { input.layout = {}; },
+    input => { input.roles = {}; },
+    input => { input.colors.italic = true; },
   ]) {
     const input = fixture(); change(input); assert.throws(() => parsePiTheme(input));
   }
@@ -83,11 +86,10 @@ test('adapter snapshots preserve the native Pi presentation contract', async () 
     toolPendingBg: '#182838', toolSuccessBg: '#183828', toolErrorBg: '#381828' });
   const converted = piThemeToNativeToml({ name: 'Pi presentation QA', appearance: 'dark', colors });
   assert.equal(converted.toml, await readFile(new URL('./fixtures/pi-native-layout.toml', import.meta.url), 'utf8'));
-  assert.match(converted.toml, /thinking_spinner = true/);
-  assert.match(converted.toml, /thinking_expanded = true/);
+  assert.match(converted.toml, /profile = "pi"/);
   assert.match(converted.toml, /\[roles\."extension\.pi\.accent"\]/);
-  assert.match(converted.toml, /\[surfaces\.user\]\nchrome = "band"\npadding = 1/);
-  assert.match(converted.toml, /\[surfaces\.reasoning\]\nchrome = "plain"\npadding = 0/);
+  assert.match(converted.toml, /\[roles\."surface\.tool\.success"\]/);
+  assert.doesNotMatch(converted.toml, /\[surfaces\./);
 });
 
 test('Theme facade renders pinned color/style methods without acquiring the terminal or mutating the host palette', () => {

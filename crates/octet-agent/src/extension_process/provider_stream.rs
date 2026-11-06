@@ -2,14 +2,17 @@
 
 use super::*;
 
-/// Host-facing adapter for one extension-owned provider/model route.
-///
-/// It resolves the active process generation for every request so a stale
-/// catalog route cannot continue to call a replaced process.
 pub(super) struct ExtensionProviderStreamTransport {
     pub(super) process: Weak<ExtensionProcessInner>,
-    pub(super) provider_id: String,
-    pub(super) model_id: String,
+    pub(super) binding: ProviderRouteBinding,
+}
+
+pub(super) enum ProviderRouteBinding {
+    Projected(crate::extension_provider::ExtensionProviderRoute),
+    Prepared {
+        captured: crate::extension_provider::ExtensionProviderRoute,
+        selected: octet_ai::HostStreamModel,
+    },
 }
 
 pub(super) struct ProviderStreamCancellation {
@@ -268,13 +271,9 @@ pub(super) fn provider_protocol_name(protocol: Protocol) -> Option<&'static str>
         Protocol::OpenAiChat => Some("openai_chat"),
         Protocol::OpenAiResponses => Some("openai_responses"),
         Protocol::AnthropicMessages => Some("anthropic_messages"),
-        // The API 0.3 extension-provider schema intentionally declares only
-        // these three generic wire protocols. Do not coerce native host codecs
-        // into a misleading generic route.
-        Protocol::BedrockConverse
-        | Protocol::GoogleGenerativeAi
-        | Protocol::MistralConversations
-        | Protocol::PiMessages => None,
+        Protocol::GoogleGenerativeAi => Some("google_generative_ai"),
+        Protocol::ExtensionStream => Some("extension_stream"),
+        Protocol::BedrockConverse | Protocol::MistralConversations | Protocol::PiMessages => None,
     }
 }
 
@@ -345,7 +344,35 @@ pub(super) fn extension_provider_response_stream(
                     yield event;
                 }
                 DecodedProviderStreamEvent::Finish(stop_reason) => {
-                    let response = assembler.finish(stop_reason)?;
+                    let mut response = assembler.finish(stop_reason)?;
+                    let delegate = lock_std_mutex(&connection.provider_streams).get(&stream_id).and_then(|ingress| ingress.delegate.clone());
+                    if let Some(delegate) = delegate.filter(|delegate| delegate.used.load(Ordering::Acquire)) {
+                        let native = { lock_std_mutex(&delegate.response).take() };
+                        let mut native = native.ok_or_else(invalid_provider_stream_event)?;
+                        let expected = native.usage;
+                        let actual = response.usage;
+                        if (expected.input_tokens, expected.output_tokens, expected.cache_read_tokens, expected.cache_write_tokens, expected.total_tokens)
+                            != (actual.input_tokens, actual.output_tokens, actual.cache_read_tokens, actual.cache_write_tokens, actual.total_tokens) {
+                            Err(invalid_provider_stream_event())?;
+                        }
+                        for (index, part) in native.message.content.iter().enumerate() {
+                            if let octet_ai::AssistantPart::Reasoning(reasoning) = part {
+                                if let Some(state) = &reasoning.state {
+                                    let expected = if matches!(state.kind, octet_ai::ReasoningStateKind::AnthropicRedacted { .. }) { Some("[Reasoning redacted]") } else { reasoning.text.as_deref().or(Some("")) };
+                                    if !matches!(response.message.content.get(index), Some(octet_ai::AssistantPart::Reasoning(actual)) if actual.text.as_deref() == expected && actual.state.is_none()) {
+                                        Err(invalid_provider_stream_event())?;
+                                    }
+                                    response.message.content[index] = part.clone();
+                                }
+                            }
+                        }
+                        native.message = response.message;
+                        native.diagnostics.extend(response.diagnostics);
+                        response = native;
+                    }
+                    if lock_std_mutex(&connection.provider_streams).get(&stream_id).is_some_and(|stream| stream.request_hooks.as_ref().is_some_and(|job| !job.completed())) {
+                        Err(provider_unavailable_error())?;
+                    }
                     connection.settle_provider_stream(&stream_id);
                     cancellation.disarm();
                     yield StreamEvent::Finished(response);
@@ -367,11 +394,127 @@ pub(super) fn extension_provider_response_stream(
 
 #[async_trait::async_trait]
 impl HostStreamTransport for ExtensionProviderStreamTransport {
+    fn supports_request_hooks(&self) -> bool {
+        self.process.upgrade().is_some_and(|process| {
+            let connection = read_std_lock(&process.connection);
+            let protocol = read_std_lock(&connection.protocol);
+            protocol.version == EXTENSION_API_VERSION_0_4
+                && protocol.supports(provider_hooks::FEATURE)
+        })
+    }
+
+    async fn stream_with_request_hooks(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        continuation: Option<octet_ai::NativeRequestContinuation>,
+        hooks: octet_ai::HostProviderRequestHooks,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, continuation, Some(hooks))
+            .await
+    }
+
+    fn custom_http_model(&self, selected: &octet_ai::Model) -> Option<octet_ai::Model> {
+        let captured = match &self.binding {
+            ProviderRouteBinding::Projected(route) => route,
+            ProviderRouteBinding::Prepared { captured, .. } => captured,
+        };
+        let metadata = captured.model_metadata.as_ref()?;
+        if metadata.inherit_provider.is_some() || metadata.base_url.is_empty() {
+            return None;
+        }
+        let process = self.process.upgrade()?;
+        let connection = read_std_lock(&process.connection).clone();
+        if !connection_is_usable(&connection) || captured.owner != connection.provider_owner {
+            return None;
+        }
+        if !connection
+            .provider_registry
+            .as_ref()?
+            .route_is_active(captured)
+        {
+            return None;
+        }
+        let mut base_url = url::Url::parse(&metadata.base_url).ok()?;
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
+        let id = octet_ai::EndpointId(format!("{}/custom-http", selected.endpoint.id.0));
+        let mut model = selected.clone();
+        Arc::make_mut(&mut model.spec).endpoint = id.clone();
+        model.endpoint = Arc::new(octet_ai::Endpoint {
+            id,
+            base_url,
+            auth: octet_ai::Auth::None,
+            default_headers: reqwest::header::HeaderMap::new(),
+            transport: octet_ai::EndpointTransport::Http,
+            runtime: octet_ai::RequestRuntime {
+                openai_chat_profile: metadata.custom_openai_chat.map_or(
+                    octet_ai::OpenAiChatRuntimeProfile::Default,
+                    octet_ai::OpenAiChatRuntimeProfile::PiCustom,
+                ),
+                ..Default::default()
+            },
+            timeout: selected.endpoint.timeout,
+        });
+        Some(model)
+    }
+
+    fn native_model(&self) -> Option<octet_ai::Model> {
+        let captured = match &self.binding {
+            ProviderRouteBinding::Projected(route) => route,
+            ProviderRouteBinding::Prepared { captured, .. } => captured,
+        };
+        captured
+            .model_metadata
+            .as_ref()?
+            .inherit_provider
+            .as_ref()?;
+        let process = self.process.upgrade()?;
+        let connection = read_std_lock(&process.connection).clone();
+        if !connection_is_usable(&connection) || captured.owner != connection.provider_owner {
+            return None;
+        }
+        let registry = connection.provider_registry.as_ref()?;
+        if !registry.route_is_active(captured) {
+            return None;
+        }
+        registry
+            .native_catalog()?
+            .model(&captured.provider.id, &captured.model.api_name)
+    }
+
     async fn stream(
         &self,
         model: HostStreamModel,
         request: octet_ai::Request,
         diagnostics: Vec<Diagnostic>,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, None, None)
+            .await
+    }
+
+    async fn stream_native(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        continuation: octet_ai::NativeRequestContinuation,
+    ) -> Result<ResponseStream, AiError> {
+        self.stream_inner(model, request, diagnostics, Some(continuation), None)
+            .await
+    }
+}
+
+impl ExtensionProviderStreamTransport {
+    async fn stream_inner(
+        &self,
+        model: HostStreamModel,
+        request: octet_ai::Request,
+        diagnostics: Vec<Diagnostic>,
+        mut continuation: Option<octet_ai::NativeRequestContinuation>,
+        hooks: Option<octet_ai::HostProviderRequestHooks>,
     ) -> Result<ResponseStream, AiError> {
         let process = self
             .process
@@ -397,13 +540,33 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         let Some(registry) = connection.provider_registry.clone() else {
             return Err(provider_unavailable_error());
         };
-        let Some(route) = registry.resolve(&self.provider_id, &self.model_id) else {
-            return Err(provider_unavailable_error());
+        let (projected, mut route) = match &self.binding {
+            ProviderRouteBinding::Projected(projected) => {
+                let route = registry
+                    .resolve(&projected.provider.id, &projected.model.id)
+                    .ok_or_else(provider_unavailable_error)?;
+                (projected, route)
+            }
+            ProviderRouteBinding::Prepared { captured, selected } => {
+                if model.id != selected.id
+                    || model.protocol != selected.protocol
+                    || model.pricing != selected.pricing
+                {
+                    return Err(provider_unavailable_error());
+                }
+                (captured, captured.clone())
+            }
         };
         let Some(provider_protocol) = provider_protocol_name(model.protocol) else {
             return Err(provider_unavailable_error());
         };
-        if route.owner != connection.provider_owner || route.model.protocol != provider_protocol {
+        if route.owner != connection.provider_owner
+            || route.owner != projected.owner
+            || route.provider != projected.provider
+            || route.model != projected.model
+            || route.model_metadata != projected.model_metadata
+            || route.model.protocol != provider_protocol
+        {
             return Err(provider_unavailable_error());
         }
 
@@ -434,12 +597,12 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         }
         let params = api_v03::ProviderStreamRequest {
             stream_id: stream_id.clone(),
-            provider_id: self.provider_id.clone(),
-            model_id: self.model_id.clone(),
+            provider_id: route.provider.id.clone(),
+            model_id: route.model.id.clone(),
             request: request_value,
             authorization_lease: None,
         };
-        let params = serde_json::to_value(params).map_err(|_| {
+        let mut params = serde_json::to_value(params).map_err(|_| {
             provider_transport_error(
                 TransportPhase::ResponseHeaders,
                 false,
@@ -453,6 +616,34 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
                 "extension provider request was rejected by the API contract",
             ));
         }
+        let hooks = hooks.filter(|hooks| !hooks.is_empty());
+        let bridge_allowed = hooks.is_some()
+            && self.supports_request_hooks()
+            && route
+                .model_metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.inherit_provider.is_none());
+        if hooks.is_some() {
+            if bridge_allowed {
+                params
+                    .as_object_mut()
+                    .expect("stream request is an object")
+                    .insert("request_hooks".into(), true.into());
+            } else if continuation.is_none() {
+                return Err(provider_unavailable_error());
+            }
+        }
+        let claim = Arc::new(AtomicUsize::new(0));
+        let request_hooks = hooks.map(|hooks| {
+            provider_hooks::ProviderHooksJob::new(
+                hooks,
+                &connection,
+                route.clone(),
+                stream_id.clone(),
+                claim.clone(),
+                bridge_allowed,
+            )
+        });
         let (sender, receiver) = mpsc::channel(connection.provider_stream_buffer);
         {
             let mut streams = lock_std_mutex(&connection.provider_streams);
@@ -466,6 +657,28 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
             streams.insert(
                 stream_id.clone(),
                 ProviderStreamIngress {
+                    delegate: if continuation.is_some() {
+                        let custom_http = route.model_metadata.as_ref().is_some_and(|metadata| {
+                            metadata.inherit_provider.is_none() && !metadata.base_url.is_empty()
+                        });
+                        Some(Arc::new(native_provider::NativeDelegate {
+                            continuation: StdMutex::new(Some(
+                                continuation.take().ok_or_else(provider_unavailable_error)?,
+                            )),
+                            max_output_tokens: route.model.max_output_tokens as u64,
+                            custom_http,
+                            original: request.clone(),
+                            connection: Arc::downgrade(&connection),
+                            route: route.clone(),
+                            used: AtomicBool::new(false),
+                            claim: claim.clone(),
+                            response: StdMutex::new(None),
+                            cancelled: Arc::new(Notify::new()),
+                        }))
+                    } else {
+                        None
+                    },
+                    request_hooks,
                     sender,
                     next_sequence: 0,
                     terminal: false,
@@ -478,11 +691,7 @@ impl HostStreamTransport for ExtensionProviderStreamTransport {
         let mut opening_cancellation =
             ProviderStreamCancellation::new(&connection, stream_id.clone());
         let accepted = match connection
-            .request(
-                methods::PROVIDER_STREAM,
-                params,
-                connection.provider_stream_idle_timeout,
-            )
+            .request_provider_stream(params, connection.provider_stream_idle_timeout, &mut route)
             .await
         {
             Ok(value) => api_v03::parse_provider_stream_accepted(value).map_err(|_| {
@@ -710,13 +919,18 @@ pub(super) fn dispatch_provider_stream_event(
                     .checked_add(1)
                     .ok_or_else(|| "provider stream event sequence overflowed".to_owned())?;
                 ingress.terminal = terminal;
+                if terminal {
+                    if let Some(job) = &ingress.request_hooks {
+                        job.cancelled.cancel();
+                    }
+                }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_))
             | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 cancel = true;
             }
         }
-        if terminal || cancel {
+        if cancel {
             streams.remove(&stream_id);
         }
     }
@@ -788,4 +1002,101 @@ pub(super) fn reject_unparented_child_request(
         settle_child_request(&state.child_requests, &request_id);
     }
     delivery.map(|_| ())
+}
+
+#[cfg(test)]
+mod terminal_ingress_tests {
+    use super::*;
+
+    #[test]
+    fn provider_terminal_ingress_retains_native_state_until_consumer_settlement() {
+        let (events, _) = broadcast::channel(8);
+        let (mut state, _frames) = super::super::tests::protocol_read_state_for_test(
+            ManifestContributions::default(),
+            events,
+        );
+        write_std_lock(&state.protocol).version = EXTENSION_API_VERSION_0_3.into();
+        state.provider_registry = Some(Arc::new(ExtensionProviderRegistry::new()));
+        let (sender, mut receiver) = mpsc::channel(1);
+        lock_std_mutex(&state.provider_streams).insert(
+            "terminal".into(),
+            ProviderStreamIngress {
+                delegate: None,
+                request_hooks: None,
+                sender,
+                next_sequence: 0,
+                terminal: false,
+            },
+        );
+        let terminal = api_v03::ProviderStreamEvent {
+            stream_id: "terminal".into(),
+            sequence: 0,
+            kind: "finished".into(),
+            payload: serde_json::json!({"stop_reason":"stop"}),
+        };
+        dispatch_provider_stream_event(&state, terminal.clone()).unwrap();
+        {
+            let streams = lock_std_mutex(&state.provider_streams);
+            let retained = streams
+                .get("terminal")
+                .expect("consumer still owns terminal state");
+            assert!(retained.terminal);
+            assert_eq!(retained.next_sequence, 1);
+        }
+        assert_eq!(receiver.try_recv().unwrap().kind, "finished");
+        let mut extra = terminal;
+        extra.sequence = 1;
+        assert_eq!(
+            dispatch_provider_stream_event(&state, extra).unwrap_err(),
+            "provider stream event arrived after a terminal event"
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn provider_terminal_backpressure_still_removes_ingress_and_cancels() {
+        let (events, _) = broadcast::channel(8);
+        let (mut state, mut frames) = super::super::tests::protocol_read_state_for_test(
+            ManifestContributions::default(),
+            events,
+        );
+        write_std_lock(&state.protocol).version = EXTENSION_API_VERSION_0_3.into();
+        state.provider_registry = Some(Arc::new(ExtensionProviderRegistry::new()));
+        let (sender, _receiver) = mpsc::channel(1);
+        lock_std_mutex(&state.provider_streams).insert(
+            "full".into(),
+            ProviderStreamIngress {
+                delegate: None,
+                request_hooks: None,
+                sender,
+                next_sequence: 0,
+                terminal: false,
+            },
+        );
+        dispatch_provider_stream_event(
+            &state,
+            api_v03::ProviderStreamEvent {
+                stream_id: "full".into(),
+                sequence: 0,
+                kind: "started".into(),
+                payload: serde_json::json!({"response_id":"native"}),
+            },
+        )
+        .unwrap();
+        dispatch_provider_stream_event(
+            &state,
+            api_v03::ProviderStreamEvent {
+                stream_id: "full".into(),
+                sequence: 1,
+                kind: "finished".into(),
+                payload: serde_json::json!({"stop_reason":"stop"}),
+            },
+        )
+        .unwrap();
+        assert!(!lock_std_mutex(&state.provider_streams).contains_key("full"));
+        let frame = frames.try_recv().unwrap();
+        let cancellation: serde_json::Value = serde_json::from_slice(&frame.line).unwrap();
+        assert_eq!(cancellation["method"], methods::PROVIDER_CANCEL);
+        assert_eq!(cancellation["params"]["stream_id"], "full");
+    }
 }

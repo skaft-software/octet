@@ -17,18 +17,22 @@ fn peer_error(temp: &tempfile::TempDir) -> String {
 }
 
 async fn process(temp: &tempfile::TempDir) -> ExtensionProcess {
+    process_with_tools(temp, r#"["compose"]"#).await
+}
+
+async fn process_with_tools(temp: &tempfile::TempDir, tools: &str) -> ExtensionProcess {
     write_executable_script(&temp.path().join("extension.py"), SCRIPT);
-    let manifest = ExtensionManifest::parse(
+    let manifest = ExtensionManifest::parse(&format!(
         r#"name = "driver-process"
 version = "0.1.0"
 api_version = "0.4"
 [entrypoint]
 command = "extension.py"
 [contributes]
-tools = ["compose"]
+tools = {tools}
 hooks = ["before_tool_call", "after_tool_call"]
-"#,
-    )
+"#
+    ))
     .unwrap();
     let mut config = ExtensionRuntimeConfig::new(temp.path());
     config.tool_composition = true;
@@ -79,7 +83,7 @@ impl Tool for Tiny {
     }
 }
 
-struct Scripted(std::sync::atomic::AtomicUsize);
+struct Scripted(std::sync::atomic::AtomicUsize, &'static str);
 #[async_trait::async_trait]
 impl octet_ai::HostStreamTransport for Scripted {
     async fn stream(
@@ -92,7 +96,7 @@ impl octet_ai::HostStreamTransport for Scripted {
         let content = if first {
             vec![AssistantPart::ToolCall(ToolCall {
                 id: ToolCallId("outer".into()),
-                name: "compose".into(),
+                name: self.1.into(),
                 arguments_json: "{}".into(),
                 async_execution: false,
                 argument_error: None,
@@ -126,7 +130,7 @@ impl octet_ai::HostStreamTransport for Scripted {
                 Ok(StreamEvent::ToolCallStart {
                     index: 0,
                     id: ToolCallId("outer".into()),
-                    name: "compose".into(),
+                    name: self.1.into(),
                     async_execution: false,
                 }),
                 Ok(StreamEvent::ToolCallArgsDelta {
@@ -167,7 +171,7 @@ async fn real_agent_legal_nested_composition_hook_appends_through_active_sole_dr
     let client = octet_ai::AiClient::new();
     client.register_host_stream_transport(
         model.endpoint.id.clone(),
-        Arc::new(Scripted(AtomicUsize::new(0))),
+        Arc::new(Scripted(AtomicUsize::new(0), "compose")),
     );
     let mut agent = Agent::new(AgentConfig {
         client,
@@ -194,6 +198,54 @@ async fn real_agent_legal_nested_composition_hook_appends_through_active_sole_dr
     assert!(persisted.contains("before_tool_call"));
     assert!(persisted.contains("after_tool_call"));
     assert!(persisted.contains("nested complete"));
+    let connection = read_std_lock(&process.inner.connection).clone();
+    assert!(lock_std_mutex(&connection.session_leaf.bound).is_empty());
+    assert!(lock_std_mutex(&connection.session_leaf.execution_slots).is_empty());
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn real_agent_tool_body_append_presents_the_operations_single_use_grant() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("append-tool"), "1").unwrap();
+    let process = process_with_tools(&temp, r#"["compose", "append"]"#).await;
+    let mut host = ExtensionHost::new();
+    crate::extension::Extension::register(&process, &mut host);
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let client = octet_ai::AiClient::new();
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(Scripted(AtomicUsize::new(0), "append")),
+    );
+    let mut agent = Agent::new(AgentConfig {
+        client,
+        model,
+        session: crate::Session::create(temp.path().join("session.jsonl")).unwrap(),
+        extensions: host,
+        system: "system".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::new(crate::effect::EffectPolicy::UnsafeHost),
+        max_turns: Some(3),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: Some("driver-test".into()),
+    })
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), agent.complete("run"))
+        .await
+        .expect("a tool body append must not hang or be refused")
+        .unwrap_or_else(|error| panic!("{error}: {}", peer_error(&temp)));
+    assert_eq!(result.text, "done", "{}", peer_error(&temp));
+    let persisted = std::fs::read_to_string(agent.session().path()).unwrap();
+    // before_tool_call and after_tool_call checkpoints bracket the tool body's.
+    assert_eq!(persisted.matches("driver-checkpoint").count(), 2);
+    assert_eq!(persisted.matches("tool-body-checkpoint").count(), 1);
+    assert!(persisted.contains(r#""granted":true"#));
+    // The grant was consumed by the one append; no authority outlives the call.
     let connection = read_std_lock(&process.inner.connection).clone();
     assert!(lock_std_mutex(&connection.session_leaf.bound).is_empty());
     assert!(lock_std_mutex(&connection.session_leaf.execution_slots).is_empty());

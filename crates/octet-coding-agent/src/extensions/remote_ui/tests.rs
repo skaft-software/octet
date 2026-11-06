@@ -813,21 +813,19 @@ async fn mounted_editor_survives_an_expired_input_hook() {
     // extension process does in an interactive session.
     let hold = temp.path().join("hold-input-hook");
     std::fs::write(&hold, "hold").unwrap();
-    let error = match extensions
+    // Like Pi's emitInput, a stalled handler is skipped and the input goes on.
+    let outcome = extensions
         .process_input(
             "steered while busy".into(),
             None,
             "interactive",
             Some("steer"),
         )
-        .await
-    {
-        Ok(_) => panic!("the stalled input hook must hit the host deadline"),
-        Err(error) => error,
-    };
+        .await;
     assert!(
-        error.to_string().contains("timed out"),
-        "unexpected input failure: {error}"
+        outcome.is_ok(),
+        "a stalled input hook is skipped, not fatal: {:?}",
+        outcome.err()
     );
     std::fs::remove_file(&hold).unwrap();
 

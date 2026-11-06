@@ -89,6 +89,10 @@ pub(super) async fn install_official(
         );
     }
 
+    if replace {
+        ensure_installed(root, id)?;
+    }
+
     let octet_version = Version::parse(env!("CARGO_PKG_VERSION"))?;
     let asset = format!("{id}-{octet_version}.tar.gz");
     let tag = format!("v{octet_version}");
@@ -697,6 +701,11 @@ fn validate_install_record(record: &InstallRecord, expected_id: &str) -> anyhow:
 }
 
 pub(super) fn list_installed(root: &Path) -> anyhow::Result<Vec<InstalledBundle>> {
+    #[cfg(windows)]
+    let _lock = match crate::extension_package::lock_existing(root)? {
+        Some(lock) => lock,
+        None => return Ok(Vec::new()),
+    };
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -738,6 +747,11 @@ pub(super) fn list_installed(root: &Path) -> anyhow::Result<Vec<InstalledBundle>
 }
 
 pub(super) fn installed_skill_roots(root: &Path) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    let _lock = match crate::extension_package::lock_existing(root) {
+        Ok(Some(lock)) => lock,
+        Ok(None) | Err(_) => return Vec::new(),
+    };
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -773,6 +787,13 @@ pub(super) fn installed_skill_roots(root: &Path) -> Vec<PathBuf> {
 
 pub(super) fn ensure_installed(root: &Path, id: &str) -> anyhow::Result<()> {
     validate_bundle_id(id)?;
+    #[cfg(windows)]
+    let _lock = acquire_lock(root)?;
+    inspect_installed(root, id)
+        .with_context(|| format!("{id} is not installed; run 'octet extension install {id}'"))
+}
+
+fn inspect_installed(root: &Path, id: &str) -> anyhow::Result<()> {
     let package = root.join(id);
     let metadata = fs::symlink_metadata(&package)
         .with_context(|| format!("cannot inspect installed extension {}", package.display()))?;
@@ -789,7 +810,9 @@ pub(super) fn ensure_installed(root: &Path, id: &str) -> anyhow::Result<()> {
 pub(super) fn remove_installed(root: &Path, id: &str) -> anyhow::Result<()> {
     validate_bundle_id(id)?;
     let _lock = acquire_lock(root)?;
-    ensure_installed(root, id)?;
+    #[cfg(windows)]
+    crate::extension_package::ensure_update_finished(root, id)?;
+    inspect_installed(root, id)?;
     let package = root.join(id);
     let removed = root.join(format!(
         ".{id}.remove-{}-{}",
@@ -808,7 +831,19 @@ pub(super) fn remove_installed(root: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_bundle_id(id: &str) -> anyhow::Result<()> {
+/// Stable identity for Windows publication/recovery. Serialize the bounded,
+/// validated install record rather than trusting journal-supplied paths or
+/// version labels. Older host pins are valid for the displaced bundle.
+#[cfg(windows)]
+pub(super) fn installed_record_digest(package: &Path, id: &str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let record = load_install_record(package, id)?;
+    Ok(crate::extension_package::digest_hex(&Sha256::digest(
+        serde_json::to_vec(&record)?,
+    )))
+}
+
+pub(super) fn validate_bundle_id(id: &str) -> anyhow::Result<()> {
     let mut characters = id.chars();
     let first_valid = characters
         .next()
@@ -912,6 +947,7 @@ mod tests {
                 "octet-codemode",
                 "octet-computer-use",
                 "octet-mcp",
+                "octet-pi-compat",
                 "octet-subagents",
                 "octet-web-search",
             ]
@@ -921,15 +957,12 @@ mod tests {
         }
     }
 
-    // The update path needs atomic directory exchange, which is unavailable
-    // on Windows (`atomic_exchange_directories` is linux/macOS-only); a
-    // non-atomic fallback with crash recovery is a separate product decision.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "macos")),
-        ignore = "atomic directory exchange is unavailable on this platform"
+        not(any(target_os = "linux", target_os = "macos", windows)),
+        ignore = "bundle replacement is unavailable on this platform"
     )]
     #[test]
-    fn local_bundle_installs_lists_updates_atomically_and_removes() {
+    fn local_bundle_installs_lists_updates_and_removes() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("extensions");
         let first = create_bundle(directory.path(), "test-extension", b"first");

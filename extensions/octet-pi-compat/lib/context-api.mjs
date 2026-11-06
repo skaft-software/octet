@@ -1,9 +1,12 @@
-// Pi 1.0.2 context facts and raw-input transforms. Rust supplies every fact;
-// extension request cancellation is not a substitute for aborting the agent.
-import { bounded, facade, fields, invalid, plainJSON, strict, unsupported } from './errors.mjs';
+// Pi 1.0.2 context facts and raw-input transforms. Rust supplies native facts;
+// Pi's no-project-resources trust signal does not change native resource admission.
+// Extension request cancellation is not a substitute for aborting the agent.
+import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
+import { readPiSettings } from './pi-setup.mjs';
+import { retainPiProjectTrust } from './project-trust.mjs';
 
 function fact(runtime, store, key, api) {
   runtime.assertSessionOwner(store);
@@ -20,7 +23,30 @@ export function contextFacts(runtime, store) {
     isProjectTrusted() {
       const trusted = fact(runtime, store, 'project_trusted', 'ctx.isProjectTrusted');
       if (typeof trusted !== 'boolean') invalid('host project trust');
-      return trusted;
+      retainPiProjectTrust(store.state);
+      return trusted || store.state.piPlainWorkspaceTrusted;
+    },
+    getSystemPrompt() {
+      runtime.require('system_prompt_read');
+      if (runtime.stopping) throw rpcError(-32002, 'host is draining');
+      runtime.assertOwner(store);
+      store.controller.signal.throwIfAborted();
+      const scoped = store.promptReadScope !== undefined && runtime.features.has('run_system_prompt_read_v1');
+      const observation = !store.live && store.method === 'turn/started' && scoped
+        && store.promptReadScope === store.state.promptReadScope && store.state.runActive;
+      if (!observation && (!Number.isSafeInteger(store.id) || store.id < 0 || !store.live
+          || runtime.active.get(store.id)?.controller !== store.controller)) {
+        throw rpcError(-32002, 'not_foreground_owner system prompt read requires a live request');
+      }
+      const parent = observation ? 0 : store.id;
+      const result = runtime.transport.requestSync('context/system_prompt', {
+        parent_request_id: parent, resource_owner: store.state.owner,
+        ...(scoped ? { scope: store.promptReadScope } : {}),
+      }, { parent, signal: store.controller.signal });
+      fields(result, ['text'], 'system prompt reply');
+      const text = bounded(result.text, 'system prompt text', 262144, { controls: true });
+      if (text.includes('\0')) invalid('system prompt text must not contain NUL');
+      return text;
     },
     getSystemPromptOptions() {
       if (store.method !== 'command/execute') unsupported('ctx.getSystemPromptOptions', 'command context only');
@@ -29,7 +55,12 @@ export function contextFacts(runtime, store) {
   };
 }
 export function getSettings(runtime, store) {
-  return plainJSON(fact(runtime, store, 'settings', 'pi.getSettings'), 'settings', 524288);
+  runtime.assertSessionOwner(store);
+  if (Object.hasOwn(store.state.host, 'settings')) return plainJSON(store.state.host.settings, 'settings', 524288);
+  // The user's own Pi settings, read the way Pi reads them. Project settings
+  // count only under the host's trust decision, never a Pi trust file.
+  const { settings } = readPiSettings({ agentDir: runtime.config.pi_agent_dir, cwd: store.state.workspace, projectTrusted: store.state.host.project_trusted === true });
+  return plainJSON(settings, 'settings', 524288);
 }
 
 function inputImages(images) {

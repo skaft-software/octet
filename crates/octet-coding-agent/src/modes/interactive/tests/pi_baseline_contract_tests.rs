@@ -121,6 +121,106 @@ export default pi => {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_append_publication_preserves_live_pin_and_refreshes_each_shortcut() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.registerCommand('publication-prime', {handler: () => {
+    pi.appendEntry('publication-seed', {index:1});
+    pi.appendEntry('publication-seed', {index:2});
+  }});
+  pi.registerShortcut('ctrl+shift+p', {handler: ctx => {
+    const entries = ctx.sessionManager.getEntries();
+    pi.appendEntry('publication-shortcut', {
+      seeds: entries.filter(entry => entry.type === 'custom' && entry.customType === 'publication-seed').length,
+      previous: entries.filter(entry => entry.type === 'custom' && entry.customType === 'publication-shortcut').length
+    });
+  }});
+};
+"#,
+    );
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "publication-prime")
+        .await
+        .unwrap();
+    assert_eq!(
+        private_entries(app.agent.session(), "publication-seed").len(),
+        2
+    );
+    for count in 1..=2 {
+        app.executable_extensions
+            .dispatch_shortcut_for_event(&Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('P'),
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+            )))
+            .expect("native shortcut remains registered after append publication");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                apply_extension_background(&mut shell, &mut app.executable_extensions);
+                app.executable_extensions
+                    .apply_session_host_requests(&mut app.agent, &app.sessions);
+                let entries = private_entries(app.agent.session(), "publication-shortcut");
+                if entries.len() == count {
+                    assert_eq!(
+                        entries[count - 1].1,
+                        json!({"seeds":2,"previous":count - 1})
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("each invocation appends against the actual latest durable head");
+    }
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    assert_eq!(private_entries(&reopened, "publication-seed").len(), 2);
+    assert_eq!(private_entries(&reopened, "publication-shortcut").len(), 2);
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_late_shortcut_hook_registers_native_binding_and_dispatches() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.on('session_start', () => pi.registerShortcut('ctrl+alt+f', {
+    description: 'Late fleet overlay', handler: ctx => {
+      pi.appendEntry('late-shortcut-fired', {session:ctx.sessionManager.getSessionId()});
+    }
+  }));
+  pi.registerCommand('late-shortcut-prime', {handler: (_args, ctx) => {
+    pi.appendEntry('late-shortcut-prime', {session:ctx.sessionManager.getSessionId()});
+  }});
+};
+"#,
+    );
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "late-shortcut-prime")
+        .await
+        .unwrap();
+    let invocation = app
+        .executable_extensions
+        .dispatch_shortcut_for_event(&Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+        )))
+        .expect("late hook registered a real native shortcut binding");
+    assert_eq!(invocation.extension, "octet-pi-compat");
+    assert_eq!(invocation.name, "pi-runtime-shortcut-0");
+    let data = wait_private(&mut app, &mut shell, "late-shortcut-fired").await;
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    assert_eq!(private_entries(&reopened, "late-shortcut-fired").len(), 1);
+    assert_eq!(
+        data["session"],
+        private_entries(&reopened, "late-shortcut-prime")[0].1["session"]
+    );
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_baseline_event_bus_preserves_identity_order_and_unsubscribe_during_dispatch() {
     let (_directory, mut app) = pi_app(
         r#"
@@ -233,6 +333,56 @@ export default pi => {
             .as_deref(),
         Some("Pi baseline name")
     );
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_session_name_receipt_without_ui_normalizes_and_clears_before_getters() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.registerCommand('name-receipt', { handler: async (_args, ctx) => {
+    for (const name of ['  Committed name  ', '   ', 'Restored', '']) {
+      await pi.setSessionName(name);
+      // Read immediately after the ACK: no new invocation or UI mount supplies facts.
+      const observed = pi.getSessionName() ?? null;
+      const manager = ctx.sessionManager.getSessionName() ?? null;
+      pi.appendEntry('name-receipt', { requested: name, observed, manager });
+    }
+  }});
+};
+"#,
+    );
+    let path = app.sessions.new_path("20261004-name-receipt");
+    app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::CreateNew(path)),
+    )
+    .unwrap();
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "name-receipt").await.unwrap();
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    let observed: Vec<_> = private_entries(&reopened, "name-receipt")
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(
+        observed,
+        vec![
+            json!({"requested": "  Committed name  ", "observed": "Committed name", "manager": "Committed name"}),
+            json!({"requested": "   ", "observed": null, "manager": null}),
+            json!({"requested": "Restored", "observed": "Restored", "manager": "Restored"}),
+            json!({"requested": "", "observed": null, "manager": null}),
+        ]
+    );
+    let id = reopened.path().file_stem().unwrap().to_str().unwrap();
+    assert_eq!(app.sessions.load_metadata(id).unwrap().name, None);
     assert!(reopened.usage_records().is_empty());
 }
 

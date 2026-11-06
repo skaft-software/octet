@@ -220,7 +220,7 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
             }
             // The pi-messages codec has its own wire-body fixtures; this
             // cross-codec fixture only compares the JSON-document codecs above.
-            Protocol::PiMessages => unreachable!(),
+            Protocol::PiMessages | Protocol::ExtensionStream => unreachable!(),
         };
         let serialized = body.to_string();
         if protocol == Protocol::GoogleGenerativeAi {

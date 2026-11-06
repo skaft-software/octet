@@ -272,12 +272,16 @@ mod tests {
             &[228, 159, 137, 255]
         );
         for (plain, adaptive) in decode_native_png(&base)
-            .chunks_exact(1025)
-            .zip(decode_native_png(&model).chunks_exact(1025))
+            .as_chunks::<1025>()
+            .0
+            .iter()
+            .zip(decode_native_png(&model).as_chunks::<1025>().0)
         {
             for (plain, adaptive) in plain[1..]
-                .chunks_exact(4)
-                .zip(adaptive[1..].chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(adaptive[1..].as_chunks::<4>().0)
             {
                 assert_eq!(plain[3], adaptive[3], "colors never change silhouette");
             }

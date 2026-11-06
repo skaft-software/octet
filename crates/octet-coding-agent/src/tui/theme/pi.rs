@@ -575,39 +575,6 @@ fn compile(
         ),
     );
     metadata.insert("author".into(), toml::Value::String("Mario Zechner".into()));
-    let palette = native["colors"]
-        .as_table_mut()
-        .expect("Pi projection colors");
-    for (key, value) in [
-        ("prompt_wash", toml::Value::Boolean(false)),
-        // Pi shows the thinking trace as it streams rather than a collapsed line.
-        ("thinking_expanded", toml::Value::Boolean(true)),
-        ("prompt_rail_model_adaptive", toml::Value::Boolean(false)),
-        ("splash_model_adaptive", toml::Value::Boolean(false)),
-        (
-            "assistant_msg_text",
-            toml::Value::String(native_value(&generated.colors["text"])),
-        ),
-        (
-            "model_accent",
-            toml::Value::String(native_value(&generated.colors["accent"])),
-        ),
-        (
-            "model_assistant",
-            toml::Value::String(native_value(&generated.colors["text"])),
-        ),
-        ("md_code_bg", toml::Value::String("default".into())),
-        ("md_code_inline_bg", toml::Value::String("default".into())),
-    ] {
-        palette.insert(key.into(), value);
-    }
-    native.insert(
-        "model".into(),
-        toml::Value::Table(toml::Table::from_iter([(
-            "use_lab_color".into(),
-            toml::Value::Boolean(false),
-        )])),
-    );
     let roles = native["roles"].as_table_mut().expect("Pi projection roles");
     for token in TOKENS {
         roles
@@ -620,10 +587,23 @@ fn compile(
                 toml::Value::Boolean(generated.dim.contains(&token.name)),
             );
     }
-    // Native semantic roles are installed after required Octet defaults, so
-    // diff foregrounds and faint neutral roles are not lost during compilation.
+    roles.insert(
+        "thinking".into(),
+        toml::Value::Table(toml::Table::from_iter([
+            (
+                "foreground".into(),
+                toml::Value::String(native_value(&generated.colors["thinkingText"])),
+            ),
+            (
+                "dim".into(),
+                toml::Value::Boolean(generated.dim.contains(&"thinkingText")),
+            ),
+        ])),
+    );
+    // Install semantic parents, including Pi's tool title, before compiling
+    // transcript role overrides so generated faint/title attributes survive.
     for &(pi, native) in NATIVE_FOREGROUNDS {
-        if super::semantic_text_role(native).is_some() {
+        if super::semantic_text_role(native).is_some() || native == "tool_title" {
             roles.insert(
                 native.to_owned(),
                 toml::Value::Table(toml::Table::from_iter([

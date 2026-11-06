@@ -313,8 +313,8 @@ class OwnerState:
     pending_spawns: Dict[str, SpawnRequest] = field(default_factory=dict)
     selected_agent_id: Optional[str] = None
     last_used_ms: int = 0
-    # Host observations must be applied in request order for this owner. Do not
-    # hold the global state lock across a blocking host list/wait call.
+    # Serialize authoritative list observations and reconciliation for this
+    # owner. Long-poll waits only wake a fresh list and never hold this lock.
     refresh_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -528,22 +528,27 @@ class Orchestrator:
                     wait_timed_out = True
                     break
                 slice_ms = max(1, min(1_000, caller_deadline - now))
+                response = client.wait_agents(timeout_ms=slice_ms)
+                self._check_cancelled(cancellation)
+                if not isinstance(response, Mapping) or not isinstance(
+                    response.get("timed_out"), bool
+                ):
+                    raise SubagentError(
+                        "agent_sessions returned an invalid wait response",
+                        code="host_state_invalid",
+                    )
+                if not isinstance(response.get("snapshot"), Mapping):
+                    raise SubagentError(
+                        "agent_sessions wait omitted its authoritative snapshot",
+                        code="host_state_invalid",
+                    )
+                # A live status may have reconciled newer state while the wait
+                # was pending. Its snapshot has no ordering token, so use the
+                # wait only as a wakeup and re-list under the observation lock.
                 with state.refresh_lock:
-                    response = client.wait_agents(timeout_ms=slice_ms)
                     self._check_cancelled(cancellation)
-                    if not isinstance(response, Mapping) or not isinstance(
-                        response.get("timed_out"), bool
-                    ):
-                        raise SubagentError(
-                            "agent_sessions returned an invalid wait response",
-                            code="host_state_invalid",
-                        )
-                    snapshot = response.get("snapshot")
-                    if not isinstance(snapshot, Mapping):
-                        raise SubagentError(
-                            "agent_sessions wait omitted its authoritative snapshot",
-                            code="host_state_invalid",
-                        )
+                    snapshot = client.list_agents()
+                    self._check_cancelled(cancellation)
                     self._reconcile_snapshot(state, snapshot)
                     self._enforce_policy_descendants(client, state, cancellation)
         finally:

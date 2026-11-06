@@ -179,7 +179,11 @@ impl ExecutableExtensions {
                     models: entry
                         .models
                         .iter()
-                        .map(|model| extension_provider_model_id(&entry.provider.id, &model.id).0)
+                        .map(|model| {
+                            self.provider_runtime
+                                .projected_model_id(&entry.provider.id, &model.id)
+                                .0
+                        })
                         .collect(),
                     live: complete,
                 })
@@ -417,8 +421,7 @@ impl ExecutableExtensions {
                 process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
                     && process.is_running()
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == "subagents")
             })
@@ -582,6 +585,12 @@ commands = ["subagents"]
         );
     }
 
+    /// Background observations must not append transcript notices. Keep their
+    /// failures in the bounded diagnostic history exposed by /extensions status.
+    pub(crate) fn record_subagent_refresh_error(&mut self, error: &str) {
+        self.diagnostics.push(error);
+    }
+
     /// An owned, single-flight observation request for the active modal loop.
     /// Only the first-party status command is admitted, without consent or
     /// context-injection authority. Persistent receivers still own snapshots.
@@ -595,8 +604,7 @@ commands = ["subagents"]
                 process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
                     && process.is_running()
                     && process
-                        .contributions()
-                        .commands
+                        .command_definitions()
                         .iter()
                         .any(|command| command.name == "subagents")
             })?

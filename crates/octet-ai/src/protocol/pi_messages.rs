@@ -185,7 +185,9 @@ fn assistant_part_value(
                     ..
                 }) => Some(data.clone()),
                 Some(ReasoningState {
-                    kind: ReasoningStateKind::OpenAiReasoning { .. },
+                    kind:
+                        ReasoningStateKind::OpenAiReasoning { .. }
+                        | ReasoningStateKind::ChatReasoningDetails { .. },
                     ..
                 }) => {
                     drop_unsupported(UnsupportedError::Reasoning, "dropped_reasoning_state")?;

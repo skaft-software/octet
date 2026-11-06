@@ -156,6 +156,7 @@ pub(super) struct CompactionContext<'a> {
     pub(super) max_network_wait: Option<Duration>,
     pub(super) provider_retries_enabled: bool,
     pub(super) client: &'a AiClient,
+    pub(super) initial_authority: Option<&'a PreparedHostAuthority>,
     /// Active model, used for context-window sizing and the normal request.
     pub(super) model: &'a Model,
     /// Optional configured route used for the summary request itself.
@@ -504,6 +505,10 @@ impl CompactionContext<'_> {
             self.max_session_cost_microdollars,
             request.cache_retention,
         )?;
+        let initial_authority = self.initial_authority;
+        let client = self.client;
+        let compaction_model = self.compaction_model;
+        let max_network_wait = self.max_network_wait;
         let response = recover_auxiliary(
             AuxiliaryRecovery {
                 dispatch: AuxiliaryDispatch::default(),
@@ -535,14 +540,23 @@ impl CompactionContext<'_> {
                 session_id: self.session_id,
             },
             |deadline, dispatch| {
-                auxiliary_complete(
-                    self.client,
-                    self.compaction_model,
-                    request.clone(),
-                    deadline,
-                    self.max_network_wait,
-                    dispatch,
-                )
+                let request = request.clone();
+                async move {
+                    let options = initial_authority
+                        .map(|authority| authority.auxiliary_options(compaction_model))
+                        .transpose()?
+                        .flatten();
+                    auxiliary_complete(
+                        client,
+                        compaction_model,
+                        request,
+                        deadline,
+                        max_network_wait,
+                        dispatch,
+                        options,
+                    )
+                    .await
+                }
             },
             |session, response| {
                 session.record_compaction_usage(
@@ -772,8 +786,21 @@ impl CompactionContext<'_> {
         }
     }
 
-    pub(super) fn oldest_reducible_boundary(&self) -> Option<EntryId> {
-        turn_starts(self.session).get(1).cloned()
+    pub(super) fn oldest_reducible_boundary(
+        &self,
+        attempted: &HashSet<EntryId>,
+    ) -> Option<EntryId> {
+        let branch = active_branch_entries(self.session);
+        let previous_boundary = branch.iter().rev().find_map(|entry| match &entry.value {
+            EntryValue::Compaction { first_kept, .. } => Some(first_kept),
+            _ => None,
+        });
+        turn_starts(self.session)
+            .into_iter()
+            .skip(1)
+            .find(|candidate| {
+                Some(candidate) != previous_boundary && !attempted.contains(candidate)
+            })
     }
 
     pub(super) fn begin_compaction(
@@ -822,6 +849,11 @@ impl CompactionContext<'_> {
         tools: &[ToolDef],
         reason: CompactionReason,
     ) -> Result<CompactionInfo, AgentError> {
+        if self.initial_authority.is_some() {
+            return Err(AgentError::InvalidCompactionPolicy(
+                "native Responses compact is unsupported for a prepared opaque host route".into(),
+            ));
+        }
         if !self.session_operation_hooks.is_empty() {
             let first_kept = self.session.head().ok_or_else(|| {
                 AgentError::InvalidCompactionPolicy("no history to compact".into())
@@ -1201,6 +1233,8 @@ impl CompactionContext<'_> {
             }
         };
         let mut native_attempted = false;
+        let mut local_previous_estimate = None;
+        let mut local_attempted = HashSet::new();
         loop {
             let active_system = system.to_owned();
             // Hook preparation precedes every estimate, including after a
@@ -1224,6 +1258,7 @@ impl CompactionContext<'_> {
                     // of Session. This owning driver services private append
                     // leaves while it waits, then freezes against the post-hook
                     // head without rerunning a mutating hook after its append.
+                    let mut notices = Vec::new();
                     let projection = project_provider_context(
                         request,
                         preparation.hooks,
@@ -1231,8 +1266,15 @@ impl CompactionContext<'_> {
                         self.model,
                         self.abort,
                         self.session,
+                        &mut notices,
                     );
-                    Some(Box::pin(projection).await?)
+                    let projection = Box::pin(projection).await;
+                    for message in notices {
+                        let _ = self
+                            .events
+                            .send(AgentEvent::ExtensionObservationWarning { message });
+                    }
+                    Some(projection?)
                 }
                 None => None,
             };
@@ -1289,18 +1331,32 @@ impl CompactionContext<'_> {
                 native_attempted = true;
                 continue;
             }
-            // `keep_recent_tokens` is a preference, not permission to sail past
-            // the configured threshold. If the retained episodes themselves
-            // are unusually large, compact the oldest reducible episode.
+            // A larger (or unchanged) summary must not start a cascade of
+            // interruptions. Re-estimate the actual projected request first:
+            // the soft threshold may be exceeded, but the hard budget may not.
+            if local_previous_estimate.is_some_and(|previous| estimate >= previous) {
+                if over_capacity {
+                    return Err(AgentError::ContextExceeded { estimate, budget });
+                }
+                return Ok(resolve(estimate, active_system, effective_request));
+            }
+            // `keep_recent_tokens` is a preference. Successive distinct cuts
+            // may still be needed when each summary reduces the request.
             let boundary = self
                 .preferred_boundary()?
-                .or_else(|| self.oldest_reducible_boundary());
+                .filter(|candidate| !local_attempted.contains(candidate))
+                .or_else(|| self.oldest_reducible_boundary(&local_attempted));
             if let Some(first_kept) = boundary {
                 match self
-                    .compact_boundary(first_kept, &active_system, tools, reason)
+                    .compact_boundary(first_kept.clone(), &active_system, tools, reason)
                     .await
                 {
-                    Ok(_) => continue,
+                    Ok(info) => {
+                        local_attempted.insert(first_kept);
+                        local_attempted.insert(info.first_kept);
+                        local_previous_estimate = Some(estimate);
+                        continue;
+                    }
                     Err(error) if is_compaction_veto(&error) => {
                         // A veto suppresses threshold compaction, not the host's
                         // hard context bound, and must not re-run the same hook.
@@ -1344,7 +1400,7 @@ impl CompactionContext<'_> {
         }
         let boundary = if self.mode == AgentCompactionMode::Local {
             self.preferred_boundary()?
-                .or_else(|| self.oldest_reducible_boundary())
+                .or_else(|| self.oldest_reducible_boundary(&HashSet::new()))
         } else {
             None
         };
@@ -2085,6 +2141,7 @@ impl Agent {
             max_network_wait: self.max_network_wait,
             provider_retries_enabled: self.provider_retries_enabled,
             client: &self.client,
+            initial_authority: None,
             model: &self.model,
             compaction_model: model,
             summary_operation: operation,

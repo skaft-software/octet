@@ -202,6 +202,12 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             return Ok(());
         }
         match method {
+            "pi/settings/read" | "pi/settings/update" => {
+                pi_settings::dispatch(state, object, method, params)?;
+            }
+            "commands/register" => {
+                runtime_commands::register_runtime_commands(state, object, params)?;
+            }
             "model/select"
                 if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 =>
             {
@@ -226,8 +232,15 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             "resource/register" | "resource/release" => {
                 dispatch_resource_request(state, object, method, params)?;
             }
+            "provider/infer" => {
+                nested_inference::dispatch(state, object, params)?;
+            }
+            "provider/infer/cancel" => {
+                nested_inference::cancel(state, object, params)?;
+            }
             methods::COMPOSITION_CONTEXT
             | methods::COMPOSITION_CALL
+            | "composition/prepare"
             | methods::COMPOSITION_STORE => {
                 dispatch_composition_request(state, object, method)?;
             }
@@ -619,6 +632,29 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 let registry = provider_registry_for_request(state)
                     .map_err(|_| "provider registry is unavailable".to_owned())?;
                 registry.complete_initial_catalog(&state.provider_owner);
+            }
+            "providers/inherit" => {
+                require_declared(state.declared.providers, "provider catalogs")?;
+                if !read_std_lock(&state.protocol).supports("provider_inheritance_v1") {
+                    return Err("provider inheritance unavailable".into());
+                }
+                let id = parse_child_request_id(object, "providers/inherit")?;
+                insert_child_request(state, id.clone(), None, None)?;
+                queue_provider_host_response(
+                    state,
+                    &id,
+                    native_provider::inherited_models(state, params),
+                )?;
+            }
+            "provider/hooks/payload" | "provider/hooks/headers" | "provider/hooks/response" => {
+                provider_hooks::dispatch(state, object, method, params)?;
+            }
+            "provider/delegate" => {
+                require_declared(state.declared.providers, "provider streams")?;
+                if !read_std_lock(&state.protocol).supports("provider_inheritance_v1") {
+                    return Err("provider inheritance unavailable".into());
+                }
+                native_provider::dispatch_delegate(state, object, params)?;
             }
             methods::PROVIDERS_REGISTER => {
                 require_declared(state.declared.providers, "provider catalogs")?;
@@ -1193,6 +1229,21 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         (ExtensionRequestFailure::InvalidRequest, error.to_string()),
                     );
                 }
+                if state
+                    .declared
+                    .shortcuts
+                    .iter()
+                    .any(|shortcut| shortcut.name == request.id)
+                {
+                    return refuse_admitted_request(
+                        state,
+                        &admitted,
+                        (
+                            ExtensionRequestFailure::InvalidRequest,
+                            "runtime shortcut id is declared by the static manifest".into(),
+                        ),
+                    );
+                }
                 if let Err(failure) = bounded_plain_text_failure(
                     "shortcut key",
                     &request.key,
@@ -1206,6 +1257,14 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES,
                 ) {
                     return refuse_admitted_request(state, &admitted, failure);
+                }
+                {
+                    let mut children = lock_std_mutex(&state.child_requests);
+                    let Some(child) = children.get_mut(&admitted.request_id) else {
+                        return Ok(());
+                    };
+                    child.shortcut_registration =
+                        Some((request.id.clone(), admitted.owner.clone()));
                 }
                 dispatch_host_request_event(state, &admitted, move |admitted| {
                     ExtensionEvent::ShortcutRequested {
@@ -1472,6 +1531,26 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     }
                 })?;
             }
+            "commands/snapshot" => {
+                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                    state,
+                    object,
+                    method,
+                    EXTENSION_FEATURE_COMMAND_CATALOG,
+                    params,
+                )?
+                else {
+                    return Ok(());
+                };
+                dispatch_host_request_event(state, &admitted, |admitted| {
+                    ExtensionEvent::ContextSnapshotRequested {
+                        request_id: admitted.request_id.clone(),
+                        generation: admitted.generation,
+                        owner: Some(admitted.owner.clone()),
+                        operation: ExtensionContextOperation::Commands,
+                    }
+                })?;
+            }
             "tools/snapshot" => {
                 let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
                     state,
@@ -1614,7 +1693,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 // echoing it in the initialize response fails negotiation as an
                 // unknown feature. An unnegotiated request is refused with
                 // `unsupported_feature` before the owner check.
-                let Some((_request, admitted)) = admit_host_request::<ContextSnapshotRequest>(
+                let Some((request, admitted)) = admit_host_request::<prompt_read::Request>(
                     state,
                     object,
                     methods::CONTEXT_SYSTEM_PROMPT,
@@ -1624,6 +1703,9 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 else {
                     return Ok(());
                 };
+                if let Some(scope) = request.scope.as_deref() {
+                    return prompt_read::respond(state, &request, &admitted, scope);
+                }
                 // The child request stays registered until the frontend answers
                 // with bounded prompt text.
                 dispatch_host_request_event(state, &admitted, |admitted| {

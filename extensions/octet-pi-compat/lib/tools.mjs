@@ -3,74 +3,73 @@ import { constants, lstatSync, openSync, fstatSync, readSync, closeSync, unlinkS
 import { lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { bounded, fields, invalid, plainJSON, unsupported } from './errors.mjs';
+import { consumeRegistryUsageEcho } from './model-registry-stream.mjs';
 
 export const BUILTIN_TOOL_NAMES = Object.freeze(['read', 'edit', 'write', 'bash', 'powershell']);
 const builtinToolNames = new Set(BUILTIN_TOOL_NAMES);
 
-// Match octet 0.9.6's bounded schema profile (octet-ai/json_repair.rs).
-// Never strip a constraint to make a Pi tool load: reject its factory so import
-// can report it, instead of poisoning every subsequent provider request.
-const schemaKeywords = new Set(['$schema', 'title', 'description', 'default', 'examples', 'type', 'properties', 'required',
-  'additionalProperties', 'items', 'enum', 'const', 'allOf', 'anyOf', 'oneOf', 'minimum', 'maximum', 'exclusiveMinimum',
-  'exclusiveMaximum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'uniqueItems', 'minProperties', 'maxProperties', 'pattern', 'deprecated']);
+const schemaKeywords = new Set(['$schema', '$id', '$ref', '$defs', 'definitions', '$anchor', '$dynamicAnchor', '$dynamicRef',
+  '$recursiveAnchor', '$recursiveRef', '$vocabulary', '$comment', 'title', 'description', 'default', 'examples', 'type', 'properties', 'required',
+  'additionalProperties', 'patternProperties', 'propertyNames', 'dependencies', 'dependentRequired', 'dependentSchemas',
+  'unevaluatedProperties', 'items', 'additionalItems', 'prefixItems', 'contains', 'minContains', 'maxContains', 'unevaluatedItems',
+  'enum', 'const', 'allOf', 'anyOf', 'oneOf', 'not', 'if', 'then', 'else', 'minimum', 'maximum', 'exclusiveMinimum',
+  'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'minItems', 'maxItems', 'uniqueItems', 'minProperties',
+  'maxProperties', 'pattern', 'format', 'deprecated', 'readOnly', 'writeOnly', 'contentEncoding', 'contentMediaType', 'contentSchema']);
 
-// Exact portable subset shared with octet-ai's SchemaPattern: ^...$ sequences
-// of printable ASCII literals / positive character classes and finite {m,n}
-// repetitions. No escapes, wildcard, groups, alternation or unbounded repeats.
-// Admission never changes the pattern; native argument validation enforces it.
-function supportedPattern(pattern) {
-  if (typeof pattern !== 'string' || pattern.length > 1024 || !pattern.startsWith('^') || !pattern.endsWith('$')) return false;
-  const printable = c => c !== undefined && c >= ' ' && c <= '~';
-  const classChar = c => printable(c) && !'[]\\^-'.includes(c);
-  let index = 1, maximum = 0;
-  while (index < pattern.length - 1) {
-    if (pattern[index] === '[') {
-      const start = ++index;
-      while (pattern[index] !== ']') {
-        const c = pattern[index];
-        if (c === '-' && (index === start || pattern[index + 1] === ']')) { index++; continue; }
-        if (!classChar(c)) return false;
-        if (pattern[index + 1] === '-' && pattern[index + 2] !== ']') {
-          const end = pattern[index + 2];
-          if (!classChar(end) || end < c) return false;
-          index += 3;
-        } else index++;
-      }
-      if (index === start) return false;
-      index++;
-    } else {
-      if (!printable(pattern[index]) || '.+*?^$(){}[]\\|'.includes(pattern[index])) return false;
-      index++;
-    }
-    let upper = 1;
-    if (pattern[index] === '{') {
-      const repeat = /^\{(0|[1-9][0-9]*)(?:,(0|[1-9][0-9]*))?\}/.exec(pattern.slice(index));
-      if (!repeat) return false;
-      upper = Number(repeat[2] ?? repeat[1]);
-      if (Number(repeat[1]) > upper || upper > 1024) return false;
-      index += repeat[0].length;
-    }
-    maximum += upper;
-    if (maximum > 1024) return false;
-  }
-  return index === pattern.length - 1;
-}
-
-function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0) {
-  if (depth > 32) invalid(`tool ${tool} schema depth`);
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) invalid(`tool ${tool} ${path} must be a schema object`);
+// Same bounds as the host's schema check (depth 32, 4096 schema nodes); the
+// separate work bound only stops pathological keyword/list sizes.
+function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0, budget = { nodes: 4096, work: 65536 }) {
+  if (depth > 32 || --budget.nodes < 0) invalid(`tool ${tool} schema depth or work limit`);
+  if (typeof schema === 'boolean') return;
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) invalid(`tool ${tool} ${path} must be a schema object or boolean`);
+  const visit = (child, suffix) => validateSchemaProfile(child, tool, `${path}.${suffix}`, depth + 1, budget);
+  const strings = value => {
+    if (!Array.isArray(value) || value.length > budget.work || new Set(value).size !== value.length) invalid(`tool ${tool} ${path} requires distinct strings`);
+    for (const name of value) if (--budget.work < 0 || typeof name !== 'string') invalid(`tool ${tool} ${path} dependency or schema work limit`);
+  };
+  const constant = value => plainJSON(value, `tool ${tool} schema constant`, 65536);
+  const pattern = value => {
+    if (typeof value !== 'string' || Buffer.byteLength(value) > 1024) invalid(`tool ${tool} ${path}.pattern`);
+    try { new RegExp(value, 'u'); } catch { invalid(`tool ${tool} ${path}.pattern syntax`); }
+  };
+  // Validate the same document toolWire sends: JSON omits undefined object
+  // members (e.g. TypeBox-style `required: undefined`), so they are absent.
+  // Undefined array entries are still rejected by the checks below.
   for (const [key, value] of Object.entries(schema)) {
-    if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported by octet 0.9.6');
-    if (key === 'pattern' && !supportedPattern(value)) unsupported(`tool ${tool} ${path}.pattern`, 'pattern syntax is not supported: require bounded ^...$ ASCII literals/classes with finite repetitions (1024 bytes/maximum characters)');
-    if (key === 'deprecated' && typeof value !== 'boolean') invalid(`tool ${tool} ${path}.deprecated must be boolean`);
-    if (key === 'properties') {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`tool ${tool} ${path}.properties`);
-      for (const [name, child] of Object.entries(value)) validateSchemaProfile(child, tool, `${path}.properties.${name}`, depth + 1);
-    } else if (key === 'items' || key === 'additionalProperties' && typeof value !== 'boolean') {
-      validateSchemaProfile(value, tool, `${path}.${key}`, depth + 1);
-    } else if (['allOf', 'anyOf', 'oneOf'].includes(key)) {
+    if (value === undefined) continue;
+    if (--budget.work < 0) invalid(`tool ${tool} schema work limit`);
+    if (!schemaKeywords.has(key)) unsupported(`tool ${tool} ${path}.${key}`, 'JSON Schema keyword is not supported');
+    if (key === 'pattern') pattern(value);
+    if (['deprecated', 'readOnly', 'writeOnly', '$recursiveAnchor', 'uniqueItems'].includes(key) && typeof value !== 'boolean') invalid(`tool ${tool} ${path}.${key} must be boolean`);
+    if (['$schema', '$id', '$ref', '$anchor', '$dynamicAnchor', '$dynamicRef', '$recursiveRef', '$comment', 'title', 'description', 'format', 'contentEncoding', 'contentMediaType'].includes(key) && typeof value !== 'string') invalid(`tool ${tool} ${path}.${key} must be string`);
+    if (key === '$vocabulary' && (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(child => typeof child !== 'boolean'))) invalid(`tool ${tool} ${path}.${key}`);
+    if (key === 'type' && !(typeof value === 'string' ? [value] : Array.isArray(value) && value.length ? value : [null]).every(name => ['null', 'boolean', 'object', 'array', 'number', 'integer', 'string'].includes(name))) invalid(`tool ${tool} ${path}.type`);
+    if (['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'].includes(key) && (!Number.isFinite(value) || key === 'multipleOf' && value <= 0)) invalid(`tool ${tool} ${path}.${key}`);
+    if (['minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties', 'minContains', 'maxContains'].includes(key) && (!Number.isInteger(value) || value < 0)) invalid(`tool ${tool} ${path}.${key}`);
+    if (key === 'required') strings(value);
+    if (key === 'dependentRequired') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`tool ${tool} ${path}.${key}`);
+      for (const child of Object.values(value)) strings(child);
+    }
+    if (['const', 'default', 'examples'].includes(key)) constant(value);
+    if (key === 'enum') {
+      if (!Array.isArray(value) || !value.length) invalid(`tool ${tool} ${path}.enum`);
+      for (const child of value) { if (--budget.work < 0) invalid(`tool ${tool} schema work limit`); constant(child); }
+    }
+    if (['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas', 'dependencies'].includes(key)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`tool ${tool} ${path}.${key}`);
+      for (const [name, child] of Object.entries(value)) {
+        if (child === undefined) continue;
+        if (key === 'patternProperties') pattern(name);
+        if (key === 'dependencies' && Array.isArray(child)) { strings(child); continue; }
+        visit(child, `${key}.${name}`);
+      }
+    } else if (['items', 'additionalItems', 'additionalProperties', 'unevaluatedProperties', 'unevaluatedItems', 'propertyNames', 'contains', 'not', 'if', 'then', 'else', 'contentSchema'].includes(key)) {
+      if (key === 'items' && Array.isArray(value)) value.forEach((child, index) => visit(child, `${key}[${index}]`));
+      else visit(value, key);
+    } else if (['allOf', 'anyOf', 'oneOf', 'prefixItems'].includes(key)) {
       if (!Array.isArray(value) || !value.length) invalid(`tool ${tool} ${path}.${key}`);
-      for (const [index, child] of value.entries()) validateSchemaProfile(child, tool, `${path}.${key}[${index}]`, depth + 1);
+      value.forEach((child, index) => visit(child, `${key}[${index}]`));
     }
   }
 }
@@ -79,7 +78,7 @@ function validateSchemaProfile(schema, tool, path = 'parameters', depth = 0) {
 export function validateTool(tool) {
   fields(tool, ['name', 'label', 'description', 'parameters', 'execute', 'promptSnippet', 'promptGuidelines',
     'outputSchema', 'prepareArguments', 'renderCall', 'renderResult', 'renderShell', 'annotations',
-    'defaultActive', 'executionMode', 'exposure', 'namespace', 'constrainedSampling', 'prepareLoadout'], 'tool');
+    'defaultActive', 'executionMode', 'exposure', 'namespace', 'constrainedSampling', 'prepareLoadout', 'reachesTools'], 'tool');
   bounded(tool.name, 'tool name', 128);
   if (!/^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(tool.name)) invalid('tool name');
   bounded(tool.description, 'tool description', 4096);
@@ -94,9 +93,12 @@ export function validateTool(tool) {
   for (const key of ['renderCall', 'renderResult']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
   if (tool.renderShell !== undefined && !['default', 'self'].includes(tool.renderShell)) invalid('tool.renderShell');
   if (tool.defaultActive !== undefined && typeof tool.defaultActive !== 'boolean') invalid('tool.defaultActive');
+  if (tool.outputSchema !== undefined) validateSchemaProfile(tool.outputSchema, tool.name, 'outputSchema');
   if (tool.outputSchema !== undefined && (!tool.outputSchema || typeof tool.outputSchema !== 'object' || Array.isArray(tool.outputSchema))) invalid('tool.outputSchema');
-  for (const key of ['prepareArguments', 'prepareLoadout']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
-  if (tool.exposure !== undefined && tool.exposure !== 'direct') unsupported('tool.exposure', 'non-direct callable and declared surfaces are not bound');
+  // reachesTools (Pi 1.2) is published through getAllTools; the host never
+  // registers tools late, so it has nothing to wait for before a call.
+  for (const key of ['prepareArguments', 'prepareLoadout', 'reachesTools']) if (tool[key] !== undefined && typeof tool[key] !== 'function') invalid(`tool.${key}`);
+  if (tool.exposure !== undefined && !['direct', 'codemode', 'deferred', 'model-only', 'hidden'].includes(tool.exposure)) invalid('tool.exposure');
   if (tool.executionMode !== undefined && tool.executionMode !== 'sequential') unsupported('tool.executionMode', 'the host keeps extension effects exclusive');
   // These are consumed by getAllTools, never used as verified effect or replay declarations.
   if (tool.annotations !== undefined) {
@@ -104,8 +106,12 @@ export function validateTool(tool) {
     for (const value of Object.values(tool.annotations)) if (typeof value !== 'boolean') invalid('tool annotations must be boolean hints');
   }
   if (tool.namespace !== undefined) {
-    fields(tool.namespace, ['name', 'description', 'instructions'], 'tool namespace');
+    fields(tool.namespace, ['name', 'aliases', 'description', 'instructions'], 'tool namespace');
     bounded(tool.namespace.name, 'tool namespace name', 128);
+    if (tool.namespace.aliases !== undefined) {
+      if (!Array.isArray(tool.namespace.aliases) || tool.namespace.aliases.length > 16) invalid('tool namespace aliases must contain at most 16 strings');
+      for (const alias of tool.namespace.aliases) bounded(alias, 'tool namespace alias', 128);
+    }
     for (const key of ['description', 'instructions']) if (tool.namespace[key] !== undefined) bounded(tool.namespace[key], `tool namespace ${key}`, 4096);
   }
   if (tool.constrainedSampling !== undefined && tool.constrainedSampling !== false) {
@@ -123,6 +129,7 @@ export function validateTool(tool) {
 
 export function toolWire(name, { definition: d }) {
   return { name, description: d.description, parameters: JSON.parse(JSON.stringify(d.parameters)),
+    ...(d.exposure === undefined ? {} : { exposure: d.exposure }),
     nested_execution: true,
     ...(d.prepareArguments === undefined ? {} : { prepare_arguments: true }),
     ...(d.promptSnippet === undefined ? {} : { prompt_snippet: d.promptSnippet }),
@@ -149,8 +156,14 @@ export function registerTool(runtime, factory, definition) {
   // Pi registration is synchronous void. Reuse the transport worker so a
   // following getter sees the host ACK, not an optimistic local catalog.
   const result = runtime.transport.requestSync('tools/register', { tools: [toolWire(definition.name, entry)] }, { signal: store.controller.signal });
-  fields(result, ['revision', 'tools'], 'tool registration acknowledgement');
-  if (!Number.isSafeInteger(result.revision) || result.revision < 0 || !Array.isArray(result.tools) || !result.tools.includes(definition.name)) invalid('host did not publish registered tool');
+  fields(result, ['revision', 'tools', 'withheld'], 'tool registration acknowledgement');
+  if (!Number.isSafeInteger(result.revision) || result.revision < 0 || !Array.isArray(result.tools)) invalid('host did not publish registered tool');
+  const withheld = result.withheld ?? [];
+  if (!Array.isArray(withheld) || result.withheld !== undefined && !withheld.length || withheld.some(name => typeof name !== 'string' || result.tools.includes(name))) invalid('tool registration withheld names');
+  // Pi registers a tool even when the product tool policy disables it by
+  // default (`--no-tools`): registration succeeds, the tool is never active
+  // or model-visible. Only the host's explicit policy withholding counts.
+  if (!result.tools.includes(definition.name) && !withheld.includes(definition.name)) invalid('host did not publish registered tool');
   runtime.tools.set(definition.name, entry);
 }
 
@@ -172,6 +185,7 @@ export function getAllTools(runtime, factory, snapshot = toolSnapshot(runtime, f
       ...(local?.definition.promptGuidelines === undefined ? {} : { promptGuidelines: [...local.definition.promptGuidelines] }),
       ...(local?.definition.annotations === undefined ? {} : { annotations: { ...local.definition.annotations } }),
       ...(local?.definition.namespace === undefined ? {} : { namespace: { ...local.definition.namespace } }),
+      ...(local?.definition.reachesTools === undefined ? {} : { reachesTools: local.definition.reachesTools }),
       ...(local ? { sourceInfo: { path: local.factory, source: 'extension', scope: 'temporary', origin: 'top-level' } } : {}),
     };
   });
@@ -184,7 +198,7 @@ export function setActiveTools(runtime, factory, names) {
   const store = runtime.current(factory);
   // Pi ignores unknown names. Do not optimistically claim the host applied a
   // requested set, and do not relax native product policy.
-  const registered = new Set(toolSnapshot(runtime, factory).all_tools.map(tool => tool.name));
+  const registered = new Set(toolSnapshot(runtime, factory).all_tools.filter(tool => tool.exposure !== 'hidden').map(tool => tool.name));
   runtime.transport.requestSync('tools/set_active', {
     parent_request_id: store.id, resource_owner: store.state.owner,
     names: [...new Set(names)].filter(name => registered.has(name)),
@@ -231,14 +245,14 @@ function nativePart(part) {
   if (!image || typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || typeof image.media_type !== 'string') unsupported('nested tool media', 'Pi requires verified inline image bytes and MIME type');
   return { type: 'image', data, mimeType: image.media_type };
 }
-function nativeResult(value) {
+export function nativeResult(value) {
   fields(value, ['content', 'is_error', 'metadata', 'structured_content', 'usage'], 'nested tool result');
   if (!Array.isArray(value.content) || typeof value.is_error !== 'boolean') invalid('nested tool result');
   if (value.usage != null) unsupported('nested tool usage', 'native aggregate usage has no lossless Pi tool-usage binding');
   return { content: value.content.map(nativePart), details: value.metadata?.pi_details,
     ...(value.structured_content === undefined ? {} : { structuredContent: value.structured_content }), isError: value.is_error };
 }
-function nativeOutcome(value) {
+export function nativeOutcome(value) {
   fields(value, ['tool_call', 'content', 'is_error', 'metadata', 'structured_content', 'usage'], 'nested tool outcome');
   fields(value.tool_call, ['id', 'name', 'arguments'], 'nested tool call');
   bounded(value.tool_call.id, 'nested tool call id', 256);
@@ -249,7 +263,7 @@ function nativeOutcome(value) {
 
 // Reuse the existing native composition sidecar contract, validating identity,
 // exact bytes and digest before any JSON is consumed. No arbitrary host path.
-async function compositionReply(runtime, reply, key) {
+export async function compositionReply(runtime, reply, key) {
   const reference = reply[`${key}_file`];
   if (reference === undefined) return key === 'value' ? reply.value : reply;
   fields(reference, ['path', 'bytes', 'sha256'], 'composition sidecar');
@@ -273,7 +287,9 @@ export async function createToolContext(runtime, params, store, context) {
   store.factory = runtime.tools.get(params.name)?.factory;
   if (!runtime.features.has('tool_composition_v1')) return context;
   const executeTool = async (name, args, options = {}) => {
-    bounded(name, 'nested tool name', 128); fields(options, ['signal', 'onUpdate'], 'executeTool options');
+    bounded(name, 'nested tool name', 128);
+    if (['hidden', 'model-only'].includes(runtime.tools.get(name)?.definition.exposure)) invalid(`tool ${name} is not callable from other tools`);
+    fields(options, ['signal', 'onUpdate'], 'executeTool options');
     if (options.onUpdate !== undefined && typeof options.onUpdate !== 'function') invalid('executeTool onUpdate');
     const controller = new AbortController(), signals = [store.controller.signal, options.signal].filter(Boolean);
     const abort = event => controller.abort(event.target.reason);
@@ -306,7 +322,7 @@ export async function createToolContext(runtime, params, store, context) {
       } finally { if (fd !== undefined) closeSync(fd); unlinkSync(path); }
     }
     if (!Array.isArray(catalog.tools)) invalid('nested tool catalog');
-    return catalog.tools.map(tool => ({ name: tool.name, label: runtime.tools.get(tool.name)?.definition.label ?? tool.name,
+    return catalog.tools.filter(tool => !['hidden', 'model-only'].includes(tool.exposure ?? runtime.tools.get(tool.name)?.definition.exposure)).map(tool => ({ name: tool.name, label: runtime.tools.get(tool.name)?.definition.label ?? tool.name,
       description: tool.description, parameters: tool.parameters, ...(tool.output_schema === undefined ? {} : { outputSchema: tool.output_schema }),
       execute: async (_id, args, signal, onUpdate) => (await executeTool(tool.name, args, { signal, ...(onUpdate === undefined ? {} : { onUpdate }) })).result }));
   };
@@ -325,9 +341,10 @@ export function prepareToolLoadout(runtime, store, declared) {
   const previous = store.state.piToolLoadout;
   if (previous?.signature === signature && previous.callbacks.every((entry, index) => entry === callbacks[index]) && previous.callbacks.length === callbacks.length) return previous.projection;
   const descriptor = tool => ({ ...tool, label: runtime.tools.get(tool.name)?.definition.label ?? tool.name });
-  const loadout = { declared: declared.map(descriptor), callable: all.filter(tool => active.has(tool.name) && tool.exposure !== 'model-only' && tool.exposure !== 'hidden').map(descriptor),
+  const loadout = { declared: declared.map(descriptor), callable: all.filter(tool => tool.exposure === 'codemode' || tool.exposure === 'deferred' || (active.has(tool.name) && (tool.exposure ?? 'direct') === 'direct')).map(descriptor),
     registered: all.map(descriptor), getExposure: name => all.find(tool => tool.name === name)?.exposure ?? 'direct',
-    getNamespace: name => runtime.tools.get(name)?.definition.namespace };
+    getNamespace: name => runtime.tools.get(name)?.definition.namespace,
+    getPromptGuidelines: name => all.find(tool => tool.name === name)?.promptGuidelines ?? [] };
   const descriptions = new Map(), hidden = new Set();
   for (const entry of callbacks) {
     try {
@@ -350,7 +367,7 @@ export function prepareToolLoadout(runtime, store, declared) {
   return projection;
 }
 
-export async function executeRegisteredTool(runtime, params, store, context) {
+export async function executeRegisteredTool(runtime, params, store, context, definition = runtime.tools.get(params.name)?.definition) {
   const tool = runtime.tools.get(params.name); if (!tool) invalid(`unknown tool ${params.name}`);
   store.factory = tool.factory; let sequence = 0, settled = false, queued = 0, tail = Promise.resolve();
   const update = runtime.features.has('request_progress') ? result => {
@@ -378,9 +395,10 @@ export async function executeRegisteredTool(runtime, params, store, context) {
     runtime.track(pending, store);
   } : undefined;
   let result;
-  try { result = await runtime.scope.run(store, () => tool.definition.execute(String(store.id), params.arguments, store.controller.signal, update, context)); }
+  try { result = await runtime.scope.run(store, () => definition.execute(String(store.id), params.arguments, store.controller.signal, update, context)); }
   finally { settled = true; }
-  fields(result, ['content', 'details', 'isError', 'structuredContent'], 'tool result');
+  fields(result, ['content', 'details', 'isError', 'structuredContent', 'usage'], 'tool result');
+  if (result.usage !== undefined) consumeRegistryUsageEcho(runtime, store, plainJSON(result.usage, 'tool result usage', 4096));
   if (result.isError !== undefined && typeof result.isError !== 'boolean') invalid('tool isError must be boolean');
   const content = await toolContent(runtime, result.content, store);
   await runtime.flush(store);

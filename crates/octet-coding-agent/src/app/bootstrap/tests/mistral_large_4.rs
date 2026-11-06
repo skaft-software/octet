@@ -235,10 +235,10 @@ fn mistral_large_4_rates_and_display_name_are_pinned_for_every_route() {
     assert_eq!(direct.cache_read, TokenRate(70_000));
     assert_eq!(direct.cache_write_5m, TokenRate(0));
 
-    // Discovered routes without published rates fall back to the checked-in
-    // models.dev projection.
+    // Discovered routes without published rates fall back to the reviewed
+    // models.dev projection, not the historical endpoint fixture above.
     for (provider, id, input, output, cache_read) in [
-        ("openrouter", OPENROUTER_LEAF, 1_360_000, 4_180_000, 140_000),
+        ("openrouter", OPENROUTER_LEAF, 700_000, 2_100_000, 70_000),
         ("opencode", MISTRAL_LARGE_4, 680_000, 2_090_000, 70_000),
     ] {
         let pinned = octet_ai::model_metadata::model_pricing(provider, id)

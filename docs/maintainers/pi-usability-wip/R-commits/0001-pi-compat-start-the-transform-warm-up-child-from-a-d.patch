@@ -1,0 +1,75 @@
+From d3531c65257edd997f5f1a69b16833adc3b8e6f5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 03:24:52 +0000
+Subject: [PATCH 1/8] pi-compat: start the transform warm-up child from a
+ decoded path
+
+new URL(import.meta.url).pathname keeps percent escapes, so an extension
+directory containing a space (or a Windows drive path) made the child fail to
+start and the warm-up silently do nothing.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../octet-pi-compat/lib/transform-warmup.mjs  |  3 ++-
+ .../test/startup-once.test.mjs                | 19 +++++++++++++++++--
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/extensions/octet-pi-compat/lib/transform-warmup.mjs b/extensions/octet-pi-compat/lib/transform-warmup.mjs
+index d60e4ee6..8140f478 100644
+--- a/extensions/octet-pi-compat/lib/transform-warmup.mjs
++++ b/extensions/octet-pi-compat/lib/transform-warmup.mjs
+@@ -2,6 +2,7 @@ import { Worker, isMainThread, parentPort, workerData } from 'node:worker_thread
+ import { availableParallelism, setPriority } from 'node:os';
+ import { spawn } from 'node:child_process';
+ import { readFileSync, statSync } from 'node:fs';
++import { fileURLToPath } from 'node:url';
+ 
+ const TYPESCRIPT = /\.[cm]?tsx?$/;
+ // Everything jiti transforms: TypeScript, and ESM JavaScript (large bundled
+@@ -31,7 +32,7 @@ export function startTransformWarmup(files, fsCache, { workers, timeoutMs = 6000
+   }).filter(item => item && item.size <= MAX_FILE_BYTES).sort((a, b) => b.size - a.size).map(item => item.file);
+   const count = warmupWorkerCount(targets.length, workers);
+   if (count < 1) return none;
+-  const child = spawn(process.execPath, [new URL(import.meta.url).pathname, CHILD_FLAG, String(count), String(nice)],
++  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), CHILD_FLAG, String(count), String(nice)],
+     { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, OCTET_TRANSFORM_WARMUP_CACHE: fsCache } });
+   let output = '';
+   child.stdout.setEncoding('utf8');
+diff --git a/extensions/octet-pi-compat/test/startup-once.test.mjs b/extensions/octet-pi-compat/test/startup-once.test.mjs
+index 4341fee5..1a979943 100644
+--- a/extensions/octet-pi-compat/test/startup-once.test.mjs
++++ b/extensions/octet-pi-compat/test/startup-once.test.mjs
+@@ -1,8 +1,9 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
++import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+-import { join } from 'node:path';
++import { dirname, join } from 'node:path';
++import { fileURLToPath } from 'node:url';
+ import { spawnSync } from 'node:child_process';
+ import { reviewedSourceHashes } from '../lib/runtime.mjs';
+ import { SourceFingerprints } from '../lib/source-fingerprints.mjs';
+@@ -86,3 +87,17 @@ test('warm-up transforms TypeScript and ESM JavaScript, never .cjs or declaratio
+   assert.equal(result.transformed, 2);
+   assert.equal(readdirSync(join(dir, 'cache')).length, 2);
+ });
++
++test('warm-up child starts when the extension path needs URL decoding (spaces)', async t => {
++  const root = mkdtempSync(join(tmpdir(), 'octet-warm-'));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  const lib = join(root, 'with space', 'lib');
++  mkdirSync(lib, { recursive: true });
++  copyFileSync(new URL('../lib/transform-warmup.mjs', import.meta.url), join(lib, 'transform-warmup.mjs'));
++  writeFileSync(join(root, 'with space', 'package.json'), '{"type":"module"}');
++  symlinkSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules'), join(root, 'with space', 'node_modules'));
++  writeFileSync(join(root, 'a.ts'), 'export const a: number = 1;\n');
++  const { warmTransformCache: warm } = await import(join(lib, 'transform-warmup.mjs'));
++  const result = await warm([join(root, 'a.ts')], join(root, 'cache'));
++  assert.equal(result.transformed, 1);
++});
+-- 
+2.43.0
+

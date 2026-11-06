@@ -35,7 +35,8 @@ async fn headless_before_prompt_answers_pi_tool_snapshot_without_hook_timeout() 
     let workspace = root_path.join("workspace");
     let extensions = root_path.join("extensions");
     std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(workspace.join(".pi")).unwrap();
+    std::fs::write(workspace.join(".pi/settings.json"), "{}").unwrap();
     let credential = home.join(".octet/credentials/custom.json");
     std::fs::write(
         &credential,
@@ -144,8 +145,18 @@ export default pi => {{
             .expect("bounded headless invocation")
             .unwrap();
         if mode == "headless-ui" {
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("no foreground composer"));
+            // An extension that asks for a composer this mode lacks is turned
+            // off with a one-line notice (4b4569e5a); the prompt still runs.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "headless-ui: stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                stderr.contains("octet-pi-compat failed"),
+                "the composer-less extension must be reported as turned off: {stderr}"
+            );
             continue;
         }
         assert!(
@@ -155,13 +166,15 @@ export default pi => {{
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Diagnostics are compact and path-free by design (4b4569e5a): the
+        // skipped factory is named, and the failing hook is named by its event.
         assert!(
-            stderr.contains("[Extension issues]") && stderr.contains("optional.mjs"),
-            "the skipped factory must be reported with its path: {stderr}"
+            stderr.contains("Optional: skipped"),
+            "the skipped factory must be reported by name: {stderr}"
         );
         assert!(
-            stderr.contains("turn_start callback failed and was skipped"),
-            "the failing callback must be reported with its event: {stderr}"
+            stderr.contains("turn_start hook failed and was skipped"),
+            "the failing hook must be reported with its event: {stderr}"
         );
         assert!(
             !stderr.contains("private callback details"),
@@ -211,7 +224,7 @@ export default pi => {{
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         requests.len(),
-        2,
-        "each accepted prompt reached the provider"
+        3,
+        "each accepted prompt reached the provider, including the one whose extension was turned off"
     );
 }

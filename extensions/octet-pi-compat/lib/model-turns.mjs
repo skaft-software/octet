@@ -5,7 +5,7 @@ import { assistantObservation, emitRunPrompt, settleRunTurn, settleStreamedParti
 
 export const modelTurnHooks = ['model_turn_start', 'model_turn_end'];
 
-function assistantMetadata(message, entry, data) {
+export function assistantMetadata(message, entry, data) {
   fields(data, ['assistant_entry_id', 'model', 'usage', 'cost', 'stop_reason'], 'assistant metadata');
   if (data.assistant_entry_id !== entry.id) invalid('assistant metadata entry mismatch');
   if (data.model != null && data.model !== message.model) invalid('assistant metadata model mismatch');
@@ -46,7 +46,7 @@ function assistantMetadata(message, entry, data) {
   }
 }
 
-function messageEntry(entry, calls, assistantFacts) {
+export function messageEntry(entry, calls, assistantFacts) {
   if (entry?.value?.type !== 'message') invalid('model turn requires durable message entries');
   bounded(entry.id, 'model turn entry id', 256);
   if (entry.parent !== null) bounded(entry.parent, 'model turn parent id', 256);
@@ -128,6 +128,8 @@ function turnEvent(hook, body) {
       }
       if (results.size !== calls.size) invalid('model turn contains unsettled tool calls');
       event.message = assistant[0]; event.toolResults = toolResults;
+      event.messageEntryId = body.assistant_entry.id;
+      event.toolResultEntryIds = body.tool_result_entries.map(entry => entry.id);
     }
     return event;
 }

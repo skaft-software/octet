@@ -1,0 +1,11 @@
+const namespace = globalThis[Symbol.for('octet.pi-compat.installed-pi')];
+if (typeof namespace !== 'function') throw new Error('installed-Pi overlay loaded without an explicit pi_runtime "installed" runtime');
+module.exports = namespace('agent-core');
+module.exports.Agent = module.exports.Agent;
+module.exports.agentLoop = module.exports.agentLoop;
+module.exports.agentLoopContinue = module.exports.agentLoopContinue;
+module.exports.runAgentLoop = module.exports.runAgentLoop;
+module.exports.runAgentLoopContinue = module.exports.runAgentLoopContinue;
+module.exports.runToolCall = module.exports.runToolCall;
+module.exports.setDefaultStreamFn = module.exports.setDefaultStreamFn;
+module.exports.streamProxy = module.exports.streamProxy;

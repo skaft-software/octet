@@ -68,12 +68,14 @@ struct BashArgs {
     cwd: Option<String>,
     /// Optional timeout in milliseconds.
     timeout_ms: Option<u64>,
+    /// Pi-compatible optional timeout in seconds.
+    timeout: Option<f64>,
 }
 
 /// The built-in `bash` tool.
 ///
 /// Executes the complete command through a Bash-compatible shell with bounded
-/// stdout/stderr capture and a timeout.
+/// stdout/stderr capture. An optional timeout may be supplied per call.
 /// The child's entire process tree is killed on timeout or cancellation. On
 /// Windows, the child is assigned to a private Job Object before it resumes.
 /// Spill paths are temporary: this tool owns at most 64 MiB / 32 files,
@@ -106,8 +108,9 @@ impl Tool for BashTool {
             constrained_sampling: None,
             name: "bash".to_string(),
             description: "Run a command through the configured Bash-compatible shell. \
-                          Omit cwd to run at the workspace root. Output reports the exit \
-                          status and bounded stdout/stderr. Complete streams end with \
+                          Omit cwd to run at the workspace root. Optional timeout is in seconds; \
+                          no default timeout is imposed. Output reports the exit status and \
+                          bounded stdout/stderr. Complete streams end with \
                           complete_<stream>=true; truncated_<stream>=... means bytes \
                           were omitted. Truncated output may include a private full_output_path, \
                           or partial_output_path containing only a prefix if the 16 MiB per-stream \
@@ -128,7 +131,13 @@ impl Tool for BashTool {
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Optional timeout in milliseconds."
+                        "description": "Optional octet timeout in milliseconds."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2147483,
+                        "description": "Optional timeout in seconds. No default timeout."
                     }
                 },
                 "required": ["command"],
@@ -182,7 +191,7 @@ impl Tool for BashTool {
             .ok_or_else(|| ToolError::new("invalid arguments: expected an object"))?;
         if object
             .keys()
-            .any(|key| !matches!(key.as_str(), "command" | "cwd" | "timeout_ms"))
+            .any(|key| !matches!(key.as_str(), "command" | "cwd" | "timeout_ms" | "timeout"))
         {
             return Err(ToolError::new("invalid arguments: unknown field"));
         }
@@ -212,6 +221,24 @@ impl Tool for BashTool {
                 .ok_or_else(|| ToolError::new("invalid arguments: `cwd` must be a string"))?;
             validate_effect_path(cwd, ctx.sandbox.allow_external_paths)?;
         }
+        if object.contains_key("timeout_ms") && object.contains_key("timeout") {
+            return Err(ToolError::new(
+                "invalid arguments: provide only one of `timeout` or `timeout_ms`",
+            ));
+        }
+        if let Some(value) = object.get("timeout") {
+            let seconds = value.as_f64();
+            if seconds.is_none_or(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+                return Err(ToolError::new(
+                    "Invalid timeout: must be a finite number of seconds",
+                ));
+            }
+            if seconds.is_some_and(|seconds| seconds > 2_147_483.0) {
+                return Err(ToolError::new(
+                    "Invalid timeout: must be less than or equal to 2147483 seconds",
+                ));
+            }
+        }
         if object
             .get("timeout_ms")
             .is_some_and(|value| value.as_u64().is_none_or(|timeout| timeout == 0))
@@ -230,7 +257,9 @@ impl Tool for BashTool {
     }
 
     fn prompt_snippet(&self) -> Option<&str> {
-        Some("Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)")
+        Some(
+            "Execute bash commands (prefer rg/ripgrep when available; otherwise use grep for file and content search)",
+        )
     }
 
     async fn execute(
@@ -279,10 +308,14 @@ impl BashTool {
         let shell = resolve_shell(ctx.sandbox.shell_path.as_deref()).path;
         let mut command = tokio::process::Command::new(&shell);
 
-        // Honour the per-call timeout when present, bounded by sandbox max.
-        let effective_timeout = match args.timeout_ms {
-            Some(ms) => Duration::from_millis(ms).min(ctx.sandbox.bash_timeout),
-            None => ctx.sandbox.bash_timeout,
+        let requested_timeout = args
+            .timeout
+            .map(Duration::from_secs_f64)
+            .or_else(|| args.timeout_ms.map(Duration::from_millis));
+        let effective_timeout = match (requested_timeout, ctx.sandbox.bash_timeout) {
+            (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
+            (Some(requested), None) => Some(requested),
+            (None, ceiling) => ceiling,
         };
 
         let workdir: PathBuf = match args.cwd.as_ref() {
@@ -350,44 +383,68 @@ impl BashTool {
         let stdout_progress = ctx.progress.clone();
         let stderr_progress = ctx.progress.clone();
 
+        let stop_drain = crate::tool::CancellationToken::default();
+        let readers_done = crate::tool::CancellationToken::default();
         let work = async {
-            let (mut out, mut err, status) = tokio::join!(
-                read_bounded_with_progress(
-                    &mut stdout_pipe,
-                    capture_budget,
-                    &stdout_progress,
-                    OutputStream::Stdout,
-                    checkpoints,
-                    (ctx.resource_owner, ctx.execution_scope),
-                ),
-                read_bounded_with_progress(
-                    &mut stderr_pipe,
-                    capture_budget,
-                    &stderr_progress,
-                    OutputStream::Stderr,
-                    checkpoints,
-                    (ctx.resource_owner, ctx.execution_scope),
-                ),
-                wait_for_bash_process(&mut child, handoff),
-            );
+            let readers = async {
+                let result = tokio::join!(
+                    read_bounded_with_progress(
+                        &mut stdout_pipe,
+                        capture_budget,
+                        &stdout_progress,
+                        OutputStream::Stdout,
+                        checkpoints,
+                        (ctx.resource_owner, ctx.execution_scope),
+                        Some(&stop_drain),
+                    ),
+                    read_bounded_with_progress(
+                        &mut stderr_pipe,
+                        capture_budget,
+                        &stderr_progress,
+                        OutputStream::Stderr,
+                        checkpoints,
+                        (ctx.resource_owner, ctx.execution_scope),
+                        Some(&stop_drain),
+                    ),
+                );
+                readers_done.cancel();
+                result
+            };
+            let wait = async {
+                let status = wait_for_bash_process(&mut child, handoff).await;
+                tokio::select! {
+                    _ = readers_done.cancelled() => {},
+                    _ = tokio::time::sleep(POST_KILL_DRAIN_TIMEOUT) => stop_drain.cancel(),
+                }
+                status
+            };
+            let ((mut out, mut err), status) = tokio::join!(readers, wait);
             // EOF-only spills share the readers' deadline and drop cancellation.
             rebalance_captures(&mut out, &mut err, capture_budget).await;
             (out, err, status)
         };
-        tokio::pin!(work);
+        let mut work = Box::pin(work);
 
-        match tokio::time::timeout(effective_timeout, &mut work).await {
-            Err(_elapsed) => {
+        let outcome = match effective_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, &mut work).await,
+            None => Ok(work.as_mut().await),
+        };
+        let outcome = match outcome {
+            Err(_) => {
                 guard.terminate_now();
-                // Preserve final output when ordinary descendants close the
-                // pipes promptly, but never let an escaped descendant retain a
-                // capture descriptor and defeat the execution deadline. When
-                // this bounded drain expires, returning drops `work`, the pipe
-                // readers, and the kill-on-drop child handle immediately.
-                let drained = tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await;
+                Err(tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await)
+            }
+            Ok(result) => Ok(result),
+        };
+        // Release the capture futures' borrows before transferring open pipes.
+        drop(work);
+        match outcome {
+            Err(drained) => {
                 let mut message = format!(
                     "error timeout\ncommand exceeded the {:.0}s execution limit and was killed",
-                    effective_timeout.as_secs_f64()
+                    effective_timeout
+                        .expect("timeout branch has a deadline")
+                        .as_secs_f64()
                 );
                 match drained {
                     Ok((out, err, status)) => {
@@ -423,12 +480,24 @@ impl BashTool {
                 // The direct child and capture pipes are finished, but a
                 // background descendant may have deliberately redirected both
                 // streams and remained in the same process group. Transfer the
-                // group to the centralized reaper for the rest of this tool's
-                // original deadline instead of silently unregistering it.
-                guard.supervise_bash_descendants(
-                    effective_timeout.saturating_sub(start.elapsed()),
+                // group to the centralized reaper, preserving the optional
+                // execution deadline instead of silently unregistering it.
+                let supervision = guard.supervise_bash_descendants(
+                    effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed())),
                     ctx.cancellation.clone(),
                 );
+                if let Some(supervision) = supervision {
+                    if out.incomplete {
+                        if let Some(pipe) = stdout_pipe.take() {
+                            tokio::spawn(drain_supervised_pipe(pipe, supervision));
+                        }
+                    }
+                    if err.incomplete {
+                        if let Some(pipe) = stderr_pipe.take() {
+                            tokio::spawn(drain_supervised_pipe(pipe, supervision));
+                        }
+                    }
+                }
                 let duration = start.elapsed();
 
                 let exit = {
@@ -453,12 +522,42 @@ impl BashTool {
                         text.push_str(&err.render("stderr"));
                     }
                 }
+                if out.incomplete || err.incomplete {
+                    if out.incomplete && out.total_bytes == 0 {
+                        text.push_str("\ncomplete_stdout=false");
+                    }
+                    if err.incomplete && err.total_bytes == 0 {
+                        text.push_str("\ncomplete_stderr=false");
+                    }
+                    text.push_str(
+                        "\noutput capture ended after shell exit; descendants remain supervised",
+                    );
+                }
                 if status.success() {
                     successful_output(text, &out, &err, status.code())
                 } else {
                     Err(ToolError::new(format!("error nonzero_exit\n{text}")))
                 }
             }
+        }
+    }
+}
+
+// Continue discarding inherited output only while the exact registered process
+// tree remains supervised. The reaper removes that registration on natural
+// exit, cancellation, deadline or shutdown, bounding even escaped pipe holders.
+#[cfg(unix)]
+async fn drain_supervised_pipe<R: AsyncRead + Unpin>(mut pipe: R, key: (u64, u64)) {
+    let mut buffer = [0u8; 8192];
+    loop {
+        if !crate::extension_process::ProcessGroupGuard::bash_supervision_registered(key) {
+            break;
+        }
+        tokio::select! {
+            result = pipe.read(&mut buffer) => {
+                if !matches!(result, Ok(n) if n > 0) { break; }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
 }
@@ -903,10 +1002,14 @@ impl BashTool {
         };
         let mut command = tokio::process::Command::new(&shell);
 
-        // Honour the per-call timeout when present, bounded by sandbox max.
-        let effective_timeout = match args.timeout_ms {
-            Some(ms) => Duration::from_millis(ms).min(ctx.sandbox.bash_timeout),
-            None => ctx.sandbox.bash_timeout,
+        let requested_timeout = args
+            .timeout
+            .map(Duration::from_secs_f64)
+            .or_else(|| args.timeout_ms.map(Duration::from_millis));
+        let effective_timeout = match (requested_timeout, ctx.sandbox.bash_timeout) {
+            (Some(requested), Some(ceiling)) => Some(requested.min(ceiling)),
+            (Some(requested), None) => Some(requested),
+            (None, ceiling) => ceiling,
         };
 
         let workdir: PathBuf = match args.cwd.as_ref() {
@@ -981,6 +1084,7 @@ impl BashTool {
                     OutputStream::Stdout,
                     checkpoints,
                     (ctx.resource_owner, ctx.execution_scope),
+                    None,
                 ),
                 read_bounded_with_progress(
                     &mut stderr_pipe,
@@ -989,6 +1093,7 @@ impl BashTool {
                     OutputStream::Stderr,
                     checkpoints,
                     (ctx.resource_owner, ctx.execution_scope),
+                    None,
                 ),
                 child.wait(),
             );
@@ -998,13 +1103,19 @@ impl BashTool {
         };
         tokio::pin!(work);
 
-        match tokio::time::timeout(effective_timeout, &mut work).await {
+        let outcome = match effective_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, &mut work).await,
+            None => Ok(work.as_mut().await),
+        };
+        match outcome {
             Err(_elapsed) => {
                 guard.terminate_now();
                 let drained = tokio::time::timeout(POST_KILL_DRAIN_TIMEOUT, &mut work).await;
                 let mut message = format!(
                     "error timeout\ncommand exceeded the {:.0}s execution limit and was killed",
-                    effective_timeout.as_secs_f64()
+                    effective_timeout
+                        .expect("timeout branch has a deadline")
+                        .as_secs_f64()
                 );
                 match drained {
                     Ok((out, err, status)) => {
@@ -1036,7 +1147,7 @@ impl BashTool {
                     ToolError::new(format!("error io\nfailed to wait for command: {error}"))
                 })?;
                 guard.supervise_bash_descendants(
-                    effective_timeout.saturating_sub(start.elapsed()),
+                    effective_timeout.map(|timeout| timeout.saturating_sub(start.elapsed())),
                     ctx.cancellation.clone(),
                 );
                 let duration = start.elapsed();
@@ -1092,6 +1203,7 @@ struct Capture {
     // Separate from head/tail rendering and spill storage. Never populated for
     // direct calls, and never published to progress or durable checkpoints.
     programmatic: Option<ProgrammaticCapture>,
+    incomplete: bool,
 }
 
 #[cfg(any(unix, windows))]
@@ -1170,6 +1282,7 @@ impl Capture {
             spill_truncated: false,
             spill_error: false,
             programmatic: None,
+            incomplete: false,
         }
     }
 
@@ -1262,7 +1375,7 @@ impl Capture {
                 } else {
                     text.push_str(&format!(
                         "\n{}_output_path={}",
-                        if self.spill_error || self.spill_truncated {
+                        if self.spill_error || self.spill_truncated || self.incomplete {
                             "partial"
                         } else {
                             "full"
@@ -1278,6 +1391,12 @@ impl Capture {
                 text.push_str("\nspill_error=true (full output could not be retained)");
             }
         }
+        if self.incomplete {
+            if self.truncated {
+                text.push_str(&format!("\ncomplete_{name}=false"));
+            }
+            text.push_str("\ncapture ended after shell exit; later output was not captured");
+        }
         text
     }
 
@@ -1290,7 +1409,10 @@ impl Capture {
             } else {
                 text.lines().count()
             };
-            format!("{name}: {lines} lines\n{text}\ncomplete_{name}=true")
+            format!(
+                "{name}: {lines} lines\n{text}\ncomplete_{name}={}",
+                !self.incomplete
+            )
         } else {
             let head = String::from_utf8_lossy(&self.head);
             let tail_bytes = self.tail.iter().copied().collect::<Vec<_>>();
@@ -1331,20 +1453,21 @@ async fn read_bounded_with_progress<R: AsyncRead + Unpin>(
     stream: OutputStream,
     checkpoints: Option<&BashCheckpoints>,
     ownership: (&str, &str),
+    stop_drain: Option<&crate::tool::CancellationToken>,
 ) -> Capture {
-    read_bounded_with_spill_limit(
+    read_bounded_until(
         reader,
         budget,
         progress,
         stream,
         checkpoints,
-        MAX_BASH_SPILL_BYTES,
+        (MAX_BASH_SPILL_BYTES, stop_drain),
         ownership,
     )
     .await
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(all(test, any(unix, windows)))]
 async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     reader: &mut Option<R>,
     budget: usize,
@@ -1354,6 +1477,29 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     spill_limit: usize,
     ownership: (&str, &str),
 ) -> Capture {
+    read_bounded_until(
+        reader,
+        budget,
+        progress,
+        stream,
+        checkpoints,
+        (spill_limit, None),
+        ownership,
+    )
+    .await
+}
+
+#[cfg(any(unix, windows))]
+async fn read_bounded_until<R: AsyncRead + Unpin>(
+    reader: &mut Option<R>,
+    budget: usize,
+    progress: &ToolProgressSink,
+    stream: OutputStream,
+    checkpoints: Option<&BashCheckpoints>,
+    drain: (usize, Option<&crate::tool::CancellationToken>),
+    ownership: (&str, &str),
+) -> Capture {
+    let (spill_limit, stop_drain) = drain;
     let mut capture = Capture::empty();
     if progress.is_programmatic() {
         capture.programmatic = Some(ProgrammaticCapture::default());
@@ -1374,7 +1520,22 @@ async fn read_bounded_with_spill_limit<R: AsyncRead + Unpin>(
     let mut writer = None;
     let mut buf = [0u8; 8192];
     loop {
-        match reader.read(&mut buf).await {
+        let read = async {
+            match stop_drain {
+                Some(stop) => tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => None,
+                    result = reader.read(&mut buf) => Some(result),
+                },
+                None => Some(reader.read(&mut buf).await),
+            }
+        }
+        .await;
+        let Some(read) = read else {
+            capture.incomplete = true;
+            break;
+        };
+        match read {
             Ok(0) => {
                 if let Some(raw) = &mut capture.programmatic {
                     raw.eof = true;

@@ -111,7 +111,8 @@ The separate steering transport owns multi-response control and acknowledgement.
 
 Qualified native GPT-6 routes reject sampling/logprob controls with non-Off
 effective reasoning, including model-preset overrides. 6-Sol/Luna Off continues
-to permit sampling; 6.1 Sol has no Off/`none` choice. A third-party model with
+to permit sampling; 6.1 Terra also supports Off/`none` on its public API route,
+while 6.1 Sol has no Off/`none` choice. A third-party model with
 the same name gets no new authority or native-route sampling assumptions.
 
 Deterministic coverage lives in `src/protocol/openai_responses_gpt6_tests.rs`.

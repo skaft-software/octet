@@ -97,6 +97,7 @@ use crate::tui::view::{
 };
 
 mod admission;
+mod command_catalog;
 mod commands;
 mod composition;
 mod confirmation;
@@ -116,6 +117,7 @@ mod provider_runtime;
 mod runtime_state;
 mod status;
 mod summaries;
+mod tool_inference;
 mod transcript_renderers;
 mod trust_policy;
 mod turns;
@@ -138,6 +140,8 @@ pub(crate) use self::runtime_state::ExtensionAutocompleteUpdate;
 pub use self::runtime_state::ExtensionBackgroundUpdates;
 pub use self::runtime_state::ExtensionToolRenderUpdate;
 pub use self::runtime_state::ExtensionTurnLifecycle;
+#[cfg(test)]
+pub(crate) use self::runtime_state::LifecycleDeliveryTestControl;
 use self::runtime_state::*;
 pub use self::summaries::ExtensionLifecycleSnapshot;
 pub use self::summaries::ExtensionOptions;
@@ -150,6 +154,7 @@ use self::summaries::*;
 pub(crate) use self::trust_policy::persistent_host_authority_grant;
 pub(crate) use self::trust_policy::provider_preflight_config;
 pub(crate) use self::trust_policy::selected_extension_flag_declarations;
+pub(crate) use self::trust_policy::selected_extension_flag_declarations_with_resolver;
 use self::trust_policy::*;
 
 /// The first-party extension that owns every in-harness child-session surface.
@@ -350,8 +355,17 @@ pub(crate) struct DeferredExtensionStartup {
     /// Whether a pending `octet-subagents` was admitted with `subagent_spawn`.
     /// Keeps delegation readiness honest while its handshake is in flight.
     agent_sessions_pending: bool,
+    pi_preparation: Option<lifecycle::DeferredPiPreparation>,
     /// Activation tasks; aborting cancels the still-starting processes.
     tasks: Vec<JoinHandle<()>>,
+}
+
+impl Drop for DeferredExtensionStartup {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 /// One settled extension handshake reported by a deferred startup.
@@ -381,6 +395,7 @@ pub(crate) struct DeferredStartupProgress {
 }
 
 pub struct ExecutableExtensions {
+    modeless: bool,
     telemetry: Option<octet_agent::TelemetryObserver>,
     telemetry_rejected: u64,
     /// Recently shown extension notices, so a repeating one is shown once.
@@ -415,10 +430,12 @@ pub struct ExecutableExtensions {
     pending_editor_requests: VecDeque<PendingEditorRequest>,
     pending_host_requests: VecDeque<PendingHostRequest>,
     pending_session_requests: VecDeque<PendingHostRequest>,
+    pending_message_control: Option<(String, octet_agent::RunControl)>,
     pending_session_setup: Option<(u64, octet_agent::extension_process::ExtensionResourceOwner)>,
     // The actual host registry handle, not an adapter-owned tool mirror. Its
     // interior dynamic registry remains usable while the Agent is borrowed.
     tool_host: Option<octet_agent::ExtensionHost>,
+    command_resources: Option<command_catalog::CommandResources>,
     /// The one foreground terminal grant the host can cede, or `None` while the
     /// host still owns its own raw terminal.
     terminal_arbiter: TerminalGrantArbiter,
@@ -431,6 +448,9 @@ pub struct ExecutableExtensions {
     /// Notices drained while a prompt waited on an extension, returned by the
     /// next drain so they still reach the transcript.
     held_messages: Vec<String>,
+    /// Extensions whose prompt/input hooks failed. The user is told once per
+    /// extension; every later prompt just continues without the failed work.
+    degraded_prompt_extensions: std::collections::BTreeSet<String>,
     confirmation_denials: VecDeque<PendingConfirmationDenial>,
     confirmation_tasks: Vec<JoinHandle<()>>,
     input_cancellations: VecDeque<PendingInputCancellation>,
@@ -483,7 +503,8 @@ pub struct ExecutableExtensions {
     /// `None` for every synchronous boot and once a deferred fleet settles.
     deferred_startup: Option<DeferredExtensionStartup>,
     #[cfg(test)]
-    lifecycle_delivery_test_control: Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
+    pub(crate) lifecycle_delivery_test_control:
+        Option<std::sync::Arc<LifecycleDeliveryTestControl>>,
 }
 
 impl Default for ExecutableExtensions {
@@ -521,8 +542,11 @@ impl Default for ExecutableExtensions {
             pending_editor_requests: VecDeque::new(),
             pending_host_requests: VecDeque::new(),
             pending_session_requests: VecDeque::new(),
+            pending_message_control: None,
             pending_session_setup: None,
             tool_host: None,
+            modeless: false,
+            command_resources: None,
             terminal_arbiter: TerminalGrantArbiter::default(),
             remote_ui: remote_ui::RemoteUi::default(),
             remote_ui_wake: None,
@@ -531,6 +555,7 @@ impl Default for ExecutableExtensions {
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,
             held_messages: Vec::new(),
+            degraded_prompt_extensions: std::collections::BTreeSet::new(),
             confirmation_denials: VecDeque::new(),
             confirmation_tasks: Vec::new(),
             input_cancellations: VecDeque::new(),
@@ -570,9 +595,7 @@ impl ExecutableExtensions {
     pub(crate) fn startup_failure_notices(&self) -> Vec<String> {
         self.start_failures
             .iter()
-            .map(|(name, reason)| {
-                format!("extension {name} did not start: {reason} (see /extensions)")
-            })
+            .map(|(name, reason)| startup_failure_notice(name, reason))
             .collect()
     }
 }

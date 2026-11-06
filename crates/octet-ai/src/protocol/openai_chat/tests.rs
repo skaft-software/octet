@@ -1461,3 +1461,370 @@ fn test_build_request_image_input() {
     );
     assert!(content[1]["image_url"]["detail"].is_null());
 }
+
+fn stream_response(model: &Model, frames: &[&str]) -> crate::types::Response {
+    let mut builder = ResponseBuilder::new(model.spec.id.clone(), Protocol::OpenAiChat, None);
+    let mut finished = None;
+    for frame in frames {
+        let sse = SseEvent {
+            event: None,
+            data: (*frame).to_string(),
+        };
+        for event in decode_stream_event(model, &sse, &mut builder).unwrap() {
+            if let StreamEvent::Finished(response) = event {
+                finished = Some(response);
+            }
+        }
+    }
+    finished.expect("stream finished")
+}
+
+fn chat_reasoning_details(message: &AssistantMessage) -> Vec<serde_json::Value> {
+    message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::Reasoning(ReasoningPart {
+                state:
+                    Some(crate::types::ReasoningState {
+                        kind: crate::types::ReasoningStateKind::ChatReasoningDetails { details },
+                        ..
+                    }),
+                ..
+            }) => Some(details.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn replay_after_tool_result(model: &Model, assistant: AssistantMessage) -> serde_json::Value {
+    let request = Request {
+        messages: vec![
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("write the file".into())],
+            }),
+            Message::Assistant(assistant),
+            Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                    tool_call_id: ToolCallId("call_1".into()),
+                    content: vec![ToolResultPart::Text("written".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                })],
+            }),
+        ],
+        tools: vec![crate::types::ToolDef {
+            async_execution: false,
+            constrained_sampling: None,
+            name: "write".to_string(),
+            description: "Write a file".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }],
+        ..base_request()
+    };
+    serde_json::from_slice(&build_request(model, &request).unwrap().body).unwrap()
+}
+
+#[test]
+fn openrouter_gemini_reasoning_details_survive_a_tool_turn() {
+    let model = make_test_model(false, false, false, true, true, false);
+    let response = stream_response(
+        &model,
+        &[
+            r#"{"id":"gen-1","choices":[{"delta":{"role":"assistant","content":"","reasoning":"Plan ","reasoning_details":[{"type":"reasoning.text","text":"Plan ","format":"google-gemini-v1","index":0}]}}]}"#,
+            r#"{"id":"gen-1","choices":[{"delta":{"reasoning":"the write","reasoning_details":[{"type":"reasoning.text","text":"the write","format":"google-gemini-v1","index":0}]}}]}"#,
+            r#"{"id":"gen-1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"path\":\"a.txt\"}"}}],"reasoning_details":[{"type":"reasoning.encrypted","data":"GEMINI-SIGNATURE","id":"call_1","format":"google-gemini-v1","index":1}]}}]}"#,
+            r#"{"id":"gen-1","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            "[DONE]",
+        ],
+    );
+
+    // Streamed text deltas merge into one entry; the signature entry is kept.
+    assert_eq!(
+        chat_reasoning_details(&response.message),
+        vec![
+            serde_json::json!({"type":"reasoning.text","text":"Plan the write","format":"google-gemini-v1","index":0}),
+            serde_json::json!({"type":"reasoning.encrypted","data":"GEMINI-SIGNATURE","id":"call_1","format":"google-gemini-v1","index":1}),
+        ]
+    );
+    let visible = response.message.content.iter().find_map(|part| match part {
+        AssistantPart::Reasoning(reasoning) => reasoning.text.clone(),
+        _ => None,
+    });
+    assert_eq!(visible.as_deref(), Some("Plan the write"));
+
+    let body = replay_after_tool_result(&model, response.message.clone());
+    let assistant = &body["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    // The unsigned Gemini text entry is dropped; the signed one goes back as is.
+    assert_eq!(
+        assistant["reasoning_details"],
+        serde_json::json!([{"type":"reasoning.encrypted","data":"GEMINI-SIGNATURE","id":"call_1","format":"google-gemini-v1","index":1}])
+    );
+    assert_eq!(assistant["reasoning"], "Plan the write");
+    // Reasoning is not replayed as something the model said.
+    assert!(assistant.get("content").is_none(), "{assistant}");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "write");
+
+    // Another model never receives this model's signatures: switching models
+    // keeps the visible reasoning as text and drops the opaque entries.
+    let mut other = make_test_model(false, false, false, true, true, false);
+    Arc::make_mut(&mut other.spec).id = ModelId("other-model".into());
+    let switched =
+        crate::transform::transform_messages(&[Message::Assistant(response.message)], &other);
+    let Message::Assistant(switched) = &switched[0] else {
+        panic!("assistant message");
+    };
+    assert!(chat_reasoning_details(switched).is_empty());
+    let body = replay_after_tool_result(&other, switched.clone());
+    assert!(body["messages"][1].get("reasoning_details").is_none());
+}
+
+#[test]
+fn signed_reasoning_text_keeps_its_late_signature_and_detail_only_streams_show_reasoning() {
+    let model = make_test_model(false, false, false, true, true, false);
+    // No flat `reasoning` field: the visible text comes from the details, and
+    // the Anthropic signature arrives on the last delta.
+    let response = stream_response(
+        &model,
+        &[
+            r#"{"id":"gen-2","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"Think","format":"anthropic-claude-v1","index":0}]}}]}"#,
+            r#"{"id":"gen-2","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"ing","signature":"ANTHROPIC-SIG","format":"anthropic-claude-v1","index":0}]}}]}"#,
+            r#"{"id":"gen-2","choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}"#,
+            "[DONE]",
+        ],
+    );
+    assert_eq!(
+        chat_reasoning_details(&response.message),
+        vec![
+            serde_json::json!({"type":"reasoning.text","text":"Thinking","format":"anthropic-claude-v1","index":0,"signature":"ANTHROPIC-SIG"})
+        ]
+    );
+    assert!(response.message.content.iter().any(|part| matches!(
+        part,
+        AssistantPart::Reasoning(ReasoningPart { text: Some(text), .. }) if text == "Thinking"
+    )));
+    let request = Request {
+        messages: vec![
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("think".into())],
+            }),
+            Message::Assistant(response.message),
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("again".into())],
+            }),
+        ],
+        ..base_request()
+    };
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+    assert_eq!(
+        body["messages"][1]["reasoning_details"][0]["signature"],
+        "ANTHROPIC-SIG"
+    );
+    assert_eq!(body["messages"][1]["reasoning"], "Thinking");
+    assert_eq!(body["messages"][1]["content"], "Done.");
+}
+
+#[test]
+fn encrypted_only_reasoning_details_attach_to_an_empty_reasoning_part() {
+    let model = make_test_model(false, false, false, true, true, false);
+    let response = stream_response(
+        &model,
+        &[
+            r#"{"id":"gen-3","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write","arguments":"{}"}}]}}]}"#,
+            r#"{"id":"gen-3","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","data":"SIG","format":"google-gemini-v1"}]},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ],
+    );
+    assert!(response.message.content.iter().any(|part| matches!(
+        part,
+        AssistantPart::Reasoning(ReasoningPart {
+            text: None,
+            state: Some(_)
+        })
+    )));
+    let body = replay_after_tool_result(&model, response.message);
+    assert_eq!(body["messages"][1]["reasoning_details"][0]["data"], "SIG");
+    assert!(body["messages"][1].get("reasoning").is_none());
+}
+
+#[test]
+fn completed_chat_responses_keep_reasoning_details() {
+    let model = make_test_model(false, false, false, true, true, false);
+    let body = serde_json::json!({
+        "id": "gen-4",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "reasoning": "Plan",
+                "reasoning_details": [
+                    {"type":"reasoning.encrypted","data":"SIG","id":"call_1","format":"google-gemini-v1"}
+                ],
+                "tool_calls": [{"id":"call_1","type":"function","function":{"name":"write","arguments":"{}"}}]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let response = decode_response(&model, &serde_json::to_vec(&body).unwrap(), None).unwrap();
+    assert_eq!(
+        chat_reasoning_details(&response.message),
+        vec![
+            serde_json::json!({"type":"reasoning.encrypted","data":"SIG","id":"call_1","format":"google-gemini-v1"})
+        ]
+    );
+    let replay = replay_after_tool_result(&model, response.message);
+    assert_eq!(replay["messages"][1]["reasoning_details"][0]["data"], "SIG");
+    assert_eq!(replay["messages"][1]["reasoning"], "Plan");
+}
+
+#[test]
+fn custom_chat_profile_preserves_authority_and_projects_role_cap_and_strict_tools() {
+    for supports_developer_role in [false, true] {
+        for use_max_tokens in [false, true] {
+            for supports_strict_mode in [false, true] {
+                let profile = crate::CustomOpenAiChatProfile {
+                    supports_developer_role,
+                    use_max_tokens,
+                    supports_strict_mode,
+                };
+                let mut model = make_test_model(false, false, false, true, true, false);
+                Arc::make_mut(&mut model.endpoint)
+                    .runtime
+                    .openai_chat_profile = crate::OpenAiChatRuntimeProfile::PiCustom(profile);
+                let request = Request {
+                    system: Some("actual native system".into()),
+                    messages: vec![Message::User(UserMessage {
+                        content: vec![UserPart::Text("actual native user".into())],
+                    })],
+                    session_id: Some("actual-native-session".into()),
+                    max_output_tokens: Some(1000),
+                    tools: vec![ToolDef {
+                        name: "native_tool".into(),
+                        description: "native definition".into(),
+                        parameters: serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}),
+                        async_execution: false,
+                        constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                            strict: crate::ConstrainedSamplingStrict::Prefer,
+                        }),
+                    }],
+                    ..base_request()
+                };
+                let before = serde_json::to_value(&request).unwrap();
+                let spec = model.spec.clone();
+                let parts = build_request(&model, &request).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+                assert_eq!(
+                    body["messages"][0]["role"],
+                    if supports_developer_role {
+                        "developer"
+                    } else {
+                        "system"
+                    }
+                );
+                assert_eq!(body["messages"][0]["content"], "actual native system");
+                assert_eq!(body["model"], model.spec.api_name);
+                assert_eq!(body["tool_choice"], "auto");
+                assert_eq!(
+                    body[if use_max_tokens {
+                        "max_tokens"
+                    } else {
+                        "max_completion_tokens"
+                    }],
+                    1000
+                );
+                assert!(body
+                    .get(if use_max_tokens {
+                        "max_completion_tokens"
+                    } else {
+                        "max_tokens"
+                    })
+                    .is_none());
+                let tool = &body["tools"][0]["function"];
+                assert_eq!(tool["name"], "native_tool");
+                if supports_strict_mode {
+                    assert_eq!(tool["strict"], true);
+                    assert_eq!(tool["parameters"]["additionalProperties"], false);
+                } else {
+                    assert!(tool.get("strict").is_none());
+                    assert_eq!(tool["parameters"], request.tools[0].parameters);
+                }
+                assert_eq!(serde_json::to_value(&request).unwrap(), before);
+                assert_eq!(
+                    serde_json::to_value(&*model.spec).unwrap(),
+                    serde_json::to_value(&*spec).unwrap()
+                );
+                let uncapped = Request {
+                    max_output_tokens: None,
+                    ..request
+                };
+                let body: serde_json::Value =
+                    serde_json::from_slice(&build_request(&model, &uncapped).unwrap().body)
+                        .unwrap();
+                assert!(body.get("max_tokens").is_none());
+                assert!(body.get("max_completion_tokens").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn custom_chat_profile_cannot_silently_downgrade_required_strict_sampling() {
+    let mut model = make_test_model(false, false, false, true, false, false);
+    Arc::make_mut(&mut model.endpoint)
+        .runtime
+        .openai_chat_profile =
+        crate::OpenAiChatRuntimeProfile::PiCustom(crate::CustomOpenAiChatProfile {
+            supports_developer_role: false,
+            use_max_tokens: true,
+            supports_strict_mode: false,
+        });
+    let request = Request {
+        tools: vec![ToolDef {
+            name: "required_strict".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}),
+            async_execution: false,
+            constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                strict: crate::ConstrainedSamplingStrict::Require,
+            }),
+        }],
+        ..base_request()
+    };
+    assert!(matches!(
+        build_request(&model, &request),
+        Err(AiError::Unsupported(
+            crate::error::UnsupportedError::ConstrainedSampling(_)
+        ))
+    ));
+}
+
+#[test]
+fn custom_chat_profile_is_a_strict_three_boolean_boundary() {
+    let profile = serde_json::json!({"supports_developer_role":false,"use_max_tokens":true,"supports_strict_mode":false});
+    assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(profile.clone()).is_ok());
+    for field in [
+        "supports_developer_role",
+        "use_max_tokens",
+        "supports_strict_mode",
+    ] {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::json!({}),
+        ] {
+            let mut malformed = profile.clone();
+            malformed[field] = value;
+            assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(malformed).is_err());
+        }
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(missing).is_err());
+    }
+    let mut unknown = profile;
+    unknown["max_output_tokens"] = serde_json::json!(99999);
+    assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(unknown).is_err());
+}

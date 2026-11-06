@@ -12,6 +12,12 @@ pub(in crate::extension_process) struct Receipt<'a> {
     pub previous_revision: u64,
     pub view_revision: u64,
     pub previous_head: Option<String>,
+    /// Host-written config entries (model/thinking selections) committed on
+    /// this parent's branch after its pinned head, oldest first. The receipt
+    /// chains `previous_head -> gap.. -> entry` so the parent's view stays
+    /// exact; omitted when the pin was already current.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gap: Vec<visible::VisibleEntry<'a>>,
 }
 
 pub(in crate::extension_process) fn fits(
@@ -61,10 +67,12 @@ pub(in crate::extension_process) fn fits(
         entry: visible::VisibleEntry {
             entry: &entry,
             namespace,
+            usage: None,
         },
         previous_revision: MAX_SAFE,
         view_revision: MAX_SAFE,
         previous_head: current.expected_head,
+        gap: Vec::new(),
     };
     // Maximum legal child ID, not merely the present ID. All escaped UTF-8
     // record fields are counted by the same serializer used for the real reply.

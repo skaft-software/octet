@@ -123,22 +123,21 @@ export function piThemeToNativeToml(input) {
   const native = value => value === '' ? 'default' : typeof value === 'number' ? `index:${value}` : colorToHex(parseColor(value));
   const lines = ['# Partial palette projection from Pi JSON; not Pi theme format.', '[metadata]',
     `name = ${JSON.stringify(palette.name)}`, 'description = "Pi colors and shaded transcript surfaces; native input and ownership"',
-    `terminal = ${JSON.stringify(palette.appearance ?? 'any')}`, 'adaptive = false', '', '[colors]'];
+    `terminal = ${JSON.stringify(palette.appearance ?? 'any')}`, 'adaptive = false', 'profile = "pi"', '', '[colors]'];
   for (const [pi, octet] of Object.entries(nativeTokenProjection)) lines.push(`${octet} = ${JSON.stringify(native(palette.colors[pi]))}`);
-  lines.push('prompt_wash = false', 'margin_markers = false', 'thinking_spinner = true', 'thinking_expanded = true', 'splash_compact = true',
-    `assistant_msg_text = ${JSON.stringify(native(palette.colors.text))}`, `model_assistant = ${JSON.stringify(native(palette.colors.text))}`,
-    `model_accent = ${JSON.stringify(native(palette.colors.accent))}`, 'md_code_bg = "default"', 'md_code_inline_bg = "default"',
-    '', '[model]', 'use_lab_color = false', '', '[layout]', 'transcript_inset = 0');
+  lines.push(`assistant_msg_text = ${JSON.stringify(native(palette.colors.text))}`, `model_assistant = ${JSON.stringify(native(palette.colors.text))}`,
+    `model_accent = ${JSON.stringify(native(palette.colors.accent))}`);
   for (const [kind, fg, bg] of [
     ['user', 'userMessageText', 'userMessageBg'], ['assistant', 'text', null], ['reasoning', 'thinkingText', null],
     ['tool', 'toolOutput', 'toolPendingBg'], ['shell', 'toolOutput', 'toolPendingBg'],
   ]) {
-    const chrome = ['user', 'tool', 'shell'].includes(kind) ? 'band' : 'plain';
-    const padding = kind === 'reasoning' ? 0 : 1;
     lines.push('', `[roles."surface.${kind}"]`, `foreground = ${JSON.stringify(native(palette.colors[fg]))}`,
-      `background = ${JSON.stringify(bg ? native(palette.colors[bg]) : 'default')}`, '', `[surfaces.${kind}]`,
-      `chrome = "${chrome}"`, `padding = ${padding}`, `narrow_chrome = "${chrome}"`, `narrow_padding = ${padding}`);
+      `background = ${JSON.stringify(bg ? native(palette.colors[bg]) : 'default')}`);
   }
+  for (const kind of ['tool', 'shell']) for (const [state, bg] of [
+    ['pending', 'toolPendingBg'], ['success', 'toolSuccessBg'], ['error', 'toolErrorBg'],
+  ]) lines.push('', `[roles."surface.${kind}.${state}"]`,
+    `foreground = ${JSON.stringify(native(palette.colors.toolOutput))}`, `background = ${JSON.stringify(native(palette.colors[bg]))}`);
   for (const token of tokens) lines.push('', `[roles."extension.pi.${token}"]`,
     `${backgroundTokens.includes(token) ? 'background' : 'foreground'} = ${JSON.stringify(native(palette.colors[token]))}`);
   const toml = lines.join('\n') + '\n';

@@ -27,13 +27,13 @@ use octet_agent::{
 use octet_ai::{Model, ModelId, ReasoningConfig, ReasoningMode, ToolCallId};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-#[cfg(test)]
-use crate::app::bootstrap::build_app_with_resource_consumer as build_app;
 use crate::app::bootstrap::{
     build_app_first_frame_first, effective_compaction_threshold_fraction, estimate_text_tokens,
-    open_launch_session, rebuild_app, resolve_launch_interactive, terminal_goal_session_id,
-    Bootstrap, SessionSelection,
+    open_launch_session, rebuild_app_for_reload, resolve_launch_interactive,
+    terminal_goal_session_id, Bootstrap, SessionSelection,
 };
+#[cfg(test)]
+use crate::app::bootstrap::{build_app_with_resource_consumer as build_app, rebuild_app};
 use crate::app::{
     apply_reconfig, level_from_reasoning, reasoning_label, requested_thinking_to_reasoning,
     supported_levels_with_subagents, App, Reconfig,
@@ -74,6 +74,7 @@ use crate::tui::view::{
 
 mod extension_menu;
 mod model_controls;
+mod modeless;
 mod onboarding;
 mod provider_removal;
 mod session_tree_menu;
@@ -576,6 +577,9 @@ pub enum PendingIdleAction {
     /// Display is already changed; only config synchronization/persistence waits.
     SyncTheme(String),
     SyncImages(bool),
+    /// The screen and preference already changed. Retain each exact write until
+    /// the idle reload owner can acknowledge it; receipt chains never coalesce.
+    AcknowledgeTuiPreference(crate::reload::AppliedConfigWrite),
     /// `/scoped-models` mutations that must own the application catalog and the
     /// shell's cycling list. Reports are rendered immediately instead.
     ScopedModels(commands::ScopedModelsCommand),
@@ -584,8 +588,8 @@ pub enum PendingIdleAction {
 }
 
 /// Push an idle action while preserving ordering barriers. Adjacent model or
-/// thinking changes and preference writes collapse to the latest request;
-/// sessions and compaction do not collapse or disappear.
+/// thinking changes and preference intents collapse to the latest request;
+/// sessions, compaction, and checked write receipts never collapse or disappear.
 pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: PendingIdleAction) {
     let same_kind = matches!(
         (&queue.back(), &action),
@@ -659,6 +663,9 @@ where
 {
     let mut scroll_dirty = false;
     let mut cache_warming_failed = false;
+    let mut delegation_telemetry = agent
+        .as_deref()
+        .and_then(octet_agent::Agent::delegation_telemetry);
     let remote_ui_wake = executable_extensions.remote_ui_wake();
     loop {
         executable_extensions.sync_editor_autocomplete(shell);
@@ -740,12 +747,9 @@ where
                         },
                     }
                 }
-                if let Some(shortcut) = executable_extensions.dispatch_shortcut_for_event(&event) {
-                    shell.notice(format!(
-                        "running extension shortcut {}: {}",
-                        shortcut.extension, shortcut.description
-                    ));
-                    shell.render();
+                if executable_extensions.dispatch_shortcut_for_event(&event).is_some() {
+                    // Shortcuts report their actual result through background updates.
+                    // Routine controls must not create a transcript row on dispatch.
                     continue;
                 }
                 // The clipboard gesture is resolved before translation: the
@@ -864,8 +868,10 @@ where
             } => return Ok(Idle::GoalContinuation),
             _ = crate::extensions::remote_ui::notified(&remote_ui_wake) => {
                 if apply_extension_background(shell, executable_extensions) { shell.render(); }
+                if executable_extensions.is_modeless() { return Ok(Idle::ExtensionWake); }
             }
             _ = extension_tick.tick() => {
+                if executable_extensions.is_modeless() { return Ok(Idle::ExtensionWake); }
                 if executable_extensions.startup_pending() {
                     // The outer loop owns `&mut App` and the shell: it installs
                     // settled handshakes, re-projects what they contribute, and
@@ -935,6 +941,20 @@ where
                 }
                 if reload.is_due(now) {
                     return Ok(Idle::ReloadDue);
+                }
+            }
+            snapshot = async {
+                let receiver = delegation_telemetry.as_mut().expect("delegation observer");
+                receiver.changed().await.ok()?;
+                receiver.borrow_and_update().clone()
+            }, if delegation_telemetry.is_some() => {
+                match snapshot {
+                    Some(snapshot) => {
+                        if shell.set_subagent_telemetry(Some(&snapshot), true) {
+                            shell.render();
+                        }
+                    }
+                    None => delegation_telemetry = None,
                 }
             }
             warm = async {
@@ -1342,7 +1362,7 @@ where
 
 fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
     if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
-        shell.cancel_thinking_submission("thinking change interrupted");
+        shell.cancel_thinking_submission("interrupted");
         shell.request_close();
         return true;
     }
@@ -1366,11 +1386,11 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => {
-            shell.cancel_thinking_submission("thinking change interrupted");
+            shell.cancel_thinking_submission("interrupted");
             return true;
         }
         InputAction::Closed => {
-            shell.cancel_thinking_submission("thinking change interrupted");
+            shell.cancel_thinking_submission("interrupted");
             shell.request_close();
             return true;
         }
@@ -1388,15 +1408,14 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::CompletePath => shell.complete_path(),
         InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
         InputAction::Queue(_) | InputAction::Steer(_) | InputAction::Submit(_) => {
-            if !shell.queue_thinking_submission() {
-                // Other operations have no pending submission owner. Commands
-                // and shell escapes are never admitted as delayed model input.
-                shell.notice("operation in progress · draft kept for the next prompt");
+            // An ordinary prompt is latched once and sent when the wait ends,
+            // so Enter never has to be repeated. Commands and shell escapes are
+            // never admitted as delayed model input; a repeat Enter stays silent.
+            if !shell.queue_thinking_submission() && !shell.thinking_submission_pending() {
+                shell.notice("busy · draft kept");
             }
         }
-        InputAction::Command(_) => {
-            shell.notice("operation in progress · draft kept for the next prompt")
-        }
+        InputAction::Command(_) => shell.notice("busy · draft kept"),
         InputAction::Close => shell.clear_error(),
         _ => return false,
     }
@@ -1825,19 +1844,30 @@ where
     .await
 }
 
-/// Diagnostic names for silent startup work. They never render: the startup
-/// composer stays typeable without branding until readiness; a name appears
-/// only in a worker-failure, cancellation, or shutdown diagnostic.
+/// Diagnostic names for startup work. Ordinary startup stays unbranded;
+/// explicitly enabled Pi setup preparation also gets a visible loading label.
 const STARTUP_MODELS_OPERATION: &str = "model discovery";
 const STARTUP_APP_OPERATION: &str = "startup build";
+const STARTUP_PI_APP_OPERATION: &str = "Pi setup preparation";
 const STARTUP_SESSION_OPERATION: &str = "session open";
 
-/// Run one bounded startup phase with no status text and a typeable composer.
-///
-/// Startup shows nothing: no phase label, no progress notice. Keystrokes are
-/// still accepted and buffered into the draft from the first frame, and the
-/// phase durations stay attributable off-screen through
-/// `OCTET_STARTUP_TRACE=1` (`crate::app::bootstrap::startup_phase`).
+fn startup_app_operation(config: &Config) -> &'static str {
+    if config.start_extension_processes
+        && config.sandbox.process_execution_allowed()
+        && config
+            .enabled_extensions
+            .iter()
+            .any(|name| name == "octet-pi-compat")
+    {
+        STARTUP_PI_APP_OPERATION
+    } else {
+        STARTUP_APP_OPERATION
+    }
+}
+
+/// Run one startup phase with a typeable composer. Pi preparation is named on
+/// screen because cold registration capture can take tens of seconds. Other
+/// phases retain silent startup; phase durations stay in `OCTET_STARTUP_TRACE`.
 pub(crate) async fn run_blocking_startup_lifecycle<T, W, S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -1850,11 +1880,14 @@ where
     W: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
     let task = tokio::task::spawn_blocking(work);
-    await_lifecycle(shell, input, "", async move {
+    let label = if operation == STARTUP_PI_APP_OPERATION {
+        "Loading your Pi setup…"
+    } else {
+        ""
+    };
+    await_lifecycle(shell, input, label, async move {
         task.await
             .map_err(|error| anyhow::anyhow!("{operation} worker failed: {error}"))?
-            // Nothing rendered, so the operation name is the only attribution a
-            // failed startup phase carries.
             .map_err(|error| anyhow::anyhow!("{operation} failed: {error}"))
     })
     .await
@@ -1891,10 +1924,13 @@ fn codex_login_document(progress: &crate::auth::codex::LoginProgress) -> String 
                 crate::auth::codex::DEVICE_VERIFICATION_URI,
             )
         }
+        LoginProgress::Exchanging => "Authorization received; exchanging for the private credential…".to_owned(),
         LoginProgress::Saving => "Authorization received; waiting to save the private credential…".to_owned(),
         LoginProgress::SignedIn => "Signed in to ChatGPT. The credential has been saved.".to_owned(),
     };
-    format!("{body}\n\nClose this sheet to cancel while authorization is pending. Ctrl+C also cancels. Your conversation draft is kept.")
+    format!(
+        "{body}\n\nClose this sheet to cancel while authorization is pending. Ctrl+C also cancels. Your conversation draft is kept."
+    )
 }
 
 /// This is a cancellation-safe, frontend-owned OAuth future, not lifecycle work:
@@ -1918,6 +1954,8 @@ where
         scroll_from_bottom: 0,
     });
     shell.set_run_label("signing in to ChatGPT…");
+    shell.begin_terminal_operation();
+    shell.set_terminal_auth_progress(&progress.borrow());
     shell.render();
     let mut operation = Box::pin(operation);
     let mut progress_open = true;
@@ -1972,6 +2010,7 @@ where
                     progress_open = false;
                 } else {
                     shell.update_read_only_document(codex_login_document(&progress.borrow_and_update()));
+                    shell.set_terminal_auth_progress(&progress.borrow());
                     shell.render();
                 }
             }
@@ -1981,6 +2020,11 @@ where
     drop(operation);
     shell.close_panel();
     shell.set_run_label("idle");
+    if matches!(outcome, Ok(Some(()))) {
+        shell.set_terminal_auth_progress(&LoginProgress::SignedIn);
+    } else {
+        shell.finish_terminal_auth(&outcome);
+    }
     shell.request_tern_focus_resync();
     shell.render();
     outcome
@@ -2010,7 +2054,11 @@ where
     .await
     {
         Ok(Some(())) if !shell.close_requested() => {}
-        Ok(Some(())) => return Ok(None),
+        Ok(Some(())) => {
+            shell.finish_terminal_operation(true);
+            shell.render();
+            return Ok(None);
+        }
         Ok(None) => {
             shell.notice("ChatGPT login cancelled; no credential was saved");
             shell.render();
@@ -2023,10 +2071,9 @@ where
         }
     }
 
-    let catalog = match run_blocking_lifecycle(
+    let catalog = match reload_codex_login_catalog(
         shell,
         input,
-        "reloading models…",
         crate::app::bootstrap::model_catalog,
     )
     .await
@@ -2040,15 +2087,32 @@ where
             return Ok(None);
         }
     };
-    if !catalog
-        .models()
-        .any(|model| model.endpoint.0 == crate::auth::codex::ENDPOINT_ID)
-    {
-        shell.error("ChatGPT login completed, but no Codex models could be registered".into());
-        shell.render();
-        return Ok(None);
-    }
     Ok(Some(catalog))
+}
+
+async fn reload_codex_login_catalog<S, W>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    work: W,
+) -> anyhow::Result<octet_ai::ModelCatalog>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    W: FnOnce() -> anyhow::Result<octet_ai::ModelCatalog> + Send + 'static,
+{
+    let result = run_blocking_lifecycle(shell, input, "reloading models…", work)
+        .await
+        .and_then(|catalog| {
+            if !catalog
+                .models()
+                .any(|model| model.endpoint.0 == crate::auth::codex::ENDPOINT_ID)
+            {
+                anyhow::bail!("no Codex models could be registered");
+            }
+            Ok(catalog)
+        });
+    shell.finish_terminal_operation(result.is_ok());
+    shell.render();
+    result
 }
 
 /// Keep sign-in native, then make the new models available immediately without
@@ -2534,11 +2598,13 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
                 | commands::ExtensionsSubcommand::Status
                 | commands::ExtensionsSubcommand::Inspect { .. }
         ),
-        // Only the display settings keep a deferred step: the preference write
-        // that follows an immediate theme or image change.
+        // Display settings retain a deferred write or checked acknowledgement.
+        // Reserve capacity before changing either the screen or its preference.
         Command::Settings(sub) => matches!(
             sub,
-            commands::SettingsCommand::Theme(Some(_)) | commands::SettingsCommand::Images(Some(_))
+            commands::SettingsCommand::Theme(Some(_))
+                | commands::SettingsCommand::Images(Some(_))
+                | commands::SettingsCommand::TuiMode(Some(_))
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
         Command::Model(None)
@@ -2664,9 +2730,9 @@ fn settle_active_thinking(
             &display,
         );
         shell.notice(if applied {
-            format!("thinking {label} applied at the host response boundary; not provider acknowledgement")
+            format!("thinking: {label}")
         } else {
-            format!("thinking {label} queued for the next idle boundary; active request unchanged")
+            format!("thinking: {label} · next turn")
         });
     }
 }
@@ -3045,7 +3111,7 @@ where
             // dispatcher — but their current state renders now.
             shell.show_overlay_text(extensions.inspect_text());
             push_pending_action(queue, PendingIdleAction::Extensions(sub));
-            shell.notice("extension action queued for the next idle boundary");
+            shell.notice("extension action queued; it runs when the current response finishes");
         }
         Command::Fast(requested) => {
             if fast_route_available(shell, &inspection.model) {
@@ -3155,7 +3221,11 @@ where
                 commands::SettingsCommand::QueueMode(kind, Some(mode)) => {
                     save_queue_mode(shell, extensions, inspection.cache_warming_control.as_ref(), kind, mode).await;
                 }
-                commands::SettingsCommand::TuiMode(Some(mode)) => save_tui_mode(shell, extensions, mode).await,
+                commands::SettingsCommand::TuiMode(Some(mode)) => {
+                    if let Some(write) = save_tui_mode(shell, extensions, mode).await {
+                        push_pending_action(queue, PendingIdleAction::AcknowledgeTuiPreference(write));
+                    }
+                }
                 commands::SettingsCommand::DefaultModel(None) => shell.notice(format!(
                     "default model for new sessions: {}",
                     inspection
@@ -3267,7 +3337,9 @@ where
                 } else {
                     format!("unknown command: {text}")
                 });
-            } else if commands::is_reserved_slash_command_name(name) {
+            } else if commands::is_reserved_slash_command_name(name)
+                && !extensions.shadows_native_command(name)
+            {
                 shell.error(format!("invalid syntax for built-in command: {text}"));
             } else if let Some(owner) = extensions.command_owner(name) {
                 if name == "subagents" {
@@ -3286,7 +3358,9 @@ where
                             arguments,
                         },
                     );
-                    shell.notice("extension command queued for the next idle boundary");
+                    shell.notice(
+                        "extension command queued; it runs when the current response finishes",
+                    );
                 }
             } else if shell.has_prompt_template(name) {
                 shell.queue_follow_up(ComposedInput::from_text(text));
@@ -3527,6 +3601,7 @@ impl ActiveToolInteraction {
     fn open(&self, shell: &mut InteractiveShell) {
         match &self.request {
             ActiveToolRequest::Confirmation(request) => {
+                shell.set_terminal_permission_pending(true);
                 Self::open_confirmation(request, shell);
             }
             ActiveToolRequest::Input(request, _) => {
@@ -3849,6 +3924,7 @@ where
     let run_id = shell
         .current_run_id()
         .ok_or_else(|| anyhow::anyhow!("cannot drive a run without presentation state"))?;
+    executable_extensions.bind_pending_message_control(control);
     let mut intents = VecDeque::<ControlIntent>::new();
     let mut in_flight: Option<ControlFuture> = None;
     // Loop-owned, not spawned: dropping this future also drops the helper's
@@ -3909,6 +3985,7 @@ where
             extension_menu.cancel();
             extension_collection = None;
         }
+        executable_extensions.refresh_frontend_pending_messages(shell);
         executable_extensions.sync_editor_autocomplete(shell);
         if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {
             shell.render();
@@ -3939,6 +4016,7 @@ where
             clipboard_fallback = None;
             if !interactions.is_empty() {
                 interactions.clear();
+                shell.set_terminal_permission_pending(false);
                 shell.close_panel();
                 shell.set_tool_input_prompt(None);
             }
@@ -4022,7 +4100,7 @@ where
                                     &inspection.model.spec.id.0,
                                     &format!("{label} (queued)"),
                                 );
-                                shell.notice(format!("thinking {label} queued for the next response boundary; not provider acknowledgement"));
+                                shell.notice(format!("thinking: {label} · next turn"));
                             }
                         }
                         Err(error) if selected_reasoning == reasoning => {
@@ -4095,7 +4173,9 @@ where
                 subagent_refresh = None;
                 let error = result.and_then(Result::err).map(|error| format!("subagent view live refresh failed; showing the last accepted state: {error}"));
                 if error != subagent_refresh_error {
-                    if let Some(error) = error.as_ref() { shell.notice(error.clone()); }
+                    if let Some(error) = error.as_ref() {
+                        executable_extensions.record_subagent_refresh_error(error);
+                    }
                     subagent_refresh_error = error;
                 }
                 apply_extension_background(shell, executable_extensions);
@@ -4200,6 +4280,7 @@ where
                 if let Some(interaction) = interactions.front_mut().filter(|_| !clipboard_replay) {
                     if interaction.input(shell, &event) {
                         interactions.pop_front();
+                        shell.set_terminal_permission_pending(false);
                         if let Some(next) = interactions.front() { next.open(shell); }
                     }
                     shell.render();
@@ -4264,7 +4345,7 @@ where
                                             shell.error("command queue is full; extension unchanged".into());
                                         } else {
                                             push_pending_action(pending_actions, PendingIdleAction::ExtensionMenuEffect(Box::new(effect)));
-                                            shell.notice("extension action queued for the next idle boundary; approval and eligibility are checked there");
+                                            shell.notice("extension action queued; it runs when the current response finishes");
                                         }
                                     }
                                 }
@@ -4406,12 +4487,8 @@ where
                         },
                     }
                 }
-                if let Some(shortcut) = (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten() {
-                    shell.notice(format!(
-                        "running extension shortcut {}: {}",
-                        shortcut.extension, shortcut.description
-                    ));
-                    shell.render();
+                if (!clipboard_replay).then(|| executable_extensions.dispatch_shortcut_for_event(&event)).flatten().is_some() {
+                    // As at idle, only actual shortcut results belong in the transcript.
                     continue;
                 }
                 // Keep polling input and the run while a native helper waits.
@@ -4585,7 +4662,7 @@ where
                             shell.render();
                             continue;
                         }
-                        let parsed = commands::parse(&text);
+                        let parsed = executable_extensions.parse_command(&text);
                         let prompt_template = match &parsed {
                             Command::Prompt(Some(_)) => true,
                             Command::Unknown(text) => split_prompt_invocation(text).is_some_and(|(name, _)| {
@@ -4615,7 +4692,7 @@ where
                             shell.render();
                             continue;
                         }
-                        let command = commands::parse(&shell.consume_command_text(text));
+                        let command = executable_extensions.parse_command(&shell.consume_command_text(text));
                         if let Command::Thinking(Some(level)) = &command {
                             let requested = ThinkingLevel::parse(level).and_then(|level| requested_thinking_to_reasoning(
                                 level, &inspection.model, inspection.subagents_available,
@@ -4641,7 +4718,7 @@ where
                                         selected_reasoning = reasoning.clone();
                                         shell.set_identity(&inspection.model.endpoint.id.0, &inspection.model.spec.id.0,
                                             &format!("{} (queued)", reasoning_label(&reasoning)));
-                                        shell.notice("thinking change queued for the next idle boundary");
+                                        shell.notice(format!("thinking: {} · next turn", reasoning_label(&reasoning)));
                                     } else {
                                         shell.error("command queue is full; thinking unchanged".into());
                                     }
@@ -4855,7 +4932,7 @@ where
                                 if model_controls::acknowledge_response_boundary(pending_actions, &reasoning) {
                                     executable_extensions.refresh_host_state(&session, &inspection.model, &reasoning, &inspection.sessions);
                                     shell.set_pending_controls(model_controls::queue_labels(pending_actions));
-                                    shell.notice(format!("thinking {} applied at the host response boundary; not provider acknowledgement", reasoning_label(&reasoning)));
+                                    shell.notice(format!("thinking: {}", reasoning_label(&reasoning)));
                                 }
                             }
                         }
@@ -4889,6 +4966,7 @@ where
                         let was_front = interactions.front().is_some_and(|request| &request.id == id);
                         interactions.retain(|request| &request.id != id);
                         if was_front {
+                            shell.set_terminal_permission_pending(false);
                             shell.close_panel(); shell.set_tool_input_prompt(None);
                             if let Some(next) = interactions.front() { next.open(shell); }
                         }
@@ -4962,6 +5040,7 @@ where
                         extension_collection = None;
                         settle_active_thinking(shell, inspection, pending_actions);
                         interactions.clear();
+                        shell.set_terminal_permission_pending(false);
                         shell.close_panel();
                         shell.set_tool_input_prompt(None);
                         // The renderer is asynchronous and coalesces requests.
@@ -4993,6 +5072,7 @@ where
                     extension_collection = None;
                     settle_active_thinking(shell, inspection, pending_actions);
                     interactions.clear();
+                    shell.set_terminal_permission_pending(false);
                     shell.close_panel();
                     shell.set_tool_input_prompt(None);
                     assistant_message.settle(executable_extensions);
@@ -5555,18 +5635,32 @@ where
     app.executable_extensions
         .revoke_terminal_grant_for_shell(shell, "the application resources are being reloaded");
     let _diagnostics = crate::output::defer_tui_diagnostics();
-    let background = shell.theme().background();
+    let current_theme = shell.theme();
+    let background = current_theme.background();
     let mut app = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
         app.system_tokens = estimate_text_tokens(&app.system);
-        let mut app = rebuild_app(app, None, None, None, None)?;
+        let mut app = rebuild_app_for_reload(app)?;
         app.mark_resource_paths_reload();
         Ok(app)
     })
     .await?;
-    let problems = resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
-    shell.set_theme(load_theme_for_background(&app.config, background));
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
+    let mut problems =
+        resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
+    let (theme, problem) = crate::tui::theme::retain_invalid_file_theme(
+        &app.config,
+        &current_theme,
+        load_theme_for_background(&app.config, background),
+    );
+    if let Some(problem) = problem {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+    shell.set_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.reload_keybindings();
     app.executable_extensions
@@ -5574,8 +5668,6 @@ where
     shell.hydrate(app.agent.session())?;
     // After hydration: it rebuilds the transcript, which would drop the note.
     shell.report_reload_outcome(&problems, announce_success);
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
     update_status(shell, &app);
     Ok((app, true))
 }
@@ -6855,10 +6947,10 @@ fn refresh_subagent_snapshot<'a, 'extensions>(
                 "subagent view live refresh failed; showing the last accepted state: {error}"
             )),
         };
-        let mut notices = context.extensions.drain_events();
+        let notices = context.extensions.drain_events();
         if refresh_error != context.last_error {
             if let Some(error) = refresh_error.as_ref() {
-                notices.push(error.clone());
+                context.extensions.record_subagent_refresh_error(error);
             }
             context.last_error = refresh_error;
         }
@@ -7332,6 +7424,8 @@ fn select_idle_thinking(app: &mut App, reasoning: ReasoningConfig) -> anyhow::Re
             .select_model_at_idle(app.model.clone(), reasoning, label)?;
     }
     app.reasoning = app.agent.reasoning().clone();
+    // A chosen effort must outrank Pi's default on every later /reload.
+    app.keep_thinking_choice();
     app.executable_extensions.refresh_host_state(
         app.agent.session(),
         &app.model,
@@ -7534,18 +7628,44 @@ where
     // later rebuilds and stay authoritative over session-only resource
     // contributions (for example a mirrored Pi default model).
     let explicit_model_change = matches!(&reconfig, Reconfig::Model(_));
-    let mut app = run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
-        apply_reconfig(app, reconfig)
-    })
-    .await?;
+    let explicit_reasoning_change = matches!(
+        &reconfig,
+        Reconfig::Thinking(_) | Reconfig::ThinkingMode { .. }
+    );
+    let in_place = if let Reconfig::Model(id) = &reconfig {
+        match crate::app::try_apply_model_reconfig(&mut app, id) {
+            Ok(selected) => selected,
+            Err(error) => {
+                shell.error(format!("model unchanged: {error}"));
+                return Ok(app);
+            }
+        }
+    } else {
+        false
+    };
+    let mut app = if in_place {
+        app
+    } else {
+        run_blocking_lifecycle(shell, input, "reconfiguring…", move || {
+            apply_reconfig(app, reconfig)
+        })
+        .await?
+    };
     if explicit_model_change {
-        app.config.model_explicit = true;
+        app.keep_model_choice();
     }
-    refresh_resource_paths(&mut app, shell, input).await?;
-    shell.hydrate(app.agent.session())?;
-    let session_id = herdr_session_id(&app);
-    if session_id != previous_session_id {
-        shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+    if explicit_reasoning_change {
+        app.keep_thinking_choice();
+    }
+    if !in_place {
+        refresh_resource_paths(&mut app, shell, input).await?;
+        shell.hydrate(app.agent.session())?;
+        let session_id = herdr_session_id(&app);
+        if session_id != previous_session_id {
+            shell.herdr_session_changed(session_id, start_source, herdr_launch_scope(&app));
+        }
+        app.executable_extensions
+            .activate_session_lifecycle_driver();
     }
     // Model and thinking changes are acknowledged by stable chrome, not a
     // duplicate transcript notice. Session-operation notices remain caller-owned.
@@ -7553,8 +7673,6 @@ where
     if had_fast && app.agent.service_tier().is_none() {
         shell.notice("Fast mode: off after the model/session change; use /fast on on a supported route to enable it again");
     }
-    app.executable_extensions
-        .activate_session_lifecycle_driver();
     host_notification.publish(&mut app.executable_extensions);
     Ok(app)
 }
@@ -8647,21 +8765,13 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::ActiveThinkingSelection(reasoning)
             | PendingIdleAction::ChangeThinking(reasoning) => {
-                let target = reasoning.clone();
                 app = select_thinking(app, shell, input, reasoning, None, reload).await?;
-                if app.reasoning == target {
-                    shell.notice("thinking change applied at the idle boundary");
-                }
             }
             PendingIdleAction::ChangeThinkingLevel(level) => {
                 match requested_thinking_to_reasoning(level, &app.model, app.subagents_available())
                 {
                     Ok(reasoning) => {
-                        let target = reasoning.clone();
                         app = select_thinking(app, shell, input, reasoning, None, reload).await?;
-                        if app.reasoning == target {
-                            shell.notice("thinking change applied at the idle boundary");
-                        }
                     }
                     Err(error) => {
                         shell.error(format!("thinking unchanged: {error}"));
@@ -8824,7 +8934,11 @@ async fn apply_pending_actions(
                 app.config.theme_explicit = true;
                 if let Err(error) =
                     persist_configuration(Some(&mut app.executable_extensions), || {
-                        crate::cli::persist_theme_choice(&selector)
+                        let receipt = crate::cli::persist_theme_selection(&selector)?;
+                        if let Some(receipt) = receipt {
+                            reload.acknowledge_applied_write(&receipt);
+                        }
+                        Ok(())
                     })
                     .await
                 {
@@ -8834,6 +8948,9 @@ async fn apply_pending_actions(
                 } else {
                     shell.notice("theme preference saved at the idle boundary");
                 }
+            }
+            PendingIdleAction::AcknowledgeTuiPreference(write) => {
+                reload.acknowledge_applied_write(&write);
             }
             PendingIdleAction::SyncImages(enabled) => {
                 app.config.show_images = enabled;
@@ -9463,7 +9580,7 @@ where
     let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(stdout_budget)));
     let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(stderr_budget)));
     let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel();
-    let command_timeout = Duration::from_secs(sandbox.bash_timeout_secs);
+    let command_timeout = sandbox.bash_timeout_secs.map(Duration::from_secs);
     #[cfg(unix)]
     let command_started = tokio::time::Instant::now();
     let stdout_capture = stdout.clone();
@@ -9486,7 +9603,12 @@ where
         status
     };
     let mut work = Box::pin(work);
-    let deadline = tokio::time::sleep(command_timeout);
+    let deadline = async {
+        match command_timeout {
+            Some(timeout) => tokio::time::sleep(timeout).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
     tokio::pin!(deadline);
     let mut input_open = true;
     let mut interrupted = false;
@@ -9592,6 +9714,7 @@ where
         }
         combined.push_str("command stopped during shutdown");
         shell.finalize_shell(&shell_id, combined.clone(), -1);
+        shell.cancel_terminal_operation();
         shell.render();
         return Ok(ShellEscapeOutcome {
             output: combined,
@@ -9614,7 +9737,7 @@ where
     } else {
         #[cfg(unix)]
         group_guard.supervise_bash_descendants(
-            command_timeout.saturating_sub(command_started.elapsed()),
+            command_timeout.map(|timeout| timeout.saturating_sub(command_started.elapsed())),
             Default::default(),
         );
     }
@@ -9641,13 +9764,16 @@ where
                 combined.push_str("command cancelled");
             } else if timed_out {
                 combined.push_str(&format!(
-                    "command exceeded the {}s execution limit",
-                    sandbox.bash_timeout_secs
+                    "command exceeded the {}s execution limit (bash_timeout_secs)",
+                    command_timeout.unwrap().as_secs()
                 ));
             } else {
                 combined.push_str(&format!("process error: {error}"));
             }
             shell.finalize_shell(&shell_id, combined.clone(), -1);
+            if interrupted {
+                shell.cancel_terminal_operation();
+            }
             shell.render();
             return Ok(ShellEscapeOutcome {
                 output: combined,
@@ -9954,28 +10080,45 @@ async fn save_tui_mode(
     shell: &mut InteractiveShell,
     extensions: &mut crate::extensions::ExecutableExtensions,
     mode: crate::config::TuiMode,
-) {
+) -> Option<crate::reload::AppliedConfigWrite> {
+    save_tui_mode_with(shell, extensions, mode, |shell| {
+        shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen)
+    })
+    .await
+}
+
+async fn save_tui_mode_with(
+    shell: &mut InteractiveShell,
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    mode: crate::config::TuiMode,
+    switch_renderer: impl FnOnce(&mut InteractiveShell) -> anyhow::Result<()>,
+) -> Option<crate::reload::AppliedConfigWrite> {
     if crate::cli::tui_mode_is_explicit() {
         shell.error(
             "TUI preference unchanged: --tui-mode overrides saved settings for this invocation"
                 .to_owned(),
         );
-        return;
+        return None;
     }
-    if let Err(error) =
-        persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode)).await
+    let write = match persist_configuration(Some(extensions), || crate::cli::persist_tui_mode(mode))
+        .await
     {
-        shell.error(format!("failed to save the TUI mode preference: {error}"));
-        return;
-    }
-    if let Err(error) = shell.set_tui_fullscreen(mode == crate::config::TuiMode::Fullscreen) {
+        Ok(write) => write,
+        Err(error) => {
+            shell.error(format!("failed to save the TUI mode preference: {error}"));
+            return None;
+        }
+    };
+    if let Err(error) = switch_renderer(shell) {
         shell.error(format!("TUI mode was saved for the next launch, but the live renderer could not switch: {error}"));
-        return;
+        return None;
     }
     shell.notice(format!(
         "interactive terminal mode saved as {}",
         mode.as_str()
     ));
+    // A failed live switch must remain visible to normal resource reload.
+    write
 }
 
 /// Save the default model for new sessions. It never switches the live session.
@@ -10035,6 +10178,7 @@ async fn apply_settings_command(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
     sub: commands::SettingsCommand,
+    reload: &mut crate::reload::ReloadSupervisor,
 ) -> anyhow::Result<()> {
     use commands::SettingsCommand as Sub;
     let sub = if sub == Sub::Menu {
@@ -10071,7 +10215,11 @@ async fn apply_settings_command(
             save_queue_mode(shell, &mut app.executable_extensions, None, kind, mode).await;
         }
         Sub::TuiMode(None) => shell.notice(tui_mode_report()),
-        Sub::TuiMode(Some(mode)) => save_tui_mode(shell, &mut app.executable_extensions, mode).await,
+        Sub::TuiMode(Some(mode)) => {
+            if let Some(write) = save_tui_mode(shell, &mut app.executable_extensions, mode).await {
+                reload.acknowledge_applied_write(&write);
+            }
+        }
         Sub::Theme(requested) => {
             configure_terminal_theme(
                 shell,
@@ -10080,6 +10228,7 @@ async fn apply_settings_command(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10713,6 +10862,7 @@ async fn run_idle_command_inner(
                 requested,
                 false,
                 Some(&mut app.executable_extensions),
+                Some(reload),
             )
             .await?;
         }
@@ -10807,7 +10957,7 @@ async fn run_idle_command_inner(
             apply_idle_goal_command(&app, shell, goal, goal_deadline)?;
         }
         Command::Settings(sub) => {
-            apply_settings_command(&mut app, shell, input, sub).await?;
+            apply_settings_command(&mut app, shell, input, sub, reload).await?;
         }
         Command::Pi(sub) => {
             app = Box::new(apply_pi_command(*app, shell, input, sub).await?);
@@ -10835,7 +10985,9 @@ async fn run_idle_command_inner(
                             format!("unknown command: {text}")
                         },
                     );
-                } else if commands::is_reserved_slash_command_name(&name) {
+                } else if commands::is_reserved_slash_command_name(&name)
+                    && !app.executable_extensions.shadows_native_command(&name)
+                {
                     shell.error(format!("invalid syntax for built-in command: {text}"));
                 } else if let Some(owner) = app.executable_extensions.command_owner(&name) {
                     let arguments = split_prompt_invocation(&text)
@@ -11167,6 +11319,13 @@ const SHUTDOWN_NOTICE_DELAY: Duration = Duration::from_millis(150);
 /// normally takes. A signal-driven exit writes nothing: that path may have no
 /// terminal at all.
 async fn shutdown_for_exit(app: &mut App, shell: &mut InteractiveShell) {
+    shutdown_extensions_for_exit(&mut app.executable_extensions, shell).await;
+}
+
+async fn shutdown_extensions_for_exit(
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    shell: &mut InteractiveShell,
+) {
     let signalled = crate::tui::terminal::received_shutdown_signal().is_some();
     let cleanup = async {
         if signalled {
@@ -11174,21 +11333,13 @@ async fn shutdown_for_exit(app: &mut App, shell: &mut InteractiveShell) {
                 400,
             ))
             .await;
-            let _ = tokio::time::timeout(
-                Duration::from_millis(1400),
-                app.executable_extensions.shutdown(),
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_millis(1400), extensions.shutdown()).await;
         } else {
             // Bound the idle Ctrl+D path like the signal path so a hung
             // extension child cannot make exit feel stuck. 2s covers normal
             // fleet drain (the inner manager cap is 3s); on timeout fall
             // through to force-kill like the signal path does.
-            let _ = tokio::time::timeout(
-                Duration::from_millis(2000),
-                app.executable_extensions.shutdown(),
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_millis(2000), extensions.shutdown()).await;
         }
         octet_agent::extension_process::force_kill_registered_process_groups();
     };
@@ -11491,6 +11642,7 @@ async fn configure_terminal_theme<S, E: Into<crate::tui::terminal::InputPacket>>
     requested: Option<String>,
     onboarding: bool,
     extensions: Option<&mut crate::extensions::ExecutableExtensions>,
+    reload: Option<&mut crate::reload::ReloadSupervisor>,
 ) -> anyhow::Result<Option<ThemeSelection>>
 where
     S: Stream<Item = std::io::Result<E>> + Unpin,
@@ -11548,7 +11700,16 @@ where
         apply_detected_terminal_background(shell, input, config).await;
     }
     if let Err(error) = persist_configuration(extensions, || {
-        crate::cli::persist_theme_choice(choice.key())
+        let Some(reload) = reload else {
+            return crate::cli::persist_theme_choice(choice.key());
+        };
+        let receipt = crate::cli::persist_theme_selection(choice.key())?;
+        if let Some(receipt) = receipt {
+            // The live palette is already installed. Acknowledge only this
+            // exact atomic write, not unrelated/queued resource changes.
+            reload.acknowledge_applied_write(&receipt);
+        }
+        Ok(())
     })
     .await
     {
@@ -11585,6 +11746,7 @@ async fn run_interactive_without_model(
     let mut boot = boot;
     let workspace = boot.config.workspace.clone();
     let mut prepared = boot.take_prepared_session();
+    let launch_reason = launch.session.session_start_reason(true);
     let selection = launch.session;
     let session =
         run_blocking_startup_lifecycle(shell, input, STARTUP_SESSION_OPERATION, move || {
@@ -11594,7 +11756,7 @@ async fn run_interactive_without_model(
 
     let resume_command = resume_command_for_session(&session, &boot.config);
     shell.set_identity("", "", "");
-    shell.set_status_detail("no configured model · read-only session".to_owned());
+    shell.set_status_detail("no configured model · prompts disabled".to_owned());
     shell.set_workspace(workspace.clone());
     shell.set_input_modalities(octet_ai::ModalitySet::none());
     shell.set_session_telemetry(&session, None);
@@ -11628,24 +11790,44 @@ async fn run_interactive_without_model(
     scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut extensions = crate::extensions::ExecutableExtensions::default();
-    // Model-less mode has no `App`, no agent, and no session, so there is
-    // nothing a pass could re-read. The supervisor stays disabled and can never
-    // report a due pass; keeping the same call shape means the idle loop has
-    // exactly one arm set.
+    let reason = launch_reason;
+    let operation = startup_app_operation(&boot.config);
+    let (mut boot, mut session, mut state) =
+        run_blocking_lifecycle(shell, input, operation, move || {
+            let runtime = boot.prepare_modeless_extension_runtime();
+            let state = modeless::ModelessExtensions::with_runtime(
+                &boot.config,
+                &session,
+                &boot.sessions,
+                reason,
+                None,
+                runtime,
+            )?;
+            Ok((boot, session, state))
+        })
+        .await?;
     let mut reload =
         crate::reload::ReloadSupervisor::new(crate::reload::ReloadSettings::disabled());
     let reload_watcher = crate::reload::ReloadWatcher::new(crate::reload::ReloadWatchSet::new());
     let mut reload_tick = tokio::time::interval(reload.settings().tick_interval());
     reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    let result = async {
     loop {
+        state.extensions.refresh_pi_model_catalog_without_selection(&boot.catalog, None);
+        state.attach(shell, &session).await;
+        state.pump(shell, &mut session, &boot.sessions);
+        if let Err(error) = state.refresh_resources(shell, input, &mut session, &boot.sessions, &boot.config).await {
+            if shell.close_requested() { return Ok(resume_command); }
+            shell.error(format!("extension startup failed: {error}"));
+        }
+        shell.render();
         match wait_for_prompt(
             shell,
             input,
             &mut scroll_tick,
             &mut extension_tick,
-            &mut extensions,
+            &mut state.extensions,
             None,
             &mut reload_tick,
             &reload_watcher,
@@ -11655,8 +11837,6 @@ async fn run_interactive_without_model(
         .await?
         {
             Idle::Quit => return Ok(resume_command),
-            // Unreachable while the supervisor is disabled; kept explicit so the
-            // variant stays honest instead of silently ignored.
             Idle::ReloadDue | Idle::ExtensionWake => {}
             Idle::CycleThinking => {
                 shell.notice("thinking is unavailable until a model is configured");
@@ -11668,12 +11848,12 @@ async fn run_interactive_without_model(
             }
             Idle::Submit(_) => {
                 shell.error(
-                    "no configured model; set an API key and restart before submitting prompts"
+                    "no configured model; configure a model and restart before submitting prompts"
                         .to_owned(),
                 );
                 shell.render();
             }
-            Idle::Command(raw) => match commands::parse(&raw) {
+            Idle::Command(raw) => match state.extensions.parse_command(&raw) {
                 Command::Exit => return Ok(resume_command),
                 Command::Hotkeys => {
                     show_hotkeys(shell);
@@ -11706,8 +11886,8 @@ async fn run_interactive_without_model(
                 Command::Status => {
                     shell.show_report_facts(
                         "Status",
-                        "Review the read-only session configuration",
-                        "No model is configured. The session can be read, but prompts are disabled."
+                        "Review the session configuration",
+                        "No model is configured. Enabled extensions are available; prompts are disabled."
                             .to_owned(),
                     );
                     shell.render();
@@ -11716,12 +11896,26 @@ async fn run_interactive_without_model(
                     configure_terminal_theme(
                         shell,
                         input,
-                        &mut boot.config,
+                        &mut state.config,
                         requested,
                         false,
+                        Some(&mut state.extensions),
                         None,
                     )
                     .await?;
+                    boot.config.theme = state.config.theme.clone();
+                }
+                Command::Extensions(commands::ExtensionsSubcommand::Status | commands::ExtensionsSubcommand::Menu) => {
+                    shell.show_overlay_text(state.extensions.inspect_text());
+                    shell.render();
+                }
+                Command::Extensions(commands::ExtensionsSubcommand::Reload) => {
+                    let report = state.reload(shell, input, &mut session, &boot.sessions, &boot.config).await?;
+                    for notice in extension_reload_notices(&mut reload, report, true) { shell.notice(notice); }
+                    shell.render();
+                }
+                Command::Unknown(text) => {
+                    state.command(shell, input, &mut session, &boot.sessions, &text).await?;
                 }
                 Command::Setup => {
                     onboarding::run_setup(shell, input, &mut boot).await?;
@@ -11793,6 +11987,8 @@ async fn run_interactive_without_model(
                     .await?;
                     let has_models = catalog.models().next().is_some();
                     boot.catalog = catalog;
+                    let report = state.reload(shell, input, &mut session, &boot.sessions, &boot.config).await?;
+                    for notice in extension_reload_notices(&mut reload, report, true) { shell.notice(notice); }
                     if has_models {
                         shell.notice(
                             "models reloaded; use /model to select one, then restart octet to chat",
@@ -11809,6 +12005,9 @@ async fn run_interactive_without_model(
             },
         }
     }
+    }.await;
+    shutdown_extensions_for_exit(&mut state.extensions, shell).await;
+    result
 }
 
 /// Dispatch positional release notes locally before a startup prompt or prewarm
@@ -11821,6 +12020,7 @@ fn pending_extension_label(app: &App) -> String {
     let names = app.executable_extensions.pending_startup_names();
     match names.len() {
         0 => "idle".to_owned(),
+        1 if names[0] == "octet-pi-compat" => "Loading your Pi setup…".to_owned(),
         1 => format!("{} loading…", names[0]),
         count => format!("extensions loading… ({count})"),
     }
@@ -12782,7 +12982,8 @@ async fn run_interactive_once(
         && shell.theme().capabilities().interactive
         && !config.plain
     {
-        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None).await?;
+        configure_terminal_theme(&mut shell, &mut input, &mut config, None, true, None, None)
+            .await?;
         if shell.close_requested() {
             shell.leave();
             return Ok(InteractiveExit::Finished);
@@ -12854,12 +13055,12 @@ async fn run_interactive_once(
             Err(error) => Err(error),
         };
     }
-    // The first interactive frame never waits for an extension host: the fleet
-    // is discovered synchronously and each process attaches as its handshake
-    // completes (`App::pump_extension_startup`). Every other frontend keeps the
-    // synchronous build, because it has no foreground pump to attach through.
+    // Handshakes attach after readiness. Pi's registration capture still runs
+    // during the build, so name it while the existing input pump keeps editing
+    // and resize responsive, without claiming the setup has already loaded.
+    let startup_operation = startup_app_operation(&boot.config);
     let mut app =
-        run_blocking_startup_lifecycle(&mut shell, &mut input, STARTUP_APP_OPERATION, move || {
+        run_blocking_startup_lifecycle(&mut shell, &mut input, startup_operation, move || {
             let system = compose_instructions(&boot.config)?;
             build_app_first_frame_first(boot, launch, system)
         })
@@ -13154,7 +13355,7 @@ async fn run_interactive_once(
                     }
                     continue;
                 }
-                let command = commands::parse(&command_input);
+                let command = app.executable_extensions.parse_command(&command_input);
                 match run_idle_command(
                     app,
                     &mut shell,
@@ -13402,7 +13603,6 @@ async fn run_interactive_once(
                 for notification in composition.notifications {
                     shell.notice(notification);
                 }
-                app.agent.set_system_prompt(composition.system);
                 let answer_only = composed.answer_only;
                 let retry_composed = composed.clone();
                 if !composed.parts.is_empty() {
@@ -13412,9 +13612,7 @@ async fn run_interactive_once(
                 // Keep extension context in the replayable model message, but
                 // persist the exact user-facing draft separately for title and
                 // transcript reconstruction.
-                app.agent.set_owner_tool_images_enabled(true);
-                app.agent
-                    .set_prompt_display_text(Some(composed.transcript_text.clone()));
+                let prompt_display_text = composed.transcript_text.clone();
                 // Capacity checks and autonomous compaction live inside the
                 // cancellable Agent run. Frontends must not start an
                 // unabortable provider request before RunControl exists.
@@ -13425,9 +13623,9 @@ async fn run_interactive_once(
                 // Do this directly at the request boundary. A provider update
                 // can remove the old host-stream transport; never let an Agent
                 // retaining its inert endpoint fall through to localhost.
-                let provider_diagnostics =
-                    match app.synchronize_extension_provider_catalog_for_request() {
-                        Ok(diagnostics) => diagnostics,
+                let (submission, provider_diagnostics) =
+                    match app.prepare_submission(composed.into_user_input()) {
+                        Ok(prepared) => prepared,
                         Err(error) => {
                             app.agent.set_system_prompt(app.system.clone());
                             shell.restore_composed(retry_composed);
@@ -13459,18 +13657,21 @@ async fn run_interactive_once(
                 // Capture the pane's session identity before the run borrows
                 // the agent mutably: Herdr must learn the session reference at
                 // the same moment the prompt is accepted.
+                app.agent.set_system_prompt(composition.system);
+                app.agent.set_owner_tool_images_enabled(true);
+                app.agent.set_prompt_display_text(Some(prompt_display_text));
                 let pane_session_id = herdr_session_id(&app);
                 // Snapshot the read-only application facts the run cannot lend
                 // out (it owns `&mut Agent`), so inspection commands still work.
                 let prior_cache_misses = commands::cache_miss_count(&app);
                 let mut inspection = ActiveRunInspection::capture(&app);
                 let mut run = {
-                    let user_input = composed.into_user_input();
-                    let run_result = if answer_only {
-                        app.agent.prompt_without_tools(user_input).await
+                    let mode = if answer_only {
+                        octet_agent::PreparedPromptMode::WithoutTools
                     } else {
-                        app.agent.prompt(user_input).await
+                        octet_agent::PreparedPromptMode::Normal
                     };
+                    let run_result = submission.start(&mut app.agent, mode).await;
                     match run_result {
                         Ok(run) => run,
                         Err(error) => {

@@ -2,11 +2,12 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { read, write } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { Socket } from 'node:net';
-import { Transport, MAX_FRAME, SYNC_REPLY, SYNC_UNKNOWN, SYNC_CANCELLED } from './transport.mjs';
+import { Transport, MAX_FRAME, MAX_SYNC_UI_CLOSED_BYTES, SYNC_REPLY, SYNC_UNKNOWN, SYNC_CANCELLED } from './transport.mjs';
 import { rpcError } from './errors.mjs';
 
 const header = new Int32Array(workerData.syncBuffer, 0, 4);
-const body = new Uint8Array(workerData.syncBuffer, 16);
+const body = new Uint8Array(workerData.syncBuffer, 16, MAX_FRAME);
+const closedBody = new Uint8Array(workerData.syncBuffer, MAX_FRAME + 16, MAX_SYNC_UI_CLOSED_BYTES);
 // Pipes inherited from Node may already be O_NONBLOCK. fs streams treat EAGAIN
 // as fatal; these callback-based fd streams retain partial reads/writes and
 // retry readiness without a second reader or abandoning a partial JSON frame.
@@ -42,7 +43,7 @@ const output = new Writable({
   destroy(error, callback) { clearTimeout(writeRetry); callback(error); },
 });
 let sync, sequence = 0, bytes = 0;
-const forwarded = new Map();
+const forwarded = new Map(), pendingClosed = new Map();
 // Async request ids this extension issued. Ids are never reused, so this is
 // also the tombstone set for replies that arrive after an async request was
 // cancelled or settled (the factory thread drops known ids).
@@ -65,6 +66,9 @@ function complete(value, status) {
   clearTimeout(sync?.timer); clearTimeout(sync?.watchdog);
   const encoded = Buffer.from(JSON.stringify(value));
   if (encoded.length > MAX_FRAME) throw rpcError(-32602, 'bounds_exceeded synchronous response');
+  const closed = Buffer.from(JSON.stringify([...new Set(pendingClosed.values())]));
+  if (closed.length > MAX_SYNC_UI_CLOSED_BYTES) throw rpcError(-32602, 'bounds_exceeded synchronous UI retirement');
+  closedBody.set(closed); Atomics.store(header, 3, closed.length);
   body.set(encoded); Atomics.store(header, 1, encoded.length);
   sync = undefined;
   Atomics.store(header, 0, status); Atomics.notify(header, 0);
@@ -73,7 +77,7 @@ function complete(value, status) {
 // learn, so a host that drops it gets terminal cancellation and the factory
 // thread is woken instead of waiting out the watchdog. The host also drops the
 // request silently, so its reply may never arrive.
-const READ_ONLY_SYNC = new Set(['tools/snapshot', 'composition/context']);
+const READ_ONLY_SYNC = new Set(['tools/snapshot', 'commands/snapshot', 'composition/context', 'context/system_prompt', 'pi/settings/read']);
 function cancelSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
@@ -96,6 +100,7 @@ function forward(message) {
   // the stricter 128-frame limit; neither path admits unbounded Port buffering.
   if (forwarded.size >= (sync ? 128 : 256) || bytes + size > 4194304) throw rpcError(-32012, 'bounds_exceeded worker input queue');
   const token = ++sequence; forwarded.set(token, size); bytes += size;
+  if (message.id === undefined && message.method === 'ui/closed' && typeof message.params.surface_id === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(message.params.surface_id)) pendingClosed.set(token, message.params.surface_id);
   parentPort.postMessage({ kind: 'message', token, message });
 }
 const transport = new Transport({ write: output.write.bind(output), output }, {
@@ -120,10 +125,10 @@ parentPort.on('message', packet => {
     if (packet.kind === 'received') {
       const size = forwarded.get(packet.token);
       if (size === undefined) throw rpcError(-32600, 'unknown worker input acknowledgement');
-      forwarded.delete(packet.token); bytes -= size; return;
+      forwarded.delete(packet.token); pendingClosed.delete(packet.token); bytes -= size; return;
     }
     if (packet.kind === 'sync') {
-      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
+      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent, method: packet.message.method };
       sync.timer = setTimeout(cancelSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);

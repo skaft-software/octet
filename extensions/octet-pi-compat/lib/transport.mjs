@@ -11,6 +11,7 @@ export const MAX_FRAME = 1048576;
 export const SYNC_REPLY = 2;
 export const SYNC_UNKNOWN = 3;
 export const SYNC_CANCELLED = 4;
+export const MAX_SYNC_UI_CLOSED_BYTES = 32768;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
 // A worker that cannot be stopped (pending inherited-pipe read) must not hold
 // shutdown open; see Transport.close().
@@ -249,7 +250,7 @@ export class Transport {
   startWorker() {
     // The factory thread never attaches a reader to fd 0. One worker owns both
     // physical pipes; do not mix readline/async buffering with fs.readSync.
-    this.syncBuffer = new SharedArrayBuffer(MAX_FRAME + 16);
+    this.syncBuffer = new SharedArrayBuffer(MAX_FRAME + 16 + MAX_SYNC_UI_CLOSED_BYTES);
     this.syncHeader = new Int32Array(this.syncBuffer, 0, 4);
     this.worker = new Worker(new URL('./transport-worker.mjs', import.meta.url), { execArgv: workerExecArgv(), workerData: { syncBuffer: this.syncBuffer } });
     this.worker.on('message', packet => {
@@ -285,8 +286,8 @@ export class Transport {
       this.worker.postMessage({ ...packet, token });
     });
   }
-  requestSync(method, params, { parent, signal, onCancel, timeout = 30000 } = {}) {
-    if (!['session/append_entry', 'session/setup', 'tools/register', 'tools/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
+  requestSync(method, params, { parent, signal, onCancel, onUiClosed, timeout = 30000 } = {}) {
+    if (!['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
     if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();
@@ -297,6 +298,7 @@ export class Transport {
     if (this.transfers.size >= MAX_QUEUE || this.transferBytes + size > MAX_QUEUE_BYTES) throw rpcError(-32012, 'bounds_exceeded worker transfer queue');
     this.syncIds.add(id);
     Atomics.store(this.syncHeader, 2, 0);
+    Atomics.store(this.syncHeader, 3, 0);
     Atomics.store(this.syncHeader, 1, 0); Atomics.store(this.syncHeader, 0, 1);
     this.worker.postMessage({ kind: 'sync', message, parent, timeout });
     // At timeout the worker requests cancellation, but continues waiting for the
@@ -320,6 +322,15 @@ export class Transport {
     if (status === SYNC_CANCELLED) throw rpcError(reply.code, reply.message);
     this.validate(reply);
     if (status !== SYNC_REPLY || reply.id !== id) { const error = rpcError(-32600, 'invalid synchronous response identity'); this.fail(error); throw error; }
+    const closedBytes = Atomics.load(this.syncHeader, 3);
+    if (closedBytes < 0 || closedBytes > MAX_SYNC_UI_CLOSED_BYTES) { const error = rpcError(-32600, 'invalid synchronous UI retirement length'); this.fail(error); throw error; }
+    if (closedBytes) {
+      const closed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(this.syncBuffer, MAX_FRAME + 16, closedBytes)));
+      if (!Array.isArray(closed) || closed.length > 256 || closed.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(id))) {
+        const error = rpcError(-32600, 'invalid synchronous UI retirement'); this.fail(error); throw error;
+      }
+      for (const surfaceId of closed) onUiClosed?.(surfaceId);
+    }
     if (Atomics.load(this.syncHeader, 2)) onCancel?.();
     if (reply.error) throw rpcError(reply.error.code, reply.error.message);
     return reply.result;

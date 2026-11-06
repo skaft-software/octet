@@ -662,6 +662,51 @@ mod tests {
     }
 
     #[test]
+    fn sol_500k_discovery_default_keeps_deliberate_cap_and_entitlement_gates() {
+        for tier in [CodexContextTier::Default, CodexContextTier::Extended] {
+            let resolve = |override_| {
+                resolve_codex_context_window(
+                    "gpt-6.1-sol",
+                    tier,
+                    500_000,
+                    872_000,
+                    Some(128_000),
+                    override_,
+                )
+            };
+            let default = resolve(CodexContextOverride::NONE).unwrap();
+            assert_eq!(default.context_window, 272_000);
+            assert_eq!(
+                default.advertised_context_window,
+                if tier == CodexContextTier::Default {
+                    500_000
+                } else {
+                    872_000
+                }
+            );
+            assert_eq!(default.entitled_max_context_window, 872_000);
+            assert_eq!(default.max_output_tokens, 128_000);
+            assert!(!default.has_uncertain_usage);
+            assert!(default.clamp.is_some());
+            let raised = resolve(CodexContextOverride::raising(500_000, true));
+            if tier == CodexContextTier::Default {
+                assert!(matches!(
+                    raised,
+                    Err(CodexContextWindowError::OverrideRequiresEntitlement { .. })
+                ));
+            } else {
+                let raised = raised.unwrap();
+                assert_eq!(raised.context_window, 500_000);
+                assert!(raised.has_uncertain_usage);
+                assert!(matches!(
+                    resolve(CodexContextOverride::raising(500_000, false)),
+                    Err(CodexContextWindowError::OverrideRequiresAcknowledgement { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn reporter_fires_once_per_transition() {
         let clamp = ctx().clamp.unwrap();
         let mut reporter = CodexContextClampReporter::default();

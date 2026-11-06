@@ -149,6 +149,10 @@ pub enum Protocol {
     /// `{ model, context, options }` document and the response is a stream of
     /// serialized assistant-message events.
     PiMessages,
+    /// A model whose stream is produced by its own extension process (for
+    /// example a Pi package's custom `streamSimple`). The host never encodes
+    /// or decodes a wire request for it; this is only the route's label.
+    ExtensionStream,
 }
 
 /// Preferred transport for streaming provider responses.
@@ -206,6 +210,20 @@ pub enum OpenAiChatRuntimeProfile {
     Default,
     /// Mistral Chat Completions compatibility behavior.
     Mistral,
+    /// Custom process-owned Chat Completions compatibility behavior.
+    PiCustom(CustomOpenAiChatProfile),
+}
+
+/// Bounded compatibility facts for a custom Chat Completions route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOpenAiChatProfile {
+    /// Whether the route accepts the developer role.
+    pub supports_developer_role: bool,
+    /// Whether the existing output cap uses `max_tokens` instead of `max_completion_tokens`.
+    pub use_max_tokens: bool,
+    /// Whether the route supports strict function-tool schemas.
+    pub supports_strict_mode: bool,
 }
 
 /// Endpoint behavior for an existing OpenAI Responses codec.
@@ -1391,6 +1409,14 @@ pub enum ReasoningStateKind {
         /// Opaque encrypted reasoning block.
         encrypted_content: Option<String>,
     },
+    /// Chat Completions `reasoning_details` (OpenRouter), merged across stream
+    /// deltas. Gateways carry provider signatures here, such as Gemini thought
+    /// signatures and Anthropic thinking signatures, and require the entries
+    /// back unchanged on the assistant message.
+    ChatReasoningDetails {
+        /// Provider entries in emission order.
+        details: Vec<serde_json::Value>,
+    },
 }
 
 // Opaque replay state must survive serialization unchanged, but it is not
@@ -1410,6 +1436,10 @@ impl std::fmt::Debug for ReasoningStateKind {
                 .debug_struct("OpenAiReasoning")
                 .field("item_id", &"[REDACTED]")
                 .field("encrypted_content", &"[REDACTED]")
+                .finish(),
+            Self::ChatReasoningDetails { details } => formatter
+                .debug_struct("ChatReasoningDetails")
+                .field("details", &format_args!("[REDACTED; {}]", details.len()))
                 .finish(),
         }
     }

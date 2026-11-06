@@ -69,8 +69,7 @@ impl ProviderDeclaration {
             .and_then(serde_json::Value::as_u64)
             .filter(|output| *output > 0)
             .unwrap_or(32_768);
-        let preset = pinned_reasoning_preset(&record, api_name, protocol, max_output_tokens)?;
-        static_reasoning_capability(&preset)
+        pinned_reasoning_capability(&record, api_name, protocol, max_output_tokens)
     }
 
     /// Input modalities the pinned record documents for an OpenCode model,
@@ -129,33 +128,57 @@ pub(crate) fn pdf_input(provider_id: &str, api_name: &str, protocol: Protocol) -
     }
 }
 
-/// The checked-in preset shape equivalent to one pinned reasoning record, so
-/// derived capabilities use exactly the encodings hand-written presets use.
-fn pinned_reasoning_preset(
+fn pinned_reasoning_capability(
     record: &serde_json::Value,
     api_name: &str,
     protocol: Protocol,
     max_output_tokens: u64,
-) -> Option<StaticModelPreset> {
+) -> Option<ReasoningCapability> {
     use super::models::{StaticOpenAiChatReasoningProfile as Profile, StaticReasoningMode as Mode};
-    use octet_ai::ReasoningEffort as E;
+    use octet_ai::{types::ReasoningOptions, ReasoningConfig, ReasoningEffort as E};
     if record.get("reasoning").and_then(serde_json::Value::as_bool) != Some(true) {
         return None;
     }
-    let options = record
-        .get("reasoning_options")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let has = |kind: &str| options.iter().any(|option| option["type"] == kind);
-    let efforts = options
+    let options = record.get("reasoning_options")?.as_array()?;
+    if options.is_empty() || options.len() > 3 {
+        return None;
+    }
+    let mut kinds = Vec::new();
+    for option in options {
+        let kind = option.get("type")?.as_str()?;
+        if !matches!(kind, "effort" | "toggle" | "budget_tokens") || kinds.contains(&kind) {
+            return None;
+        }
+        kinds.push(kind);
+    }
+    let has = |kind: &str| kinds.contains(&kind);
+    let mut exact = options
         .iter()
         .find(|option| option["type"] == "effort")
-        .and_then(|option| option["values"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>();
+        .map(|option| serde_json::from_value::<ReasoningOptions>(option.clone()))
+        .transpose()
+        .ok()?;
+    if exact.as_ref().is_some_and(|options| {
+        !options.is_valid()
+            || options.choices().iter().any(|choice| {
+                matches!(
+                    choice,
+                    ReasoningConfig::On | ReasoningConfig::Effort(E::Ultra)
+                )
+            })
+    }) {
+        return None;
+    }
+    let efforts = exact
+        .as_ref()
+        .map(|options| {
+            options
+                .values
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let portable = efforts
         .iter()
         .filter_map(
@@ -183,28 +206,31 @@ fn pinned_reasoning_preset(
         Protocol::GoogleGenerativeAi => {
             // `thinkingLevel` has exactly MINIMAL, LOW, MEDIUM and HIGH.
             let levels = ["minimal", "low", "medium", "high"];
-            if !efforts.contains(&"low")
-                || !efforts.contains(&"high")
-                || efforts.iter().any(|value| !levels.contains(value))
+            if efforts.is_empty()
+                || has("toggle")
+                || efforts
+                    .iter()
+                    .any(|value| !levels.contains(&value.to_ascii_lowercase().as_str()))
             {
                 return None;
             }
             preset.reasoning_mode = Mode::GoogleLevels {
-                minimal: efforts.contains(&"minimal"),
-                medium: efforts.contains(&"medium"),
+                minimal: portable.contains(&E::Minimal),
+                medium: portable.contains(&E::Medium),
             };
         }
         Protocol::AnthropicMessages => {
             let adaptive = api_name.starts_with("claude-")
-                && ["low", "medium", "high", "max"]
+                && !efforts.is_empty()
+                && efforts
                     .iter()
-                    .all(|level| efforts.contains(level));
+                    .all(|value| ["none", "low", "medium", "high", "xhigh", "max"].contains(value));
             preset.reasoning_mode = if adaptive {
                 Mode::Adaptive {
-                    off: has("toggle"),
+                    off: has("toggle") || efforts.contains(&"none"),
                     xhigh: efforts.contains(&"xhigh"),
                 }
-            } else if has("budget_tokens") || has("toggle") {
+            } else if has("budget_tokens") {
                 // The budget table spans the fixed Minimal..High efforts.
                 preset.min_reasoning_effort = E::Minimal;
                 preset.max_reasoning_effort = E::High;
@@ -215,16 +241,33 @@ fn pinned_reasoning_preset(
         }
         Protocol::OpenAiChat => {
             if api_name.starts_with("deepseek-") {
-                // DeepSeek's thinking map accepts only `high` (see presets).
-                preset.min_reasoning_effort = E::High;
-                preset.max_reasoning_effort = E::High;
                 preset.openai_chat_reasoning_profile = Profile::DeepSeekThinking;
             }
         }
         Protocol::OpenAiResponses => {}
         _ => return None,
     }
-    Some(preset)
+    let mut capability = static_reasoning_capability(&preset)?;
+    if let Some(options) = &mut exact {
+        let min = portable.iter().copied().min()?;
+        let max = portable.iter().copied().max()?;
+        if has("toggle") && !options.choices().contains(&ReasoningConfig::Off) {
+            options.values.insert(0, "none".into());
+        }
+        if !options.is_valid() {
+            return None;
+        }
+        capability.min_effort = min;
+        capability.max_effort = max;
+        capability.options = exact;
+    } else if capability.control != ReasoningControl::TokenBudget {
+        return None;
+    } else if !has("toggle") {
+        capability.options.as_mut()?.values.retain(|value| {
+            ReasoningConfig::from_provider_value(value) != Some(ReasoningConfig::Off)
+        });
+    }
+    Some(capability)
 }
 
 /// Register every unique route endpoint for an environment-authenticated
@@ -656,6 +699,192 @@ mod tests {
     };
 
     #[test]
+    fn pinned_reasoning_refresh_preserves_source_holes_defaults_and_wire_values() {
+        use octet_ai::{ReasoningConfig as R, ReasoningEffort as E};
+        let record = serde_json::json!({"reasoning":true,"reasoning_options":[{
+            "type":"effort","values":["low","high","max"],"default":"high"
+        }]});
+        for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
+            let capability =
+                pinned_reasoning_capability(&record, "future-model", protocol, 32768).unwrap();
+            let options = capability.options.as_ref().unwrap();
+            assert_eq!(options.values, ["low", "high", "max"]);
+            assert_eq!(options.default.as_deref(), Some("high"));
+            assert_eq!(capability.default_selection(), Some(R::Effort(E::High)));
+            assert_eq!(
+                capability.wire_value(&R::Effort(E::Max)).as_deref(),
+                Some("max")
+            );
+            assert!(!capability.supports(&R::Off));
+            assert!(!capability.supports(&R::Effort(E::Medium)));
+            assert!(!capability.supports(&R::Effort(E::Xhigh)));
+            assert!(capability.supports(&R::Effort(E::Max)));
+        }
+        let mut no_default = record;
+        no_default["reasoning_options"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("default");
+        let capability = pinned_reasoning_capability(
+            &no_default,
+            "future-model",
+            Protocol::OpenAiResponses,
+            32768,
+        )
+        .unwrap();
+        assert_eq!(capability.options.unwrap().default, None);
+    }
+
+    #[test]
+    fn pinned_deepseek_efforts_follow_the_source_not_a_high_only_preset() {
+        use octet_ai::{ReasoningConfig as R, ReasoningEffort as E};
+        let record = serde_json::json!({"reasoning":true,"reasoning_options":[
+            {"type":"toggle"},
+            {"type":"effort","values":["high","max"],"default":"max"}
+        ]});
+        let capability =
+            pinned_reasoning_capability(&record, "deepseek-future", Protocol::OpenAiChat, 32768)
+                .unwrap();
+        assert_eq!(
+            capability.openai_chat_mode,
+            octet_ai::OpenAiChatReasoningMode::DeepSeekThinking
+        );
+        assert_eq!(capability.min_effort, E::High);
+        assert_eq!(capability.max_effort, E::Max);
+        assert_eq!(
+            capability.options.as_ref().unwrap().values,
+            ["none", "high", "max"]
+        );
+        assert_eq!(capability.default_selection(), Some(R::Effort(E::Max)));
+        assert!(capability.supports(&R::Off));
+        assert!(capability.supports(&R::Effort(E::Max)));
+        assert!(!capability.supports(&R::Effort(E::Xhigh)));
+        let pinned = OPENCODE
+            .pinned_reasoning_for("deepseek-v4-pro", Protocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(pinned.options.unwrap().values, ["none", "high", "max"]);
+    }
+
+    #[test]
+    fn pinned_native_controls_preserve_source_subsets_and_defaults() {
+        use octet_ai::{ReasoningConfig as R, ReasoningEffort as E};
+        for (protocol, name, values, default) in [
+            (
+                Protocol::GoogleGenerativeAi,
+                "gemini-future",
+                vec!["low", "high"],
+                "low",
+            ),
+            (
+                Protocol::GoogleGenerativeAi,
+                "gemini-future",
+                vec!["LOW", "HIGH"],
+                "LOW",
+            ),
+            (
+                Protocol::AnthropicMessages,
+                "claude-future",
+                vec!["low", "high", "max"],
+                "max",
+            ),
+        ] {
+            let record = serde_json::json!({"reasoning":true,"reasoning_options":[{
+                "type":"effort","values":values,"default":default
+            }]});
+            let capability = pinned_reasoning_capability(&record, name, protocol, 32768).unwrap();
+            assert_eq!(capability.control, ReasoningControl::Effort);
+            assert_eq!(capability.options.as_ref().unwrap().values, values);
+            assert_eq!(
+                capability.options.as_ref().unwrap().default.as_deref(),
+                Some(default)
+            );
+            assert!(!capability.supports(&R::Off));
+            assert!(!capability.supports(&R::Effort(E::Medium)));
+            assert!(!capability.supports(&R::Effort(E::Xhigh)));
+        }
+        let record = serde_json::json!({"reasoning":true,"reasoning_options":[
+            {"type":"toggle"}, {"type":"effort","values":["low","high"]}
+        ]});
+        assert!(pinned_reasoning_capability(
+            &record,
+            "gemini-future",
+            Protocol::GoogleGenerativeAi,
+            32768,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn pinned_reasoning_never_guesses_missing_or_malformed_efforts() {
+        for options in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{"type":"toggle"}]),
+            serde_json::json!([{"type":"budget_tokens"}]),
+            serde_json::json!([{"type":"future-control"}]),
+            serde_json::json!([{"type":"effort"}]),
+            serde_json::json!([{"type":"effort","values":[]}]),
+            serde_json::json!([{"type":"effort","values":["low",42]}]),
+            serde_json::json!([{"type":"effort","values":["low","LOW"]}]),
+            serde_json::json!([{"type":"effort","values":["low","unknown"]}]),
+            serde_json::json!([{"type":"effort","values":["ultra"]}]),
+            serde_json::json!([{"type":"effort","values":["default","high"]}]),
+            serde_json::json!([{"type":"effort","values":["high"],"default":"low"}]),
+            serde_json::json!([{"type":"effort","values":["high"]},{"type":"effort","values":["max"]}]),
+        ] {
+            let record = serde_json::json!({"reasoning":true,"reasoning_options":options});
+            for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
+                assert!(
+                    pinned_reasoning_capability(&record, "future-model", protocol, 32768).is_none(),
+                    "{record}"
+                );
+            }
+        }
+        for reasoning in [
+            serde_json::json!(false),
+            serde_json::json!(null),
+            serde_json::json!("true"),
+        ] {
+            let record = serde_json::json!({"reasoning":reasoning,"reasoning_options":[{"type":"effort","values":["high"]}]});
+            assert!(pinned_reasoning_capability(
+                &record,
+                "future-model",
+                Protocol::OpenAiChat,
+                32768
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn pinned_budget_control_does_not_add_an_unadvertised_off_choice() {
+        use octet_ai::ReasoningConfig;
+        let mut record = serde_json::json!({"reasoning":true,"reasoning_options":[{"type":"budget_tokens","min":1024}]});
+        let capability = pinned_reasoning_capability(
+            &record,
+            "claude-future",
+            Protocol::AnthropicMessages,
+            32768,
+        )
+        .unwrap();
+        assert_eq!(capability.control, ReasoningControl::TokenBudget);
+        assert!(!capability.supports(&ReasoningConfig::Off));
+        assert!(capability.supports(&ReasoningConfig::Budget(2048)));
+        record["reasoning_options"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type":"toggle"}));
+        let capability = pinned_reasoning_capability(
+            &record,
+            "claude-future",
+            Protocol::AnthropicMessages,
+            32768,
+        )
+        .unwrap();
+        assert!(capability.supports(&ReasoningConfig::Off));
+    }
+
+    #[test]
     fn pdf_input_follows_the_pinned_record_or_the_documented_family() {
         // Pinned records decide where they exist, in either direction.
         assert!(pdf_input(
@@ -877,8 +1106,11 @@ mod tests {
                 "gpt-6-astra",
                 "gpt-6-sol",
                 "gpt-6.1-sol",
+                "gpt-6.1-terra",
                 "gpt-6-luna",
                 "gpt-6-unverified",
+                "gpt-6.1-terra-pro",
+                "openai/gpt-6.1-terra",
             ] {
                 register_discovered_model(
                     &mut catalog,
@@ -909,7 +1141,11 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     model.spec.cache.supports_explicit_prompt_cache_mode,
-                    provider.id == "openai" && id != "gpt-6-unverified",
+                    provider.id == "openai"
+                        && !matches!(
+                            id,
+                            "gpt-6-unverified" | "gpt-6.1-terra-pro" | "openai/gpt-6.1-terra"
+                        ),
                     "{}/{id}",
                     provider.id,
                 );

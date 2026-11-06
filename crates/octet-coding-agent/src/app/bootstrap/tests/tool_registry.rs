@@ -397,10 +397,9 @@ providers = true
     app.synchronize_extension_provider_catalog();
     let refreshed = app.catalog.resolve(&ModelId(model_id.into())).unwrap();
     assert_ne!(refreshed.endpoint.id, old_endpoint);
-    let error = app
-        .synchronize_extension_provider_catalog_for_request()
-        .unwrap_err();
-    assert!(error.to_string().contains("route changed"), "{error}");
+    app.synchronize_extension_provider_catalog_for_request()
+        .unwrap();
+    assert_eq!(app.model.endpoint.id, refreshed.endpoint.id);
 
     app.executable_extensions.shutdown().await;
 }

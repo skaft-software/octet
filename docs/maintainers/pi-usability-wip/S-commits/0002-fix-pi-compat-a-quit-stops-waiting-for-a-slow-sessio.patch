@@ -1,0 +1,186 @@
+From 4116c3d8c31b6e5eeaff37ae6efefc8eed957895 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:55:20 +0000
+Subject: [PATCH 2/2] fix(pi-compat): a quit stops waiting for a slow
+ session_start so shutdown handlers run at once
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SJg4KTSPzhSXgwjtDWqAnQ
+---
+ .../octet-pi-compat/lib/handler-budget.mjs    | 19 ++++++++-
+ extensions/octet-pi-compat/lib/runtime.mjs    | 12 ++++++
+ .../test/event-parity.test.mjs                |  1 +
+ .../test/fixtures/slow-startup-quit.ts        |  8 ++++
+ .../test/handler-budget.test.mjs              | 41 ++++++++++++++++++-
+ 5 files changed, 77 insertions(+), 4 deletions(-)
+ create mode 100644 extensions/octet-pi-compat/test/fixtures/slow-startup-quit.ts
+
+diff --git a/extensions/octet-pi-compat/lib/handler-budget.mjs b/extensions/octet-pi-compat/lib/handler-budget.mjs
+index 9552239b..95ff3f0a 100644
+--- a/extensions/octet-pi-compat/lib/handler-budget.mjs
++++ b/extensions/octet-pi-compat/lib/handler-budget.mjs
+@@ -28,6 +28,7 @@ const DEFAULT_PER_HANDLER_MS = 5000;
+ const DEFAULT_TOTAL_MS = 15000;
+ const MIN_WAIT_MS = 250;
+ const TIMED_OUT = Symbol('handler budget exceeded');
++const PREEMPTED = Symbol('hook preempted by quit');
+ 
+ // The suite shortens every budget; the variable never reaches a bridge started
+ // by the host, which passes an allow-listed environment only.
+@@ -138,9 +139,23 @@ export class HookBudget {
+         if (late.error && entry.factory !== undefined) this.runtime.reportCallbackError(this.event, entry.factory, late.error);
+       }
+     });
++    // A quit aborts the hook still starting up: stop waiting so shutdown handlers run at
++    // once, and let the handler finish in the background. Nothing is reported, the
++    // process is going away.
++    let release;
++    const preempted = new Promise(resolve => {
++      release = () => { if (store.preempted) resolve(PREEMPTED); };
++      store.controller.signal.addEventListener('abort', release, { once: true });
++    });
+     let outcome;
+-    try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
+-    finally { timer.cancel(); }
++    try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT), preempted]); }
++    finally { timer.cancel(); store.controller.signal.removeEventListener('abort', release); }
++    if (outcome === PREEMPTED) {
++      child.detached = true;
++      for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
++      this.trace(entry, performance.now() - started, 'preempted');
++      return { ran: false, busy: false };
++    }
+     if (outcome === TIMED_OUT) {
+       // Work the handler already queued on this hook must not hold the hook's
+       // own flush, and anything it queues later is observed but never joined.
+diff --git a/extensions/octet-pi-compat/lib/runtime.mjs b/extensions/octet-pi-compat/lib/runtime.mjs
+index af8b33aa..df90d098 100644
+--- a/extensions/octet-pi-compat/lib/runtime.mjs
++++ b/extensions/octet-pi-compat/lib/runtime.mjs
+@@ -894,6 +894,17 @@ export class Runtime {
+       ...(changed.has('isError') ? { is_error: event.isError } : {}),
+     };
+   }
++  // Pi shuts down without waiting for the extensions' startup hooks. A quit stops waiting for
++  // the session_start still running (its handler carries on detached) so the quit's own
++  // handlers run now, still in order; reload and the other replacements wait their turn.
++  preemptStartup(params, store) {
++    if (['reload', 'new', 'resume', 'fork'].includes(params.payload?.reason)) return;
++    for (const other of this.active.values()) {
++      if (other === store || other.hook !== 'session_start' || other.state !== store.state) continue;
++      other.preempted = true;
++      other.controller.abort(cancelled());
++    }
++  }
+   queued(store, work, { holdOnCancel = false } = {}) {
+     if (++this.hookQueued > 128) { this.hookQueued--; throw rpcError(-32012, 'bounds_exceeded ordered hook queue'); }
+     const running = this.hookTail.then(() => { store.controller.signal.throwIfAborted(); return Promise.resolve().then(work); });
+@@ -966,6 +977,7 @@ export class Runtime {
+     if (message.method === 'tool/prepare_arguments') return prepareRegisteredArguments(this, p, store);
+     if (message.method === 'tool/call') return withToolHost(this, store, async () => executeRegisteredTool(this, p, store,
+       await createToolContext(this, p, store, createContext(this, store)), this.toolExecution(p.name)));
++    if (message.method === 'hook/run' && p.hook === 'session_end') this.preemptStartup(p, store);
+     if (message.method === 'hook/run') return this.queued(store, async () => {
+       const events = Object.keys(hookEvents).filter(e => e !== 'input' && hookEvents[e] === p.hook);
+       if (!this.metadata().hooks.includes(p.hook)) invalid(`unknown hook ${p.hook}`);
+diff --git a/extensions/octet-pi-compat/test/event-parity.test.mjs b/extensions/octet-pi-compat/test/event-parity.test.mjs
+index 5a4f553f..e33d8f40 100644
+--- a/extensions/octet-pi-compat/test/event-parity.test.mjs
++++ b/extensions/octet-pi-compat/test/event-parity.test.mjs
+@@ -129,6 +129,7 @@ test('session_shutdown projects actual Pi reasons and target file while retainin
+   f.runtime.metadata = () => ({ hooks: ['session_end'] });
+   f.runtime.bind = params => { assert.equal(params.payload.binding, binding); };
+   f.runtime.queued = (_store, work) => work();
++  f.runtime.preemptStartup = () => {};
+   f.runtime.runEvent = async (type, event) => {
+     if (type === 'session_shutdown') events.push(JSON.parse(JSON.stringify(event)));
+     return { action: 'continue' };
+diff --git a/extensions/octet-pi-compat/test/fixtures/slow-startup-quit.ts b/extensions/octet-pi-compat/test/fixtures/slow-startup-quit.ts
+new file mode 100644
+index 00000000..f3459de0
+--- /dev/null
++++ b/extensions/octet-pi-compat/test/fixtures/slow-startup-quit.ts
+@@ -0,0 +1,8 @@
++// A slow session_start (like a heavy extension warming up) followed by a quit.
++import { appendFileSync } from 'node:fs';
++export default pi => {
++  const log = line => appendFileSync(process.env.STARTUP_QUIT_LOG, `${line}\n`);
++  pi.on('session_start', async () => { log('slow-begin'); await new Promise(resolve => setTimeout(resolve, 1500)); log('slow-end'); });
++  pi.on('session_start', () => { log('next-start'); });
++  pi.on('session_shutdown', event => { log(`shutdown ${event.reason}`); });
++};
+diff --git a/extensions/octet-pi-compat/test/handler-budget.test.mjs b/extensions/octet-pi-compat/test/handler-budget.test.mjs
+index 7262340f..53c5c228 100644
+--- a/extensions/octet-pi-compat/test/handler-budget.test.mjs
++++ b/extensions/octet-pi-compat/test/handler-budget.test.mjs
+@@ -1,5 +1,7 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
++import { mkdtempSync, readFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { spawnSync } from 'node:child_process';
+ import { launch, root, owner, noPiAgent } from './helper.mjs';
+@@ -45,6 +47,41 @@ test('a detached handler is reported once per event, naming its factory, then sk
+   await peer.close();
+ });
+ 
++const slowStartup = join(root, 'test/fixtures/slow-startup-quit.ts');
++const end = (peer, reason) => peer.request('hook/run', { hook: 'session_end', payload: { binding: owner, reason }, context: peer.context() });
++const logged = log => { try { return readFileSync(log, 'utf8').trim().split('\n'); } catch { return []; } };
++async function untilLogged(log, line) {
++  for (let waited = 0; waited < 3000 && !logged(log).includes(line); waited += 20) await new Promise(resolve => setTimeout(resolve, 20));
++  assert.ok(logged(log).includes(line), `${line} was never logged`);
++}
++
++test('a quit during a slow session_start runs the shutdown handlers at once and starts nothing more', async t => {
++  const log = join(mkdtempSync(join(tmpdir(), 'startup-quit-')), 'log');
++  const peer = launch(t, [slowStartup], { env: { STARTUP_QUIT_LOG: log } }); await peer.init(features);
++  const starting = start(peer).response;
++  await untilLogged(log, 'slow-begin');
++  const begun = Date.now();
++  const quit = await end(peer, 'quit').response;
++  assert.ok(quit.result, JSON.stringify(quit));
++  assert.ok(Date.now() - begun < 700, `shutdown did not wait for the slow session_start (${Date.now() - begun} ms)`);
++  assert.deepEqual(logged(log), ['slow-begin', 'shutdown quit'], 'the quit handler ran before the startup handler finished');
++  await starting;
++  await new Promise(resolve => setTimeout(resolve, 1700));
++  assert.ok(!logged(log).includes('next-start'), 'no later session_start handler starts after the quit');
++  await peer.close();
++});
++
++test('a reload during a slow session_start still waits for it, in order', async t => {
++  const log = join(mkdtempSync(join(tmpdir(), 'startup-quit-')), 'log');
++  const peer = launch(t, [slowStartup], { env: { STARTUP_QUIT_LOG: log } }); await peer.init(features);
++  const starting = start(peer).response;
++  await untilLogged(log, 'slow-begin');
++  const reloading = end(peer, 'reload').response;
++  await Promise.all([starting, reloading]);
++  assert.deepEqual(logged(log), ['slow-begin', 'slow-end', 'next-start', 'shutdown reload']);
++  await peer.close();
++});
++
+ test('a stalled tool_call guard fails closed instead of wedging the bridge', async t => {
+   const peer = launch(t, [stalled], options); await peer.init(features);
+   await start(peer).response;
+@@ -119,7 +156,7 @@ test('many stalled hook handlers share one deadline and do not start after it',
+   try {
+     const reports = [];
+     const runtime = { config: { extensions: [] }, issues: { slow: (event, items) => reports.push({ event, items }) } };
+-    const store = { pending: new Set(), errors: [] };
++    const store = { pending: new Set(), errors: [], controller: new AbortController() };
+     const budget = new HookBudget(runtime, store, 'input');
+     const begun = Date.now();
+     let invoked = 0;
+@@ -145,7 +182,7 @@ test('many stalled hook handlers share one deadline and do not start after it',
+ 
+ test('a healthy late handler can use the shared reserve without extending the deadline', async () => {
+   const runtime = { config: { extensions: [] }, issues: { slow() {} } };
+-  const store = { pending: new Set(), errors: [] };
++  const store = { pending: new Set(), errors: [], controller: new AbortController() };
+   const budget = new HookBudget(runtime, store, 'input');
+   budget.perHandler = 100; budget.total = 160;
+   const stalled = await budget.run({ label: 'stalled' }, { ...store }, () => new Promise(() => {}));
+-- 
+2.43.0
+

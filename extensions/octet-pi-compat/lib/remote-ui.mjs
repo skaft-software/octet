@@ -5,9 +5,15 @@ import { theme, hostKeybindings } from './theme.mjs';
 import { commandArgumentRequest, getAutocompleteProvider } from './completions.mjs';
 import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
+import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
 const MAX_CAPTURE_READMISSIONS = 8;
+const MAX_FRAME_ROWS = 256;
+const MAX_FRAME_LINE_BYTES = 16384;
+const MAX_FRAME_TEXT_BYTES = 524288;
+const TRUNCATION_MARK = '…';
+const SGR_RESET = '\x1b[0m';
 const OSC8_START = '\x1b]8;';
 const OSC8_MAX_URI_BYTES = 4096;
 const OSC8_MAX_PARAMS_BYTES = 1024;
@@ -48,33 +54,84 @@ function stripOsc8Links(line) {
   return output + line.slice(cursor);
 }
 const basic = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 21, 22, 23, 24, 25, 27, 28, 29, 39, 49, ...Array.from({ length: 8 }, (_, i) => 30 + i), ...Array.from({ length: 8 }, (_, i) => 40 + i), ...Array.from({ length: 8 }, (_, i) => 90 + i), ...Array.from({ length: 8 }, (_, i) => 100 + i)]);
+
+function validatedLine(line) {
+  if (typeof line !== 'string') invalid('component render must return string[]');
+  // Pi's cursor marker is component metadata. Balanced, validated OSC 8 is
+  // stripped to its label; all other controls (including other OSC, images and
+  // cursor movement) are refused.
+  line = stripOsc8Links(line.replaceAll(CURSOR_MARKER, ''));
+  const text = line.replace(/\x1b\[([0-9;]*)m/g, (_match, body) => {
+    if (body.length > 128 || !/^\d+(;\d+)*$/.test(body)) invalid('ui/frame SGR parameters');
+    const raw = body.split(';'), codes = raw.map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (basic.has(c)) continue;
+      if ([38, 48].includes(c)) {
+        const mode = raw[++i], n = mode === '2' ? 3 : mode === '5' ? 1 : 0;
+        if (!n || i + n >= codes.length) invalid('ui/frame color SGR');
+        for (let j = 0; j < n; j++) if (!Number.isInteger(codes[++i]) || codes[i] < 0 || codes[i] > 255) invalid('ui/frame RGB/index SGR');
+      } else invalid(`ui/frame unsupported SGR ${c}`);
+    }
+    return '';
+  });
+  if (/[\x00-\x1f\x7f-\x9f\uD800-\uDFFF]/u.test(text)) invalid('ui/frame contains nonprintable data or unsafe escape');
+  return line;
+}
+
+function fitLine(line, maxBytes, forceMarker = false) {
+  if (!forceMarker && Buffer.byteLength(line) <= maxBytes) return { line, truncated: false };
+  if (maxBytes < Buffer.byteLength(TRUNCATION_MARK)) return { line: '', truncated: true };
+
+  let output = '', bytes = 0, styled = false;
+  const tokens = line.match(/\x1b\[[0-9;]*m|./gsu) ?? [];
+  for (const token of tokens) {
+    const tokenBytes = Buffer.byteLength(token), nextStyled = styled || token.startsWith('\x1b[');
+    const suffixBytes = Buffer.byteLength(TRUNCATION_MARK) + (nextStyled ? Buffer.byteLength(SGR_RESET) : 0);
+    if (bytes + tokenBytes + suffixBytes > maxBytes) break;
+    output += token; bytes += tokenBytes; styled = nextStyled;
+  }
+  return { line: `${output}${styled ? SGR_RESET : ''}${TRUNCATION_MARK}`, truncated: true };
+}
+
+// Strict validation remains useful for contracts that require a complete value.
 export function safeLines(lines) {
-  if (!Array.isArray(lines) || lines.length > 256) throw rpcError(-32602, 'bounds_exceeded ui/frame rows');
+  if (!Array.isArray(lines) || lines.length > MAX_FRAME_ROWS) throw rpcError(-32602, 'bounds_exceeded ui/frame rows');
   let total = 0;
-  return lines.map(line => {
-    if (typeof line !== 'string') invalid('component render must return string[]');
-    // Pi's cursor marker is component metadata. Balanced, validated OSC 8 is
-    // stripped above; all other controls (including other OSC) are refused.
-    line = stripOsc8Links(line.replaceAll(CURSOR_MARKER, ''));
-    const bytes = Buffer.byteLength(line); total += bytes;
-    if (bytes > 16384 || total > 524288) throw rpcError(-32602, 'bounds_exceeded ui/frame text');
-    const text = line.replace(/\x1b\[([0-9;]*)m/g, (_match, body) => {
-      if (body.length > 128 || !/^\d+(;\d+)*$/.test(body)) invalid('ui/frame SGR parameters');
-      const raw = body.split(';'), codes = raw.map(Number);
-      for (let i = 0; i < codes.length; i++) {
-        const c = codes[i];
-        if (basic.has(c)) continue;
-        if ([38, 48].includes(c)) {
-          const mode = raw[++i], n = mode === '2' ? 3 : mode === '5' ? 1 : 0;
-          if (!n || i + n >= codes.length) invalid('ui/frame color SGR');
-          for (let j = 0; j < n; j++) if (!Number.isInteger(codes[++i]) || codes[i] < 0 || codes[i] > 255) invalid('ui/frame RGB/index SGR');
-        } else invalid(`ui/frame unsupported SGR ${c}`);
-      }
-      return '';
-    });
-    if (/[\x00-\x1f\x7f-\x9f\uD800-\uDFFF]/u.test(text)) invalid('ui/frame contains nonprintable data or unsafe escape');
+  return lines.map(value => {
+    const line = validatedLine(value), bytes = Buffer.byteLength(line);
+    total += bytes;
+    if (bytes > MAX_FRAME_LINE_BYTES || total > MAX_FRAME_TEXT_BYTES) throw rpcError(-32602, 'bounds_exceeded ui/frame text');
     return line;
   });
+}
+
+// Pi components can render much more text than Octet's bounded snapshot wire,
+// especially when they emit truecolor SGR for every cell. Clip presentation at
+// safe SGR/Unicode boundaries instead of retiring an otherwise valid UI mount.
+export function fitLines(lines) {
+  if (!Array.isArray(lines)) invalid('component render must return string[]');
+  const result = [];
+  let total = 0, truncated = lines.length > MAX_FRAME_ROWS;
+  const count = Math.min(lines.length, MAX_FRAME_ROWS);
+  for (let index = 0; index < count; index++) {
+    const line = validatedLine(lines[index]);
+    const remaining = MAX_FRAME_TEXT_BYTES - total;
+    if (remaining <= 0) { truncated = true; break; }
+    const limit = Math.min(MAX_FRAME_LINE_BYTES, remaining);
+    const fitted = fitLine(line, limit);
+    result.push(fitted.line);
+    total += Buffer.byteLength(fitted.line);
+    truncated ||= fitted.truncated;
+    if (fitted.truncated && limit < MAX_FRAME_LINE_BYTES) break;
+  }
+  if (truncated && result.length && !result.at(-1).endsWith(TRUNCATION_MARK)) {
+    const lastIndex = result.length - 1, previousBytes = total - Buffer.byteLength(result[lastIndex]);
+    const limit = Math.min(MAX_FRAME_LINE_BYTES, MAX_FRAME_TEXT_BYTES - previousBytes);
+    const marked = fitLine(result[lastIndex], limit, true).line;
+    result[lastIndex] = marked;
+  }
+  return result;
 }
 function dimension(value) {
   if (!Number.isInteger(value) || value <= 0 || value > 65535) invalid('ui geometry');
@@ -93,6 +150,7 @@ function size(value, reference, fallback) {
 
 const editorSurfaces = new WeakMap();
 const nativeEditors = new WeakMap();
+const nativeRetirements = new WeakMap(), retiredNativeSurfaces = new WeakMap();
 
 // Internal component binding only; native handles still pass the admitted
 // surface's owner/mount checks on every synchronous call.
@@ -109,19 +167,35 @@ export function nativeEditorCall(tui) {
   const surface = editorSurfaces.get(tui);
   if (!surface) unsupported('native Editor', 'requires the host-supplied TUI');
   const call = (operation, editorId) => {
-    if (operation.op === 'dispose' && surface.closed) return {};
+    if (operation.op === 'dispose' && (surface.closed || retiredNativeSurfaces.has(surface))) return {};
+    if (retiredNativeSurfaces.has(surface)) throw retiredNativeSurfaces.get(surface);
     if (surface.closed || !surface.opened || surface.runtime.stopping) throw rpcError(-32002, 'native editor surface retired');
     const runtime = surface.runtime, store = surface.store;
     runtime.require('remote_ui'); runtime.assertOwner(store);
     store.controller.signal.throwIfAborted();
-    return runtime.transport.requestSync('ui/chrome', {
-      parent_request_id: store.id, resource_owner: store.state.owner,
-      chrome: { kind: 'editor', surface_id: surface.id,
-        ...(surface.placement === 'editor' ? {mount_id: surface.mountId} : {}),
-        ...(editorId === undefined ? {} : {editor_id: editorId}), operation },
-    }, {parent: store.live ? store.id : undefined, signal: store.controller.signal});
+    try {
+      return runtime.transport.requestSync('ui/chrome', {
+        parent_request_id: store.id, resource_owner: store.state.owner,
+        chrome: { kind: 'editor', surface_id: surface.id,
+          ...(surface.placement === 'editor' ? {mount_id: surface.mountId} : {}),
+          ...(editorId === undefined ? {} : {editor_id: editorId}), operation },
+      }, {parent: store.live ? store.id : undefined, signal: store.controller.signal,
+        onUiClosed(id) {
+          if (id !== surface.id || retiredNativeSurfaces.has(surface)) return;
+          const error = rpcError(-32002, surface.placement === 'editor' ? 'editor mount retired' : 'native editor surface retired');
+          retiredNativeSurfaces.set(surface, error);
+          nativeRetirements.set(error, surface);
+        },
+      });
+    } catch (error) {
+      if (retiredNativeSurfaces.has(surface) && error.code === -32002) nativeRetirements.set(error, surface);
+      throw error;
+    }
   };
-  call.isAlive = () => !surface.closed && surface.opened && !surface.runtime.stopping;
+  call.isAlive = () => !surface.closed && !retiredNativeSurfaces.has(surface) && surface.opened && !surface.runtime.stopping;
+  // Editors created on this surface, so an adapter-initiated close can retain
+  // their final observable state before the native mount is released.
+  call.track = editor => (surface.nativeEditorObjects ??= new Set()).add(editor);
   return call;
 }
 
@@ -136,12 +210,24 @@ export class RemoteTUI {
         if (intent === undefined) unsupported('tui.terminal.write', 'only reviewed mouse-capture intent is admitted; Rust owns all output');
         surface.runtime.scope.run(surface.store, () => surface.runtime.mouseIntent(intent));
       },
+      // Key-protocol flags third-party hint code reads (pi-tui-kit's componentKeyAvailable). The adapter never
+      // negotiates Kitty or modifyOtherKeys with a terminal (the host normalizes keys), so they report the
+      // adapter's own state: the module-wide Kitty flag, which nothing here sets, and false.
+      get kittyProtocolActive() { return isKittyProtocolActive(); },
+      get modifyOtherKeysActive() { return false; },
       start() { unsupported('tui.terminal.start', 'Rust owns terminal input'); },
       stop() { unsupported('tui.terminal.stop', 'Rust owns terminal lifetime'); },
     }, 'tui.terminal');
+    // Pi's optional debug callback: absent means no host debug key, and reading it must not refuse.
+    this.onDebug = undefined;
     this.facade = strict(this, 'tui');
     editorSurfaces.set(this.facade, surface);
   }
+  // Pi 1.4.0 `TUI.mode` is 'regular' (main-screen scrollback) or 'fullscreen' (alt screen that owns the
+  // transcript and reserves `tui.altScreen.*` keys). octet's Rust frontend owns scrollback and the terminal and
+  // has no Pi alt-screen actions, so extension components always run as 'regular'; extensions that reserve
+  // alt-screen keys when fullscreen (pi-tui-kit) therefore reserve none.
+  get mode() { return 'regular'; }
   requestRender() { this.surface.requestRender(); }
   addChild(value) { this.children.push(component(value)); this.requestRender(); }
   removeChild(value) { const at = this.children.indexOf(value); if (at >= 0) this.children.splice(at, 1); if (this.focus === value) this.setFocus(null); this.requestRender(); }
@@ -170,6 +256,7 @@ export class RemoteTUI {
     };
   }
   topOverlay() { return this.overlays.findLast(e => !e.hidden && !e.options.nonCapturing && (!e.options.visible || e.options.visible(this.surface.columns, this.surface.rows))); }
+  getTopmostVisibleOverlay() { return this.topOverlay(); }
   hideOverlay() { const entry = this.overlays.pop(); if (entry) { this.setFocus(entry.before); this.requestRender(); } }
   hasOverlay() { return this.overlays.some(e => !e.hidden); }
   input(data, release) {
@@ -185,14 +272,14 @@ export class RemoteTUI {
     this.requestRender();
   }
   render(width) {
-    let lines = this.children.flatMap(c => safeLines(c.render(width)));
+    let lines = this.children.flatMap(c => fitLines(c.render(width)));
     for (const e of this.overlays) {
       if (e.hidden || e.options.visible && !e.options.visible(width, this.surface.rows)) continue;
       const o = e.options, margin = typeof o.margin === 'number' ? { top: o.margin, right: o.margin, bottom: o.margin, left: o.margin } : (o.margin || {});
       const left = margin.left || 0, top = margin.top || 0;
       const availW = Math.max(1, width - left - (margin.right || 0)), availH = Math.max(1, this.surface.rows - top - (margin.bottom || 0));
       const w = Math.min(availW, Math.max(1, o.minWidth || 1, size(o.width, width, Math.min(80, availW))));
-      const overlay = safeLines(e.component.render(w)).slice(0, Math.min(availH, size(o.maxHeight, this.surface.rows, availH)));
+      const overlay = fitLines(e.component.render(w)).slice(0, Math.min(availH, size(o.maxHeight, this.surface.rows, availH)));
       const anchor = o.anchor || 'center';
       if (!['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'top-center', 'bottom-center', 'left-center', 'right-center'].includes(anchor)) invalid('overlay anchor');
       const xDefault = left + (anchor.includes('left') ? 0 : anchor.includes('right') ? availW - w : Math.floor((availW - w) / 2));
@@ -207,7 +294,7 @@ export class RemoteTUI {
         lines[y + row] = prefix + ' '.repeat(Math.max(0, x - visibleWidth(prefix))) + '\x1b[0m' + content + ' '.repeat(Math.max(0, w - visibleWidth(content))) + '\x1b[0m' + suffix;
       }
     }
-    return safeLines(lines);
+    return fitLines(lines);
   }
   start() { unsupported('tui.start', 'Rust owns the terminal'); }
   stop() { unsupported('tui.stop', 'close the host surface with done instead'); }
@@ -293,7 +380,11 @@ export class RemoteUI {
       await this.push(surface);
       if (placement === 'fullscreen' && store.method === 'command/execute' && store.detach) store.detach();
       return surface;
-    } catch (error) { await this.close(surface, undefined, !surface.opened).catch(e => this.runtime.backgroundError(e)); throw error; }
+    } catch (error) {
+      if (nativeRetirements.get(error) === surface) return surface;
+      await this.close(surface, undefined, !surface.opened).catch(e => this.runtime.backgroundError(e));
+      throw error;
+    }
   }
   async admit(surface, title, capture) {
     surface.requestedMouseCapture = capture;
@@ -453,6 +544,7 @@ export class RemoteUI {
     let lines;
     try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
     catch (error) {
+      if (nativeRetirements.get(error) === surface) return;
       // History-reading components cannot render a missing publication as an
       // empty session. Retain their last frame without blocking native paint or
       // retiring the mount; successful preparation requests another render.
@@ -461,6 +553,7 @@ export class RemoteUI {
     }
     // Capture lines and this exact barrier in the same synchronous turn. Never
     // render newer text after waiting on an older checkpoint acknowledgement.
+    if (retiredNativeSurfaces.has(surface)) return;
     const checkpoint = surface.editor?.tail;
     await checkpoint;
     if (surface.closed || !surface.store.state.alive || columns !== surface.columns || rows !== surface.rows) return;
@@ -471,6 +564,21 @@ export class RemoteUI {
   }
   async close(surface, value, observed = false) {
     if (surface.closed) return;
+    observed ||= retiredNativeSurfaces.has(surface);
+    // Pi's Editor stays a readable object after its custom UI resolves (e.g.
+    // a questionnaire mirrors its drafts right after done()). While this close
+    // is ours and the native mount is still live, retain each editor's final
+    // read-only state; host-observed retirement has nothing left to read.
+    if (!observed && surface.opened && surface.store.state.alive && !this.runtime.stopping) {
+      for (const editor of surface.nativeEditorObjects ?? []) {
+        try { this.runtime.scope.run(surface.store, () => editor.retainFinalState()); }
+        catch (error) {
+          if (nativeRetirements.get(error) === surface) { observed = true; break; }
+          this.runtime.backgroundError(error);
+        }
+        if (retiredNativeSurfaces.has(surface)) { observed = true; break; }
+      }
+    }
     surface.closed = true; surface.observedClose = observed; surface.phase = 'closed';
     if (observed) { surface.opened = false; surface.admittedMouseCapture = false; }
     surface.initialInputs.length = 0;
@@ -533,7 +641,11 @@ export class RemoteUI {
         if (surface.placement !== 'editor') invalid('ui/editor-text without an editor mount');
         const editor = surface.editor;
         if (!editor || surface.closed) return;
-        const text = bounded(params.text, 'editor text', 262144);
+        // Terminals (including Apple Terminal) paste CR or CRLF line endings.
+        // Bound the original bytes first; normalize only paste newlines before
+        // applying the unchanged control-free editor text grammar.
+        const raw = bounded(params.text, 'editor text', 262144, { controls: true });
+        const text = bounded(params.paste ? raw.replace(/\r\n?/g, '\n') : raw, 'editor text', 262144);
         // The genuine component keeps pastes and undo: the host decision is a
         // replacement, not a rebuild of local editor state.
         editor.mutating++;

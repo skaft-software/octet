@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { canonicalToPi, piToCanonical, projectContext } from '../lib/provider-context.mjs';
 import { Runtime } from '../lib/runtime.mjs';
+import { ExtensionIssues } from '../lib/issues.mjs';
 import { launch, owner, root } from './helper.mjs';
 const fixture = join(root, 'test/fixtures/provider-context.ts');
+const systemPrompt = 'host-served prompt';
 const grant = { grant_id: 'a'.repeat(64), activation_epoch: 4, operation_id: 'provider-context:4', owner, expected_head: 'old-head' };
 const user = text => ({ User: { content: [{ Text: text }] } });
 const contextParams = (peer, mode = 'replace') => ({ hook: 'provider_context', session_leaf: grant,
@@ -12,19 +14,33 @@ const contextParams = (peer, mode = 'replace') => ({ hook: 'provider_context', s
   payload: { request: { system: 'real system', messages: [user('original')], tools: [{ name: 'not-replaceable' }] },
     preparation: { resource_owner: owner.session_id, session_id: 'actual-session', head: 'old-head', tool_generation: 7 } } });
 
-for (const mode of ['replace', 'in-place', 'throws']) test(`real process context ${mode}: ordered callbacks project only canonical messages and preserve real system`, async t => {
-  const peer = launch(t, [fixture]); await peer.init();
-  const reply = await peer.request('hook/run', contextParams(peer, mode)).response;
-  assert.deepEqual(reply.result.provider_context, { messages: [user(mode === 'replace' ? 'projected' : mode === 'in-place' ? 'mutated' : 'original'), user('second:real system')], system: 'real system' });
+for (const mode of ['replace', 'in-place', 'throws', 'throws-coded']) test(`real process context ${mode}: ordered callbacks project only canonical messages and preserve real system`, async t => {
+  const peer = launch(t, [fixture], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  // Disclosure also requires the real foreground lifecycle binding.
+  await peer.start();
+  const request = peer.request('hook/run', contextParams(peer, mode));
+  const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+  assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+  assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+  // Distinct from preparation.request.system: only the native read may supply
+  // the synchronous getter, while the projected provider system stays intact.
+  peer.send({ jsonrpc: '2.0', id: read.id, result: { text: systemPrompt } });
+  const reply = await request.response;
+  assert.ok(reply.result, JSON.stringify(reply));
+  const expected = mode === 'replace' ? 'projected' : mode === 'in-place' ? 'mutated' : 'original';
+  const expectedMessages = [user(expected)];
+  if (['replace', 'in-place', 'throws', 'throws-coded'].includes(mode)) expectedMessages.push(user(`second:${systemPrompt}`));
+  assert.deepEqual(reply.result.provider_context, { messages: expectedMessages, system: 'real system' });
   assert.equal(reply.result.provider_context.tools, undefined);
-  if (mode === 'throws') {
+  if (['throws', 'throws-coded'].includes(mode)) {
     const issue = peer.seen.find(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]');
     assert.ok(issue, peer.stderr());
     assert.equal(issue.params.level, 'warning');
-    assert.ok(issue.params.message.includes(fixture));
-    assert.match(issue.params.message, /context callback failed and was skipped/);
+    assert.match(issue.params.message, /^Octet Pi Compat: context hook failed and was skipped\./);
     assert.match(peer.stderr(), /\[Extension issues\]/);
-    assert.doesNotMatch(issue.params.message + peer.stderr(), /ordinary context failure/);
+    assert.doesNotMatch(issue.params.message + peer.stderr(), /ordinary context failure|coded context failure/);
   }
   await peer.close();
 });
@@ -32,7 +48,7 @@ for (const mode of ['replace', 'in-place', 'throws']) test(`real process context
 for (const event of ['context', 'context_with_system']) test(`${event} callback issues retain refusal and cancellation guards`, async () => {
   const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
   runtime.uninstallChildren(); runtime.features.add('session_entries');
-  const reports = []; runtime.reportCallbackError = (...args) => reports.push(args);
+  const reports = []; runtime.reportCallbackError = (...args) => reports.push(args.slice(0, 3));
   runtime.backgroundError = () => assert.fail('recoverable callback errors must use the issue reporter');
   const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
   const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
@@ -43,15 +59,209 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   assert.ok(await projectContext(runtime, params, store));
   assert.deepEqual(reports, [[event, 0, failure]]);
   assert.equal(kept, 1);
-  for (const code of [-32601, -32602, -32002, -32800]) {
-    const refusal = Object.assign(new Error('native refusal'), { code });
-    handlers[0].handler = () => { throw refusal; };
-    await assert.rejects(projectContext(runtime, params, store), error => error === refusal);
+  for (const code of [-32601, -32602]) {
+    const failure = Object.assign(new Error('callback failure'), { code });
+    handlers[0].handler = () => { throw failure; };
+    assert.ok(await projectContext(runtime, params, store));
   }
+  const hostRefusal = Object.assign(new Error('owner refused'), { code: -32002 });
+  handlers[0].handler = () => { throw hostRefusal; };
+  await assert.rejects(projectContext(runtime, params, store), error => error === hostRefusal);
+  const tracked = new Error('tracked host failure'); store.errors.push(tracked);
+  handlers[0].handler = () => { throw tracked; };
+  await assert.rejects(projectContext(runtime, params, store), error => error === tracked);
+  store.errors.length = 0;
+  const refusal = Object.assign(new Error('cancelled'), { code: -32800 });
+  handlers[0].handler = () => { throw refusal; };
+  await assert.rejects(projectContext(runtime, params, store), error => error === refusal);
   const cancelled = Object.assign(new Error('cancelled'), { code: -32800 });
   handlers[0].handler = () => { store.controller.abort(cancelled); throw failure; };
   await assert.rejects(projectContext(runtime, params, store), error => error === cancelled);
-  assert.equal(reports.length, 1); assert.equal(kept, 1);
+  assert.equal(reports.length, 3); assert.equal(kept, 3);
+});
+
+test('coded callback failures retain the last good projection and run remaining callbacks', async () => {
+  const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  const reports = []; runtime.reportCallbackError = (...args) => reports.push(args.slice(0, 3));
+  runtime.backgroundError = () => assert.fail('recoverable callback errors must use the issue reporter');
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  const coded = Object.assign(new Error('private callback details'), { code: -32602 });
+  let later = 0;
+  runtime.events.set('context', [
+    { factory: 0, handler: () => ({ messages: [{ role: 'user', content: 'last good' }] }) },
+    { factory: 0, handler() { throw coded; } },
+    { factory: 0, handler(event) { later++; event.messages.push({ role: 'user', content: 'later ran' }); } },
+  ]);
+  const result = await projectContext(runtime, params, store);
+  assert.deepEqual(result.provider_context.messages, [user('last good'), user('later ran')]);
+  assert.equal(later, 1); assert.deepEqual(reports, [['context', 0, coded]]);
+});
+
+for (const event of ['context', 'context_with_system']) test(`${event} failed nested mutations do not leak to later handlers`, async () => {
+  const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  runtime.reportCallbackError = () => {};
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  runtime.events.set(event, [
+    { factory: 0, handler(e) { const msg = e.messages.find(m => m.role === 'user'); msg.content[0].text = 'leaked secret'; e.messages.push({ role: 'user', content: 'bad' }); if (event === 'context_with_system') e.messages[0].content = 'bad system'; throw new Error('private'); } },
+    { factory: 0, handler(e) { const msg = e.messages.find(m => m.role === 'user'); assert.equal(msg.content[0].text, 'original'); if (event === 'context_with_system') assert.equal(e.messages[0].content, 'real system'); e.messages.push({ role: 'user', content: 'later' }); } },
+  ]);
+  const result = await projectContext(runtime, params, store);
+  assert.deepEqual(result.provider_context.messages, [user('original'), user('later')]);
+  assert.equal(result.provider_context.system, 'real system');
+});
+
+for (const event of ['context', 'context_with_system']) for (const swallow of [false, true]) for (const code of [-32602, -32000, -32800]) test(`${event} host append failure after a committed append fails closed, swallowed=${swallow}, code=${code}`, async () => {
+  const hostFailure = Object.assign(new Error(code === -32800 ? 'cancelled' : 'private host failure'), { code });
+  let calls = 0, later = 0, reports = 0;
+  const runtime = new Runtime({ extensions: [fixture] }, { requestSync(method, params) {
+    assert.equal(method, 'session/append_entry');
+    if (++calls === 1) return { entry_id: 'committed', head: 'committed', successor: { ...grant, grant_id: 'b'.repeat(64), expected_head: 'committed' } };
+    assert.equal(params.session_leaf.grant_id, 'b'.repeat(64));
+    throw hostFailure;
+  } });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  runtime.reportCallbackError = () => { reports++; };
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.active.set(store.id, store);
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  runtime.events.set(event, [
+    { factory: 0, handler() { runtime.appendEntry('first', { saved: true }); } },
+    { factory: 0, handler() { try { runtime.appendEntry('second', {}); } catch (error) { if (!swallow) throw error; } } },
+    { factory: 0, handler() { later++; } },
+  ]);
+  await assert.rejects(projectContext(runtime, params, store), error => error.code === (code === -32800 ? -32800 : -32002) && !error.message.includes('private'));
+  assert.equal(calls, 2); assert.equal(later, 0); assert.equal(reports, 0);
+  assert.equal(store.state.host.session_leaf_id, 'committed');
+  assert.deepEqual(store.state.host.session_entries.map(entry => entry.id), ['committed']);
+  assert.equal(store.leaf.grant, null);
+});
+
+test('a caught second append after a committed leaf without a successor still fails closed', async () => {
+  let calls = 0, later = 0;
+  const runtime = new Runtime({ extensions: [fixture] }, { requestSync() {
+    calls++; return { entry_id: 'committed', head: 'committed', successor: null };
+  } });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  runtime.active.set(store.id, store);
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  runtime.events.set('context', [
+    { factory: 0, handler() { runtime.appendEntry('first', {}); } },
+    { factory: 0, handler() { try { runtime.appendEntry('second', {}); } catch {} } },
+    { factory: 0, handler() { later++; } },
+  ]);
+  await assert.rejects(projectContext(runtime, params, store), { code: -32002 });
+  assert.equal(calls, 1); assert.equal(later, 0);
+  assert.equal(store.state.host.session_leaf_id, 'committed');
+});
+
+test('default context timeout leaves later callbacks in both phases able to run', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  try {
+    const runtime = new Runtime({ extensions: [fixture] }, {});
+    runtime.uninstallChildren(); runtime.features.add('session_entries'); runtime.issues.slow = () => {};
+    const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+    const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+    params.payload.request.tools = [];
+    runtime.events.set('context', [
+      { factory: 0, handler: () => new Promise(() => {}) },
+      { factory: 0, handler: event => { event.messages.push({ role: 'user', content: 'later context' }); } },
+    ]);
+    runtime.events.set('context_with_system', [
+      { factory: 0, handler: event => { event.messages.push({ role: 'user', content: 'later system' }); } },
+    ]);
+    const result = await projectContext(runtime, params, store);
+    assert.deepEqual(result.provider_context.messages, [user('original'), user('later context'), user('later system')]);
+    assert.equal(result.provider_context.system, 'real system');
+  } finally {
+    if (previous !== undefined) process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('detached context timeout cannot append while the next handler still owns the leaf', async () => {
+  const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
+  process.env.OCTET_PI_HANDLER_BUDGET_MS = '30';
+  try {
+    let calls = 0, release, settled;
+    const gate = new Promise(resolve => { release = resolve; });
+    const late = new Promise(resolve => { settled = resolve; });
+    const runtime = new Runtime({ extensions: [fixture] }, { requestSync(method) {
+      assert.equal(method, 'session/append_entry'); calls++;
+      return { entry_id: 'later', head: 'later', successor: { ...grant, grant_id: 'b'.repeat(64), expected_head: 'later' } };
+    } });
+    runtime.uninstallChildren(); runtime.features.add('session_entries'); runtime.issues.slow = () => {};
+    const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+    runtime.active.set(store.id, store);
+    const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+    params.payload.request.tools = [];
+    runtime.events.set('context', [
+      { factory: 0, async handler(event) {
+        await gate;
+        event.messages[0].content[0].text = 'late mutation';
+        assert.throws(() => runtime.appendEntry('late', {}), { code: -32002 });
+        settled();
+      } },
+      { factory: 0, async handler(event) {
+        release(); await late;
+        assert.equal(event.messages[0].content[0].text, 'original');
+        runtime.appendEntry('later', {});
+        event.messages.push({ role: 'user', content: 'later handler' });
+      } },
+    ]);
+    const result = await projectContext(runtime, params, store);
+    assert.equal(calls, 1);
+    assert.deepEqual(result.provider_context.messages, [user('original'), user('later handler')]);
+    assert.equal(store.state.host.session_leaf_id, 'later');
+    assert.deepEqual(store.errors, []);
+  } finally {
+    if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;
+    else process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
+  }
+});
+
+test('context notice ledger prunes removed handlers and warns again after registration', async () => {
+  const runtime = new Runtime({ extensions: [fixture, `${fixture}-other`] }, {});
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  const issues = []; runtime.issues.publish = batch => issues.push(...batch);
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  const entry = { factory: 0, handler() { throw new Error('private'); } };
+  runtime.events.set('context', [entry]);
+  await projectContext(runtime, params, store);
+  await projectContext(runtime, params, store);
+  assert.equal(issues.length, 1); assert.equal(store.state.contextFailureNotices.size, 1);
+  runtime.events.set('context', [{ factory: 1, handler() {} }]);
+  await projectContext(runtime, params, store);
+  assert.equal(store.state.contextFailureNotices.size, 0);
+  runtime.events.set('context', [entry]);
+  await projectContext(runtime, params, store);
+  assert.equal(issues.length, 2); assert.equal(store.state.contextFailureNotices.size, 1);
+});
+
+test('context failure notices are per live session and never include error bodies', async () => {
+  const sent = [];
+  const runtime = { config: { extensions: [fixture] }, features: new Set(), stopping: false,
+    transport: { closed: false, notify: async (_method, notice) => { sent.push(notice); }, fail: assert.fail } };
+  const issues = new ExtensionIssues(runtime), one = { alive: true }, two = { alive: true };
+  const failure = new Error('secret-bearing context body');
+  issues.callback('context', 0, failure, one);
+  issues.slow('context_with_system', [[fixture, 200]], one);
+  issues.callback('context', 0, failure, two);
+  one.alive = false; one.contextFailureNotices.clear();
+  issues.callback('context', 0, failure, one);
+  await issues.flush();
+  assert.equal(sent.length, 2);
+  assert.doesNotMatch(JSON.stringify(sent), /secret-bearing context body/);
 });
 
 test('unchanged context contributes no unnecessary canonical rewrite', async t => {
@@ -219,19 +429,31 @@ test('context replay refuses opaque state before parsing its kind; observations 
 });
 
 test('process context validates opaque reasoning before callbacks and permits ordinary context filtering', async t => {
-  const peer = launch(t, [fixture]); await peer.init();
+  const peer = launch(t, [fixture], { hold: ['context/system_prompt'] });
+  const initialized = await peer.init(['session_entries', 'system_prompt_read']);
+  assert.ok(initialized.protocol.features.includes('system_prompt_read'));
+  await peer.start();
   const state = { protocol: 'open_ai_responses', model: 'model',
     kind: { OpenAiReasoning: { item_id: 'rs_1', encrypted_content: 'gAAAA' } } };
   for (const reasoning of [{ text: 'thinking', state: { kind: 'opaque' } }, { text: null, state }, { text: 'plan', state }]) {
     const params = contextParams(peer, 'replace');
     params.payload.request.messages = [{ Assistant: { model: 'model', protocol: 'open_ai_responses', content: [{ Reasoning: reasoning }] } }];
-    const reply = await peer.request('hook/run', params).response;
+    const request = peer.request('hook/run', params);
     if (reasoning.state === state) {
-      assert.deepEqual(reply.result.provider_context.messages, [user('projected'), user('second:real system')]);
+      const read = await peer.wait(frame => frame.method === 'context/system_prompt');
+      assert.deepEqual(read.params, { parent_request_id: request.id, resource_owner: owner });
+      assert.ok(!peer.seen.some(frame => frame.id === request.id && !frame.method));
+      peer.send({ jsonrpc: '2.0', id: read.id, result: { text: systemPrompt } });
+    }
+    const reply = await request.response;
+    if (reasoning.state === state) {
+      assert.ok(reply.result, JSON.stringify(reply));
+      assert.deepEqual(reply.result.provider_context.messages, [user('projected'), user(`second:${systemPrompt}`)]);
     } else {
       assert.equal(reply.error?.code, -32602);
       assert.match(reply.error.message, /invalid_request reasoning state kind/);
       assert.equal(reply.result, undefined);
+      assert.ok(!peer.seen.some(frame => frame.method === 'context/system_prompt' && frame.params.parent_request_id === request.id));
     }
   }
   await peer.close();

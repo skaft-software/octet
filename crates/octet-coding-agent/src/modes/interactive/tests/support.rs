@@ -20,6 +20,8 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         model_explicit: false,
         reasoning: None,
         reasoning_explicit: false,
+        model_saved: false,
+        reasoning_saved: false,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         reasoning_mode_explicit: false,
         cache_retention: octet_ai::CacheRetention::Short,
@@ -573,7 +575,10 @@ impl HeldApi {
                     socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
                     continue;
                 }
-                let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 socket.write_all(headers.as_bytes()).await.unwrap();
                 if attempt != 0 {
                     socket.write_all(body.as_bytes()).await.unwrap();

@@ -467,6 +467,7 @@ impl UsageTotals {
                     totals.delegated_records = totals.delegated_records.saturating_add(1);
                 }
                 UsageRecordKind::ToolComposition { .. }
+                | UsageRecordKind::ToolInference { .. }
                 | UsageRecordKind::CacheWarm
                 | UsageRecordKind::RejectedResponsesTurn
                 | UsageRecordKind::TerminalGate { .. } => {

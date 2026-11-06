@@ -185,7 +185,7 @@ async fn assert_custom_lifecycle(app: &App) {
         expected.len() * 2,
         "exactly one pair per durable commit: {events:#?}"
     );
-    for (pair, (id, message)) in events.chunks_exact(2).zip(expected) {
+    for (pair, (id, message)) in events.as_chunks::<2>().0.iter().zip(expected) {
         for (event, kind) in pair.iter().zip(["message_start", "message_end"]) {
             assert_eq!(
                 event,
@@ -265,14 +265,18 @@ async fn native_pi_messages_images_persist_resume_and_emit_committed_events() {
         let message = json!({"customType":"image", "content":image_content(), "display":false,
             "details":{"private":"IMAGE_SECRET"}});
         let factory = if mode == "before" {
-            format!("export default pi => pi.on('before_agent_start', () => ({{ message: {message} }}));")
+            format!(
+                "export default pi => pi.on('before_agent_start', () => ({{ message: {message} }}));"
+            )
         } else {
             let options = match mode {
                 "wake" => "{ triggerTurn: true }",
                 "next" => "{ deliverAs: 'nextTurn', triggerTurn: true }",
                 _ => "{ triggerTurn: false }",
             };
-            format!("export default pi => pi.registerCommand('probe', {{ handler: () => pi.sendMessage({message}, {options}) }});")
+            format!(
+                "export default pi => pi.registerCommand('probe', {{ handler: () => pi.sendMessage({message}, {options}) }});"
+            )
         };
         let (_directory, mut app, _server, requests) = app_with_provider(&factory, false).await;
         let mut shell = InteractiveShell::test_shell();
@@ -361,7 +365,9 @@ async fn native_pi_messages_images_in_run_preserve_real_tool_pairs() {
     ] {
         let message = json!({"customType":"image", "content":image_content(), "display":false,
             "details":{"private":"IMAGE_SECRET"}});
-        let factory = format!("export default pi => pi.on('tool_call', async () => {{ await pi.sendMessage({message}, {options}); }});");
+        let factory = format!(
+            "export default pi => pi.on('tool_call', async () => {{ await pi.sendMessage({message}, {options}); }});"
+        );
         let (_directory, mut app, _server, requests) = app_with_provider(&factory, true).await;
         let mut shell = InteractiveShell::test_shell();
         drive(
@@ -401,7 +407,10 @@ async fn native_pi_messages_images_in_run_preserve_real_tool_pairs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_messages_send_user_image_is_native_media_not_custom_or_text() {
-    let factory = format!("export default pi => pi.registerCommand('probe', {{ handler: () => pi.sendUserMessage({}, {{ deliverAs: 'steer' }}) }});", image_content());
+    let factory = format!(
+        "export default pi => pi.registerCommand('probe', {{ handler: () => pi.sendUserMessage({}, {{ deliverAs: 'steer' }}) }});",
+        image_content()
+    );
     let (_directory, mut app, _server, requests) = app_with_provider(&factory, false).await;
     let mut shell = InteractiveShell::test_shell();
     command(&mut app, &mut shell, "probe").await.unwrap();

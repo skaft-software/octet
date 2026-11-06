@@ -38,8 +38,8 @@ content searches; other enabled tools do not depend on them.
 | `read` | Reads text files line by line, within a size limit. Also handles [supported media](media.md). | On |
 | `edit` | Exact replacements that detect stale file content. | On |
 | `write` | Creates or replaces whole files. | On |
-| `bash` | Runs Bash-compatible commands with output limits, a timeout, cancellation and process-group cleanup. | On, except on Windows |
-| `powershell` | Runs PowerShell (`pwsh.exe`, else Windows PowerShell 5.1) with the same limits, timeout, cancellation and Job Object cleanup. | On Windows only, in place of `bash` ([Windows](windows.md#powershell)) |
+| `bash` | Runs Bash-compatible commands with output limits, optional timeouts, cancellation and process-group cleanup. | On, except on Windows |
+| `powershell` | Runs PowerShell (`pwsh.exe`, else Windows PowerShell 5.1) with the same limits, optional timeouts, cancellation and Job Object cleanup. | On Windows only, in place of `bash` ([Windows](windows.md#powershell)) |
 
 A tool you turn off is never advertised to the model. Having a tool isn't
 permission to use it. When the model batches calls in one response, reads run
@@ -54,6 +54,10 @@ run one at a time, and results reach the model in the order it asked.
 | Block whole-file writes | `--no-write` |
 | Block commands | `--no-process` or `--no-shell` |
 | Turn off every tool | `--no-tools` |
+
+Tool names in `--tools` and `--exclude-tools` are case-sensitive, including
+extension names: `mcpScript` and `mcpscript` select different tools. Use the
+advertised spelling; builtin names are lowercase (`read`, not `Read`).
 
 The `edit` tool accepts LF or CRLF old/new text using the file's first line-ending
 convention (LF if it has no newline). Inserted lines use that convention; unmatched
@@ -147,9 +151,25 @@ goes to one shell with `-c`. On Unix, octet uses the first of: `shell_path`,
 process or effect gate. Diagnostics report only `configured`, `system_bash`,
 `path_bash` or `sh_fallback`, never a path.
 
-The example [settings](configuration.md#settings) use `bash_timeout_secs = 120`
-and `max_output_bytes = 1048576`. Expanding a panel in the TUI can't restore
-output that was discarded at capture.
+Commands have **no timeout by default**. Set `bash_timeout_secs` in
+[settings](configuration.md#settings), `OCTET_BASH_TIMEOUT_SECS`, or
+`--bash-timeout-secs` to impose a ceiling. A `bash` tool call can set a shorter
+`timeout` in seconds or `timeout_ms` in milliseconds, but not both; without a
+configured ceiling, either still imposes its own deadline. Cancellation and
+process cleanup remain active when no deadline is set.
+
+On Unix, background descendants with redirected output stay supervised after
+the shell exits, until they finish, the run is cancelled, a configured deadline
+expires, or the host shuts down. An absent deadline does not kill them at shell
+exit. After the shell exits, octet drains inherited stdout and stderr for up to
+500 ms, then returns the captured output with incomplete streams marked. Later
+output from those streams is discarded while their registered descendants remain
+supervised, so writers do not receive a broken pipe merely because the call
+returned. Draining stops when supervision ends. Redirect output when it must be
+retained, and set an explicit timeout when needed.
+
+`max_output_bytes` bounds capture independently of timeouts. Expanding a panel
+in the TUI can't restore output that was discarded at capture.
 
 <a id="bash-output-and-temporary-spills"></a>
 

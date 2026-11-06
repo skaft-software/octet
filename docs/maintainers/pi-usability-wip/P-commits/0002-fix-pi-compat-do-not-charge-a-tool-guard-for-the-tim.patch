@@ -1,0 +1,190 @@
+From 487c87f6755a96651ec4e906653e92561110369c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 07:45:54 +0000
+Subject: [PATCH 2/2] fix(pi-compat): do not charge a tool guard for the time
+ the user takes to answer
+
+A permission-style tool_call guard that asked the user was denied after the
+10 s handler budget while its dialog was still open, so slow approvals were
+refused. Time spent awaiting ctx.ui dialogs is now excluded, capped below the
+host's 30 s request timeout so a guard whose dialog never settles still fails
+closed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/octet-pi-compat/lib/api.mjs        |  6 +-
+ .../octet-pi-compat/lib/handler-budget.mjs    | 57 +++++++++++++++++--
+ .../test/fixtures/asking-guard.ts             |  4 ++
+ .../test/handler-budget.test.mjs              | 11 ++++
+ 4 files changed, 72 insertions(+), 6 deletions(-)
+ create mode 100644 extensions/octet-pi-compat/test/fixtures/asking-guard.ts
+
+diff --git a/extensions/octet-pi-compat/lib/api.mjs b/extensions/octet-pi-compat/lib/api.mjs
+index 424fa55b..17c44571 100644
+--- a/extensions/octet-pi-compat/lib/api.mjs
++++ b/extensions/octet-pi-compat/lib/api.mjs
+@@ -306,6 +306,7 @@ export function createContext(runtime, store, replaced = false) {
+     const promise = previous.then(action); state.uiQueues.set(slot, promise.catch(() => {}));
+     return runtime.track(promise, store);
+   };
++  const userAnswer = promise => store.userWait?.track(promise) ?? promise;
+   const custom = (factory, options = {}) => {
+     runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
+     if (typeof factory !== 'function') invalid('ui.custom factory');
+@@ -315,6 +316,7 @@ export function createContext(runtime, store, replaced = false) {
+     const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
+     const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle });
+     runtime.track(mounting, store);
++    userAnswer(result);
+     return Promise.all([mounting, result]).then(([, value]) => value);
+   };
+   const ui = facade({
+@@ -328,11 +330,11 @@ export function createContext(runtime, store, replaced = false) {
+     ...dialogAPI(custom, {
+       async confirm(title, message) {
+         foreground();
+-        return (await runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store)).confirmed;
++        return (await userAnswer(runtime.hostCall('confirmation/request', { prompt: bounded(title, 'confirmation', 16384), detail: message === undefined ? null : bounded(message, 'confirmation detail', 16384), default: false, destructive: false }, store))).confirmed;
+       },
+       async input(title) {
+         foreground();
+-        return (await runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store)).value ?? undefined;
++        return (await userAnswer(runtime.hostCall('input/request', { prompt: bounded(title, 'input prompt', 16384), secret: false }, store))).value ?? undefined;
+       },
+     }),
+     custom,
+diff --git a/extensions/octet-pi-compat/lib/handler-budget.mjs b/extensions/octet-pi-compat/lib/handler-budget.mjs
+index 9552239b..90561de6 100644
+--- a/extensions/octet-pi-compat/lib/handler-budget.mjs
++++ b/extensions/octet-pi-compat/lib/handler-budget.mjs
+@@ -27,6 +27,13 @@ const TOTAL_MS = { before_agent_start: 4000, input: 4000, resources_discover: 40
+ const DEFAULT_PER_HANDLER_MS = 5000;
+ const DEFAULT_TOTAL_MS = 15000;
+ const MIN_WAIT_MS = 250;
++// A tool guard may ask the user (a permission dialog) and the user takes as long
++// as they take, as in Pi. That time is not charged to the guard, up to a cap kept
++// below the host's 30 s request timeout, so a guard whose dialog never settles
++// still fails closed. before_agent_start is not listed: the host's 5 s prompt
++// deadline applies to it regardless.
++const USER_WAIT_EVENTS = new Set(['tool_call']);
++const USER_WAIT_CAP_MS = 20000;
+ const TIMED_OUT = Symbol('handler budget exceeded');
+ 
+ // The suite shortens every budget; the variable never reaches a bridge started
+@@ -90,18 +97,48 @@ export class LoadBudget {
+   }
+ }
+ 
++// Time one handler spends awaiting a dialog the user answers. `ctx.ui` marks
++// those waits through `child.userWait` while the budget runs the handler.
++export class UserWait {
++  constructor() { this.active = 0; this.since = 0; this.total = 0; this.release = undefined; }
++
++  track(promise) {
++    if (this.active++ === 0) this.since = performance.now();
++    const end = () => {
++      if (--this.active > 0) return;
++      this.total += performance.now() - this.since;
++      this.release?.(); this.release = undefined;
++    };
++    promise.then(end, end);
++    return promise;
++  }
++
++  spent() {
++    return Math.min(USER_WAIT_CAP_MS, this.total + (this.active ? performance.now() - this.since : 0));
++  }
++
++  // Resolves when no dialog is open or the cap is reached.
++  idle() {
++    const room = USER_WAIT_CAP_MS - this.spent();
++    if (!this.active || room <= 0) return Promise.resolve();
++    const timer = nativeTimer(room);
++    return Promise.race([new Promise(resolve => { this.release = resolve; }), timer.promise]).finally(() => timer.cancel());
++  }
++}
++
+ export class HookBudget {
+   constructor(runtime, store, event) {
+     this.runtime = runtime; this.store = store; this.event = event;
+     ({ perHandler: this.perHandler, total: this.total } = budgetFor(event));
+     this.started = performance.now();
+     this.detached = new Map(); // factory path -> milliseconds actually waited
++    this.excluded = 0; // milliseconds the hook's handlers spent awaiting the user
+   }
+ 
+   // Keep a small shared reserve for healthy handlers reached late, but never
+   // let their individual floors extend the hook's absolute total deadline.
+   wait() {
+-    const left = this.total - (performance.now() - this.started);
++    const left = this.total - (performance.now() - this.started - this.excluded);
+     const reserve = Math.min(MIN_WAIT_MS, this.perHandler);
+     const share = Math.max(reserve, Math.min(this.perHandler, left - reserve));
+     return Math.max(0, Math.min(left, share));
+@@ -128,7 +165,7 @@ export class HookBudget {
+     const { store } = this;
+     const started = performance.now();
+     const pendingBefore = new Set(store.pending);
+-    const timer = nativeTimer(waited);
++    const userWait = USER_WAIT_EVENTS.has(this.event) ? child.userWait = new UserWait() : undefined;
+     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
+     entry.busy = true;
+     settled.then(late => {
+@@ -139,8 +176,20 @@ export class HookBudget {
+       }
+     });
+     let outcome;
+-    try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
+-    finally { timer.cancel(); }
++    for (;;) {
++      const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
++      if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
++        outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT)]);
++        if (outcome !== TIMED_OUT) break;
++        continue;
++      }
++      if (left <= 0) { outcome = TIMED_OUT; break; }
++      const timer = nativeTimer(left);
++      try { outcome = await Promise.race([settled, timer.promise.then(() => TIMED_OUT)]); }
++      finally { timer.cancel(); }
++      if (outcome !== TIMED_OUT) break;
++    }
++    this.excluded += userWait?.spent() ?? 0;
+     if (outcome === TIMED_OUT) {
+       // Work the handler already queued on this hook must not hold the hook's
+       // own flush, and anything it queues later is observed but never joined.
+diff --git a/extensions/octet-pi-compat/test/fixtures/asking-guard.ts b/extensions/octet-pi-compat/test/fixtures/asking-guard.ts
+new file mode 100644
+index 00000000..bc2594d2
+--- /dev/null
++++ b/extensions/octet-pi-compat/test/fixtures/asking-guard.ts
+@@ -0,0 +1,4 @@
++// A permission-style tool guard: it asks the user and waits for the answer.
++export default pi => {
++  pi.on('tool_call', async (_event, ctx) => (await ctx.ui.confirm('Allow?', 'run bash')) ? undefined : { block: true, reason: 'user said no' });
++};
+diff --git a/extensions/octet-pi-compat/test/handler-budget.test.mjs b/extensions/octet-pi-compat/test/handler-budget.test.mjs
+index 7262340f..ddcab0a1 100644
+--- a/extensions/octet-pi-compat/test/handler-budget.test.mjs
++++ b/extensions/octet-pi-compat/test/handler-budget.test.mjs
+@@ -54,6 +54,17 @@ test('a stalled tool_call guard fails closed instead of wedging the bridge', asy
+   await peer.close();
+ });
+ 
++test('a tool guard waiting for the user is not charged for the time the user takes', async t => {
++  const peer = launch(t, [join(root, 'test/fixtures/asking-guard.ts')], { ...options, hold: ['confirmation/request'] }); await peer.init([...features, 'remote_ui']); await peer.start();
++  const guarded = peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'bash', tool_call_id: 'call-1', arguments: { command: 'true' } }, context: peer.context() });
++  const asked = await peer.wait(frame => frame.method === 'confirmation/request');
++  await new Promise(resolve => setTimeout(resolve, 1500)); // five budgets
++  peer.send({ jsonrpc: '2.0', id: asked.id, result: { confirmed: true } });
++  const answer = await guarded.response;
++  assert.equal(answer.result?.disposition?.action, 'continue', JSON.stringify(answer));
++  await peer.close();
++});
++
+ const stalledPipeline = join(root, 'test/fixtures/stalled-pipeline.ts');
+ const pipelineFeatures = ['resource_paths_v1', 'pipeline_hooks_v1', 'session_entries'];
+ 
+-- 
+2.43.0
+
