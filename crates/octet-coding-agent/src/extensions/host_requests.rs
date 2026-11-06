@@ -884,10 +884,10 @@ impl ExecutableExtensions {
                     ),
                     Some(session_id) => match sessions.rename(&session_id, &name) {
                         Ok(metadata) => {
-                            // Publish the committed name before its notification and
-                            // acknowledgement. Otherwise an earlier host snapshot
-                            // can overwrite the adapter's optimistic setter while
-                            // it awaits this request, until the next shell pump.
+                            // Refresh mounted views before the notification. The
+                            // correlated receipt below also commits the normalized
+                            // name for callers with no mounted UI, without waiting
+                            // for asynchronous snapshot preparation or a shell pump.
                             let state = {
                                 let mut state = self
                                     .host_state
@@ -914,7 +914,16 @@ impl ExecutableExtensions {
                                 }
                             }
                             changed = true;
-                            ExtensionRequestOutcome::Ok(serde_json::json!({}))
+                            // API 0.4 setters receive the durable value even without
+                            // a mounted UI. Retained API 0.2 keeps its empty reply.
+                            let result = if pending.process.api_version()
+                                == octet_agent::extension_process::EXTENSION_API_VERSION_0_4
+                            {
+                                serde_json::json!({ "name": state.session_name })
+                            } else {
+                                serde_json::json!({})
+                            };
+                            ExtensionRequestOutcome::Ok(result)
                         }
                         Err(error) => ExtensionRequestOutcome::Failed(
                             ExtensionRequestFailure::InvalidRequest,

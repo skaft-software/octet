@@ -1997,9 +1997,14 @@ after the initialize request settled leaves the shortcut unavailable; a
 `session/append_entry` requests `{ "parent_request_id": 2, "entry_type":
 "custom", "data": <bounded JSON> }` and returns `{ "entry_id": "..." }`, the
 host-assigned durable entry identifier. `session/set_name` requests
-`{ "parent_request_id": 2, "name": "..." }`; an empty name clears it.
+`{ "parent_request_id": 2, "name": "..." }`; an empty or whitespace-only name
+clears it. API `0.4` returns `{ "name": string | null }`, the committed normalized
+name (`null` when cleared), independently of mounted UI or snapshot preparation.
+The adapter applies this correlated receipt before resolving the setter, only
+while its original session/instance/generation owner remains foreground and the
+call has not been cancelled. Retained API `0.2` returns `{}`.
 `session/set_label` requests `{ "parent_request_id": 2, "entry_id": "...",
-"label": "..." }`; an empty label clears it. Both mutations return `{}`.
+"label": "..." }`; an empty label clears it. It returns `{}`.
 
 `entry_type` is bounded to 128 UTF-8 bytes, the opaque `data` payload to 64 KiB
 of bounded plain JSON (no functions, exotic prototypes, non-finite numbers, or

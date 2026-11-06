@@ -225,7 +225,7 @@ test('callback pi APIs AND captured ctx setters own a separate retained pending 
     assert.equal(h.transport.children.get(call.id).signal, callbackStore.controller.signal);
   }
   assert.throws(() => h.events.return[0].value.ctx.compact(), /outstanding compaction for owner/);
-  for (const call of writes) h.ack(call, {});
+  for (const call of writes) h.ack(call, call.method === 'session/set_name' ? { name: call.params.name } : {});
   h.events['callback-barrier'][0].value.resolve(); await tick();
   assert.equal(callbackStore.pending.size, 0); assert.equal(origin.pending.size, 0); assert.equal(h.diagnostics.length, 0);
 });

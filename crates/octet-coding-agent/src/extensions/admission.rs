@@ -339,7 +339,8 @@ pub(super) fn validate_host_request(
                 Ok(())
             }
             ExtensionSessionEntryOperation::SetName { name } => {
-                bounded_host_request_name("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
+                // Empty names are the documented clear operation, not identifiers.
+                bounded_host_request_text("session name", name, MAX_EXTENSION_SESSION_NAME_BYTES)
             }
             ExtensionSessionEntryOperation::SetLabel { entry_id, label } => {
                 bounded_host_request_name("entry id", entry_id, MAX_EXTENSION_UI_KEY_BYTES)?;

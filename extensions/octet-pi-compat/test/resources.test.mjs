@@ -135,7 +135,7 @@ test('resources: owner-bound reverse calls preserve the real parent, await ACK, 
     const reverse = await peer.wait(f => f.method === 'session/set_name');
     assert.equal(reverse.params.parent_request_id, pending.id); assert.deepEqual(reverse.params.resource_owner, owner);
     assert.equal(peer.seen.some(f => f.id === pending.id && !f.method), false);
-    peer.send({ jsonrpc: '2.0', id: reverse.id, ...(refuse ? { error: { code: -32019, message: 'host refused test reverse call' } } : { result: {} }) });
+    peer.send({ jsonrpc: '2.0', id: reverse.id, ...(refuse ? { error: { code: -32019, message: 'host refused test reverse call' } } : { result: { name: reverse.params.name } }) });
     const response = await pending.response;
     if (refuse) assert.equal(response.error.code, -32019); else assert.ok(response.result);
   }

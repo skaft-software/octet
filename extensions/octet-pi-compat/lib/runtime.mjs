@@ -284,12 +284,22 @@ export class Runtime {
     // response is written. Keep the origin and abort signal so explicit
     // cancellation still retires that UI; omit only the settlement parent.
     const detachedUi = store.detached && (method === 'ui/open' || method === 'ui/close');
-    return this.transport.request(method, {
+    const response = this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
     }, { parent: live && !detachedUi && !independentCheckpoint ? store.id : undefined,
       signal: requestOptions.signal ?? store.controller.signal,
       ...(requestOptions.onUpdate === undefined ? {} : { onUpdate: requestOptions.onUpdate }),
       timeout: method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
+    if (method !== 'session/set_name') return response;
+    return response.then(result => {
+      // This correlated receipt, not a UI mount or an asynchronous snapshot,
+      // commits read-after-write facts. A retired owner cannot accept a late ACK.
+      store.controller.signal.throwIfAborted(); this.assertOwner(store);
+      fields(result, ['name'], 'session name receipt');
+      const name = result.name === null ? null : bounded(result.name, 'committed session name', 4096);
+      store.state.host.session_name = name;
+      return result;
+    });
   }
   appendEntry(type, data, store = this.scope.getStore()) {
     this.require('session_entries');

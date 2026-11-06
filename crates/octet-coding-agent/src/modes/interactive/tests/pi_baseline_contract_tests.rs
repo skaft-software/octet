@@ -337,6 +337,56 @@ export default pi => {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_session_name_receipt_without_ui_normalizes_and_clears_before_getters() {
+    let (_directory, mut app) = pi_app(
+        r#"
+export default pi => {
+  pi.registerCommand('name-receipt', { handler: async (_args, ctx) => {
+    for (const name of ['  Committed name  ', '   ', 'Restored', '']) {
+      await pi.setSessionName(name);
+      // Read immediately after the ACK: no new invocation or UI mount supplies facts.
+      const observed = pi.getSessionName() ?? null;
+      const manager = ctx.sessionManager.getSessionName() ?? null;
+      pi.appendEntry('name-receipt', { requested: name, observed, manager });
+    }
+  }});
+};
+"#,
+    );
+    let path = app.sessions.new_path("20261004-name-receipt");
+    app = rebuild_app(
+        app,
+        None,
+        None,
+        None,
+        Some(SessionSelection::CreateNew(path)),
+    )
+    .unwrap();
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
+    let mut shell = InteractiveShell::test_shell();
+    command(&mut app, &mut shell, "name-receipt").await.unwrap();
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(app.agent.session().path()).unwrap();
+    let observed: Vec<_> = private_entries(&reopened, "name-receipt")
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(
+        observed,
+        vec![
+            json!({"requested": "  Committed name  ", "observed": "Committed name", "manager": "Committed name"}),
+            json!({"requested": "   ", "observed": null, "manager": null}),
+            json!({"requested": "Restored", "observed": "Restored", "manager": "Restored"}),
+            json!({"requested": "", "observed": null, "manager": null}),
+        ]
+    );
+    let id = reopened.path().file_stem().unwrap().to_str().unwrap();
+    assert_eq!(app.sessions.load_metadata(id).unwrap().name, None);
+    assert!(reopened.usage_records().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_baseline_compaction_request_callback_and_tree_hooks_have_durable_native_evidence() {
     let (_directory, mut app) = pi_app(
         r#"

@@ -10,9 +10,10 @@
 
 ### Fixed
 
-- Pi session-name writes publish the committed, normalized name before their
-  acknowledgement, so concurrent host snapshots cannot leave the adapter reading
-  the old name until another shell update.
+- Pi session-name writes acknowledge the committed, normalized name, including
+  clears, even without a custom footer, editor or widget. Concurrent host
+  snapshots cannot leave the adapter reading the old name until another shell
+  update, and late acknowledgements cannot cross a retired session owner.
 - Subagent chrome continues updating while the parent waits for input after its
   turn ends. Worker telemetry is session-lived; background roster refresh
   failures retain the last accepted view and go to extension diagnostics instead

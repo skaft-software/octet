@@ -80,6 +80,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
       else if (frame.method === 'ui/autocomplete/register') result = { accepted: options.completionAccepted ?? true };
       else if (frame.method === 'composer/get') result = { text: options.composer ?? 'existing draft' };
       else if (frame.method === 'session/append_entry') result = { entry_id: 'host-entry' };
+      else if (frame.method === 'session/set_name') result = { name: frame.params.name.trim() || null };
       else if (frame.method === 'provider/credentials') result = frame.params.provider === 'test' && frame.params.model === 'test-model'
         ? { ok: true, apiKey: 'fixture-secret', headers: { authorization: 'Bearer fixture-secret' } }
         : { ok: false, error: `No API key found for "${frame.params.provider}"` };
@@ -87,7 +88,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
         const { input_revision, checkpoint_revision } = frame.params.editor_checkpoint;
         result = { input_revision, checkpoint_revision };
       }
-      else if (['ui/close', 'composer/set', 'composer/insert', 'composer/history', 'session/set_name', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
+      else if (['ui/close', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/set_label', 'session/send_user_message', 'session/send_message', 'tools/set_active'].includes(frame.method)) result = {};
       if (result !== undefined) send({ jsonrpc: '2.0', id: frame.id, result });
     }
     const at = waiters.findIndex(w => w.match(frame));

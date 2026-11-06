@@ -17,6 +17,15 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def wait_for_retirement():
+    import socket
+    root = os.path.dirname(os.path.dirname(os.path.dirname(VARIANT_PATH)))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as gate:
+        gate.settimeout(20)
+        gate.connect(os.path.join(root, "retired.sock"))
+        assert gate.recv(1) == b"r", "old provider retirement was not acknowledged"
+
+
 def receive():
     line = sys.stdin.buffer.raw.readline()
     assert line, "host closed stdin"
@@ -97,6 +106,8 @@ if variant == "v04-unknown":
 models = [model]
 if variant == "catalog256":
     models += [dict(model, id="model-%03d" % i) for i in range(1, 256)]
+if variant == "handoff-target":
+    wait_for_retirement()
 if variant != "none":
     send({"jsonrpc": "2.0", "id": "register", "method": "providers/register",
           "params": {"provider": provider, "models": models}})
@@ -892,15 +903,90 @@ async fn provider_reload_continuity_survives_a_full_catalog_update_before_admiss
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_same_identity_from_another_extension_is_not_rebound() {
+    use tokio::io::AsyncWriteExt as _;
+
     let directory = tempfile::tempdir().unwrap();
+    let gate = tokio::net::UnixListener::bind(directory.path().join("retired.sock")).unwrap();
     let mut app = provider_app_with(
         directory.path(),
         &[("rebind-provider", "same"), ("rebind-intruder", "none")],
     );
     let first = app.model.endpoint.id.clone();
+    for name in ["rebind-provider", "rebind-intruder"] {
+        std::fs::write(
+            directory
+                .path()
+                .join("extensions")
+                .join(name)
+                .join("variant.preentry"),
+            "enabled",
+        )
+        .unwrap();
+    }
     set_extension_variant(directory.path(), "rebind-provider", "none");
-    set_extension_variant(directory.path(), "rebind-intruder", "same");
-    reload_in_place(&mut app).await;
+    set_extension_variant(directory.path(), "rebind-intruder", "handoff-target");
+    // Capture the selected route and reload both processes concurrently, but
+    // hold the foreign registration until all old generations have retired.
+    // Finish this same reload only after the foreign route is live, so the
+    // continuity decision observes the competing extension's actual owner.
+    let pending = app.executable_extensions.prepare_resource_process_reload();
+    let (results, mut target) = tokio::time::timeout(Duration::from_secs(15), async {
+        let (results, connection) = tokio::join!(pending, gate.accept());
+        (results, connection.unwrap().0)
+    })
+    .await
+    .expect("provider reload and foreign registration gate did not settle");
+    let runtime = app.executable_extensions.provider_runtime();
+    assert!(
+        runtime
+            .registered_route_for_test(&app.model.spec.id)
+            .is_none(),
+        "old provider route still exists after the reload processes settled: {results:?}"
+    );
+    target.write_all(b"r").await.unwrap();
+    let intruder = app
+        .executable_extensions
+        .test_process("rebind-intruder")
+        .unwrap();
+    let foreign = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            // Registry resolution only exposes completed initial catalogs.
+            if let Some((route, _)) = runtime.registered_route_for_test(&app.model.spec.id) {
+                if route.owner.extension_instance_id == intruder.extension_instance_id()
+                    && route.owner.generation == intruder.health_snapshot().generation
+                {
+                    break route;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let traces = ["rebind-provider", "rebind-intruder"].map(|name| {
+            let path = directory.path().join("extensions").join(name).join("variant.protocol");
+            (name, std::fs::read_to_string(path).unwrap_or_default())
+        });
+        panic!("intruder did not publish a completed live route: {results:?}; health: {:?}; traces: {traces:?}", intruder.health_snapshot());
+    });
+    let reload = app
+        .executable_extensions
+        .finish_resource_process_reload(results)
+        .await;
+    for name in ["rebind-provider", "rebind-intruder"] {
+        assert!(
+            reload
+                .processes
+                .iter()
+                .any(|(extension, result)| extension == name && result.is_ok()),
+            "{name} reload failed: {reload:?}"
+        );
+    }
+    assert!(intruder.is_running());
+    assert_eq!(
+        foreign.owner.extension_instance_id,
+        intruder.extension_instance_id()
+    );
     let error = app
         .synchronize_extension_provider_catalog_for_request()
         .unwrap_err();

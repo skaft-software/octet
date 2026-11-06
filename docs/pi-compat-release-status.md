@@ -98,7 +98,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 
 | Module | Tests | Covers |
 | --- | --- | --- |
-| `pi_baseline_contract_tests` | 7 | baseline registration and lifecycle, shortcuts, the event bus, session entries and compaction/tree hooks |
+| `pi_baseline_contract_tests` | 8 | baseline registration and lifecycle, shortcuts, the event bus, session entries, committed session-name receipts and compaction/tree hooks |
 | `pi_context_contract_tests` | 5 | context/prompt projections and live-command system-prompt reads/refusals |
 | `pi_exec_contract_tests` | 3 | exact argv, controlled-policy approval/refusal, timeout and cancellation |
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
