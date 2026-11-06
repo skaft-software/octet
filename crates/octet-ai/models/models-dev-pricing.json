@@ -3430,10 +3430,10 @@
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro": {
-    "cache_read": 65888,
+    "cache_read": 63350,
     "cache_write_5m": 0,
-    "input": 790656,
-    "output": 1581312,
+    "input": 760206,
+    "output": 1520412,
     "reasoning": null
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
@@ -4662,10 +4662,10 @@
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-120b": {
-    "cache_read": 18000,
+    "cache_read": 20000,
     "cache_write_5m": 0,
-    "input": 20000,
-    "output": 75000,
+    "input": 22000,
+    "output": 81000,
     "reasoning": null
   },
   "openrouter/openai/gpt-oss-20b": {
@@ -5603,7 +5603,7 @@
     "cache_read": 180000,
     "cache_write_5m": 0,
     "input": 182400,
-    "output": 9338800,
+    "output": 10148900,
     "reasoning": null
   },
   "openrouter/~openai/gpt-astra-latest": {
