@@ -89,6 +89,10 @@ pub(super) fn append_hydrated_items(
                     model_lab,
                     prompt_color,
                     persisted: true,
+                    // Rehydrated history: a steering entry is recognized by its
+                    // own provenance, which hydration does not carry, so replay
+                    // it in full rather than guessing at a collapse.
+                    injected: false,
                 });
             }
             TranscriptItem::CustomMessage {

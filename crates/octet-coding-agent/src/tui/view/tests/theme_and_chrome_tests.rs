@@ -563,7 +563,8 @@ fn card_geometry_keeps_prompt_identity_and_decorations_out_of_selection() {
             model_lab: Some(ModelLab::Alibaba),
             prompt_color: Some("#ff7018".into()),
             persisted: true,
-        });
+                 injected: false,
+             });
     }
     let (start, length, geometry, rows) = {
         let state = shell.state.borrow();
@@ -652,7 +653,8 @@ fn card_surface_degrades_to_rail_with_exact_cached_narrow_geometry() {
         model_lab: None,
         prompt_color: None,
         persisted: true,
-    };
+             injected: false,
+         };
     let wide = compile_surface_plan(None, &block, &theme, 80);
     assert_eq!(wide.chrome, ThemeSurfaceChrome::Card);
     assert_eq!(wide.geometry.leading_rows, 2);

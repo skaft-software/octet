@@ -782,6 +782,11 @@ enum TranscriptBlock {
         prompt_color: Option<String>,
         /// Whether this prompt is represented in the durable Session.
         persisted: bool,
+        /// Injected into a running turn (steering or follow-up) rather than typed
+        /// as the turn's opening prompt. Collapsed by default: a long paste steered
+        /// into a live turn must not consume the transcript's scrollable area, and
+        /// Ctrl+O expands it.
+        injected: bool,
     },
     Assistant(Box<AssistantBlock>),
     Reasoning(Box<AssistantBlock>),
@@ -3870,6 +3875,9 @@ fn transcript_transition_rows(previous: Option<&TranscriptBlock>, density: Theme
     }
 }
 
+/// Rows of an injected (steering/follow-up) prompt kept while collapsed.
+const COLLAPSED_INJECTED_PROMPT_ROWS: usize = 3;
+
 fn render_user_prompt(
     text: &str,
     model_lab: &Option<ModelLab>,
@@ -3877,6 +3885,7 @@ fn render_user_prompt(
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
+    collapsed: bool,
 ) -> Vec<String> {
     if !theme.surface_for_width("user", width).prompt_marker {
         let document = parse_markdown(&sanitize_for_terminal(text));
@@ -3891,8 +3900,8 @@ fn render_user_prompt(
                     line.styled
                 }
             })
-            .collect();
-        return finish_transcript_block(lines);
+            .collect::<Vec<_>>();
+        return finish_transcript_block(truncate_injected_prompt(lines, width, collapsed, theme));
     }
     let marker_glyph = sanitize_for_terminal(prompt_marker(theme));
     let marker_width = visible_width(&marker_glyph);
@@ -3933,7 +3942,44 @@ fn render_user_prompt(
     if lines.is_empty() {
         lines.push(fit_line(&format!("{marker} "), width));
     }
-    finish_transcript_block(lines)
+    finish_transcript_block(truncate_injected_prompt(lines, width, collapsed, theme))
+}
+
+/// Collapse an injected prompt to a bounded number of rows plus one hint row, so
+/// a long steered paste cannot push the transcript out of its scrollable area.
+/// The full text is untouched: Ctrl+O renders the same block expanded.
+pub(super) fn truncate_injected_prompt(
+    mut lines: Vec<String>,
+    width: u16,
+    collapsed: bool,
+    theme: &OctetTheme,
+) -> Vec<String> {
+    if !collapsed || lines.len() <= COLLAPSED_INJECTED_PROMPT_ROWS {
+        return lines;
+    }
+    let hidden = lines.len() - COLLAPSED_INJECTED_PROMPT_ROWS;
+    lines.truncate(COLLAPSED_INJECTED_PROMPT_ROWS);
+    // Keep the hint legible on narrow terminals, then drop it when not even the
+    // short form fits; the row budget is a bound, never an overflow.
+    let fits = |candidate: &str| {
+        u16::try_from(visible_width(candidate)).unwrap_or(u16::MAX) <= width
+    };
+    let long = format!("… +{hidden} lines · ctrl+o");
+    let short = format!("… +{hidden} ctrl+o");
+    let hint = if fits(&long) {
+        long
+    } else if fits(&short) {
+        short
+    } else {
+        String::new()
+    };
+    if !hint.is_empty() {
+        lines.push(fit_line(
+            &theme.fg("muted", &sanitize_for_terminal(&hint)),
+            width,
+        ));
+    }
+    lines
 }
 
 /// Wrap content after a visible prefix while preserving that prefix on the
@@ -5161,6 +5207,7 @@ impl InteractiveShell {
                         model_lab,
                         prompt_color: prompt_color.clone(),
                         persisted: true,
+                        injected: true,
                     });
                 }
                 state.open_working_status();
@@ -5178,6 +5225,7 @@ impl InteractiveShell {
                         model_lab,
                         prompt_color: prompt_color.clone(),
                         persisted: true,
+                        injected: true,
                     });
                 }
                 state.open_working_status();
@@ -5678,6 +5726,7 @@ impl InteractiveShell {
             model_lab,
             prompt_color,
             persisted: false,
+            injected: false,
         });
         // Closing the streaming blocks removed the turn's transient status row,
         // and the prompt was appended after it. Reopen the liveness row below

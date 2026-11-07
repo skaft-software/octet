@@ -53,6 +53,7 @@ mod subagent_rendering_tests;
 mod support;
 pub(crate) use support::{begin_startup, emulated_shell};
 mod terminal_handoff_pty_tests;
+mod injected_prompt_tests;
 mod theme_and_chrome_tests;
 mod threaded_native_resize_tests;
 mod tool_and_diff_card_tests;

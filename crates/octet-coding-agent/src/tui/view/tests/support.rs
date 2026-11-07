@@ -825,7 +825,8 @@ pub(super) fn populate_theme_fixture(shell: &mut InteractiveShell) {
         model_lab: Some(ModelLab::Alibaba),
         prompt_color: Some("#ff7018".into()),
         persisted: true,
-    });
+             injected: false,
+         });
     state.push_block(TranscriptBlock::Assistant(Box::new(
             AssistantBlock::finalized(
                 "# Patch plan\n\nKeep the change **small** and verify it.\n\n```rust\nfn answer() -> u8 { 42 }\n```"

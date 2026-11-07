@@ -251,6 +251,7 @@ pub(super) fn render_block_planned_with_rainbow(
             text,
             model_lab,
             prompt_color,
+            injected,
             ..
         } => render_user_prompt(
             text,
@@ -261,6 +262,8 @@ pub(super) fn render_block_planned_with_rainbow(
             rich_renderer,
             theme,
             width,
+            // Injected into a running turn: collapsed unless Ctrl+O expands it.
+            *injected && !verbose_tools,
         ),
         TranscriptBlock::Subagents(summary) => {
             let full = summary.label();

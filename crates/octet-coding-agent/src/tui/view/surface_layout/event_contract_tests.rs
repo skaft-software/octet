@@ -59,6 +59,7 @@ fn prompt() -> TranscriptBlock {
         model_lab: None,
         prompt_color: Some("#123456".into()),
         persisted: true,
+        injected: false,
     }
 }
 
@@ -414,6 +415,7 @@ fn prompt_with(text: &str) -> TranscriptBlock {
         model_lab: None,
         prompt_color: Some("#123456".into()),
         persisted: true,
+        injected: false,
     }
 }
 

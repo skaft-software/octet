@@ -475,7 +475,7 @@ fn wide_default_prose_and_prompt_use_the_available_width() {
         renderer.render(&document, 158).plain_lines(),
         vec![source.clone()]
     );
-    let prompt = render_user_prompt(&source, &None, None, &renderer, &theme, 160);
+    let prompt = render_user_prompt(&source, &None, None, &renderer, &theme, 160, false);
     assert_eq!(
         prompt.len(),
         1,
@@ -501,7 +501,8 @@ fn colored_prompt_preserves_markdown_runs_inside_its_highlight() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-    };
+             injected: false,
+         };
     assert_eq!(block_copy_text(&block), source);
     let rows = render_block(
         None,

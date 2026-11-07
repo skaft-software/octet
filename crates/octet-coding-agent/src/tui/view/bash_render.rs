@@ -343,6 +343,7 @@ mod tests {
     use crate::presentation::summarize_tool;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{test_theme, test_theme_with};
+    use crate::tui::view::tool_render::COMPACT_TOOL_INPUT_ROWS as BUDGET;
 
     #[test]
     fn bash_output_excludes_capture_paths_but_keeps_literal_output_and_loss_notices() {
@@ -389,13 +390,22 @@ mod tests {
         let renderer = theme.rich_renderer();
         let collapsed = render_bash_row(command, action, &renderer, theme, width, false);
         let expanded = render_bash_row(command, action, &renderer, theme, width, true);
-        if expanded.len() <= 6 {
+        // Terse previews keep COMPACT_TOOL_INPUT_ROWS command rows plus one hint.
+        let budget = crate::tui::view::tool_render::COMPACT_TOOL_INPUT_ROWS;
+        if expanded.len() <= budget {
             assert_eq!(collapsed, expanded, "short commands must remain complete");
         } else {
-            assert_eq!(collapsed.len(), 7, "six command rows plus one hint");
-            assert_eq!(collapsed[..6], expanded[..6]);
-            let hint = strip_terminal_sequences(&collapsed[6]);
-            assert!(hint.contains(&format!("{}", expanded.len() - 6)), "{hint}");
+            assert_eq!(
+                collapsed.len(),
+                budget + 1,
+                "{budget} command rows plus one hint"
+            );
+            assert_eq!(collapsed[..budget], expanded[..budget]);
+            let hint = strip_terminal_sequences(&collapsed[budget]);
+            assert!(
+                hint.contains(&format!("{}", expanded.len() - budget)),
+                "{hint}"
+            );
             assert!(hint.contains("Ctrl+O"), "{hint}");
         }
         for rows in [&collapsed, &expanded] {
@@ -464,12 +474,26 @@ mod tests {
         assert!(collapsed.join("\n").contains("fourth"));
         let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", "Bash", &theme, 100);
         assert_eq!(multiline.len(), 4);
-        let longer = format!("{command}\nprintf seventh\nprintf eighth");
-        let (collapsed, expanded) = assert_input_window(&longer, "Bash", &theme, 100);
-        assert_eq!(expanded.len(), 8);
-        assert!(collapsed[6].contains("2 command rows hidden"));
-        assert!(!collapsed.join("\n").contains("seventh"));
-        assert!(expanded.join("\n").contains("eighth"));
+        // Exceed the terse budget so the disclosure suffix is exercised: the
+        // hidden-row count and the Ctrl+O hint must describe what is omitted.
+        let many = (0..BUDGET + 4)
+            .map(|index| format!("printf line{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (collapsed, expanded) = assert_input_window(&many, "Bash", &theme, 100);
+        assert!(
+            expanded.len() > BUDGET,
+            "fixture must exceed the terse budget: {} rows",
+            expanded.len()
+        );
+        assert_eq!(collapsed.len(), BUDGET + 1, "budget rows plus one hint");
+        assert!(
+            collapsed[BUDGET].contains(&format!("{} command rows hidden", expanded.len() - BUDGET)),
+            "{:?}",
+            collapsed[BUDGET]
+        );
+        assert!(!collapsed.join("\n").contains(&format!("line{}", BUDGET + 1)));
+        assert!(expanded.join("\n").contains(&format!("line{}", BUDGET + 3)));
     }
 
     #[test]
@@ -498,8 +522,8 @@ mod tests {
             );
             assert_eq!(
                 collapsed.len(),
-                if expanded.len() > 6 {
-                    7
+                if expanded.len() > BUDGET {
+                    BUDGET + 1
                 } else {
                     expanded.len()
                 }
@@ -576,7 +600,10 @@ mod tests {
                 100,
                 expanded,
             );
-            assert_eq!(input.len(), if expanded { 8 } else { 7 });
+            // 8 wrapped command rows: shown in full (no hint row) while it fits
+            // the terse budget, otherwise the budget plus one disclosure hint.
+            let expected = if expanded || 8 <= BUDGET { 8 } else { BUDGET + 1 };
+            assert_eq!(input.len(), expected);
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);
             let plain = plain_rows(&tail);

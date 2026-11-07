@@ -473,7 +473,8 @@ fn resize_motion_and_appearance_keep_the_surface_and_transcript_identity() {
         model_lab: Some(ModelLab::Anthropic),
         prompt_color: Some("#d97757".into()),
         persisted: true,
-    });
+             injected: false,
+         });
     surface.flush(&shell.state).unwrap();
     let user_id = surface.sent.main[0].id.clone();
     ack(&shell, 1);
@@ -550,7 +551,8 @@ fn model_switch_preserves_stored_prompt_color_instead_of_using_the_new_accent() 
         model_lab: Some(ModelLab::Anthropic),
         prompt_color: Some("#d97757".into()),
         persisted: true,
-    });
+             injected: false,
+         });
     surface.flush(&shell.state).unwrap();
     let history = surface.sent.main.clone();
     ack(&shell, 1);
@@ -615,7 +617,8 @@ fn composer_edits_reuse_the_history_allocation_without_touching_its_nodes() {
         model_lab: None,
         prompt_color: None,
         persisted: true,
-    });
+             injected: false,
+         });
     surface.flush(&shell.state).unwrap();
     let history = surface.sent.main.as_ptr();
     shell.state.borrow_mut().editor.set_text("fast draft");
@@ -1493,7 +1496,8 @@ fn user_prompt_is_a_left_aligned_native_card_tern_sizes_at_any_width() {
             model_lab: Some(ModelLab::Anthropic),
             prompt_color: Some("#d97757".into()),
             persisted: true,
-        });
+                 injected: false,
+             });
         surface.flush(&shell.state).unwrap();
         let identity = shell.state.borrow().transcript_commit_ids[0];
         let card = find_node(&surface.sent.main, &id(identity, "user")).unwrap();
