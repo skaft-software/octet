@@ -28,6 +28,8 @@ It runs cloud or local models, keeps resumable sessions, and takes tools as subp
 extensions you can write in any language that speaks JSON-RPC. It can also **listen to audio**
 and **drive your computer** in the same conversation, which is why it exists.
 
+## Install
+
 ```console
 curl -fsSL https://octet.skaft.org/install | sh
 ```
@@ -151,6 +153,22 @@ shasum -a 256 -c OCTET_SHA256SUMS
 ```
 
 `OCTET_RELEASE_METADATA.json` records the exact source commit the artifacts were built from.
+
+## Codebase
+
+| Path | What lives there |
+|---|---|
+| `crates/octet-coding-agent` | the agent: loop, tools, policy, sessions, CLI and TUI entry |
+| `crates/octet-agent` | agent runtime and turn orchestration |
+| `crates/octet-ai` | model clients and provider routing |
+| `crates/sexy-tui-rs` | terminal rendering |
+| `sdk/` | extension SDKs: Python, TypeScript, Rust, C++, C |
+| `extensions/` | first-party bundles, including `octet-pi-compat` |
+| `docs/` | documentation, design notes and release records |
+| `scripts/` | release, packaging and verification tooling |
+
+Build from source with `cargo build --release -p octet-coding-agent`; the
+[C contributing guide](CONTRIBUTING.md) covers the test lanes and profiles.
 
 ## Documentation
 
