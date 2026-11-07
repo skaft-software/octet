@@ -657,7 +657,14 @@ pub async fn session_picker(
 ) -> anyhow::Result<Option<PathBuf>> {
     let mut rows = picker_rows(sessions.iter().cloned());
     if rows.is_empty() {
-        shell.error(format!("no sessions in {}", store.dir().display()));
+        // gh-556: an empty /resume must tell the user what to do next. This
+        // state (no untrashed sessions in the workspace at all) is distinct
+        // from the in-panel "no matches for the filter" state, which carries
+        // its own guidance through the surface lifecycle.
+        shell.notice(format!(
+            "No sessions in {} yet. Start a new session and it will appear in /resume.",
+            store.dir().display()
+        ));
         shell.render();
         return Ok(None);
     }
