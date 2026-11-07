@@ -55,6 +55,11 @@ text LICENSE
 text README.md
 text SECURITY.md
 text THIRD_PARTY_NOTICES.md
+asset docs/assets/octet/readme/rss.jpg
+asset docs/assets/octet/readme/tape-light.jpg
+asset docs/assets/octet/readme/tape.jpg
+asset docs/assets/octet/readme/terminal.png
+asset docs/assets/octet/readme/wall-clock.jpg
 text docs/assets/fonts/GUST-FONT-LICENSE.txt
 text docs/assets/fonts/LOCAL-NOTICE.md
 asset docs/assets/fonts/LocalGrotesk-Regular.woff2
