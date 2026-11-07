@@ -7,14 +7,16 @@
 <p align="center"><strong>A fast, native coding agent for your terminal.</strong><br>
 Rust core · any-language extensions · hears audio, uses your computer</p>
 
-<p align="center">
-  <a href="https://github.com/skaft-software/octet/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/skaft-software/octet?style=flat-square&label=release&color=2a78d6"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-1baf7a?style=flat-square"></a>
-  <a href="https://skaft.org/octet/"><img alt="Website" src="https://img.shields.io/badge/docs-skaft.org%2Foctet-536dfe?style=flat-square"></a>
-  <img alt="macOS arm64" src="https://img.shields.io/badge/macOS-arm64-000000?style=flat-square&logo=apple&logoColor=white">
-  <img alt="Linux x86-64" src="https://img.shields.io/badge/Linux-x86--64-FCC624?style=flat-square&logo=linux&logoColor=black">
-  <img alt="Windows preview" src="https://img.shields.io/badge/Windows-preview-0078D4?style=flat-square&logo=windows&logoColor=white">
-</p>
+<div align="center">
+
+[![Release: 0.10.0](https://img.shields.io/badge/release-0.10.0-536dfe?style=flat-square)](docs/releases/v0.10.0.md)
+[![MIT license](https://img.shields.io/badge/license-MIT-1baf7a?style=flat-square)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-skaft.org%2Foctet-536dfe?style=flat-square)](https://skaft.org/octet/)
+![macOS arm64](https://img.shields.io/badge/macOS-arm64-000000?style=flat-square&logo=apple&logoColor=white)
+![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?style=flat-square&logo=linux&logoColor=black)
+![Windows preview](https://img.shields.io/badge/Windows-preview-0078D4?style=flat-square&logo=windows&logoColor=white)
+
+</div>
 
 <p align="center">
   <img src="docs/assets/octet/readme/terminal.png" alt="octet running a coding session in the terminal" width="860">
@@ -105,8 +107,10 @@ memory and per-turn overhead — not coding quality.
 
 ## Pi extensions
 
-Pi extension support ships as a separate, installable bundle. It is **experimental** and
-compatibility is per-extension.
+**v0.10.0 is the first Pi-compatible release.** Pi extension support ships as an **optional**,
+separately installable bundle called `octet-pi-compat`. It is experimental and compatibility is
+per-extension. Extensions run as their own processes with OS permissions — the adapter does not
+sandbox them.
 
 ```console
 octet extension install octet-pi-compat
