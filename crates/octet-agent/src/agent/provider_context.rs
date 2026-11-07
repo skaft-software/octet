@@ -413,6 +413,11 @@ async fn project_context_hooks(
             }
             Err(ProviderContextHookError::Failed(_)) => return Err(refused("hook failed")),
         };
+        // The request that reached this hook. If the hook's projection produces
+        // something the provider cannot represent, that projection is the
+        // suspect — not the session — so it can be dropped and the run continues
+        // on the validated request, exactly like any other handler failure.
+        let accepted_before_hook = request.clone();
         if let Some(projection) = projection {
             request.messages = projection.messages;
             request.system = projection.system;
@@ -465,10 +470,62 @@ async fn project_context_hooks(
         // Name the failing validation. The alternative — a bare "invalid
         // canonical provider context" — leaves an operator with a 116-tool
         // request and no way to tell which tool or field is unacceptable.
-        octet_ai::validate_provider_request(model, &request).map_err(|error| {
+        if let Some(path) = std::env::var_os("OCTET_CONTEXT_DUMP") {
+            // Operator-supplied diagnostic: one line per preparation, so a
+            // refusal can be traced to the exact fleet and validator reason.
+            let mut tools = request
+                .tools
+                .iter()
+                .map(|t| (t.name.clone(), serde_json::to_string(t).map_or(0, |s| s.len())))
+                .collect::<Vec<_>>();
+            tools.sort_by(|a, b| b.1.cmp(&a.1));
+            let record = serde_json::json!({
+                "messages": request.messages.len(),
+                "tools": request.tools.len(),
+                "schema_bytes": tools.iter().map(|(_, n)| n).sum::<usize>(),
+                "largest": tools.iter().take(5).map(|(n, s)| format!("{n}={s}")).collect::<Vec<_>>(),
+                "validation": octet_ai::validate_provider_request(model, &request)
+                    .err()
+                    .map(|e| e.to_string()),
+            });
+            use std::io::Write as _;
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(file, "{record}");
+            }
+        }
+        // A projection the provider cannot represent is a handler fault, not a
+        // reason to lose the session: Pi isolates a failing context handler, and
+        // a 116-tool Pi fleet must never be able to end a run. Fall back only to
+        // the request that reached this hook, and only when it still validates,
+        // so identity, loadout and host-authority checks above stay fatal.
+        if let Err(error) = octet_ai::validate_provider_request(model, &request) {
             let detail: String = error.to_string().chars().take(240).collect();
-            refused_owned(format!("invalid canonical provider context: {detail}"))
-        })?;
+            if octet_ai::validate_provider_request(model, &accepted_before_hook).is_ok() {
+                request = accepted_before_hook;
+                // One precise notice beats the generic hook-failure line plus a
+                // detail line. Deduplicate on the hook's own identity, the same
+                // key the caller prunes to live hooks, so the notice survives
+                // pruning and is reported once per session and extension.
+                let notice_id = hook.failure_notice_id().map(str::to_owned);
+                let already_noticed = notice_id
+                    .as_ref()
+                    .is_some_and(|id| session.context_failure_notices.contains(id));
+                if !already_noticed {
+                    if let Some(id) = notice_id {
+                        if session.context_failure_notices.len() < MAX_CONTEXT_FAILURE_NOTICES {
+                            session.context_failure_notices.insert(id);
+                        }
+                    }
+                    notices.push(format!(
+                        "Extension context projection was invalid and was skipped: {detail}"
+                    ));
+                }
+                continue;
+            }
+            return Err(refused_owned(format!(
+                "invalid canonical provider context: {detail}"
+            )));
+        }
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }
