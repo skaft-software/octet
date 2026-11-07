@@ -2486,6 +2486,9 @@ impl ShellState {
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
+                        // An injected steering/follow-up prompt collapses unless
+                        // disclosure is expanded, so Ctrl+O must re-render it.
+                        | TranscriptBlock::User { injected: true, .. }
                 ) || self
                     .extension_transcript
                     .frames

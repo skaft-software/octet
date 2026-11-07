@@ -127,3 +127,37 @@ fn queued_steering_preview_is_bounded_in_fullscreen() {
     );
     assert!(preview.iter().any(|line| line.contains("queued")), "{preview:?}");
 }
+
+/// Ctrl+O must re-render historic blocks. The disclosure invalidation used to
+/// skip user prompts, so a collapsed steering block stayed collapsed forever.
+#[test]
+fn disclosure_toggle_invalidates_the_injected_prompt_block() {
+    let mut shell = InteractiveShell::test_shell();
+    {
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::User {
+            text: "steered into the running turn".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+            injected: true,
+        });
+    }
+    shell.set_verbose_tools(true);
+    shell.render();
+    let injected = {
+        let state = shell.state.borrow();
+        state
+            .transcript
+            .iter()
+            .position(|block| matches!(block, TranscriptBlock::User { injected: true, .. }))
+            .expect("injected prompt block")
+    };
+    let before = shell.state.borrow().block_revisions[injected];
+    shell.set_verbose_tools(false);
+    let after = shell.state.borrow().block_revisions[injected];
+    assert!(
+        after > before,
+        "the disclosure toggle must schedule the injected prompt for re-render ({before} -> {after})"
+    );
+}
