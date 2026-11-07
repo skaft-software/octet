@@ -29,16 +29,22 @@ extensions you can write in any language that speaks JSON-RPC. It can also **lis
 and **drive your computer** in the same conversation, which is why it exists.
 
 ```console
-curl -fsSL https://octet.skaft.org/install | bash
+curl -fsSL https://octet.skaft.org/install | sh
+```
+
+Or pin the exact release instead of following `latest` — recommended for CI and scripted installs:
+
+```console
+curl -fsSL https://github.com/skaft-software/octet/releases/download/v0.10.0/install-octet.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/skaft-software/octet/releases/latest/download/install-octet.ps1 | iex
+irm https://github.com/skaft-software/octet/releases/download/v0.10.0/install-octet.ps1 | iex
 ```
 
-Also available via `cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.2 --bins octet-coding-agent`,
+Also available via `cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.0 --bins octet-coding-agent`,
 from a source checkout, and on npm (independent release cadence). See
 [installation](docs/installation.md).
 
@@ -140,7 +146,7 @@ Optional first-party integrations: `octet-mcp`, `octet-subagents`, `octet-codemo
 Releases are built and signed in CI, and every asset ships a checksum and a Sigstore bundle.
 
 ```console
-gh release download v0.10.2 --repo skaft-software/octet --pattern OCTET_SHA256SUMS
+gh release download v0.10.0 --repo skaft-software/octet --pattern OCTET_SHA256SUMS
 shasum -a 256 -c OCTET_SHA256SUMS
 ```
 
