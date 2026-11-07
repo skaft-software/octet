@@ -512,6 +512,19 @@ pub struct Cli {
     /// Disable all command execution (process execution is shell-equivalent authority).
     #[arg(long)]
     pub no_shell: bool,
+    /// Accepted from Pi's CLI surface and does nothing here: octet selects no
+    /// theme at all unless `--theme` names one, so there is no theme to disable.
+    ///
+    /// ACP bridges such as pi-acp spawn the agent with Pi's whole flag surface.
+    /// A surface-reducing flag that octet cannot fail on must not be a fatal
+    /// spawn error, because the editor only reports "agent failed to start".
+    #[arg(long)]
+    pub no_themes: bool,
+    /// Accepted from Pi's CLI surface and does nothing here: skills are only
+    /// loaded from explicit `--skill-dir` paths and workspace resources, and
+    /// `--no-tools` already removes the skill tools.
+    #[arg(long)]
+    pub no_skills: bool,
     /// Explicitly enable command execution (overrides a disabling user setting).
     #[arg(long)]
     pub allow_shell: bool,

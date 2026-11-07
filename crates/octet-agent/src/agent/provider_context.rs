@@ -462,8 +462,13 @@ async fn project_context_hooks(
             }
         }
         validate_identities(&canonical, &request, model)?;
-        octet_ai::validate_provider_request(model, &request)
-            .map_err(|_| refused("invalid canonical provider context"))?;
+        // Name the failing validation. The alternative — a bare "invalid
+        // canonical provider context" — leaves an operator with a 116-tool
+        // request and no way to tell which tool or field is unacceptable.
+        octet_ai::validate_provider_request(model, &request).map_err(|error| {
+            let detail: String = error.to_string().chars().take(240).collect();
+            refused_owned(format!("invalid canonical provider context: {detail}"))
+        })?;
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }

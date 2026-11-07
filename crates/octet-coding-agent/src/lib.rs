@@ -203,6 +203,19 @@ async fn run() -> anyhow::Result<()> {
     } else {
         Default::default()
     };
+    // Pi's surface-reducing flags are accepted so an ACP bridge can spawn octet
+    // with the same argv it passes Pi. Say so once instead of failing silently
+    // or pretending the flag changed something.
+    for (flag, set, why) in [
+        ("--no-themes", cli.no_themes, "octet loads no theme unless --theme names one"),
+        ("--no-skills", cli.no_skills, "skills come only from --skill-dir and trusted workspace resources"),
+    ] {
+        if set {
+            crate::output::stderr_line(format!(
+                "note: {flag} is accepted for Pi CLI compatibility and has no effect here: {why}"
+            ));
+        }
+    }
     let no_extensions = cli.no_extensions;
     let mut config = cli::build_config(cli, &cwd)?;
     app::bootstrap::startup_phase("cli.configured");

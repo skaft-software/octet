@@ -60,6 +60,8 @@ fn base() -> Cli {
         powershell: false,
         exclude_tools: vec![],
         no_tools: false,
+        no_themes: false,
+        no_skills: false,
         no_edit: false,
         no_write: false,
         no_process: false,
@@ -1603,6 +1605,30 @@ fn a_project_layer_cannot_silence_an_extension() {
     });
     assert_eq!(layer.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
     assert_eq!(layer.enabled_extensions, Some(vec!["octet-web-search".into()]));
+}
+
+#[test]
+fn pi_surface_reducing_flags_are_accepted_and_semantic_ones_still_refused() {
+    // pi-acp always spawns `<agent> --mode rpc --no-themes`; refusing the flag
+    // is a fatal spawn error in every ACP client, so accept the surface-reducing
+    // ones as documented no-ops.
+    for flags in [
+        vec!["octet", "--no-themes"],
+        vec!["octet", "--no-skills"],
+        vec!["octet", "--no-themes", "--no-skills"],
+    ] {
+        let cli = Cli::try_parse_from(&flags).expect("surface-reducing Pi flags parse");
+        assert_eq!(cli.no_themes, flags.contains(&"--no-themes"), "{flags:?}");
+        assert_eq!(cli.no_skills, flags.contains(&"--no-skills"), "{flags:?}");
+    }
+    // Flags that would change semantics octet cannot honor stay refused rather
+    // than silently dropping MCP servers or extra workspace roots.
+    for flag in ["--mcp-config", "--append-system-prompt", "--no-such-flag"] {
+        assert!(
+            Cli::try_parse_from(["octet", flag, "x"]).is_err(),
+            "{flag} must not be silently accepted"
+        );
+    }
 }
 
 #[test]
