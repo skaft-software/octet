@@ -1,6 +1,6 @@
 # Pi compatibility
 
-**v0.10.2 is octet's first Pi-compatible release.** Use your existing Pi
+**v0.10.3 is octet's first Pi-compatible release.** Use your existing Pi
 extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
@@ -16,8 +16,8 @@ and a symbol missing from the active inventory fails loudly naming the symbol an
 the version rather than becoming `undefined`. A version without an inventory is
 diagnosed and uses the nearest supported one; nothing silently downgrades Pi.
 
-See the [v0.10.2 release notes](releases/v0.10.2.md) for downloads and launch scope.
-Pi support requires octet 0.10.2 or later; v0.9.6 does not ship the adapter.
+See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
+Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
@@ -29,7 +29,7 @@ Compatibility concerns public extensions, not Pi's private internals or complete
 
 ## Use your Pi setup
 
-With octet **0.10.2+**, Node **22.19+** and your existing Pi setup:
+With octet **0.10.3+**, Node **22.19+** and your existing Pi setup:
 
 ```bash
 octet extension install octet-pi-compat

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-06
+
+### Fixed
+
+- An extension context projection that the provider cannot represent no longer
+  ends the session. The validated request that reached the hook is restored and
+  the run continues with one notice per session naming the real validator reason;
+  identity, loadout, host-authority and opaque-replay refusals remain fatal.
+- A read-only context observation no longer fails closed on history containing an
+  assistant turn from another model or protocol. That refusal used to reach Pi's
+  tool-call guard and block every tool call with `unsupported_feature context
+  opaque reasoning continuation`. Observation keeps the visible reasoning text and
+  drops only the unrepresentable signature; replay stays strict.
+- `--model <provider>/<model>` resolves when the provider exposes the model.
+
+### Known limitations
+
+- `@gotgenes/pi-permission-system` still stalls a `--print` tool call for ~30 s
+  before the host timeout, and the run exits 0. Cause identified: a synchronous
+  `tools/snapshot` wait headless never answers; fix scheduled next.
+- The published `octet-codemode` bundle ships only its launcher shim and cannot
+  start without a built runner.
+- Cold startup with a full Pi mirror can exceed 10 s.
+- Extension bundles are pinned per host: run `octet extension update <name>` after
+  updating octet.
+
 ## [0.10.2] - 2026-11-06
 
 ### Fixed

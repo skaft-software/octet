@@ -6,7 +6,7 @@
 
 **A fast, native, Pi-compatible coding agent.**
 
-[![Version: 0.10.2](https://img.shields.io/badge/version-0.10.2-536dfe?style=flat-square)](docs/releases/v0.10.2.md)
+[![Version: 0.10.2](https://img.shields.io/badge/version-0.10.3-536dfe?style=flat-square)](docs/releases/v0.10.3.md)
 
 octet reads code, edits files, and runs commands from your terminal. The core is
 native Rust: one process owns the agent loop, sessions, policy, persistence, the
@@ -34,7 +34,7 @@ the implicit authority that would start an enabled extension; an explicit
 tool-effect broker. Safe mode is an approval policy, not a sandbox. See
 [Security](SECURITY.md#permissions).
 
-See the [v0.10.2 release notes](docs/releases/v0.10.2.md) for changes, qualification
+See the [v0.10.3 release notes](docs/releases/v0.10.3.md) for changes, qualification
 boundaries and known limitations.
 
 [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
@@ -42,13 +42,13 @@ boundaries and known limitations.
 ## Install
 
 **Native installer:** macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js
-required. Use the [v0.10.2 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.2)
+required. Use the [v0.10.2 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
 for signed assets and channel availability.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.2/install-octet.sh | sh
-octet --version   # octet 0.10.2
+  https://github.com/skaft-software/octet/releases/download/v0.10.3/install-octet.sh | sh
+octet --version   # octet 0.10.3
 ```
 
 **Windows support is a preview.** Windows x86-64 uses the version-matched `install-octet.ps1` and MSVC archive on
