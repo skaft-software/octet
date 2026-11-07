@@ -310,10 +310,11 @@ impl PtyOctet {
         )
     }
 
-    fn spawn_default_fullscreen(
+    fn spawn_with_screen_policy(
         binary: &Path,
         mode: MouseMode,
         fixture: StartupFixture<'_>,
+        fullscreen: Option<bool>,
     ) -> Self {
         Self::spawn_at_with_appearance_and_mode(
             binary,
@@ -322,7 +323,7 @@ impl PtyOctet {
             (true, false),
             (INITIAL_COLUMNS, INITIAL_ROWS),
             (2, false, false),
-            (fixture, None),
+            (fixture, fullscreen),
         )
     }
 
@@ -1296,14 +1297,15 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
 }
 
 #[test]
-fn real_octet_defaults_to_fullscreen_and_restores_the_primary_screen() {
+fn real_octet_explicit_fullscreen_restores_the_primary_screen() {
     let _guard = pty_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut octet = PtyOctet::spawn_default_fullscreen(
+    let mut octet = PtyOctet::spawn_with_screen_policy(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Auto,
         StartupFixture::Setup,
+        Some(true),
     );
     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
         synchronized_frame_end_containing(bytes, b"Choose terminal appearance").is_some()

@@ -10,6 +10,10 @@
 
 ### Fixed
 
+- Default terminal sessions use the inline layout with terminal-owned selection,
+  copy shortcuts and scrollback, as in Pi, without requiring Shift or OSC 52
+  clipboard permission. Saved screen preferences still apply; `--tui-mode fullscreen`
+  retains the app-owned viewport and mouse gestures.
 - Pi session-name writes acknowledge the committed, normalized name, including
   clears, even without a custom footer, editor or widget. Concurrent host
   snapshots cannot leave the adapter reading the old name until another shell

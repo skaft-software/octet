@@ -593,7 +593,7 @@ pub(super) fn render_loop(
     );
 }
 
-/// The normal interactive renderer is fullscreen. The environment remains a
+/// The normal interactive renderer is inline. The environment remains a
 /// compatibility/test override; persistent configuration and explicit CLI
 /// choices are applied by the shell's live mode API after configuration loads.
 fn initial_fullscreen_mode() -> bool {
@@ -601,12 +601,15 @@ fn initial_fullscreen_mode() -> bool {
 }
 
 fn fullscreen_from_override(value: Option<&str>) -> bool {
-    value.is_none_or(|value| {
-        !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "off" | "no" | "primary" | "inline"
-        )
-    })
+    value.map_or(
+        crate::config::TuiMode::default() == crate::config::TuiMode::Fullscreen,
+        |value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "off" | "no" | "primary" | "inline"
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -614,8 +617,8 @@ mod fullscreen_mode_tests {
     use super::{fullscreen_from_override, InteractiveShell};
 
     #[test]
-    fn fullscreen_is_the_default_and_inline_overrides_are_explicit() {
-        assert!(fullscreen_from_override(None));
+    fn inline_is_the_default_and_fullscreen_overrides_are_explicit() {
+        assert!(!fullscreen_from_override(None));
         for value in ["", "0", "false", "off", "no", "primary", "inline"] {
             assert!(!fullscreen_from_override(Some(value)), "{value:?}");
         }

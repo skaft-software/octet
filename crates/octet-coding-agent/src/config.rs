@@ -55,7 +55,7 @@ impl MouseMode {
 
     /// Whether octet captures the mouse on the given terminal surface.
     ///
-    /// `auto` follows the surface: the fullscreen (alternate-screen) default has
+    /// `auto` follows the surface: fullscreen (alternate-screen) rendering has
     /// no terminal scrollback, so the wheel/trackpad must scroll the in-app
     /// transcript; inline keeps reporting off so the terminal retains native
     /// selection and scrollback. `app` always captures; `terminal` and `off`
@@ -69,12 +69,12 @@ impl MouseMode {
     }
 }
 
-/// Interactive terminal surface preference. Fullscreen is the product default;
-/// explicit CLI selection takes precedence over the saved user preference.
+/// Interactive terminal surface preference. Inline preserves native selection
+/// by default; explicit CLI selection takes precedence over the saved preference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TuiMode {
-    #[default]
     Fullscreen,
+    #[default]
     Inline,
 }
 
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn auto_mouse_captures_on_the_fullscreen_surface_only() {
-        // Default fullscreen has no terminal scrollback: the wheel must scroll
+        // Explicit fullscreen has no terminal scrollback: the wheel must scroll
         // the in-app transcript. Inline keeps native selection and scrollback.
         assert!(MouseMode::Auto.captures_mouse_on(TuiMode::Fullscreen));
         assert!(!MouseMode::Auto.captures_mouse_on(TuiMode::Inline));
@@ -831,8 +831,9 @@ mod tests {
     }
 
     #[test]
-    fn tui_mode_defaults_fullscreen_and_parses_only_supported_modes() {
-        assert_eq!(TuiMode::default(), TuiMode::Fullscreen);
+    fn tui_mode_defaults_inline_and_parses_only_supported_modes() {
+        assert_eq!(TuiMode::default(), TuiMode::Inline);
+        assert!(!MouseMode::default().captures_mouse_on(TuiMode::default()));
         assert_eq!(TuiMode::parse("fullscreen").unwrap(), TuiMode::Fullscreen);
         assert_eq!(TuiMode::parse("inline").unwrap(), TuiMode::Inline);
         assert_eq!(TuiMode::Inline.as_str(), "inline");

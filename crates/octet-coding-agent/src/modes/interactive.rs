@@ -9804,7 +9804,7 @@ fn tui_mode_report() -> String {
         if crate::cli::tui_mode_is_explicit() {
             " (overridden by --tui-mode for this invocation; saved preference unchanged)"
         } else {
-            " (saved preference or fullscreen default)"
+            " (saved preference or inline default)"
         }
     )
 }

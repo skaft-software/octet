@@ -689,10 +689,10 @@ fn mouse_modes_apply_expected_terminal_ownership_and_restore() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    // `auto` captures the wheel in the default fullscreen TUI so the trackpad
-    // scrolls the transcript; `terminal` and `off` leave the mouse to the terminal.
+    // Default inline leaves native selection/scrollback to the terminal;
+    // only explicit `app` captures the mouse.
     for (mode, application_owned) in [
-        ("auto", true),
+        ("auto", false),
         ("app", true),
         ("terminal", false),
         ("off", false),

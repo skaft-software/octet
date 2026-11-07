@@ -12,9 +12,10 @@ vocabulary that uses that hierarchy without adding a second TUI.
 
 ## Terminal guarantees
 
-- The interactive frontend defaults to fullscreen (alternate screen), with
-  `auto` mouse capture and a bounded semantic viewport. Inline is an explicit
-  primary-screen surface: uncaptured inline sessions use the complete logical-frame
+- The interactive frontend defaults to inline (primary screen), with `auto`
+  leaving selection, copy shortcuts and scrollback terminal-owned. Explicit
+  fullscreen uses the alternate screen with `auto` mouse capture and a bounded
+  semantic viewport. Uncaptured inline sessions use the complete logical-frame
   renderer, whose first frame writes every materialized row and whose pure appends
   flow naturally into terminal scrollback. Dimension changes and canonical mutations
   above that viewport clear and replay the complete canonical frame. PageUp transfers

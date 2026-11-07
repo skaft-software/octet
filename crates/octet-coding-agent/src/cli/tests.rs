@@ -1426,10 +1426,17 @@ fn cache_warming_keys_are_known_and_persistence_preserves_other_user_settings() 
 }
 
 #[test]
-fn tui_mode_defaults_fullscreen_and_explicit_cli_precedes_saved_setting() {
+fn tui_mode_defaults_inline_and_explicit_cli_precedes_saved_setting() {
+    let (mode, explicit) = resolve_tui_mode(None, None).unwrap();
+    assert_eq!((mode, explicit), (config::TuiMode::Inline, false));
+    assert!(!config::MouseMode::default().captures_mouse_on(mode));
     assert_eq!(
-        resolve_tui_mode(None, None).unwrap(),
+        resolve_tui_mode(None, Some("fullscreen")).unwrap(),
         (config::TuiMode::Fullscreen, false)
+    );
+    assert_eq!(
+        resolve_tui_mode(Some("inline"), Some("fullscreen")).unwrap(),
+        (config::TuiMode::Inline, true)
     );
     assert_eq!(
         resolve_tui_mode(None, Some("inline")).unwrap(),
