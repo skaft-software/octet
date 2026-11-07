@@ -4382,10 +4382,17 @@ where
                             clipboard_gesture = None;
                             shell.clear_editor();
                         } else {
-                            control.abort(); aborting = true;
-                            intents.clear(); in_flight = None;
+                            request_active_close(
+                                control,
+                                shell,
+                                run_id,
+                                &mut input_open,
+                                &mut aborting,
+                                &mut intents,
+                                &mut in_flight,
+                                quit_requested,
+                            );
                             shell.close_panel(); subagents_open = false; subagent_document = None;
-                            shell.set_run_preparing(run_id, "cancelling");
                         }
                         shell.render(); continue;
                     }

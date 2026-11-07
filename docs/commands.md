@@ -237,7 +237,7 @@ See [Discovery and trust](resources.md).
 | Ctrl+S | Queue an editable follow-up for after the run; send normally when idle. In the resume picker, change the sort order. |
 | Escape | Close a panel or slash popup first. Otherwise interrupt active work, then send the oldest queued follow-up after it settles (never the draft). |
 | Option+Up / Alt+Up | Recall the newest editable queued steering message or follow-up into an empty input. It never submits or interrupts. On Windows and WSL, where Windows Terminal uses Alt+arrows for panes, use Alt+Q. The queued-message hint names the key in use. |
-| Ctrl+C | Clear a draft. With no draft, abort active work. Does nothing when idle. |
+| Ctrl+C | Clear a draft. With no draft, close octet after cleaning up active work. |
 | Ctrl+Shift+C | Copy the in-app transcript selection (also copied when a drag is released). |
 | Ctrl+Shift+A | Select the semantic transcript; focused panels retain their own input. |
 | Ctrl+D | Close octet from any input, after active work and child processes are cleaned up. |

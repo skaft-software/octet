@@ -1313,7 +1313,7 @@ async fn active_modal_escape_ctrl_c_and_close_keep_their_owners() {
             HostRunOutcome::Completed,
             false,
         ),
-        ("", vec![ctrl_key('c')], HostRunOutcome::Aborted, false),
+        ("", vec![ctrl_key('c')], HostRunOutcome::Aborted, true),
         ("draft", vec![ctrl_key('d')], HostRunOutcome::Aborted, true),
     ] {
         let (_server, _workspace, mut agent) =

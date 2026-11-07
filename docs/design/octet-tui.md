@@ -648,8 +648,8 @@ and bounds; this does not qualify every Pi API or arbitrary editor override.
   composer it interrupts and arms queued dispatch only after authoritative
   aborted settlement; it never sends the unqueued draft. Repeated Escape while
   settling cannot arm dispatch after a plain cancellation.
-- Ctrl+C first clears a nonempty draft; with an empty draft it interrupts without
-  dispatch and is ignored while idle. An abort revokes any earlier Escape dispatch.
+- Ctrl+C first clears a nonempty draft; with an empty draft it requests a
+  coordinated close, both idle and active. Closing revokes any earlier Escape dispatch.
   Failure, max-turn limits, stream loss, and
   close do not automatically retry queued prompts; local entries remain editable.
 - Auto-dispatched prompts use normal composition and persistence, but are never

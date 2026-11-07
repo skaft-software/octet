@@ -429,7 +429,7 @@ async fn active_subagent_refresh_timeout_preserves_the_roster_without_transcript
 }
 
 #[tokio::test]
-async fn cancellable_wait_returns_none_on_ctrl_c() {
+async fn cancellable_wait_requests_close_on_empty_draft_ctrl_c() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -447,7 +447,7 @@ async fn cancellable_wait_returns_none_on_ctrl_c() {
     let mut shell = InteractiveShell::test_shell();
     let result = await_with_ctrl_c(std::future::pending::<()>(), &mut shell, &mut input).await;
     assert!(result.is_none());
-    assert!(!shell.close_requested());
+    assert!(shell.close_requested());
 }
 
 #[tokio::test]

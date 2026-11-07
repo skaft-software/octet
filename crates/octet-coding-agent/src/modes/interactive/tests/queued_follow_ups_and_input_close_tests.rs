@@ -20,7 +20,7 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         (
             Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             false,
-            false,
+            true,
             false,
         ),
         (
@@ -32,7 +32,7 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         (
             Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             false,
-            false,
+            true,
             true,
         ),
         (None, true, false, false),
@@ -55,7 +55,7 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         if let Some(cancel) = cancel {
             events.push(Event::Key(cancel));
             // Neither repeated Escape nor a second fresh Escape can arm a
-            // Ctrl+C cancellation after settlement has already started.
+            // Ctrl+C close after settlement has already started.
             events.push(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
