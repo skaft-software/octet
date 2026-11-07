@@ -124,23 +124,116 @@ fn slash_popup_event_path_keeps_arrow_navigation_active() {
 
 #[test]
 fn login_and_setup_are_discoverable_from_either_partial_query() {
-    for query in ["/logi", "/setu"] {
-        let mut shell = InteractiveShell::test_shell();
-        for character in query.chars() {
-            shell.apply_edit(EditAction::Char(character));
+    for (query, choices) in [
+        ("/logi", ["/login ", "/setup"]),
+        ("/setu", ["/setup", "/login "]),
+    ] {
+        for (selected, expected) in choices.into_iter().enumerate() {
+            let mut shell = InteractiveShell::test_shell();
+            shell.apply_edit(EditAction::Paste(query.into()));
+            let popup = render_slash_suggestions(&shell.state.borrow(), 120, 100).join("\n");
+            assert!(
+                popup.contains("/login") && popup.contains("/setup"),
+                "{query}: {popup}"
+            );
+            if selected == 1 {
+                assert!(!shell.slash_menu(SlashMenuAction::Next));
+            }
+            shell.complete_slash_command();
+            assert_eq!(shell.pending(), expected);
         }
-        let popup = render_slash_suggestions(&shell.state.borrow(), 120, 100).join("\n");
-        assert!(
-            popup.contains("/login") && popup.contains("/setup"),
-            "{query}: {popup}"
-        );
-        shell.complete_slash_command();
-        assert_eq!(
-            shell.pending(),
-            query,
-            "ambiguous completion must not choose for the user"
-        );
     }
+}
+
+#[test]
+fn tab_completes_the_highlighted_skill_with_multiple_matches() {
+    use crate::tui::keymap::InputAction;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    for active in [false, true] {
+        for select_second in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_skill_commands(Arc::from(vec![
+                ("skill:review".into(), "Review changes".into()),
+                ("skill:research".into(), "Research a topic".into()),
+            ]));
+            shell.apply_edit(EditAction::Paste("/skill:re".into()));
+            if select_second {
+                let action = shell.translate_input(
+                    Some(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
+                    active,
+                );
+                assert_eq!(action, InputAction::SlashMenu(SlashMenuAction::Next));
+                assert!(!shell.slash_menu(SlashMenuAction::Next));
+            }
+            let expected = if select_second {
+                "skill:research"
+            } else {
+                "skill:review"
+            };
+            let popup = render_slash_suggestions(&shell.state.borrow(), 100, 10).join("\n");
+            assert!(strip_terminal_sequences(&popup).contains(&format!("› /{expected}")));
+            let action = shell.translate_input(
+                Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+                active,
+            );
+            assert_eq!(action, InputAction::CompleteSlashCommand);
+            shell.complete_slash_command();
+            assert_eq!(shell.pending(), format!("/{expected} "));
+            assert!(!shell.slash_popup_open());
+            assert_eq!(
+                shell.queued_follow_up_len(),
+                0,
+                "Tab must not queue a skill"
+            );
+        }
+    }
+}
+
+#[test]
+fn slash_tab_preserves_dismissed_ambiguity_and_cursor_boundaries() {
+    for (query, dismissed, move_left, expected) in [
+        ("/skill:re", true, false, "/skill:re"),
+        ("/skill:review", true, false, "/skill:review "),
+        ("/skill:review", false, true, "/skill:review"),
+        ("/skill:missing", false, false, "/skill:missing"),
+        (
+            "/skill:review argument",
+            false,
+            false,
+            "/skill:review argument",
+        ),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_skill_commands(Arc::from(vec![
+            ("skill:review".into(), "Review changes".into()),
+            ("skill:research".into(), "Research a topic".into()),
+        ]));
+        shell.apply_edit(EditAction::Paste(query.into()));
+        if dismissed {
+            assert!(!shell.slash_menu(SlashMenuAction::Close));
+        }
+        if move_left {
+            shell.apply_edit(EditAction::Left);
+        }
+        shell.complete_slash_command();
+        assert_eq!(shell.pending(), expected);
+    }
+}
+
+#[test]
+fn slash_tab_clamps_selection_like_the_rendered_popup() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_skill_commands(Arc::from(vec![
+        ("skill:review".into(), "Review changes".into()),
+        ("skill:research".into(), "Research a topic".into()),
+    ]));
+    shell.apply_edit(EditAction::Paste("/skill:re".into()));
+    shell.state.borrow_mut().slash_selection = usize::MAX;
+    let popup = render_slash_suggestions(&shell.state.borrow(), 100, 10).join("\n");
+    assert!(strip_terminal_sequences(&popup).contains("› /skill:research"));
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/skill:research ");
 }
 
 #[test]

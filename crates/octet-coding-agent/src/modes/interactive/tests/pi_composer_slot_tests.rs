@@ -464,6 +464,44 @@ async fn native_pi_custom_editor_burst_enter_admits_complete_bash_escape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_tab_completes_the_highlighted_skill_without_submitting() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    shell.set_skill_commands(Arc::from(vec![
+        ("skill:review".into(), "Review changes".into()),
+        ("skill:research".into(), "Research a topic".into()),
+    ]));
+    type_into_slot(&mut app, &mut shell, "/skill:re").await;
+    let head = app.agent.session().head().unwrap();
+    let mut input = scripted(vec![
+        (0, key(KeyCode::Down, KeyModifiers::NONE)),
+        (0, key(KeyCode::Tab, KeyModifiers::NONE)),
+        (500, key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+    ]);
+    let idle = idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+        .await
+        .next_idle(&mut input)
+        .await;
+    assert!(
+        matches!(idle, Idle::Quit),
+        "Tab must not submit or dispatch"
+    );
+    assert_eq!(shell.pending(), "/skill:research ");
+    assert!(!shell.slash_popup_open());
+    assert_eq!(app.agent.session().head().unwrap(), head);
+    assert_eq!(shell.queued_follow_up_len(), 0);
+    // Check the mounted editor's rendering, not only the host's text mirror.
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("/skill:research") && frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_ctrl_g_never_unmounts_the_composer_slot() {
     let (_directory, mut app, mut shell) = live_slot_app().await;
     shell.set_size(96, 24);
