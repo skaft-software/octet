@@ -200,14 +200,13 @@ octet --color auto
 octet --mouse app   # always capture the mouse, including inline
 ```
 
-By default octet uses the inline (primary-screen) surface with `mouse = "auto"`.
-Your terminal owns drag selection, copy shortcuts and wheel/touchpad scrollback,
-as in Pi, without requiring Shift, a local clipboard helper or OSC 52 permission.
-An existing saved `tui_mode` preference is still honored. Use `/settings tui inline`
-to save the native-selection layout, or `--tui-mode inline` for one launch.
-`--tui-mode fullscreen` (or `tui_mode = "fullscreen"`) opts into the alternate
-screen, where `auto` captures wheel/trackpad and drag gestures because there is
-no terminal scrollback. `--mouse terminal` and `--mouse off` never capture the
+By default octet uses the fullscreen (alternate-screen) surface with `mouse = "auto"`.
+Fullscreen has no terminal scrollback, so `auto` captures the wheel/trackpad and
+drag selection there. This is application-owned selection, not the terminal's
+native selection used by Pi's inline UI.
+`--tui-mode inline` (or `tui_mode = "inline"`) keeps octet on the primary screen,
+where `auto` leaves mouse reporting off so your terminal keeps drag selection and
+wheel/touchpad history. `--mouse terminal` and `--mouse off` never capture the
 mouse on either surface; `--mouse app` always does. Inline, the renderer follows
 the height of the content, not a fixed full-screen composer and footer; it loads
 the complete resumed branch and appends to native scrollback. Explicit
@@ -225,7 +224,34 @@ If native rendering fails, the ANSI fallback restores the requested mouse policy
 `--tern off` uses the ordinary ANSI policy even inside Tern. Native pickers and
 report overlays do not change the ordinary ANSI launch default.
 
-With capture on (explicit fullscreen with `auto`, or `--mouse app`), wheel/touchpad events scroll the transcript by
+### Native selection and copy
+
+For terminal-owned drag selection and the terminal's usual Copy shortcut/menu:
+
+```sh
+octet --tui-mode inline --mouse terminal
+```
+
+Both flags matter: `--tui-mode inline` alone still captures if you saved
+`mouse = "app"`; `--mouse terminal` alone leaves the default alternate screen
+without native scrollback. These flags override saved preferences for one launch,
+without rewriting your configuration. To keep this setup, save `tui_mode = "inline"`
+and `mouse = "terminal"` in `~/.octet/config.toml`.
+
+Native copying does not depend on octet's local clipboard helpers or OSC 52.
+In fullscreen, Shift+drag can override application mouse capture where your
+terminal supports it; then use the terminal's Copy action. A multiplexer such as
+tmux can also own mouse gestures, so its bindings may still apply.
+
+If a drag highlights text in octet but nothing reaches your clipboard, check the
+clipboard transport described below. If dragging produces no highlight at all,
+report your octet version, terminal/OS, SSH or tmux use, effective `tui_mode` and
+`mouse` settings, and whether Shift+drag or the inline command above works.
+An in-app highlight is not proof that a terminal copy shortcut sees a selection.
+
+### Application-owned selection and copy
+
+With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Click-drag highlights transcript text without Shift. Release
 copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under

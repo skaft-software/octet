@@ -1322,10 +1322,15 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
         frame_count(&capture.output, FRAME_BEGIN),
         frame_count(&capture.output, FRAME_END)
     );
-    // Default setup stays inline so terminal selection and scrollback remain
-    // available throughout onboarding and the resulting conversation.
-    assert_eq!(frame_count(&capture.output, b"\x1b[?1049h"), 0);
-    assert_eq!(frame_count(&capture.output, b"\x1b[?1049l"), 0);
+    // The interactive renderer is fullscreen by default; the alternate screen
+    // must be left as often as it is entered so the terminal is restored.
+    let entered = frame_count(&capture.output, b"\x1b[?1049h");
+    let left = frame_count(&capture.output, b"\x1b[?1049l");
+    assert!(
+        entered > 0,
+        "fullscreen setup never entered the alternate screen"
+    );
+    assert_eq!(entered, left, "alternate screen was not left on exit");
 
     let registry = fs::read_to_string(octet.credentials_path()).expect("saved custom registry");
     assert!(registry.contains("fixture-model"));

@@ -82,14 +82,17 @@ typing, backspace, and bracketed paste. After the edit, a 2.35-second observatio
 window must have no decorative frames and no `CSI 2J`/`CSI 3J` replay. The normal
 resize contract above requires synchronized canonical clear/replay.
 
-## Default native selection and fullscreen mouse regression
+## Fullscreen mouse regression
 
-The default-owner case omits both `--mouse` and any CLI/config/environment screen
-policy. It checks that no alternate screen or mouse reporting is enabled and that
-the earliest resumed rows remain selectable in emulated native scrollback, without
-an application clipboard write. This does not qualify a physical terminal's clipboard.
+The inline native-scrollback test explicitly selects the primary screen; only
+its mouse policy is defaulted. It does not establish default fullscreen behavior.
+A separate CLI regression runs `--tui-mode inline --mouse terminal` against a
+saved fullscreen preference, verifies no mouse capture and a primary-screen
+transcript, and reads the earliest resumed text from emulated native scrollback.
+Neither case requires an application OSC 52 write or proves physical clipboard
+delivery.
 
-The same harness also qualifies explicit fullscreen gestures through the real binary:
+The same harness also qualifies fullscreen gestures through the real binary:
 
 ```sh
 cargo test --locked -p octet-coding-agent --test startup_frame_pty fullscreen
@@ -97,7 +100,7 @@ cargo test --locked -p octet-coding-agent --test startup_frame_pty fullscreen
 
 It checks proportional wheel bursts, scrollbar track presses and captured drags,
 visible text highlighting, copy-on-release via OSC 52, draft preservation, and
-terminal restoration. Coverage includes an explicit fullscreen launch and
+terminal restoration. Coverage includes a fresh default fullscreen launch and
 inline → fullscreen → inline → fullscreen transitions. Live transitions must
 recompute `auto` capture, retain explicit `app` capture, and never capture for
 `terminal` or `off`. The transition fence requires the resumed renderer's

@@ -76,17 +76,28 @@ fn clipboard(output: &[u8]) -> Option<String> {
 }
 
 #[test]
-fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
+fn inline_auto_preserves_native_scrollback_and_selection() {
     let _lock = pty_test_lock().lock().unwrap();
-    // Omit both --mouse and screen policy (CLI/config/environment): verify the
-    // actual launch defaults, not a fixture that silently selects inline.
-    let mut octet = PtyOctet::spawn_with_screen_policy(
+    // The history fixture explicitly saves inline. Only --mouse is omitted;
+    // this is not the default fullscreen launch.
+    let (octet, parser, consumed) = history(MouseMode::Default, 100, 24);
+    assert!(!uses_alternate_screen(&octet.pty.output));
+    assert_native_scrollback_and_selection(octet, parser, consumed);
+}
+
+#[test]
+fn native_selection_cli_overrides_saved_fullscreen() {
+    let _lock = pty_test_lock().lock().unwrap();
+    let mut octet = PtyOctet::spawn_at_with_appearance_and_mode(
         Path::new(env!("CARGO_BIN_EXE_octet")),
-        MouseMode::Default,
-        StartupFixture::MouseHistory,
+        MouseMode::Terminal,
         None,
+        (true, false),
+        (100, 24),
+        (2, false, false),
+        (StartupFixture::MouseHistory, Some(true), Some("inline")),
     );
-    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
+    let mut parser = vt100::Parser::new(24, 100, 1024);
     let mut consumed = 0;
     await_screen(
         &mut octet,
@@ -95,34 +106,44 @@ fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
         "MOUSE-END",
         STARTUP_TIMEOUT,
     );
+    assert_native_scrollback_and_selection(octet, parser, consumed);
+}
+
+fn assert_native_scrollback_and_selection(
+    mut octet: PtyOctet,
+    mut parser: vt100::Parser,
+    mut consumed: usize,
+) {
     settle(&mut octet, &mut parser, &mut consumed);
     for mode in [1000, 1002, 1003, 1006, 1007, 1015, 1016] {
         assert!(
             !contains_bytes(&octet.pty.output, format!("\x1b[?{mode}h").as_bytes()),
-            "default policy enabled mouse mode {mode}"
+            "native-selection policy enabled mouse mode {mode}"
         );
     }
     assert_eq!(
         parser.screen().mouse_protocol_mode(),
         vt100::MouseProtocolMode::None
     );
-    assert!(!uses_alternate_screen(&octet.pty.output));
+    // Startup can briefly enter fullscreen before applying the resolved policy.
+    // The resumed transcript must land on the primary screen with scrollback.
+    assert!(!parser.screen().alternate_screen());
 
     // Read/copy old text from the terminal's own saved rows, without sending
     // pointer input to octet. This models native scrollback/selection, not an
     // application-owned viewport or a physical client's clipboard permissions.
     // vt100 0.15 cannot read offsets taller than its viewport. Enlarge only a
     // disposable snapshot, leaving the live parser's cursor/wrap state intact.
-    let mut native = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
+    let mut native = vt100::Parser::new(24, 100, 1024);
     native.process(&octet.pty.output);
-    native.set_size(1024, INITIAL_COLUMNS);
+    native.set_size(1024, 100);
     native.set_scrollback(usize::MAX);
     let saved_rows = native.screen().scrollback();
     assert!(saved_rows > 350);
     let row = (0..saved_rows as u16)
-        .find(|row| row_text(&native, *row, INITIAL_COLUMNS).contains("MOUSE-ROW-001"))
+        .find(|row| row_text(&native, *row, 100).contains("MOUSE-ROW-001"))
         .expect("complete resumed history remains in native scrollback");
-    let selected = row_text(&native, row, INITIAL_COLUMNS);
+    let selected = row_text(&native, row, 100);
     assert_eq!(
         selected.trim(),
         "1. MOUSE-ROW-001 clipboard line with unique words"
@@ -149,15 +170,15 @@ fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
 }
 
 #[test]
-fn explicit_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
+fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
     let _lock = pty_test_lock().lock().unwrap();
-    // Explicit fullscreen still captures with mouse = auto: the alternate
-    // screen has no native scrollback, so the app must handle the trackpad.
-    let mut octet = PtyOctet::spawn_with_screen_policy(
+    // No --mouse and no saved screen policy: the real defaults (fullscreen
+    // surface, mouse = auto). The alternate screen has no terminal scrollback,
+    // so without capture the trackpad could not scroll anything.
+    let mut octet = PtyOctet::spawn_default_fullscreen(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Default,
         StartupFixture::MouseHistory,
-        Some(true),
     );
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
     let mut consumed = 0;
@@ -172,7 +193,7 @@ fn explicit_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
     assert!(
         contains_bytes(&octet.pty.output, b"\x1b[?1000h")
             || contains_bytes(&octet.pty.output, b"\x1b[?1002h"),
-        "explicit fullscreen did not enable mouse reporting"
+        "default fullscreen did not enable mouse reporting"
     );
     assert!(contains_bytes(&octet.pty.output, b"\x1b[?1006h"));
     assert!(!parser.screen().contents().contains("rows back"));
@@ -361,13 +382,12 @@ fn fullscreen_mouse_policy_follows_live_screen_switches() {
 }
 
 #[test]
-fn explicit_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
+fn default_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
     let _lock = pty_test_lock().lock().unwrap();
-    let mut octet = PtyOctet::spawn_with_screen_policy(
+    let mut octet = PtyOctet::spawn_default_fullscreen(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Default,
         StartupFixture::MouseHistory,
-        Some(true),
     );
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024);
     let mut consumed = 0;
@@ -390,7 +410,7 @@ fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
     for (fullscreen, hyperlinks) in [(true, true), (true, false), (false, true), (false, false)] {
         let (mut octet, mut parser, mut consumed) = if fullscreen {
             (
-                PtyOctet::spawn_with_screen_policy(
+                PtyOctet::spawn_default_fullscreen(
                     Path::new(env!("CARGO_BIN_EXE_octet")),
                     MouseMode::Default,
                     if hyperlinks {
@@ -398,7 +418,6 @@ fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
                     } else {
                         StartupFixture::MouseHistoryWithoutOsc8
                     },
-                    Some(true),
                 ),
                 vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 1024),
                 0,

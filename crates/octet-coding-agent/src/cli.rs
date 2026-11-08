@@ -38,7 +38,7 @@ use config_diagnostics::{
 
 /// The terminal mode resolved for the current process. The settings command can
 /// update it only after the saved preference was written successfully.
-static TUI_MODE: AtomicU8 = AtomicU8::new(1);
+static TUI_MODE: AtomicU8 = AtomicU8::new(0);
 static TUI_MODE_EXPLICIT: AtomicBool = AtomicBool::new(false);
 
 fn store_tui_mode(mode: config::TuiMode) {
@@ -390,7 +390,7 @@ pub struct Cli {
     /// Colour output policy: auto, always, or never.
     #[arg(long, value_name = "WHEN")]
     pub color: Option<String>,
-    /// Terminal screen policy for interactive mode: inline (default) or fullscreen.
+    /// Terminal screen policy for interactive mode: fullscreen (default) or inline.
     #[arg(long = "tui-mode", value_name = "MODE", value_parser = ["fullscreen", "inline"])]
     pub tui_mode: Option<String>,
     /// Use chronological ASCII output without cursor control.
@@ -400,7 +400,8 @@ pub struct Cli {
     #[arg(long = "show-images")]
     pub show_images: bool,
     /// Mouse ownership (default: auto): native gestures inline, app capture fullscreen.
-    /// terminal/off never capture; app always captures for in-app scrolling/selection.
+    /// terminal/off never capture; app always captures. For native selection and
+    /// scrollback, use --tui-mode inline --mouse terminal.
     #[arg(long, value_name = "MODE")]
     pub mouse: Option<String>,
     /// Tern Surface Protocol rendering: auto negotiates native surfaces inside

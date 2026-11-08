@@ -137,8 +137,8 @@ model input, and reading a report never approves an effect.
 ## Settings menu
 
 Bare `/settings` opens a filterable menu immediately, including during active
-work. Choose **Theme**, **Terminal screen** (inline, the default, or
-fullscreen), **Steering mode**, **Follow-up mode**, **Inline tool-result images
+work. Choose **Theme**, **Terminal screen** (fullscreen, the default, or
+inline), **Steering mode**, **Follow-up mode**, **Inline tool-result images
 (On/Off)**, **Default model for new sessions**, **Default reasoning for new
 sessions**, or **Show effective settings**. Up and Down select, typing filters, and Enter opens or applies the
 highlighted choice. Child menus offer **Back**; Escape closes the menu without

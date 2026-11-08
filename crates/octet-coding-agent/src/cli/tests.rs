@@ -1019,18 +1019,19 @@ fn an_explicit_extension_dir_must_exist() {
 }
 
 #[test]
-fn mouse_policy_owner_decision_defaults_to_auto_preserving_native_gestures() {
+fn mouse_policy_owner_decision_defaults_to_auto_following_the_surface() {
     let directory = cwd();
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
-    // Owner decision: omitted mouse policy preserves native scrollback/selection.
+    // Auto captures on the default fullscreen surface, but not inline.
     assert_eq!(config.mouse, config::MouseMode::Auto);
+    assert!(config.mouse.captures_mouse_on(config::TuiMode::default()));
     assert!(!config
         .mouse
         .captures_mouse_on(crate::config::TuiMode::Inline));
 
-    // An explicit inline mode still resolves normally.
+    // An explicit auto mouse policy still follows the selected surface.
     let mut cli = base();
     cli.workspace = Some(directory.path().into());
     cli.mouse = Some("auto".into());
@@ -1059,7 +1060,7 @@ fn explicit_mouse_settings_and_cli_override_the_owner_default() {
         let config =
             build_config_with_global_path(base(), directory.path(), Some(&global)).unwrap();
         assert_eq!(config.mouse, config::MouseMode::parse(saved).unwrap());
-        for explicit in ["auto", "app"] {
+        for explicit in ["auto", "app", "terminal", "off"] {
             let mut cli = base();
             cli.mouse = Some(explicit.into());
             let config =
@@ -1074,6 +1075,9 @@ fn mouse_help_documents_auto_without_setting_a_cli_override() {
     use clap::CommandFactory;
     let help = Cli::command().render_long_help().to_string();
     assert!(help.contains("Mouse ownership (default: auto)"));
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("native gestures inline, app capture fullscreen"));
+    assert!(help.contains("--tui-mode inline --mouse terminal"));
     assert!(Cli::try_parse_from(["octet"]).unwrap().mouse.is_none());
 }
 
@@ -1426,17 +1430,10 @@ fn cache_warming_keys_are_known_and_persistence_preserves_other_user_settings() 
 }
 
 #[test]
-fn tui_mode_defaults_inline_and_explicit_cli_precedes_saved_setting() {
-    let (mode, explicit) = resolve_tui_mode(None, None).unwrap();
-    assert_eq!((mode, explicit), (config::TuiMode::Inline, false));
-    assert!(!config::MouseMode::default().captures_mouse_on(mode));
+fn tui_mode_defaults_fullscreen_and_explicit_cli_precedes_saved_setting() {
     assert_eq!(
-        resolve_tui_mode(None, Some("fullscreen")).unwrap(),
+        resolve_tui_mode(None, None).unwrap(),
         (config::TuiMode::Fullscreen, false)
-    );
-    assert_eq!(
-        resolve_tui_mode(Some("inline"), Some("fullscreen")).unwrap(),
-        (config::TuiMode::Inline, true)
     );
     assert_eq!(
         resolve_tui_mode(None, Some("inline")).unwrap(),
@@ -1445,6 +1442,10 @@ fn tui_mode_defaults_inline_and_explicit_cli_precedes_saved_setting() {
     assert_eq!(
         resolve_tui_mode(Some("fullscreen"), Some("inline")).unwrap(),
         (config::TuiMode::Fullscreen, true)
+    );
+    assert_eq!(
+        resolve_tui_mode(Some("inline"), Some("fullscreen")).unwrap(),
+        (config::TuiMode::Inline, true)
     );
     assert!(resolve_tui_mode(None, Some("other")).is_err());
     for mode in ["fullscreen", "inline"] {
