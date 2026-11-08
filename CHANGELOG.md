@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pi compatibility documentation now names the supported 1.5.0 manifest and
+  emulated surface, distinguishes diagnosed unverified 1.x versions, and retains
+  the original Pi 1.4.0/23-package benchmark pins and qualification limits.
+- Guarded provider delegation leaves the hook attempt unclaimed until its real
+  native or callback-bridge route is selected. Adapter forwarding callbacks do
+  not consume a competing claim; arbitrary package callbacks still require wire
+  support, and process-owned custom credentials stay outside the hook bridge,
+  including Azure/Google API-key, auth-token and cookie header spellings.
+- Pi-requested session replacement rebuilds the session-owned V2 runtime after
+  the active run settles and workers park. Final child accounting remains in the
+  old session; negotiated services rebind without restarting the admitted setup
+  command, with old-owner rollback if rebinding fails.
+- Discovered provider models retain their exact API identity instead of being
+  skipped when a lookup alias resolves to another model and its cache policy.
+- Native tool-disclosure changes are published before a Pi command captures its
+  host context; palette caching does not suppress Ctrl+O updates.
+- RPC idle state reports queued steering and follow-up counts after a handled
+  prompt, without starting a provider turn or replaying the queues.
+- Pi cosmetic editor/footer/header/widget and status mounts wait for successful
+  origin settlement before native admission, rather than losing pending mounts
+  to parent cancellation. Setters return void as in Pi; failed callbacks, explicit
+  cancellation, owner retirement and generation fences still revoke their work.
+  Fullscreen questions and editor recovery checkpoints retain their lifetimes.
+- Headless startup, discovery and run/hook waits wake on extension events instead
+  of waiting for the 50 ms housekeeping tick. Budgeted draining, cancellation,
+  foreground ownership and resource publication fences remain in place.
+- Deferred Pi compatibility startup prepares the native child-session runtime
+  before binding its negotiated service, as eager startup already does. This
+  does not grant the Pi bridge the native delegation tools required for Ultra.
+
 ## [0.10.3] - 2026-11-06
 
 ### Fixed

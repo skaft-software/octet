@@ -534,6 +534,7 @@ extract_validated_archive() {
     expected_sha256=$5
 
     python3 - "$archive" "$extraction" "$expected_root" "$archive_kind" "$expected_sha256" "$(documentation_extra_files)" <<'PY'
+import errno
 import gzip
 import hashlib
 import os
@@ -789,8 +790,29 @@ try:
 except ArchiveError as error:
     print(str(error), file=sys.stderr)
     raise SystemExit(1)
-except (OSError, tarfile.TarError, UnicodeError, ValueError):
+except (tarfile.TarError, gzip.BadGzipFile, UnicodeError, ValueError):
     print("release archive is malformed or could not be extracted", file=sys.stderr)
+    raise SystemExit(1)
+except OSError as error:
+    number = getattr(error, "errno", None)
+    name = errno.errorcode.get(number) if number is not None else None
+    reason = getattr(error, "strerror", None) or str(error)
+    detail = f"{name} ({number}): {reason}" if name else f"{error.__class__.__name__}: {reason}"
+    if number in (errno.EDQUOT, errno.ENOSPC):
+        hint = (
+            "check the disk quota or free space for TMPDIR, or use a HOME-backed "
+            "TMPDIR with room, then re-run the installer"
+        )
+    else:
+        hint = (
+            "check write permissions, the disk quota and free space for TMPDIR "
+            "or that filesystem, then re-run the installer"
+        )
+    print(
+        f"filesystem error while extracting into '{sys.argv[2]}': OSError {detail}; "
+        f"this is a local filesystem failure, not an archive validation result; {hint}",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 PY
 }

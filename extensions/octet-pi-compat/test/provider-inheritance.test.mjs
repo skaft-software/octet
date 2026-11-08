@@ -12,7 +12,7 @@ function fixture() {
   const runtime = { initialized: false, features: new Set(['provider_proxy_v1', 'provider_inheritance_v1']),
     require(feature) { assert.ok(this.features.has(feature)); }, current: () => store,
     scope: { run: (_, fn) => fn() }, track(promise) { pending.push(promise); return promise; },
-    transport: { async request(method, params) { frames.push({ method, params }); return method === 'providers/inherit' ? { models: [native] } : { revision: 1 }; }, async notify(method, params) { frames.push({ method, params }); if (method === 'providers/complete') complete(); } },
+    transport: { async request(method, params) { frames.push({ method, params }); return method === 'providers/inherit' ? { models: [native] } : method === 'provider/hooks/payload' ? { payload: params.payload } : { revision: 1 }; }, async notify(method, params) { frames.push({ method, params }); if (method === 'providers/complete') complete(); } },
     backgroundError(error) { complete(); pending.push(Promise.reject(error)); },
   };
   return { runtime, frames, pending, store, done, registry: modelRegistry(() => ({}), runtime) };
@@ -53,7 +53,7 @@ test('native Anthropic delegate is callable but cannot run outside an admitted p
   assert.throws(() => api.streamSimple(native, { messages: [] }), /provider.*(request|stream)/i);
 });
 
-async function admitted(callback, delegate) {
+async function admitted(callback, delegate, requestHooks = false) {
   const value = fixture();
   const original = value.runtime.transport.request;
   value.runtime.transport.request = async (method, params) => method === 'provider/delegate' ? delegate(params, value) : original(method, params);
@@ -62,7 +62,8 @@ async function admitted(callback, delegate) {
   startProviderRegistration(value.runtime);
   await value.done;
   const request = { system: 'native system', messages: [{ User: { content: [{ Text: 'native input' }] } }], tools: [], tool_choice: 'auto', stop: [], output_format: { type: 'text' }, reasoning: { type: 'off' }, max_output_tokens: 32, cache_retention: 'short', session_id: null };
-  await prepareProviderStream(value.runtime, { stream_id: 'stream-1', provider_id: 'anthropic', model_id: value.frames.find(frame => frame.method === 'providers/register').params.models[0].id, request }, value.store);
+  if (requestHooks) value.runtime.features.add('provider_request_hooks_v1');
+  await prepareProviderStream(value.runtime, { stream_id: 'stream-1', provider_id: 'anthropic', model_id: value.frames.find(frame => frame.method === 'providers/register').params.models[0].id, request, ...(requestHooks ? { request_hooks: true } : {}) }, value.store);
   let complete;
   const terminal = new Promise(resolve => { complete = resolve; });
   const notify = value.runtime.transport.notify;
@@ -93,6 +94,40 @@ test('admitted native delegation preserves tools, usage and route while composin
   assert.deepEqual(events.map(frame => frame.params.kind), ['started', 'text_start', 'text_delta', 'text_end', 'usage', 'finished']);
   assert.equal(events[2].params.payload.delta, 'native response');
   assert.equal(events[4].params.payload.total_tokens, 5);
+});
+
+for (const delayed of [false, true]) test(`negotiated hooks leave the native claim untouched through a ${delayed ? 'delayed generator' : 'direct'} wrapper`, { timeout: 5000 }, async () => {
+  let calls = 0;
+  const value = await admitted((model, context, options) => {
+    const delegate = () => ai.anthropicMessagesApi().streamSimple(model, context, { ...options });
+    return delayed ? (async function* () { await new Promise(resolve => setTimeout(resolve, 15)); yield* delegate(); })() : delegate();
+  }, async params => { calls++; assert.equal(params.on_payload, false); return nativeResponse(); }, true);
+  assert.equal((await value.terminal).kind, 'finished');
+  assert.equal(calls, 1);
+  assert.equal(value.frames.some(frame => frame.method.startsWith('provider/hooks/')), false);
+});
+
+test('a native wrapper can compose the supplied payload callback without starting a second hook chain', { timeout: 5000 }, async () => {
+  const value = await admitted((model, context, options) => ai.anthropicMessagesApi().streamSimple(model, context, { ...options,
+    async onPayload(payload) { const forwarded = await options.onPayload(payload); return { ...forwarded, wrapper: true }; },
+  }), async (params, fixture) => {
+    assert.equal(params.on_payload, true);
+    assert.deepEqual(await nativeProviderPayload(fixture.runtime, { stream_id: params.stream_id, payload: { native_host_hook: true } }), { payload: { native_host_hook: true, wrapper: true } });
+    return nativeResponse();
+  }, true);
+  assert.equal((await value.terminal).kind, 'finished');
+  assert.equal(value.frames.some(frame => frame.method.startsWith('provider/hooks/')), false);
+});
+
+test('a bridge-owned attempt cannot later switch to native delegation', { timeout: 5000 }, async () => {
+  let calls = 0;
+  const value = await admitted((model, context, options) => (async function* () {
+    await options.onPayload({ actual: 'bridge request' });
+    yield* ai.anthropicMessagesApi().streamSimple(model, context, options);
+  })(), async () => { calls++; return nativeResponse(); }, true);
+  assert.equal((await value.terminal).kind, 'error');
+  assert.equal(calls, 0);
+  assert.equal(value.frames.filter(frame => frame.method === 'provider/hooks/payload').length, 1);
 });
 
 for (const callback of ['onResponse', 'transformHeaders']) {

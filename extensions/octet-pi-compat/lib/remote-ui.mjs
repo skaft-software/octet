@@ -341,7 +341,7 @@ export class RemoteUI {
         surface.mountId = geometry.editor_mount_id;
         // A notification can arrive before the open reply's JS continuation.
         // Input never establishes its own mount identity.
-        if (surface.initialInputs.some(input => input.editor_input.mount_id !== surface.mountId)) invalid('editor input mount/revision mismatch');
+        if (surface.initialInputs.some(input => input.editor_input && input.editor_input.mount_id !== surface.mountId)) invalid('editor input mount/revision mismatch');
       }
       surface.phase = 'constructing';
       const finish = value => this.close(surface, value).catch(error => this.runtime.backgroundError(error));
@@ -375,7 +375,8 @@ export class RemoteUI {
       // fenced host event exactly once. push captures the resulting ACK tail.
       for (const input of surface.initialInputs.splice(0)) {
         if (surface.closed) break;
-        this.editorInput(surface, input);
+        if (input.editor_text) this.editorText(surface, input.editor_text);
+        else this.editorInput(surface, input);
       }
       await this.push(surface);
       if (placement === 'fullscreen' && store.method === 'command/execute' && store.detach) store.detach();
@@ -388,6 +389,10 @@ export class RemoteUI {
   }
   async admit(surface, title, capture) {
     surface.requestedMouseCapture = capture;
+    // Cosmetic queues start after the origin reply, so the native host admits
+    // them under the retained owner. A local transport option cannot detach an
+    // early wire request from its still-active native parent. Fullscreen
+    // questions retain their ordinary requesting-handler lifetime.
     const geometry = await this.runtime.hostCall('ui/open', {
       surface_id: surface.id, title, placement: surface.placement, mouse_capture: capture,
     }, surface.store);
@@ -510,7 +515,7 @@ export class RemoteUI {
       const issued = params.editor_input;
       if (!issued) unsupported('editor input checkpoint', 'host must supply editor_input');
       fields(issued, ['mount_id', 'input_revision'], 'editor_input');
-      const previous = surface.initialInputs.at(-1)?.editor_input.input_revision ?? editor?.inputRevision ?? 0;
+      const previous = surface.initialInputs.findLast(input => input.editor_input)?.editor_input.input_revision ?? editor?.inputRevision ?? 0;
       if (typeof issued.mount_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(issued.mount_id)
           || surface.mountId !== undefined && issued.mount_id !== surface.mountId
           || !Number.isSafeInteger(issued.input_revision) || issued.input_revision !== previous + 1) invalid('editor input mount/revision mismatch');
@@ -535,6 +540,59 @@ export class RemoteUI {
       this.close(surface).catch(e => this.runtime.backgroundError(e));
       throw error;
     }
+  }
+  // Terminals (including Apple Terminal) paste CR or CRLF line endings. Bound the
+  // original bytes first; normalize only paste newlines before applying the
+  // unchanged control-free editor text grammar. Shared with deferEditorText so a
+  // paste that arrives during admission is judged exactly like a live one.
+  editorTextValue(params) {
+    const raw = bounded(params.text, 'editor text', 262144, { controls: true });
+    return bounded(params.paste ? raw.replace(/\r\n?/g, '\n') : raw, 'editor text', 262144);
+  }
+  deferEditorText(surface, params) {
+    // A paste is a fenced input revision and is refused exactly like a key. A
+    // non-paste update is the host's own editor text (a native edit or clear)
+    // and carries no fence; it is retained in arrival order and applied to the
+    // genuinely mounted component after the seed read has run.
+    const issued = params.editor_input;
+    const fenced = params.paste === true || issued !== undefined;
+    if (fenced) {
+      fields(issued, ['mount_id', 'input_revision'], 'editor_input');
+      const previous = surface.initialInputs.findLast(input => input.editor_input)?.editor_input.input_revision
+        ?? surface.editor?.inputRevision ?? 0;
+      if (typeof issued.mount_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(issued.mount_id)
+          || surface.mountId !== undefined && issued.mount_id !== surface.mountId
+          || !Number.isSafeInteger(issued.input_revision) || issued.input_revision !== previous + 1) invalid('editor paste mount/revision mismatch');
+    }
+    // Refuse malformed text now: a bad paste must not consume a revision or
+    // corrupt the input that follows it.
+    this.editorTextValue(params);
+    if (surface.initialInputs.length >= 128) throw rpcError(-32012, 'bounds_exceeded editor initial input queue');
+    surface.initialInputs.push({ ...(fenced ? { editor_input: { ...issued } } : {}), editor_text: { ...params, ...(fenced ? { editor_input: { ...issued } } : {}) } });
+  }
+  editorText(surface, params) {
+    const editor = surface.editor;
+    if (!editor || surface.closed) return;
+    const text = this.editorTextValue(params);
+    // The genuine component keeps pastes and undo: the host decision is a
+    // replacement, not a rebuild of local editor state.
+    editor.mutating++;
+    try { this.runtime.scope.run(surface.store, () => {
+      // A refused native admission re-offers the unchanged draft. Do not reset
+      // the component's paste ledger, cursor or undo for that echo.
+      if (params.paste) {
+        const issued = params.editor_input;
+        fields(issued, ['mount_id', 'input_revision'], 'editor_input');
+        if (issued.mount_id !== surface.mountId || issued.input_revision !== editor.inputRevision + 1) invalid('editor paste mount/revision mismatch');
+        surface.component.handleInput('\x1b[200~' + text + '\x1b[201~');
+        editor.inputRevision = issued.input_revision;
+      } else if (nativeEditors.has(surface.component) && params.native_changed !== undefined) {
+        if (params.native_changed && (surface.component.getExpandedText?.() ?? surface.component.getText()) === text) surface.component.onChange?.(surface.component.getText());
+      } else if ((surface.component.getExpandedText?.() ?? surface.component.getText()) !== text) surface.component.setText(text);
+    }); }
+    finally { editor.mutating--; }
+    editor.checkpoint();
+    surface.requestRender();
   }
   async push(surface) {
     if (surface.closed) return;
@@ -639,32 +697,13 @@ export class RemoteUI {
         }
       } else if (method === 'ui/editor-text') {
         if (surface.placement !== 'editor') invalid('ui/editor-text without an editor mount');
-        const editor = surface.editor;
-        if (!editor || surface.closed) return;
-        // Terminals (including Apple Terminal) paste CR or CRLF line endings.
-        // Bound the original bytes first; normalize only paste newlines before
-        // applying the unchanged control-free editor text grammar.
-        const raw = bounded(params.text, 'editor text', 262144, { controls: true });
-        const text = bounded(params.paste ? raw.replace(/\r\n?/g, '\n') : raw, 'editor text', 262144);
-        // The genuine component keeps pastes and undo: the host decision is a
-        // replacement, not a rebuild of local editor state.
-        editor.mutating++;
-        try { this.runtime.scope.run(surface.store, () => {
-          // A refused native admission re-offers the unchanged draft. Do not
-          // reset the component's paste ledger, cursor or undo for that echo.
-          if (params.paste) {
-            const issued = params.editor_input;
-            fields(issued, ['mount_id', 'input_revision'], 'editor_input');
-            if (issued.mount_id !== surface.mountId || issued.input_revision !== editor.inputRevision + 1) invalid('editor paste mount/revision mismatch');
-            surface.component.handleInput('\x1b[200~' + text + '\x1b[201~');
-            editor.inputRevision = issued.input_revision;
-          } else if (nativeEditors.has(surface.component) && params.native_changed !== undefined) {
-            if (params.native_changed && (surface.component.getExpandedText?.() ?? surface.component.getText()) === text) surface.component.onChange?.(surface.component.getText());
-          } else if ((surface.component.getExpandedText?.() ?? surface.component.getText()) !== text) surface.component.setText(text);
-        }); }
-        finally { editor.mutating--; }
-        editor.checkpoint();
-        surface.requestRender();
+        // A surface whose request has already settled is still being admitted:
+        // the host can write to the editor before the seed read returns. Keep
+        // that text in arrival order instead of dropping it into an editorless
+        // surface.
+        if (!surface.ready) { this.deferEditorText(surface, params); return; }
+        if (!surface.editor || surface.closed) return;
+        this.editorText(surface, params);
       } else if (method === 'ui/mouse') {
         if (!surface.ready) return; // No component input before capture admission.
         if (!surface.admittedMouseCapture) invalid('ui/mouse without capture');

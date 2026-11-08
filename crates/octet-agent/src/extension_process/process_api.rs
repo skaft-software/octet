@@ -2189,14 +2189,27 @@ impl ExtensionProcess {
         )
     }
 
-    /// Reports one user `!`/`!!` bash execution.
-    pub fn notify_user_bash(&self, command: &str) -> Result<(), ExtensionRuntimeError> {
+    /// Reports one user `!`/`!!` bash execution with Pi's event shape.
+    ///
+    /// `exclude_from_context` is `None` for callers that carry no prefix flag:
+    /// the field is omitted rather than reported as `false`. `cwd` is the real
+    /// workspace this process was admitted into.
+    pub fn notify_user_bash(
+        &self,
+        command: &str,
+        exclude_from_context: Option<bool>,
+    ) -> Result<(), ExtensionRuntimeError> {
         let command =
             bounded_notification_text("bash command", command, MAX_EXTENSION_BASH_COMMAND_BYTES)?;
+        let cwd = self.inner.config.workspace.to_string_lossy().into_owned();
         self.queue_lifecycle_notification(
             EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2,
             methods::BASH_USER,
-            &ExtensionUserBash { command },
+            &ExtensionUserBash {
+                command,
+                exclude_from_context,
+                cwd: Some(cwd),
+            },
         )
     }
 

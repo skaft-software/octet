@@ -187,7 +187,7 @@ test('turn observations ignore results and report problems once per extension/ev
 });
 
 test('cancelled model hook cannot publish a late successful turn reply', async t => {
-  const peer = launch(t, [factory], { hold: ['confirmation/request'] }); await peer.init(['session_entries']); await peer.start();
+  const peer = launch(t, [factory], { hold: ['confirmation/request'] }); await peer.init(['session_entries', 'remote_ui']); await peer.start();
   const request = peer.request('hook/run', params(peer, start(), 'wait'));
   const barrier = await peer.wait(frame => frame.method === 'confirmation/request');
   peer.notify('$/cancelRequest', { id: request.id });

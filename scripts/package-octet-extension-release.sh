@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 4 ]]; then
-    printf 'usage: %s ID OUTPUT_DIRECTORY VERSION [SOURCE_DIRECTORY]\n' "$0" >&2
+if [[ $# -lt 3 || $# -gt 5 ]]; then
+    printf 'usage: %s ID OUTPUT_DIRECTORY VERSION [SOURCE_DIRECTORY [TARGET]]\n' "$0" >&2
     exit 2
 fi
 
@@ -10,6 +10,13 @@ package_id=$1
 output_directory=$2
 version=$3
 source_override=${4:-}
+target=${5:-}
+if [[ "$package_id" == octet-codemode ]]; then
+    case "$target" in
+        x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-pc-windows-gnu|x86_64-pc-windows-msvc) ;;
+        *) printf 'codemode release packaging requires a supported TARGET\n' >&2; exit 2 ;;
+    esac
+fi
 
 if [[ ! "$package_id" =~ ^[a-z][a-z0-9-]{0,63}$ ]]; then
     printf 'invalid extension bundle ID: %s\n' "$package_id" >&2
@@ -86,6 +93,9 @@ fi
 
 mkdir -p "$output_directory"
 archive="$output_directory/$package_id-$package_version.tar.gz"
+if [[ "$package_id" == octet-codemode ]]; then
+    archive="$output_directory/$package_id-$package_version-$target.tar.gz"
+fi
 python3 - \
     "$repository_directory" \
     "$source_directory" \
@@ -94,7 +104,8 @@ python3 - \
     "$archive" \
     "$source_date_epoch" \
     "$tracked_manifest" \
-    "$dependency_directory" <<'PY'
+    "$dependency_directory" \
+    "$target" <<'PY'
 import gzip
 import json
 import os
@@ -105,9 +116,10 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 
-repository, source, package_id, octet_version, archive, epoch, tracked_manifest, dependency_directory = sys.argv[1:9]
+repository, source, package_id, octet_version, archive, epoch, tracked_manifest, dependency_directory, target = sys.argv[1:10]
 repository = pathlib.Path(repository)
 source = pathlib.Path(source)
 archive = pathlib.Path(archive)
@@ -134,6 +146,106 @@ if manifest["requires_octet"] != expected_octet:
     raise SystemExit(
         f"release bundle must declare requires_octet = {expected_octet!r}"
     )
+# Native payloads are build outputs, deliberately absent from git ls-files.
+# Stage only the explicitly targeted runner and manifest; never ship a launcher
+# that would compile at the user's first start or reuse an ambient PATH binary.
+NATIVE_TARGETS = {
+    "x86_64-unknown-linux-gnu": ("elf", "x86_64"),
+    "x86_64-apple-darwin": ("macho", "x86_64"),
+    "aarch64-apple-darwin": ("macho", "aarch64"),
+    "x86_64-pc-windows-gnu": ("pe", "x86_64"),
+    "x86_64-pc-windows-msvc": ("pe", "x86_64"),
+}
+ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
+MACHO_CPU_TYPES = {0x01000007: "x86_64", 0x0100000C: "aarch64"}
+PE_MACHINES = {0x8664: "x86_64", 0xAA64: "aarch64", 0x014C: "x86"}
+
+
+def native_payload_identity(path):
+    """Container format and machine type read from the payload itself.
+
+    Container magic alone is not enough: an arm64 Mach-O, a 32-bit PE, or an
+    object file staged under a different target would otherwise be published as
+    that target. Each check requires the minimal executable header, not a prefix.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(64)
+        if head.startswith(b"\x7fELF"):
+            if len(head) < 64:
+                raise SystemExit(f"native codemode executable has a truncated ELF header: {path}")
+            if head[4] != 2 or head[5] != 1:
+                raise SystemExit(
+                    f"native codemode executable is not a 64-bit little-endian ELF payload: {path}"
+                )
+            if int.from_bytes(head[16:18], "little") not in (2, 3):
+                raise SystemExit(f"native codemode executable is not an executable ELF payload: {path}")
+            machine = int.from_bytes(head[18:20], "little")
+            return "elf", ELF_MACHINES.get(machine, f"e_machine {machine}")
+        if head[:4] in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"):
+            byte_order = "little" if head[:4] == b"\xcf\xfa\xed\xfe" else "big"
+            if len(head) < 32:
+                raise SystemExit(f"native codemode executable has a truncated Mach-O header: {path}")
+            if int.from_bytes(head[12:16], byte_order) != 2:
+                raise SystemExit(f"native codemode executable is not an executable Mach-O payload: {path}")
+            cpu_type = int.from_bytes(head[4:8], byte_order)
+            return "macho", MACHO_CPU_TYPES.get(cpu_type, f"cputype {cpu_type:#x}")
+        if head[:4] in (b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce"):
+            raise SystemExit(f"native codemode executable is a 32-bit Mach-O payload: {path}")
+        if head[:4] in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf"):
+            # A universal binary is not the per-target artifact this release
+            # publishes, and would hide which machine actually runs.
+            raise SystemExit(f"native codemode executable is a universal Mach-O payload: {path}")
+        if head.startswith(b"MZ"):
+            if len(head) < 0x40:
+                raise SystemExit(f"native codemode executable has a truncated DOS header: {path}")
+            handle.seek(int.from_bytes(head[0x3C:0x40], "little"))
+            header = handle.read(26)
+            if len(header) < 26 or header[:4] != b"PE\0\0":
+                raise SystemExit(f"native codemode executable has no PE header: {path}")
+            optional_header = header[24:26]
+            if optional_header != b"\x0b\x02":
+                raise SystemExit(
+                    f"native codemode executable is not a PE32+ payload: {path}"
+                )
+            machine = int.from_bytes(header[4:6], "little")
+            return "pe", PE_MACHINES.get(machine, f"machine {machine:#x}")
+        raise SystemExit(f"native codemode executable has the wrong target format: {path}")
+
+
+native_staging = None
+native_root = None
+if package_id == "octet-codemode":
+    if target not in NATIVE_TARGETS:
+        raise SystemExit(f"unsupported codemode release target: {target!r}")
+    suffix = ".exe" if "-windows-" in target else ""
+    native = source / "target" / target / "release" / f"octet-codemode{suffix}"
+    if native.is_symlink() or not native.is_file() or native.stat().st_size == 0:
+        raise SystemExit(f"missing regular native codemode executable: {native}")
+    for parent in native.parents:
+        if parent == source:
+            break
+        if parent.is_symlink():
+            raise SystemExit(f"native codemode executable has a linked ancestor: {native}")
+    expected_container, expected_machine = NATIVE_TARGETS[target]
+    container, machine = native_payload_identity(native)
+    if (container, machine) != (expected_container, expected_machine):
+        raise SystemExit(
+            f"native codemode executable does not match {target}: found {machine} {container}, "
+            f"expected {expected_machine} {expected_container}: {native}"
+        )
+    native_staging = tempfile.TemporaryDirectory(prefix="octet-codemode-payload-")
+    native_root = pathlib.Path(native_staging.name)
+    (native_root / "bin").mkdir()
+    shutil.copyfile(native, native_root / "bin" / f"codemode{suffix}")
+    (native_root / "bin" / f"codemode{suffix}").chmod(0o755)
+    text = (source / "extension.toml").read_text(encoding="utf-8")
+    old = 'command = "bin/codemode"'
+    if text.count(old) != 1:
+        raise SystemExit("unexpected codemode entrypoint contract")
+    text = text.replace(old, f'command = "bin/codemode{suffix}"')
+    (native_root / "extension.toml").write_text(text, encoding="utf-8", newline="\n")
+    manifest = tomllib.loads(text)
+
 entrypoint = manifest["entrypoint"]
 if not isinstance(entrypoint, dict) or not isinstance(entrypoint.get("command"), str):
     raise SystemExit("extension.toml entrypoint.command must be a string")
@@ -157,7 +269,7 @@ def entrypoint_is_executable(path, mode, platform):
     return first_line.startswith(b"#!") and b"python" in first_line
 
 if not command.is_absolute():
-    local_command = source.joinpath(*command.parts)
+    local_command = (native_root or source).joinpath(*command.parts)
     if local_command.exists():
         local_entrypoint = command
         command_metadata = local_command.lstat()
@@ -194,6 +306,7 @@ files = [
     for path in files
     if "__pycache__" not in path.relative_to(source).parts
     and path.suffix not in {".pyc", ".pyo"}
+    and not (native_root and path.relative_to(source).parts[0] == "target")
     and not (dependency_directory and any(
         part in {"node_modules", ".npm-cache"} for part in path.relative_to(source).parts
     ))
@@ -202,6 +315,12 @@ files = [
 if not files:
     raise SystemExit("extension source has no files")
 file_roots = {path: source for path in files}
+if native_root:
+    file_roots.pop(source / "extension.toml", None)
+    file_roots.pop(source / "bin/codemode", None)
+    for path in native_root.rglob("*"):
+        if path.is_file():
+            file_roots[path] = native_root
 if dependency_directory:
     dependency_root = pathlib.Path(dependency_directory)
     for name in ("package.json", "package-lock.json", "bridge.json", "LICENSE.pi"):

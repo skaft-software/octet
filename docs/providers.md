@@ -1039,7 +1039,9 @@ cache compatibility allows it. Unsupported models and opaque Bedrock application
 profiles receive no explicit points; Nova keeps automatic caching.
 
 Responses caching follows the selected route's declared controls, not a model
-name alone. Flex is a service tier on that same codec; its existing endpoint gate
+name alone. Discovery registers exact provider API names; a lookup alias does
+not replace a newly discovered name or lend it another model's cache policy.
+Flex is a service tier on that same codec; its existing endpoint gate
 is described [above](#protocols-and-transport). Stable serialized prefixes do not
 prove that a provider's implicit breakpoint remains eligible when a user/tool-result
 group is extended. The local audit covers all builtin Responses models, including

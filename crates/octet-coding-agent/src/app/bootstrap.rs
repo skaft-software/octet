@@ -9215,12 +9215,16 @@ fn build_app_with_consumer(
         .with_context(|| "configured compaction model could not be resolved")?;
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     validate_native_compaction_replay(config.compaction.mode, &session, &model)?;
-    // A deferred boot decides delegation readiness from discovery: the same
-    // first-party subagents extension is starting, and its process binds at
-    // attach just as a python activation already does.
+    // The Pi bridge also needs the child runtime before deferred attach, but
+    // only the delegation extension supplies the native Ultra tool surface.
     let service_pending = executable_extensions.pending_agent_session_service();
     let service_available = executable_extensions.has_agent_session_service();
-    let subagents_available = if service_pending {
+    let subagents_pending = service_pending
+        && executable_extensions
+            .pending_startup_names()
+            .iter()
+            .any(|name| name == SUBAGENTS_EXTENSION_NAME);
+    let subagents_available = if subagents_pending {
         true
     } else {
         service_available
@@ -9304,8 +9308,8 @@ fn build_app_with_consumer(
             super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
         ));
     }
-    // An admitted deferred subagents process needs the host runtime before it
-    // attaches. The frontend still gates Ultra on its negotiated live service.
+    // Admitted deferred child-session owners need the host runtime before
+    // attach. The frontend separately gates Ultra on its native tool surface.
     configure_v2_delegation(
         &mut agent,
         &model,

@@ -381,6 +381,7 @@ pub(super) fn negotiate_contributions_with_host_services(
                 && manifest.api_version == EXTENSION_API_VERSION_0_4
             {
                 allowed.insert(EXTENSION_FEATURE_BULK_OBJECTS_V1);
+                allowed.insert(EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1);
             }
             if offered_host_services.tool_composition
                 && manifest.api_version == EXTENSION_API_VERSION_0_4

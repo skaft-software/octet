@@ -257,12 +257,25 @@ export class Runtime {
     const foreground = this.foreground;
     // Pi keeps a captured context valid until the session is replaced or
     // reloaded. A completed, failed, cancelled or interrupted turn does not
-    // invalidate it, so a live state of the same owner/generation is enough.
-    if (!foreground || store.state === foreground) return;
-    const same = store.state.owner?.extension_instance_id === foreground.owner.extension_instance_id
-      && store.state.owner?.process_generation === foreground.owner.process_generation
-      && store.state.workspace === foreground.workspace;
-    if (!same) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+    // invalidate it, so its own live state is still the foreground. Everything
+    // else must be the foreground state: bind() interns each complete owner,
+    // and a new incarnation retires the old state. Matching owner values cannot
+    // grant a private or replaced context a foreground lease.
+    if (!foreground) throw rpcError(-32002, 'not_foreground_owner no foreground session is bound');
+    if (store.state !== foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+  }
+  async presentationReady(store) {
+    // Native admission still binds early reverse calls to an active origin.
+    // Start the whole cosmetic chain only after its successful reply is written,
+    // never by exempting arbitrary children from native parent cancellation.
+    // Pi reports failed observers but normalizes their host hook reply. Check
+    // the individual callback too, without poisoning successful siblings.
+    for (const outcome of [store.settlement?.promise, store.presentationOutcome]) {
+      const error = await outcome;
+      if (error !== undefined) throw error;
+    }
+    if (this.stopping) throw rpcError(-32002, 'host is draining');
+    this.assertOwner(store); store.controller.signal.throwIfAborted();
   }
   assertFactory(factory) {
     if (this.failedFactories.has(factory)) throw rpcError(-32002, 'failed extension factory is unavailable');
@@ -1175,7 +1188,7 @@ export class Runtime {
     if (this.active.size >= this.maxConcurrent) {
       await this.transport.send({ jsonrpc: '2.0', id: message.id, error: { code: -32012, message: 'bounds_exceeded concurrent requests' } }); return;
     }
-    const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true };
+    const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true, settlement: deferred() };
     this.active.set(message.id, store);
     if (message.method === 'initialize') this.initializationBarrier = deferred();
     let settlementError = rpcError(-32002, 'originating request did not complete');
@@ -1242,6 +1255,7 @@ export class Runtime {
       this.sessionTransport?.settle(store, settlementError);
       store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
       settleCompactions(this, store, settlementError);
+      store.settlement.resolve(settlementError);
     }
   }
   async shutdown(id) {

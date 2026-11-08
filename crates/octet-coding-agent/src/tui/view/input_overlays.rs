@@ -598,10 +598,14 @@ pub(super) fn queued_edit_hint(key_id: &str, macos: bool) -> String {
     format!("({} to edit)", key_display_label(key_id, macos))
 }
 
+/// Rows of queued input shown while the composer is collapsed (Ctrl+O expands).
+const QUEUED_PREVIEW_ROWS: usize = 2;
+
 pub(super) fn render_pending_steering(
     state: &ShellState,
     width: u16,
     max_rows: usize,
+    expanded: bool,
 ) -> Vec<String> {
     if (state.steering_queue.is_empty()
         && state.follow_up_queue.is_empty()
@@ -682,7 +686,14 @@ pub(super) fn render_pending_steering(
             .map(|row| fit_line(&row, width)),
         );
     }
-    let budget = max_rows - 1;
+    // Queued steering/follow-up previews are collapsed by default: a long paste
+    // steered into a live turn must not take the composer's room. Ctrl+O expands
+    // them to whatever chrome space exists.
+    let budget = if expanded {
+        max_rows - 1
+    } else {
+        (max_rows - 1).min(QUEUED_PREVIEW_ROWS)
+    };
     if content.len() > budget {
         let hidden = content.len() - budget.saturating_sub(1);
         content.truncate(budget.saturating_sub(1));

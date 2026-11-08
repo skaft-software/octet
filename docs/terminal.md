@@ -67,7 +67,10 @@ A finished tool's `tool_execution_end` result and its `toolResult` message carry
 Pi's `details`: a Pi-compatible tool's own details, otherwise an extension tool's
 non-model-visible metadata. Structured content and media parts are included when
 the tool returned them. `get_state` reports `messageCount` without projecting the
-history, so it stays fast on long resumed sessions.
+history, so it stays fast on long resumed sessions. Its `pendingMessageCount`
+includes idle steering and follow-up queues, even after an input hook handles a
+prompt without starting a turn. A handled prompt acknowledges
+`data.disposition: "handled"`; idle input hooks receive no streaming-delivery hint.
 
 </details>
 
@@ -156,8 +159,11 @@ While octet works:
 
 - Enter queues live steering for the next model boundary.
 - Ctrl+S queues a local follow-up. Follow-ups run one at a time, in order, after
-  normal completion. Both kinds of pending input share the bounded hint above
-  the input.
+  normal completion. Both kinds of pending input share a collapsed preview above
+  the input: at most two preview rows plus its heading. Ctrl+O expands the preview
+  within the available space without changing queued content or delivery order.
+  Once delivered into a running turn, an injected prompt shows at most three
+  transcript rows plus an expansion hint; Ctrl+O reveals its full text.
 - Option+Up (Alt+Up) recalls the newest editable queued steering message or
   follow-up into an empty input, keeping attachment and paste chips. A recalled
   steering message is withdrawn from the agent before it's saved, so it's never
@@ -366,10 +372,12 @@ transcript updates in place. It no longer stays pinned above the input. Its
 heading counts worker states, and up to four child lines show active tasks with
 input and output tokens. Ctrl+O keeps disclosure. `/subagents` opens the live
 worker list, including during a run, with the complete roster (up to 32) and
-failure details. Enter opens a worker's read-only transcript and Ctrl+X stops
-the selected worker. `/subagents stop <name-or-id|all>` also works during a run;
-other worker operations wait for idle. `/extensions` manages extension
-enablement and configuration instead.
+failure details. Enter opens a worker transcript; Ctrl+O toggles its retained
+details and Ctrl+G composes a message to that worker without editing its history.
+Ctrl+G also works from the list, and Ctrl+X stops the selected worker.
+`/subagents continue <name-or-id> <message>` and `/subagents stop <name-or-id|all>`
+also work during a run; inspect, wait and reattach wait for idle. `/extensions`
+manages extension enablement and configuration instead.
 Finished workers' usage is added once to the main session's ledger, so cost
 limits count it. [Worker
 display](../extensions/octet-subagents/README.md#tui-and-serve-presentation).

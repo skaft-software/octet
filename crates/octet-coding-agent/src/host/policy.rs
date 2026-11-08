@@ -134,6 +134,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         theme: None,
         theme_explicit: false,
         system_prompt: request.system_prompt.clone(),
+        append_system_prompt: None,
         theme_paths: Vec::new(),
         color: ColorMode::Never,
         mouse: MouseMode::Off,

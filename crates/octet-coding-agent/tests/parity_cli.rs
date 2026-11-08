@@ -1018,9 +1018,15 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
         .expect("list discovered models");
     let listing = stdout_of(&listed);
     assert!(listed.status.success(), "{listing}");
+    // The rows are matched by model leaf, not by the full documented id. An
+    // online run installs the live models.dev metadata when its background
+    // refresh lands before the catalog is built, and that live set spells the
+    // same DeepSeek entries without the provider prefix. Which of the two shapes
+    // a given run sees is a race, so pinning the id here would make the suite
+    // depend on network timing rather than on the contract under test.
     let flash_row = listing
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-flash"))
+        .find(|line| line.contains("deepseek-flash"))
         .unwrap_or_else(|| panic!("missing discovered model row: {listing}"));
     // Columns are provider, model, context, max-out, thinking, images.
     let fields: Vec<&str> = flash_row.split_whitespace().collect();
@@ -1039,7 +1045,7 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
     );
     let pro_row = listing
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro"))
+        .find(|line| line.contains("deepseek-v4-pro"))
         .unwrap_or_else(|| panic!("missing text-only row: {listing}"));
     assert_eq!(
         pro_row.split_whitespace().last(),

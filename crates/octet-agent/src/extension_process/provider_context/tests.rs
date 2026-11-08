@@ -463,8 +463,7 @@ while True:
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
-async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolates_bad_projection(
-) {
+async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolates_bad_projection() {
     for case in [
         "valid",
         "invalid",
@@ -580,10 +579,7 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolate
         );
         assert_eq!(
             captures.lock().unwrap().len(),
-            usize::from(matches!(
-                case,
-                "valid" | "failure" | "invalid" | "refusal"
-            ))
+            usize::from(matches!(case, "valid" | "failure" | "invalid" | "refusal"))
         );
         if case == "valid" {
             let request = &captures.lock().unwrap()[0];

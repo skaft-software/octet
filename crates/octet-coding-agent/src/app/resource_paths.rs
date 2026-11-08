@@ -480,20 +480,21 @@ async fn headless_work<T>(
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        let events = extensions.headless_event_ready();
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => anyhow::bail!("resource discovery cancelled by shutdown"),
             result = &mut work => return Ok(result),
-            _ = tick.tick() => {
-                // An interactive consumer queues these requests for its next
-                // shell pump; a host without one answers with typed refusals
-                // instead of stranding the caller.
-                for notice in extensions.drain_events() {
-                    // Notifications already have bounded, line-safe grouped
-                    // layout. Retain it through the native diagnostic sink.
-                    crate::output::stderr_multiline(notice);
-                }
-            }
+            _ = events => {},
+            _ = tick.tick() => {},
         }
+        // An interactive consumer queues these requests for its next shell
+        // pump; a headless host answers with typed refusals. Event readiness
+        // wakes this drain without waiting for the housekeeping tick.
+        for notice in extensions.drain_events() {
+            // Retain the bounded, line-safe grouped notification layout.
+            crate::output::stderr_multiline(notice);
+        }
+        tokio::task::yield_now().await;
     }
 }

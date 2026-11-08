@@ -24,7 +24,10 @@ export default pi => {
   const peer = launch(t, [entry], { composer: 'retained draft' });
   await peer.init();
   await peer.start({ session_entries: [], session_branch: [], session_leaf_id: null });
-  const opens = peer.seen.filter(f => f.method === 'ui/open');
+  const opens = [];
+  for (const placement of ['above_editor', 'editor', 'footer']) {
+    opens.push(await peer.wait(f => f.method === 'ui/open' && f.params.placement === placement));
+  }
   assert.deepEqual(opens.map(f => f.params.placement).sort(), ['above_editor', 'editor', 'footer']);
   for (const [placement, text] of [['editor', 'retained draft'], ['footer', 'footer entries 0'], ['above_editor', 'widget entries 0']]) {
     const surface = opens.find(f => f.params.placement === placement).params.surface_id;

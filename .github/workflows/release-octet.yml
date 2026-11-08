@@ -765,6 +765,27 @@ jobs:
             fi
           done
           if ((${#uploads[@]})); then
+            # Complete assets before Latest: new assets may only land on a
+            # release that is still staged away from the channel default. A
+            # release that is already Latest while assets are still arriving is
+            # exactly the incomplete-Latest state this ordering forbids.
+            # `gh api` renders the raw GitHub REST document, whose latest-release
+            # tag field is `tag_name`; a `tagName` filter returns null here and
+            # would silently disable this guard against an incomplete Latest.
+            if ! latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name); then
+              echo "cannot determine the current Latest release; refusing to mutate $RELEASE_TAG" >&2
+              exit 1
+            fi
+            if [[ -z "$latest_tag" || "$latest_tag" == "null" ]]; then
+              echo "GitHub returned no Latest tag for $GITHUB_REPOSITORY; refusing to mutate $RELEASE_TAG" >&2
+              exit 1
+            fi
+            if [[ "$latest_tag" == "$RELEASE_TAG" ]]; then
+              echo "release $RELEASE_TAG is already Latest; assets may only be attached while it is staged" >&2
+              echo "the release must be created with --latest=false before any asset is attached" >&2
+              echo "see docs/release/complete-assets-before-latest.md" >&2
+              exit 1
+            fi
             gh release upload "$RELEASE_TAG" "${uploads[@]}"
           else
             echo "all release assets already match the immutable candidate"
@@ -946,6 +967,7 @@ jobs:
       - name: Build and validate npm tarballs from the verified assets
         shell: bash
         env:
+          OCTET_NPM_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -958,7 +980,8 @@ jobs:
             "$VERSION" \
             "$PWD/release-assets" \
             "$RUNNER_TEMP/npm-assets" \
-            "$PWD/release-assets/OCTET_SHA256SUMS"
+            "$PWD/release-assets/OCTET_SHA256SUMS" \
+            "$SOURCE_COMMIT"
           python3 source/scripts/create-octet-npm-manifest.py \
             "$VERSION" \
             "$TAG" \
@@ -1032,6 +1055,7 @@ jobs:
       - name: Revalidate package evidence before OIDC publication
         shell: bash
         env:
+          OCTET_NPM_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -1233,6 +1257,10 @@ jobs:
     steps:
       - name: Check out immutable verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # The expected documentation set comes from the canonical source
+          # commit, so its Git object must be present in this checkout.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
@@ -1243,6 +1271,7 @@ jobs:
       - name: Verify public registry contents and provenance
         shell: bash
         env:
+          OCTET_NPM_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
@@ -1576,6 +1605,12 @@ jobs:
             fi
           done
           if ((${#uploads[@]})); then
+            # Supplemental post-publication repair, not core staging: this job
+            # is the explicitly authorized portability repair of an existing
+            # published release, and it may legitimately target the release that
+            # is already Latest. It therefore keeps the pre-existing immutable
+            # digest refusal without the staging precondition that guards the
+            # core native and bundle attachment.
             gh release upload "$RELEASE_TAG" "${uploads[@]}"
           else
             echo "all release assets already match the immutable candidate"

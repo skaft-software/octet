@@ -28,26 +28,14 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/octet-rc-extensions.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 # Tracked files only: no workstation node_modules, caches, or factory settings.
 git -C "$source" archive HEAD -- extensions | tar -xf - -C "$stage"
-if [[ -n "$suffix" ]]; then
-    python3 - "$stage/extensions/octet-codemode/extension.toml" <<'PY'
-import pathlib
-import sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-old = 'command = "bin/codemode"'
-if text.count(old) != 1:
-    raise SystemExit("unexpected codemode entrypoint contract")
-path.write_text(text.replace(old, 'command = "bin/codemode.exe"'), encoding="utf-8", newline="\n")
-PY
-    rm "$stage/extensions/octet-codemode/bin/codemode"
-fi
-cp "$native" "$stage/extensions/octet-codemode/bin/codemode$suffix"
-chmod 0755 "$stage/extensions/octet-codemode/bin/codemode$suffix"
+native_stage="$stage/extensions/octet-codemode/target/$target/release"
+mkdir -p "$native_stage"
+cp "$native" "$native_stage/octet-codemode$suffix"
 mkdir -p "$output"
 while IFS= read -r extension; do
     [[ -n "$extension" ]] || continue
     "$source/scripts/package-octet-extension-release.sh" \
-        "$extension" "$output" "$version" "$stage/extensions/$extension"
+        "$extension" "$output" "$version" "$stage/extensions/$extension" "$target"
 done < <(grep -Ev '^[[:space:]]*(#|$)' "$stage/extensions/release-catalog.txt")
 python3 - "$source" "$output" "$version" "$target" <<'PY'
 import hashlib
@@ -61,7 +49,7 @@ commit = subprocess.check_output(["git", "-C", source, "rev-parse", "HEAD"], tex
 tree = subprocess.check_output(["git", "-C", source, "rev-parse", "HEAD^{tree}"], text=True).strip()
 catalog = subprocess.check_output(["git", "-C", source, "show", "HEAD:extensions/release-catalog.txt"], text=True)
 ids = [line.strip() for line in catalog.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-archives = [f"{extension}-{version.removeprefix('v')}.tar.gz" for extension in ids]
+archives = [f"{extension}-{version.removeprefix('v')}{'-' + target if extension == 'octet-codemode' else ''}.tar.gz" for extension in ids]
 info = {
     "kind": "unsigned dogfood release candidate; not a signed release",
     "version": version.removeprefix("v"), "target": target,

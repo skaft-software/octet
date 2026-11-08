@@ -27,6 +27,7 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
         theme: None,
         theme_explicit: false,
         system_prompt: None,
+        append_system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,
@@ -1415,4 +1416,160 @@ fn test_compaction_active_skills_serialization() {
         active_state.skill_resources[0].resource_path,
         "references/ref.md"
     );
+}
+
+fn append_fixture() -> (tempfile::TempDir, Config, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let global = root.path().join("global/AGENTS.md");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, "global instructions").unwrap();
+    let config = config(root.path().to_owned(), root.path().to_owned());
+    (root, config, global)
+}
+
+#[test]
+fn a_value_that_names_a_file_contributes_its_contents_not_the_path() {
+    let (root, _config, _global) = append_fixture();
+    let source = root.path().join("workspace-roots.txt");
+    std::fs::write(&source, "ROOTS SENTINEL").unwrap();
+
+    let resolved = resolve_appended_system_prompt(&[source.display().to_string()]).unwrap();
+    assert_eq!(resolved, "ROOTS SENTINEL");
+}
+
+#[test]
+fn a_value_that_names_no_file_is_literal_prompt_text() {
+    let (root, _config, _global) = append_fixture();
+    let value = "Treat /other as part of the workspace";
+    assert_eq!(
+        resolve_appended_system_prompt(&[value.to_owned()]).unwrap(),
+        value
+    );
+    // A path-shaped literal stays literal when nothing exists there.
+    let missing = [root.path().join("missing-roots.txt").display().to_string()];
+    assert_eq!(
+        resolve_appended_system_prompt(&missing).unwrap(),
+        missing[0]
+    );
+}
+
+#[test]
+fn an_unreadable_source_falls_back_to_the_literal_value() {
+    let (root, _config, _global) = append_fixture();
+    let directory = root.path().join("not-a-file");
+    std::fs::create_dir_all(&directory).unwrap();
+
+    let resolved = resolve_appended_system_prompt(&[directory.display().to_string()]).unwrap();
+    assert_eq!(resolved, directory.display().to_string());
+}
+
+#[test]
+fn an_oversized_source_falls_back_to_the_literal_value() {
+    let (root, _config, _global) = append_fixture();
+    let source = root.path().join("huge.txt");
+    std::fs::write(&source, vec![b'x'; MAX_APPEND_SYSTEM_PROMPT_BYTES + 1]).unwrap();
+
+    let resolved = resolve_appended_system_prompt(&[source.display().to_string()]).unwrap();
+    assert_eq!(resolved, source.display().to_string());
+}
+
+#[test]
+fn empty_values_contribute_nothing_and_repeated_values_join_in_order() {
+    let (root, _config, _global) = append_fixture();
+    let first = root.path().join("first.txt");
+    let second = root.path().join("second.txt");
+    std::fs::write(&first, "FIRST").unwrap();
+    std::fs::write(&second, "SECOND").unwrap();
+
+    assert!(resolve_appended_system_prompt(&[]).is_none());
+    assert!(resolve_appended_system_prompt(&[String::new()]).is_none());
+    assert_eq!(
+        resolve_appended_system_prompt(&[
+            first.display().to_string(),
+            String::new(),
+            "literal".to_owned(),
+            second.display().to_string(),
+        ])
+        .unwrap(),
+        "FIRST\n\nliteral\n\nSECOND"
+    );
+}
+
+#[test]
+fn the_addendum_follows_the_base_prompt_and_precedes_project_context() {
+    let (root, mut config, global) = append_fixture();
+    std::fs::write(root.path().join("AGENTS.md"), "PROJECT SENTINEL").unwrap();
+    config.append_system_prompt = Some("ADDENDUM".into());
+
+    let output = compose_instructions_at(&config, &global).unwrap();
+    assert!(output.starts_with(BASE_PERSONA), "{output}");
+    let addendum = output.find("ADDENDUM").unwrap();
+    let context = output.find("PROJECT SENTINEL").unwrap();
+    assert!(addendum < context, "{output}");
+    // Recomposition still applies the addendum exactly once.
+    assert_eq!(compose_instructions_at(&config, &global).unwrap(), output);
+    assert_eq!(output.matches("ADDENDUM").count(), 1);
+    // Without an addendum the native composition is unchanged.
+    config.append_system_prompt = None;
+    assert!(!compose_instructions_at(&config, &global)
+        .unwrap()
+        .contains("ADDENDUM"));
+}
+
+#[test]
+fn a_full_override_still_accepts_an_addendum_and_an_empty_override_stays_empty() {
+    let (root, mut config, global) = append_fixture();
+    std::fs::write(root.path().join("AGENTS.md"), "PROJECT SENTINEL").unwrap();
+    config.append_system_prompt = Some("ADDENDUM".into());
+
+    config.system_prompt = Some("OVERRIDE".into());
+    assert_eq!(
+        compose_instructions_at(&config, &global).unwrap(),
+        "OVERRIDE\n\nADDENDUM"
+    );
+
+    config.system_prompt = Some(String::new());
+    assert_eq!(
+        compose_instructions_at(&config, &global).unwrap(),
+        "ADDENDUM"
+    );
+    // An override without an addendum keeps the existing full-replacement meaning.
+    config.append_system_prompt = None;
+    assert_eq!(compose_instructions_at(&config, &global).unwrap(), "");
+}
+
+#[test]
+fn a_reload_refreshes_context_and_keeps_the_addendum_once_after_its_source_is_deleted() {
+    let (root, mut config, global) = append_fixture();
+    std::fs::write(root.path().join("AGENTS.md"), "FIRST SENTINEL").unwrap();
+    let source = root.path().join("pi-acp-workspace-roots.txt");
+    std::fs::write(&source, "ROOTS SENTINEL").unwrap();
+
+    // pi-acp writes the workspace-roots prompt to a temporary file; the
+    // configuration carries the resolved text, read once.
+    config.append_system_prompt = resolve_appended_system_prompt(&[source.display().to_string()]);
+    assert_eq!(
+        config.append_system_prompt.as_deref(),
+        Some("ROOTS SENTINEL")
+    );
+
+    let composed = compose_instructions_at(&config, &global).unwrap();
+    assert!(composed.contains("FIRST SENTINEL"), "{composed}");
+    assert_eq!(composed.matches("ROOTS SENTINEL").count(), 1);
+
+    // The bridge removes its temporary directory as soon as the child exits, and
+    // an operator edit must still reach the next composition.
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "SECOND SENTINEL").unwrap();
+    let reloaded = compose_instructions_at(&config, &global).unwrap();
+    assert!(reloaded.contains("SECOND SENTINEL"), "{reloaded}");
+    assert!(!reloaded.contains("FIRST SENTINEL"), "{reloaded}");
+    assert_eq!(reloaded.matches("ROOTS SENTINEL").count(), 1);
+    assert_eq!(compose_instructions_at(&config, &global).unwrap(), reloaded);
+}
+
+#[test]
+fn no_append_values_resolve_to_no_addendum() {
+    assert_eq!(resolve_appended_system_prompt(&[]), None);
+    assert_eq!(resolve_appended_system_prompt(&[String::new()]), None);
 }

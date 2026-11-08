@@ -531,13 +531,14 @@ fn render_panel_item(
     label_width: Option<usize>,
     stacked: bool,
     width: u16,
+    status_marker: Option<&str>,
 ) -> PanelItemRender {
     let item = panel_cell(item, state.theme.unicode());
     let marker = state.theme.glyph("prompt");
     let inset = " ".repeat(usize::from(
         PresentationLayout::new(&state.theme, width).inset,
     ));
-    let prefix = if is_selected {
+    let mut prefix = if is_selected {
         // Every picker follows the active model's adaptive shell accent. In a
         // model picker this is the active model, not the focused candidate's
         // provider colour; choosing the candidate updates the shell afterward.
@@ -545,6 +546,10 @@ fn render_panel_item(
     } else {
         format!("{inset}  ")
     };
+    if let Some(status) = status_marker {
+        prefix.push_str(status);
+        prefix.push(' ');
+    }
     let available = usize::from(width).saturating_sub(visible_width(&prefix));
     let ellipsis = state.theme.glyph("ellipsis");
     let menu_labels = matches!(
@@ -812,16 +817,11 @@ fn select_list_purpose<'a>(
     action: &PanelAction,
     width: u16,
 ) -> Option<&'a str> {
-    surface.purpose.as_deref().or_else(|| {
-        action.subagent_panel().map(|_| {
-            let full = "Enter inspects · ^x stops the selected worker";
-            if usize::from(width) >= visible_width(full) + 2 {
-                full
-            } else {
-                "^x stops the selected worker"
-            }
-        })
-    })
+    let _ = width;
+    surface
+        .purpose
+        .as_deref()
+        .or_else(|| action.subagent_panel().map(|_| "^g message · ^x stop"))
 }
 
 #[cfg(test)]
@@ -1068,6 +1068,43 @@ fn render_panel_output_with_limit(
                         }
                     }
                     let is_selected = position == *selected;
+                    let marker =
+                        subagents
+                            .and_then(|panel| panel.group_label(index))
+                            .map(|group| {
+                                let unicode = state.theme.unicode();
+                                match group {
+                                    "Running" | "Queued" => {
+                                        let frames: &[&str] = if unicode {
+                                            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                                        } else {
+                                            &["-", "\\", "|", "/"]
+                                        };
+                                        let frame = if state.theme.capabilities().animation {
+                                            state.event_spinner_frame
+                                        } else {
+                                            0
+                                        };
+                                        state.theme.fg("model_accent", frames[frame % frames.len()])
+                                    }
+                                    "Done" => state.theme.settled_event_dot(
+                                        "success",
+                                        if unicode { "✓" } else { "+" },
+                                    ),
+                                    "Failed" => state.theme.settled_event_dot(
+                                        "error",
+                                        if unicode { "✗" } else { "!" },
+                                    ),
+                                    "Stopped" => state.theme.settled_event_dot(
+                                        "error",
+                                        if unicode { "■" } else { "!" },
+                                    ),
+                                    _ => state.theme.settled_event_dot(
+                                        "neutral",
+                                        if unicode { "•" } else { "*" },
+                                    ),
+                                }
+                            });
                     let item_render = render_panel_item(
                         state,
                         &items[index],
@@ -1078,6 +1115,7 @@ fn render_panel_output_with_limit(
                         label_width,
                         stacked,
                         width,
+                        marker.as_deref(),
                     );
                     if confirmation && is_selected {
                         if let Some(metadata) = confirmation_metadata.as_mut() {
@@ -1509,7 +1547,8 @@ mod subagent_surface_tests {
             assert!(plain.contains("audit-auth"), "{plain}");
             assert!(plain.contains("running"), "{plain}");
             assert!(plain.contains("enter inspect"), "{plain}");
-            assert!(plain.contains("^x stops the selected worker"), "{plain}");
+            assert!(plain.contains("^g message"), "{plain}");
+            assert!(plain.contains("^x stop"), "{plain}");
             assert!(!plain.contains("state · elapsed"), "{plain}");
             assert!(rows.len() <= 20);
             assert!(rows
@@ -1535,7 +1574,7 @@ mod subagent_surface_tests {
                     .all(|row| visible_width(row) <= usize::from(width)));
                 if height >= 4 {
                     assert!(
-                        plain.contains("^x stops the selected worker"),
+                        plain.contains("^g message") && plain.contains("^x stop"),
                         "{width}x{height}: {plain}"
                     );
                 }

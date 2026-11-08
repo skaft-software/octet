@@ -37,6 +37,22 @@ request pending throughout a game. The Pi adapter retains the original JS
 while settling the Rust command once the mounted component publishes its first
 frame. Subsequent host effects remain owner-validated, not ambient authority.
 
+Pi's cosmetic `setEditorComponent`, `setFooter`, `setHeader`, and `setWidget`
+setters return **void**. Their mount/clear queues, including status surfaces,
+start only after the originating reply is successfully written and the individual
+callback succeeds. They do not join the hook flush. Admission, editor seed and
+first frame then use the existing retained-owner path with the original numeric
+parent and complete owner triple. An early `ui/open` remains bound to its live
+native parent; a local adapter transport option cannot exempt it from native
+settlement cancellation.
+
+Failed, cancelled or preempted origins cannot start queued presentation. Explicit
+cancellation, owner retirement/replacement, reload, generation replacement and
+shutdown still revoke pending or active work. Editor mount/revision/checkpoint
+and history-view fences remain unchanged. A fullscreen question in a hook stays
+joined until answered or dismissed; the command-specific first-frame behavior
+above is unchanged. Headless hosts never acquire a presentation surface.
+
 ## Extension-to-host messages
 
 Each envelope is one UTF-8 JSON object plus LF on protocol-only stdout.
@@ -97,6 +113,12 @@ Lines contain printable UTF-8 and checked SGR only: basic styles, 16-color,
 indexed-color, and RGB foreground/background. Cursor movement, erase controls,
 OSC, queries, embedded newlines, and other control bytes are rejected. The host
 preserves approved styling; it does not feed ANSI through a plain-text widget.
+
+The native host also publishes optional `context.host.tools_expanded` facts.
+Interactive commands capture the current native disclosure choice before they
+start, including native Ctrl+O changes in either direction. Retained mounted
+owners receive the same observation through `context/updated`. Hosts without
+an interactive consumer omit this field rather than fabricate a disclosure state.
 
 ### `ui/chrome` — desktop notification intent
 

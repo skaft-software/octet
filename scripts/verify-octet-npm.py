@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import stat
+import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass
@@ -31,28 +33,60 @@ MAX_ENTRIES = 4096
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
 
 
-def documentation_files() -> set[str]:
-    inventory = pathlib.Path(__file__).resolve().parent.parent / "docs/package-assets.txt"
+SOURCE_COMMIT_ENVIRONMENT = "OCTET_NPM_SOURCE_COMMIT"
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
+INVENTORY_PATH = "docs/package-assets.txt"
+
+
+def configured_source_commit() -> str:
+    """The canonical release source whose inventory defines the shipped docs.
+
+    The immutable `vX.Y.Z` tag commit produced, and signed, the native archives
+    this verifier inspects. Its inventory therefore defines the expected public
+    documentation set; the dispatched tooling checkout must not. Release paths
+    always name it explicitly, and an unset, malformed or unresolvable identity
+    fails closed before any artifact is accepted.
+    """
+    commit = os.environ.get(SOURCE_COMMIT_ENVIRONMENT, "")
+    if not commit:
+        fail(f"{SOURCE_COMMIT_ENVIRONMENT} must name the canonical release source commit")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        fail(f"{SOURCE_COMMIT_ENVIRONMENT} must be a full lowercase commit SHA: {commit}")
+    return commit
+
+
+def documentation_inventory(source_commit: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "show", f"{source_commit}:{INVENTORY_PATH}"],
+            check=True,
+            capture_output=True,
+        )
+    except OSError as error:
+        fail(f"cannot read the canonical source documentation inventory: {error}")
+    except subprocess.CalledProcessError:
+        fail(f"canonical source commit has no readable {INVENTORY_PATH}: {source_commit}")
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        fail(f"canonical source documentation inventory is not UTF-8: {error}")
+
+
+def documentation_files(inventory_text: str) -> set[str]:
     result = set()
-    for line in inventory.read_text(encoding="utf-8").splitlines():
+    for line in inventory_text.splitlines():
         if not line or line.startswith("#"):
             continue
         match = re.fullmatch(r"(text|asset) ([A-Za-z0-9_./-]+)", line)
         if match is None:
-            raise ValueError(f"invalid documentation inventory entry: {line}")
+            fail(f"invalid documentation inventory entry: {line}")
         name = match.group(2)
         if any(part in {"", ".", ".."} for part in name.split("/")) or name in result:
-            raise ValueError(f"unsafe or repeated documentation inventory path: {name}")
+            fail(f"unsafe or repeated documentation inventory path: {name}")
         result.add(name)
+    if not result:
+        fail("canonical source documentation inventory is empty")
     return result
-
-
-DOCUMENTATION_FILES = documentation_files()
-DOCUMENTATION_EXTRAS = {
-    name for name in DOCUMENTATION_FILES
-    if not name.startswith(("docs/", "examples/", "sdk/"))
-}
-
 
 LIFECYCLE_KEYS = {
     "scripts",
@@ -453,6 +487,18 @@ def main(argv: Sequence[str]) -> int:
     return 0
 
 
+
+try:
+    DOCUMENTATION_FILES = frozenset(
+        documentation_files(documentation_inventory(configured_source_commit()))
+    )
+except VerificationError as error:
+    print(f"npm package verification failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+DOCUMENTATION_EXTRAS = frozenset(
+    name for name in DOCUMENTATION_FILES
+    if not name.startswith(("docs/", "examples/", "sdk/"))
+)
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))

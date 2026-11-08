@@ -90,7 +90,11 @@ test('an interactive host still mounts every requested surface', async t => {
   const start = await peer.request('hook/run', { hook: 'session_start', payload: bound, context: peer.context() }).response;
   assert.ok(start.result, JSON.stringify(start));
   assert.equal(peer.seen.some(issue), false, JSON.stringify(peer.seen.filter(issue)));
-  const placements = peer.seen.filter(frame => frame.method === 'ui/open').map(frame => frame.params.placement);
-  for (const placement of ['above_editor', 'footer', 'header']) assert.ok(placements.includes(placement), JSON.stringify(placements));
+  // Pi's void setters do not join the hook. Observe every mount at its actual
+  // asynchronous admission/first-frame boundary, not at the hook reply.
+  for (const placement of ['above_editor', 'footer', 'header']) {
+    const open = await peer.wait(frame => frame.method === 'ui/open' && frame.params.placement === placement);
+    await peer.wait(frame => frame.method === 'ui/frame' && frame.params.surface_id === open.params.surface_id);
+  }
   await peer.close();
 });

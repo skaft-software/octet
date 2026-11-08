@@ -9,8 +9,14 @@ This API `0.4` bundle pins octet `0.10.0`.
 
 ## Install and enable
 
-This bundle joins `extensions/release-catalog.txt`; its release asset is
-`octet-codemode-0.10.0.tar.gz`. With the matching octet host:
+This bundle joins `extensions/release-catalog.txt`. It runs as a native
+executable, so its release asset is published per platform as
+`octet-codemode-<version>-<target>.tar.gz` (for example
+`octet-codemode-0.10.3-aarch64-apple-darwin.tar.gz`) instead of the universal
+`<id>-<version>.tar.gz` name used by the other bundles. `octet extension
+install octet-codemode` selects the asset for the host it was built for; any
+other target fails closed and needs a reviewed local build. With the matching
+octet host:
 
 ```sh
 octet extension install octet-codemode
@@ -25,12 +31,14 @@ Only guest JavaScript is isolated. `--no-process`/`--no-shell` also prevent
 this executable extension from starting, regardless of `process = false` in
 `extension.toml`.
 
-The entrypoint is `bin/codemode`. It resolves, in order, an explicit
-`OCTET_CODEMODE_BINARY`, a prebuilt `bin/octet-codemode` shipped beside it, an
-in-tree `target/{release,debug}/octet-codemode`, an installed `octet-codemode`
-on `PATH`, and finally builds the crate once with `cargo --locked --release`
-into a private cache. Only that last step needs Rust, and it needs neither
-Node nor Python:
+The entrypoint is `bin/codemode`. In a published bundle that file **is** the
+prebuilt runner for the bundle's target. In an unpublished source checkout the
+tracked launcher resolves, in order, an explicit `OCTET_CODEMODE_BINARY`, a
+prebuilt `bin/octet-codemode` shipped beside it, an in-tree
+`target/{release,debug}/octet-codemode`, an installed `octet-codemode` on
+`PATH`, and finally builds the crate once with `cargo --locked --release` into
+a private cache. Only that last resolution step needs Rust, and it needs
+neither Node nor Python:
 
 ```sh
 cargo build --locked --release --manifest-path extensions/octet-codemode/Cargo.toml

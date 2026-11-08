@@ -526,6 +526,7 @@ pub(super) fn host_state_for_selection(
     ExtensionHostState {
         keybindings: None,
         theme: None,
+        tools_expanded: None,
         // This coding host supplies the usage query even when no current
         // measurement exists. Explicit null clears retained prior facts.
         context_usage: Some(

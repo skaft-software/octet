@@ -795,3 +795,120 @@ fn bulk_store_drop_cleans_files_and_fences_inflight_copy() {
     // Windows retains its stable lock file, never payload/transfer files.
     assert_eq!(file_count(&root), usize::from(cfg!(not(unix))));
 }
+
+#[test]
+fn host_staged_content_is_immutable_owner_scoped_and_digest_verified() {
+    let (_temp, mut store, parent) = fixture(BulkLimits::default());
+    let bytes = b"host authored payload for a large request";
+    let reference = store
+        .stage_host_blob(&parent, "text/plain", bytes)
+        .expect("host staging succeeds");
+    assert_eq!(reference.bytes, bytes.len() as u64);
+    assert_eq!(reference.digest, digest(bytes));
+    assert_eq!(reference.media_type, "text/plain");
+    assert!(!reference.id.is_empty());
+
+    // The blob is not readable until the parent's outputs are admitted, exactly
+    // like an extension-authored blob.
+    assert!(matches!(
+        store.prepare_read(&parent.owner, &reference),
+        Err(BulkError::Unavailable)
+    ));
+    store
+        .admit_parent(&parent, std::slice::from_ref(&reference))
+        .unwrap();
+    let job = store.prepare_read(&parent.owner, &reference).unwrap();
+    let lease = store.finish_read(job.run().unwrap()).unwrap();
+    let path = store.transfer_directory().join(&lease.locator);
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn host_staged_content_refuses_over_quota_and_unadmitted_scope() {
+    let limits = BulkLimits {
+        object_bytes: 8,
+        ..BulkLimits::default()
+    };
+    let (_temp, mut store, parent) = fixture(limits);
+    assert_eq!(
+        store.stage_host_blob(&parent, "text/plain", b"more than eight bytes"),
+        Err(BulkError::QuotaExceeded)
+    );
+    // Exactly the object bound is admitted; one byte more is refused.
+    assert!(store
+        .stage_host_blob(&parent, "text/plain", b"12345678")
+        .is_ok());
+    assert_eq!(
+        store.stage_host_blob(&parent, "text/plain", b"123456789"),
+        Err(BulkError::QuotaExceeded)
+    );
+    // A parent the host never admitted cannot stage content.
+    let stranger = BulkParent {
+        owner: BulkOwner {
+            session: "session-z".into(),
+            extension: "instance-z".into(),
+            generation: 1,
+        },
+        request_id: "call-z".into(),
+    };
+    assert_eq!(
+        store.stage_host_blob(&stranger, "text/plain", b"x"),
+        Err(BulkError::Unavailable)
+    );
+}
+
+#[test]
+fn host_staged_content_refuses_cross_owner_and_cross_generation_reads() {
+    let (_temp, mut store, parent) = fixture(BulkLimits::default());
+    let reference = store
+        .stage_host_blob(&parent, "application/octet-stream", b"scoped")
+        .unwrap();
+    store
+        .admit_parent(&parent, std::slice::from_ref(&reference))
+        .unwrap();
+
+    // The store's read filter is host-session scoped: a foreign session is
+    // refused, and retiring another session's generation cannot disturb this
+    // content. Extension instance and process generation are *not* part of this
+    // filter — they are enforced above the store, where the wire path builds the
+    // owner from the authenticated connection (`bulk_owner()` takes the
+    // connection generation). Recorded here so the boundary is explicit.
+    let foreign = BulkOwner {
+        session: "session-b".into(),
+        extension: parent.owner.extension.clone(),
+        generation: parent.owner.generation,
+    };
+    assert!(matches!(
+        store.prepare_read(&foreign, &reference),
+        Err(BulkError::Unavailable)
+    ));
+    store.retire_generation(&foreign);
+    assert!(store.prepare_read(&parent.owner, &reference).is_ok());
+}
+
+#[test]
+fn cancelled_and_retired_host_staging_leaves_no_readable_blob() {
+    let (_temp, mut store, parent) = fixture(BulkLimits::default());
+    // A staged ticket that is retired before commit cannot be committed.
+    let ticket = store.write(&parent, 4, "text/plain").unwrap();
+    store.retire_generation(&parent.owner);
+    assert!(matches!(
+        store.prepare_commit(&parent, &ticket.ticket, 4, &digest(b"data")),
+        Err(BulkError::Unavailable)
+    ));
+
+    // A committed blob disappears with its owner's retirement.
+    store.begin_parent(&parent);
+    let reference = store
+        .stage_host_blob(&parent, "text/plain", b"retained then retired")
+        .unwrap();
+    store
+        .admit_parent(&parent, std::slice::from_ref(&reference))
+        .unwrap();
+    assert!(store.prepare_read(&parent.owner, &reference).is_ok());
+    store.retire_owner(&parent.owner.session);
+    assert!(matches!(
+        store.prepare_read(&parent.owner, &reference),
+        Err(BulkError::Unavailable)
+    ));
+}

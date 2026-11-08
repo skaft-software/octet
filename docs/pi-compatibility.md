@@ -5,16 +5,21 @@ extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
 We're working toward full compatibility with existing Pi setups. The adapter
-follows **Pi 1.4's public extension API**, works with managed Pi installs from
-1.0.2 through 1.5.x, and needs Node 22.19+. Rust still owns the agent loop,
+follows the reviewed subset of **Pi 1.5.0's public extension API**, supports
+managed Pi 1.0.2 and 1.5.0, and needs Node 22.19+. Rust still owns the agent loop,
 sessions, permissions and terminal; the adapter loads extension code, not a
 second Pi agent. Ordinary octet use does not need Node.
 
-**Pi 1.5.0 is supported.** The adapter resolves version-specific Pi helpers from
-the installed Pi for the version it detects (1.0.2 and 1.5.0 are inventoried),
-and a symbol missing from the active inventory fails loudly naming the symbol and
-the version rather than becoming `undefined`. A version without an inventory is
-diagnosed and uses the nearest supported one; nothing silently downgrades Pi.
+**Pi 1.5.0 is supported.** Shipped capability manifests describe Pi 1.0.2 and
+1.5.0; the emulated surface defaults to 1.5.0. Managed-local helpers bind to the
+detected installed release, and a missing or refused symbol fails by name and
+version rather than becoming `undefined`. Runtime version admission is
+`>=1.0.2 <2.0.0` for stable `x.y.z` versions. A version without an exact manifest
+uses the nearest older manifest with an explicit unverified-classification
+diagnostic (1.4.x uses 1.0.2); admission is not qualification of that release.
+Nothing installs, switches or downgrades Pi silently. See the
+[1.5.0 helper changes](../extensions/octet-pi-compat/shims/pi-1.5.0/README.md)
+and the per-row [API limits](pi-extension-api.md).
 
 See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
 Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
@@ -67,7 +72,8 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 ## Bring your Pi extensions
 
 Requires Node **22.19.0 or newer** and an existing managed Pi installation,
-**1.0.2 through 1.5.x**. The entrypoints reject older Node versions before loading adapter
+**1.0.2 or newer in the 1.x series**, subject to the manifest qualifications above.
+The entrypoints reject older Node versions before loading adapter
 dependencies or factories. Bun's existing execution path remains available but
 is separately unqualified. From a source checkout, install dependencies once:
 
@@ -289,10 +295,19 @@ the next time octet starts.
 
 To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and
 redirect stderr, for example `OCTET_STARTUP_TRACE=1 octet 2>trace.txt`. Each
-handler prints one line, such as
-`octet-startup: pi-compat.handler elapsed=… event=session_start factory=pi-lens/dist/index.js took=99ms outcome=ok`
-(`outcome` is `ok`, `failed`, `detached`, `late-settled`, `late-failed`,
-`skipped-busy` or `skipped-budget`).
+handler prints `outcome=started` before it runs, then a completion line such as
+`octet-startup: pi-compat.handler elapsed=… event=session_start factory=pi-lens/dist/index.js took=99ms outcome=ok`.
+A started handler without a completion line identifies work still pending at
+capture time, including an unbudgeted `session_start`. Completion outcomes include
+`ok`, `failed`, `detached`, `preempted`, `late-settled`, `late-failed`,
+`skipped-busy` and `skipped-budget`.
+
+`resource discovery blocked: session_start hook failed (timeout; …)` reports a
+retained **startup** failure, not the five-second discovery deadline. The native
+startup request normally has a 30-second deadline. Discovery stays refused for
+that failed generation; it does not silently retry or admit partial paths. Use
+the trace to identify the pending factory or host operation, then explicitly
+reload the extension or restart after addressing the cause.
 
 Explicit provider models retain their full `cost.tiers` rates. The highest
 `inputTokensAbove` threshold strictly exceeded by input plus cache-read/write
@@ -384,7 +399,9 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Managed Pi 1.0.2 through 1.5.x is accepted.
+Managed stable Pi versions `>=1.0.2 <2.0.0` are admitted; 1.0.2 and 1.5.0 have
+exact manifests, while other versions diagnose the substituted manifest as
+unverified. This does not establish full installed-setup or package parity.
 
 This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:

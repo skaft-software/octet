@@ -676,7 +676,11 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
 }
 
 fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
-    catalog.resolve(&ModelId(id.to_owned())).is_ok()
+    // Lookup aliases are not registrations: discovery must retain the exact
+    // provider API name instead of borrowing another model's route policy.
+    catalog
+        .resolve(&ModelId(id.to_owned()))
+        .is_ok_and(|model| model.spec.id.0 == id)
 }
 
 /// Return all endpoint ids declared by a provider. Tests use this to ensure
@@ -1136,9 +1140,10 @@ mod tests {
                     None,
                 )
                 .unwrap();
-                let model = catalog
-                    .resolve(&ModelId(format!("{}/{id}", provider.id)))
-                    .unwrap();
+                let catalog_id = ModelId(format!("{}/{id}", provider.id));
+                let model = catalog.resolve(&catalog_id).unwrap();
+                assert_eq!(model.spec.id, catalog_id);
+                assert_eq!(model.spec.api_name, id);
                 assert_eq!(
                     model.spec.cache.supports_explicit_prompt_cache_mode,
                     provider.id == "openai"

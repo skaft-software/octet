@@ -690,6 +690,7 @@ impl ExecutableExtensions {
             state.has_pending_messages = previous.has_pending_messages;
             state.keybindings = previous.keybindings.clone();
             state.theme = previous.theme.clone();
+            state.tools_expanded = previous.tools_expanded;
             state.mode = previous.mode.clone();
         }
         self.session_id = state.session_id.clone();
@@ -784,16 +785,18 @@ impl ExecutableExtensions {
         mut frontend: Option<&mut (dyn PromptFrontend + 'f)>,
     ) -> Option<F::Output> {
         tokio::pin!(work);
-        // A synchronous editor call wakes the frontend at once; the tick only
-        // bounds how long anything else waits.
+        // Editor and ordinary extension events wake their existing consumer;
+        // the tick remains for housekeeping, not reverse-request latency.
         let wake = frontend.as_ref().and_then(|_| self.remote_ui_wake());
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let events = self.headless_event_ready();
             tokio::select! {
                 biased;
                 result = &mut work => return Some(result),
                 _ = super::remote_ui::notified(&wake) => {}
+                _ = events => {}
                 _ = tick.tick() => {}
             }
             match frontend.as_deref_mut() {
@@ -804,6 +807,7 @@ impl ExecutableExtensions {
                 }
                 None => notifications.extend(self.drain_events()),
             }
+            tokio::task::yield_now().await;
         }
     }
 
@@ -1119,8 +1123,14 @@ impl ExecutableExtensions {
         output.messages
     }
 
+    /// Settle the after-response hook boundary for a non-interactive frontend.
+    /// Those frontends never pump between run events, so a hook that reads host
+    /// state (e.g. a synchronous tools/snapshot) must be served by this wait
+    /// instead of its own deadline. Interactive frontends keep their own
+    /// begin/finish pump and never call this method.
     pub async fn after_response(&mut self, response: &str) -> Vec<String> {
-        let output = self.begin_after_response(response).await;
+        let work = self.begin_after_response(response);
+        let output = self.with_headless_events(work).await;
         let mut messages = self.finish_after_response(output);
         messages.extend(self.drain_events());
         messages

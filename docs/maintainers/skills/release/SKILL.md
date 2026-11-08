@@ -53,6 +53,12 @@ cd /tmp && /tmp/octet-release/bin/octet --version
 
 ## 4. Publish
 
+- Follow [complete assets before Latest](../../../release/complete-assets-before-latest.md).
+  Stage the next published canonical release with `--latest=false` before
+  attaching core assets. Do not promote based on the offline completeness
+  checker alone: authenticated source/signatures, complete qualification and
+  protected approvals are still required; automated promotion remains blocked.
+  Supplemental installer repair and npm evidence have separate protected gates.
 - Read the `.github/workflows/release-octet.yml` in full first. It triggers on
   `octet-binaries-v*` / `octet-installer-v*` tags (or `workflow_dispatch` with an
   existing canonical stable tag) and resolves the canonical tag, version, and

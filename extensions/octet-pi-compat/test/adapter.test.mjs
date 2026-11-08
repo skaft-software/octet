@@ -48,10 +48,16 @@ test('credential resolution cannot redirect a reviewed request to another model'
   assert.doesNotMatch(peer.stderr(), /fixture-secret/);
   await peer.close();
 });
-test('hasUI is false when remote_ui was not offered and custom fails explicitly', async t => {
+test('hasUI is false when remote_ui was not offered and headless custom resolves undefined', async t => {
   const peer = launch(t); await peer.init(['request_progress']);
   assert.match((await peer.call('normal').response).result.content[0].text, /\|false\|/);
-  assert.match((await peer.command('surface').response).error.message, /unsupported_feature remote_ui/);
+  // Pi's noOpUIContext.custom() resolves undefined without a frontend: the command
+  // returns Pi's value instead of mounting a surface nobody can see.
+  const surface = peer.command('surface');
+  const done = await peer.wait(f => f.method === 'notification' && f.params.message === 'done:undefined');
+  assert.equal(done.params.level, 'info');
+  assert.ok((await surface.response).result);
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/chrome'), false, 'headless surface');
 });
 test('custom settles its command after mount but keeps JS done result, timers, owner and input live', async t => {
   const peer = launch(t); await peer.init();
@@ -126,11 +132,15 @@ test('unsupported options/results and unnegotiated child calls never silently di
   const peer = launch(t); await peer.init(); await peer.start();
   for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
-test('headless chrome setters are inert; dialogs and theme catalogs still refuse', async t => {
+test('headless chrome setters are inert; custom/confirm return Pi no-op values while the theme catalog still refuses', async t => {
   const peer = launch(t); await peer.init([]); await peer.start();
   // Pi's print mode has a UI context whose presentation setters do nothing.
   assert.ok((await peer.call('chrome').response).result);
-  assert.match((await peer.call('dialog').response).error.message, /unsupported_feature remote_ui/);
+  // Pi's noOpUIContext.custom() resolves undefined and confirm() resolves false:
+  // a headless call returns those values instead of mounting or waiting.
+  assert.equal((await peer.call('dialog').response).result.content[0].text, `${root}|false|host-value`);
+  assert.equal((await peer.call('confirm').response).result.content[0].text, 'false');
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/chrome'), false, 'headless mount');
   assert.match((await peer.call('theme').response).error.message, /unsupported_feature ctx\.ui\.theme/);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {

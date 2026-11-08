@@ -76,6 +76,25 @@ pub(super) fn is_official_bundle(id: &str) -> bool {
     official_bundle_ids().any(|candidate| candidate == id)
 }
 
+fn official_bundle_asset(id: &str, version: &Version, target: &str) -> anyhow::Result<String> {
+    if id != "octet-codemode" {
+        return Ok(format!("{id}-{version}.tar.gz"));
+    }
+    if !matches!(
+        target,
+        "x86_64-unknown-linux-gnu"
+            | "x86_64-apple-darwin"
+            | "aarch64-apple-darwin"
+            | "x86_64-pc-windows-gnu"
+            | "x86_64-pc-windows-msvc"
+    ) {
+        anyhow::bail!(
+            "no official codemode executable for target {target}; use a reviewed local build"
+        );
+    }
+    Ok(format!("{id}-{version}-{target}.tar.gz"))
+}
+
 pub(super) async fn install_official(
     root: &Path,
     id: &str,
@@ -94,7 +113,7 @@ pub(super) async fn install_official(
     }
 
     let octet_version = Version::parse(env!("CARGO_PKG_VERSION"))?;
-    let asset = format!("{id}-{octet_version}.tar.gz");
+    let asset = official_bundle_asset(id, &octet_version, env!("OCTET_BUILD_TARGET"))?;
     let tag = format!("v{octet_version}");
     let release = format!("{RELEASE_REPOSITORY}/releases/download/{tag}");
     let checksums_url = format!("{release}/SHA256SUMS");
@@ -863,6 +882,30 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::fs::File;
+
+    #[test]
+    fn official_native_bundle_selects_exact_platform_without_universal_fallback() {
+        let version = Version::new(0, 10, 3);
+        for target in [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-gnu",
+            "x86_64-pc-windows-msvc",
+        ] {
+            assert_eq!(
+                official_bundle_asset("octet-codemode", &version, target).unwrap(),
+                format!("octet-codemode-0.10.3-{target}.tar.gz")
+            );
+        }
+        assert!(
+            official_bundle_asset("octet-codemode", &version, "aarch64-unknown-linux-gnu").is_err()
+        );
+        assert_eq!(
+            official_bundle_asset("octet-mcp", &version, "unsupported").unwrap(),
+            "octet-mcp-0.10.3.tar.gz"
+        );
+    }
 
     fn manifest(id: &str) -> String {
         format!(

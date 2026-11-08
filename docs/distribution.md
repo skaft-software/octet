@@ -41,7 +41,11 @@ alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
 runtime. The minimal canonical process example and independent Aider adapter
 keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter targets its documented public API;
-individual coverage is recorded in the [API ledger](pi-extension-api.md). Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
+individual coverage is recorded in the [API ledger](pi-extension-api.md). The
+emulated public surface is Pi 1.5.0, with exact shipped capability manifests for
+1.0.2 and 1.5.0; the private adapter npm version 0.1.0 remains independent.
+Stable runtime admission (`>=1.0.2 <2.0.0`) is not complete runtime or package
+qualification; see the [compatibility boundary](pi-compatibility.md).
 Installation/discovery are inert. Enabling the stock bridge automatically mirrors
 and runs enabled Pi factories with OS permissions; native credential disclosure
 requires separate reviewed opt-in, and native TOML appearance stays independent. Renaming
@@ -51,6 +55,13 @@ pins, independent example versions and mismatch fixtures keep their original
 scope.
 
 ## Channel selection
+
+For the next release, create the published canonical release with `--latest=false`
+before attaching core assets. See [complete assets before
+Latest](release/complete-assets-before-latest.md) for the staging guards and the
+still-blocked authenticated promotion gate. An offline completeness receipt is
+not signature verification or release clearance. Supplemental installer repair
+and npm evidence retain their separate protected publication gates.
 
 The release workflows don't publish every source package automatically:
 

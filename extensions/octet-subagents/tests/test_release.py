@@ -239,7 +239,7 @@ class ReleaseTests(unittest.TestCase):
             "shared cwd/filesystem is **not isolation**",
             "There is no dedicated writer profile in V1",
             "host-owned `agent_sessions` service",
-            "completion mailbox claim/ack",
+            "does not currently start a parent turn automatically",
             "presentation/update",
             "/subagents",
             "host binds API `0.4` command requests",

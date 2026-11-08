@@ -61,6 +61,15 @@ pub struct BlobRef {
     pub media_type: String,
 }
 
+/// SHA-256 identity for host-authored bytes.
+#[cfg_attr(not(test), allow(dead_code))]
+fn digest_of(bytes: &[u8]) -> BlobDigest {
+    BlobDigest {
+        algorithm: "sha256".into(),
+        value: format!("{:x}", Sha256::digest(bytes)),
+    }
+}
+
 /// Constructed only from authenticated host context, never extension wire data.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BulkOwner {
@@ -511,6 +520,44 @@ impl BulkStore {
             reference,
             capacity: record.capacity,
         })
+    }
+
+    /// Stage host-authored bytes under one trusted owner/parent scope.
+    ///
+    /// This is the host's counterpart to the extension `bulk/write` +
+    /// `bulk/commit` pair, and it reuses the same admission, quota, immutable
+    /// digest and cleanup lifecycle instead of opening a second path into the
+    /// store: `write` reserves the ticket and enforces the finite bounds,
+    /// `prepare_commit` validates the declared length and digest shape,
+    /// `CommitJob::run` copies and verifies the bytes, and `finish_commit`
+    /// publishes the immutable reference.
+    ///
+    /// The content comes from the host, never from an extension-selected path, so
+    /// no locator or filesystem input crosses a trust boundary here. The caller
+    /// supplies an authenticated [`BulkParent`]; an unadmitted parent is refused
+    /// exactly as it is for extension writes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn stage_host_blob(
+        &mut self,
+        parent: &BulkParent,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<BlobRef, BulkError> {
+        let capacity = u64::try_from(bytes.len()).map_err(|_| BulkError::QuotaExceeded)?;
+        let ticket = self.write(parent, capacity, media_type)?;
+        {
+            let record = self
+                .tickets
+                .get(&ticket.ticket)
+                .ok_or(BulkError::Unavailable)?;
+            let scratch = record.scratch.as_ref().ok_or(BulkError::Unavailable)?;
+            let mut file = scratch.open()?;
+            file.write_all(bytes)?;
+            file.flush()?;
+        }
+        let reference = self.prepare_commit(parent, &ticket.ticket, capacity, &digest_of(bytes))?;
+        let prepared = reference.run()?;
+        self.finish_commit(prepared)
     }
 
     pub(crate) fn finish_commit(&mut self, prepared: PreparedCommit) -> Result<BlobRef, BulkError> {

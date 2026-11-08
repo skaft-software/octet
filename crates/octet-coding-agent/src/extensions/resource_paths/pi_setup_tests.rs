@@ -285,6 +285,15 @@ export default function (pi) {{
         app.executable_extensions.processes.is_empty(),
         "the mirror attaches after the first frame"
     );
+    assert!(
+        app.executable_extensions.pending_agent_session_service(),
+        "the Pi child service must prepare V2 before deferred attach"
+    );
+    assert!(app.agent.delegation_team_directory().is_some());
+    assert!(
+        !app.subagents_available(),
+        "Pi alone does not supply native Ultra tools"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while app.executable_extensions.startup_pending() {
             app.pump_extension_startup().await.unwrap();
@@ -308,6 +317,11 @@ export default function (pi) {{
     );
     // getBranch answered from the native history as it stood at attach.
     assert!(starts[0]["branch"].is_array(), "{seen}");
+    assert!(app.executable_extensions.has_agent_session_service());
+    assert!(
+        !app.subagents_available(),
+        "a bound Pi service must not grant Ultra tools"
+    );
     app.executable_extensions.shutdown().await;
 }
 

@@ -70,6 +70,45 @@ pub(super) fn lower_child_reasoning(mut resolved: ResolvedAgentModel) -> Resolve
 }
 
 impl DelegationTemplate {
+    /// A fresh manager gets independent mutable settings, but the same approved
+    /// host capabilities. The original template predates root tool installation.
+    pub(super) fn snapshot(&self) -> Self {
+        Self {
+            model_resolver: RwLock::new(
+                self.model_resolver
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
+            client: self.client.clone(),
+            model: RwLock::new(self.model()),
+            base_system: RwLock::new(
+                self.base_system
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
+            sandbox: self.sandbox.clone(),
+            effect_broker: self.effect_broker.clone(),
+            extensions: self.extensions.clone(),
+            max_turns: self.max_turns,
+            reasoning: RwLock::new(
+                self.reasoning
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
+            reasoning_mode: self.reasoning_mode,
+            cache_retention: self.cache_retention,
+            runtime: RwLock::new(
+                self.runtime
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
+        }
+    }
+
     pub(crate) fn model(&self) -> octet_ai::Model {
         self.model.read().unwrap_or_else(|p| p.into_inner()).clone()
     }

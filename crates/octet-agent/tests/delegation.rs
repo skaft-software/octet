@@ -1449,6 +1449,69 @@ impl Respond for SurvivingWorkerScript {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_telemetry_observes_completion_after_root_run_without_starting_a_turn() {
+    let server = MockServer::start().await;
+    let state = Arc::new(ScriptState::default());
+    mount_script(
+        &server,
+        SurvivingWorkerScript {
+            state: state.clone(),
+        },
+    )
+    .await;
+    let mut harness = build_enabled_agent(&server, DelegationLimits::default());
+    let other = build_enabled_agent(&server, DelegationLimits::default());
+    let mut telemetry = harness.agent.delegation_telemetry().unwrap();
+    let mut other_telemetry = other.agent.delegation_telemetry().unwrap();
+    telemetry.changed().await.unwrap();
+    telemetry.borrow_and_update();
+    other_telemetry.changed().await.unwrap();
+    other_telemetry.borrow_and_update();
+
+    let first = harness.agent.complete("spawn survivor").await.unwrap();
+    assert_eq!(first.text, "first turn complete");
+    assert_eq!(
+        fleet_record(&harness, "agent-1")["status"]["state"],
+        "running"
+    );
+    let parent_entry_count = harness.agent.session().entries().len();
+    // Attaching after the turn must not invalidate the subscriber that was
+    // already present when the turn attached its own event stream.
+    let mut late = harness.agent.delegation_telemetry().unwrap();
+    for receiver in [&mut telemetry, &mut late] {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let snapshot = receiver.borrow_and_update().clone();
+                if snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .children
+                        .iter()
+                        .any(|child| child.child_id == "agent-1" && child.state == "completed")
+                }) {
+                    break;
+                }
+                receiver
+                    .changed()
+                    .await
+                    .expect("session telemetry stays open");
+            }
+        })
+        .await
+        .expect("worker completion was not published after the parent turn");
+    }
+
+    // Telemetry cannot itself consume the mailbox or invent a parent turn.
+    assert_eq!(harness.agent.session().entries().len(), parent_entry_count);
+    assert_eq!(state.counters.lock().unwrap().get("root"), Some(&2));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), other_telemetry.changed())
+            .await
+            .is_err(),
+        "another session's subscription must not receive this fleet"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_worker_survives_the_owning_turn_and_a_later_turn_waits_steers_and_stops_it() {
     let server = MockServer::start().await;
     let state = Arc::new(ScriptState::default());

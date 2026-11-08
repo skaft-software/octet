@@ -13,8 +13,8 @@ fn multiline_prompt_marks_only_the_first_row() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: None,
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     let rendered = render_block(
         None,
         &block,
@@ -54,8 +54,8 @@ fn prompt_card_keeps_exact_persisted_provenance_across_theme_changes() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     let first = render_block(
         None,
         &block,
@@ -120,8 +120,8 @@ fn persisted_prompt_paints_a_full_model_adaptive_card() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     let rendered = render_block(
         None,
         &block,
@@ -289,8 +289,8 @@ fn default_prompt_card_keeps_inline_markdown_attributes() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     let rendered = render_block(
         None,
         &block,
@@ -340,8 +340,8 @@ fn compiled_prompt_highlight_preserves_media_labels_unicode_copy_and_terminal_fa
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     assert_eq!(block_copy_text(&block), source);
     for background in [
         TerminalBackground::Unknown,
@@ -559,8 +559,8 @@ fn prompt_padding_adds_static_prompt_background_rows() {
         model_lab: None,
         prompt_color: None,
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
 
     let plan = compile_surface_plan(None, &prompt, &theme, 120);
 
@@ -726,8 +726,8 @@ fn event_margin_markers_cover_responses_tools_and_collapsed_reasoning() {
         model_lab: None,
         prompt_color: None,
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     assert_eq!(event_margin_marker(&prompt, &theme, true, false), None);
     let reasoning =
         TranscriptBlock::Reasoning(Box::new(AssistantBlock::streaming_reasoning("private")));

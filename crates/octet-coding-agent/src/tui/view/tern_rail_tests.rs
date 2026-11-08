@@ -370,8 +370,8 @@ fn export_native_renderer_fixtures() {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             });
+            injected: false,
+        });
         let mut reply = AssistantBlock::streaming("This is **compiled-renderer fixture content**, not a live answer.\n\n- Retained Markdown\n- Native layout\n\n$E=mc^2$");
         reply.finished = true;
         shell

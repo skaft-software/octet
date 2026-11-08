@@ -54,6 +54,7 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
   params.payload.request.tools = [];
   const failure = new Error('private context details'); let kept = 0;
+  const callbackFailures = [failure];
   const handlers = [{ factory: 0, handler() { throw failure; } }, { factory: 0, handler() { kept++; } }];
   runtime.events.set(event, handlers);
   assert.ok(await projectContext(runtime, params, store));
@@ -61,6 +62,7 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   assert.equal(kept, 1);
   for (const code of [-32601, -32602]) {
     const failure = Object.assign(new Error('callback failure'), { code });
+    callbackFailures.push(failure);
     handlers[0].handler = () => { throw failure; };
     assert.ok(await projectContext(runtime, params, store));
   }
@@ -77,7 +79,10 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   const cancelled = Object.assign(new Error('cancelled'), { code: -32800 });
   handlers[0].handler = () => { store.controller.abort(cancelled); throw failure; };
   await assert.rejects(projectContext(runtime, params, store), error => error === cancelled);
-  assert.equal(reports.length, 3); assert.equal(kept, 3);
+  // Cancellation still wins the hook result; the callback that failed after
+  // abort is reported separately, never applied or silently discarded.
+  assert.deepEqual(reports, [...callbackFailures, failure].map(error => [event, 0, error]));
+  assert.equal(kept, 3);
 });
 
 test('coded callback failures retain the last good projection and run remaining callbacks', async () => {

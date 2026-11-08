@@ -6,6 +6,9 @@ use crate::extension_bulk::{
 use crate::{BlobDigest, BlobRef};
 
 pub(super) const EXTENSION_FEATURE_BULK_OBJECTS_V1: &str = "bulk_objects_v1";
+/// Separate negotiation for host-provided hook payload references. A peer that
+/// only negotiated bulk objects keeps the tool-call-only admission below.
+pub(super) const EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1: &str = "bulk_hook_reference_v1";
 const LOCAL_FILE: &str = "local-file.v1";
 
 pub(super) fn bulk_owner(owner: &ExtensionResourceOwner) -> BulkOwner {
@@ -323,6 +326,21 @@ impl Drop for ChildGuard {
     }
 }
 
+/// Whether one live pending request may act as a bulk parent.
+///
+/// The tool-call policy check is unchanged: a request without an admitted policy
+/// digest is still refused. A hook parent is admitted only when the peer
+/// negotiated the hook-reference feature *and* the host marked that exact
+/// pending request as a hook parent. There is no unrestricted flag here.
+pub(super) fn bulk_parent_admitted(
+    active: bool,
+    has_tool_policy: bool,
+    hook_parent: Option<ExtensionHook>,
+    negotiated_hook_reference: bool,
+) -> bool {
+    active && (has_tool_policy || (negotiated_hook_reference && hook_parent.is_some()))
+}
+
 pub(super) fn dispatch_bulk_request(
     state: &ProtocolReadState,
     object: &serde_json::Map<String, serde_json::Value>,
@@ -330,14 +348,15 @@ pub(super) fn dispatch_bulk_request(
     params: serde_json::Value,
 ) -> Result<(), String> {
     let id = parse_child_request_id(object, method)?;
-    {
+    let negotiated_hook_reference = {
         let protocol = read_std_lock(&state.protocol);
         if protocol.version != EXTENSION_API_VERSION_0_4
             || !protocol.supports(EXTENSION_FEATURE_BULK_OBJECTS_V1)
         {
             return refuse(state, id, "unsupported_feature");
         }
-    }
+        protocol.supports(EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1)
+    };
     let operation: BulkOperation =
         match serde_json::from_value(serde_json::json!({"method":method,"params":params})) {
             Ok(operation) => operation,
@@ -349,8 +368,12 @@ pub(super) fn dispatch_bulk_request(
         let owner = pending
             .get(&parent_id)
             .filter(|p| {
-                p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
-                    && p.tool_call_policy_digest.is_some()
+                bulk_parent_admitted(
+                    p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE,
+                    p.tool_call_policy_digest.is_some(),
+                    p.bulk_hook_parent.clone(),
+                    negotiated_hook_reference,
+                )
             })
             .and_then(|p| p.resource_owner.as_ref())
             .filter(|o| {
@@ -535,4 +558,71 @@ pub(super) fn dispatch_bulk_request(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod bulk_parent_admission_tests {
+    use super::*;
+
+    #[test]
+    fn a_negotiated_live_hook_parent_is_admitted() {
+        assert!(bulk_parent_admitted(
+            true,
+            false,
+            Some(ExtensionHook::BeforePrompt),
+            true
+        ));
+    }
+
+    #[test]
+    fn an_unnegotiated_hook_parent_is_refused() {
+        // The host may have marked the request, but a peer that never negotiated
+        // the hook-reference feature keeps the tool-call-only admission.
+        assert!(!bulk_parent_admitted(
+            true,
+            false,
+            Some(ExtensionHook::BeforePrompt),
+            false
+        ));
+    }
+
+    #[test]
+    fn an_unrelated_pending_request_is_refused() {
+        // No tool policy and no hook parent: arbitrary pending calls stay refused.
+        assert!(!bulk_parent_admitted(true, false, None, true));
+        assert!(!bulk_parent_admitted(true, false, None, false));
+    }
+
+    #[test]
+    fn retired_or_cancelled_parents_are_refused() {
+        for active in [false] {
+            assert!(!bulk_parent_admitted(active, true, None, true));
+            assert!(!bulk_parent_admitted(
+                active,
+                false,
+                Some(ExtensionHook::BeforePrompt),
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn the_existing_tool_policy_admission_is_unchanged() {
+        // A tool call with an admitted policy digest is admitted whether or not
+        // the hook-reference feature was negotiated.
+        assert!(bulk_parent_admitted(true, true, None, false));
+        assert!(bulk_parent_admitted(true, true, None, true));
+    }
+
+    #[test]
+    fn the_hook_reference_feature_is_a_separate_negotiated_name() {
+        assert_eq!(
+            EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1,
+            "bulk_hook_reference_v1"
+        );
+        assert_ne!(
+            EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1,
+            EXTENSION_FEATURE_BULK_OBJECTS_V1
+        );
+    }
 }

@@ -917,3 +917,50 @@ hooks = ["session_start", "session_end"]
     );
     assert_eq!(hooks[1]["payload"]["outcome"], "interrupted");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_worker_parking_keeps_the_foreground_terminal_grant() {
+    use crate::extensions::reload_lifecycle_test_support::{acquire_terminal, fixture};
+
+    let (directory, mut app) = crate::compaction::tests::app_for_estimate();
+    let (extensions, process, _wire) = fixture(directory.path(), None).await;
+    app.executable_extensions = extensions;
+    let mut shell = InteractiveShell::test_shell();
+    acquire_terminal(&mut app.executable_extensions, &mut shell, &process);
+    let parking = shell.terminal_input_parking();
+
+    // A cancelled park reattaches the parked workers and keeps the current
+    // foreground session, so the extension must keep the terminal it holds.
+    let cancelled = octet_agent::CancellationToken::default();
+    cancelled.cancel();
+    let mut input =
+        EventStream::from_stream(futures_util::stream::pending()).with_cede_flag(parking.clone());
+    let error = park_workers_and_release_terminal_for_extension_session(
+        &mut app, &mut shell, &mut input, &cancelled,
+    )
+    .await
+    .expect_err("a cancelled park must not replace the session");
+    assert!(
+        error
+            .to_string()
+            .contains("interrupted or delegated workers did not park"),
+        "{error}"
+    );
+    assert!(app.executable_extensions.terminal_grant_is_active());
+
+    // The replacement that does proceed releases the grant immediately before
+    // the swap, so the next session owns the terminal.
+    let mut input =
+        EventStream::from_stream(futures_util::stream::pending()).with_cede_flag(parking);
+    park_workers_and_release_terminal_for_extension_session(
+        &mut app,
+        &mut shell,
+        &mut input,
+        &octet_agent::CancellationToken::default(),
+    )
+    .await
+    .unwrap();
+    assert!(!app.executable_extensions.terminal_grant_is_active());
+    app.executable_extensions.shutdown().await;
+}

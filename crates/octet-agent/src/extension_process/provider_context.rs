@@ -260,10 +260,32 @@ pub(super) enum PipelineHeaderValue {
     Many(Vec<String>),
 }
 
-fn pipeline_refused(reason: &'static str) -> AiError {
+/// Secret-free classification of a provider pipeline `hook/run` failure.
+///
+/// [`ExtensionRuntimeError`] can carry remote exception text, payload or header
+/// material, so only the class (and, for a remote refusal, its numeric RPC code)
+/// reaches the provider error. A single opaque message previously hid whether the
+/// transport closed, the callback refused the attempt, the request timed out,
+/// the run was cancelled, or the reply was invalid — which made one chronic
+/// user-visible failure unattributable.
+fn provider_hook_refusal(error: &ExtensionRuntimeError, extension: &str) -> String {
+    let class = match error {
+        ExtensionRuntimeError::Closed(_) => "provider hook transport closed".to_owned(),
+        ExtensionRuntimeError::Remote { code, .. } => {
+            format!("provider hook callback refused (rpc {code})")
+        }
+        ExtensionRuntimeError::Timeout { .. } => "provider hook timed out".to_owned(),
+        ExtensionRuntimeError::Cancelled { .. } => "provider hook cancelled".to_owned(),
+        ExtensionRuntimeError::Protocol(_) => "provider hook reply invalid".to_owned(),
+        _ => "provider hook request failed".to_owned(),
+    };
+    format!("{class} in `{extension}`")
+}
+
+fn pipeline_refused(reason: impl Into<String>) -> AiError {
     // Never surface a remote exception, payload/header contents or validation
     // value through normal provider errors, traces, session records or UI.
-    octet_ai::ConfigError::Parse(reason.to_owned()).into()
+    octet_ai::ConfigError::Parse(reason.into()).into()
 }
 
 pub(super) fn pipeline_header_projection(
@@ -379,7 +401,67 @@ impl crate::extension_provider::ProviderRequestHookFactory for ExtensionProcess 
     }
 }
 
+/// Serialized length of the real JSON-RPC frame a provider hook request emits.
+///
+/// The same envelope shape the transport builds (`jsonrpc`, `id`, `method`,
+/// `params`), the real hook name, context and identities, and a maximal request
+/// id so the measurement can never be smaller than the frame actually sent.
+fn provider_frame_length(request: &HookRequest) -> Result<usize, AiError> {
+    let params = serde_json::to_value(request)
+        .map_err(|_| pipeline_refused("provider request body is not encodable as JSON"))?;
+    frame_length_for_params(&params)
+}
+
+/// Serialized length of one JSON-RPC frame carrying `params`.
+fn frame_length_for_params(params: &serde_json::Value) -> Result<usize, AiError> {
+    let envelope = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": u64::MAX,
+        "method": methods::HOOK_RUN,
+        "params": params,
+    });
+    serde_json::to_vec(&envelope)
+        .map(|encoded| encoded.len())
+        .map_err(|_| pipeline_refused("provider request body is not encodable as JSON"))
+}
+
 impl ProcessProviderRequestHook {
+    /// Bytes of the real JSON-RPC frame minus the encoded provider body.
+    ///
+    /// This uses the transport's own envelope shape and the request's actual
+    /// hook name, context owner, model identity and payload, so the admitted body
+    /// budget follows what `request_typed_on_connection` will really send. The
+    /// transport still re-checks authoritatively; this is the pre-flight check.
+    fn provider_phase_overhead(&self, request: &HookRequest) -> Result<usize, AiError> {
+        let frame = self.provider_frame_len(request)?;
+        let body = serde_json::to_vec(
+            request
+                .payload
+                .get("payload")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .map_err(|_| pipeline_refused("provider request body is not encodable as JSON"))?;
+        Ok(frame.saturating_sub(body.len()))
+    }
+
+    /// Serialized length of the real JSON-RPC request frame.
+    fn provider_frame_len(&self, request: &HookRequest) -> Result<usize, AiError> {
+        provider_frame_length(request)
+    }
+
+    /// Refuse precisely when the real request frame cannot be transported.
+    fn require_provider_frame(&self, request: &HookRequest) -> Result<(), AiError> {
+        let limit = self.connection.frame_limit.max_message_bytes();
+        let frame = self.provider_frame_len(request)?;
+        if frame > limit {
+            return Err(pipeline_refused(format!(
+                "provider request frame of {frame} bytes exceeds the {limit}-byte extension frame in `{}`; a declared before_provider_request phase cannot be transported",
+                self.process.inner.descriptor.manifest.name,
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_binding(&self) -> Result<(), AiError> {
         if !connection_is_usable(&self.connection)
             || self.connection.draining.load(Ordering::Acquire)
@@ -402,6 +484,24 @@ impl ProcessProviderRequestHook {
         if !self.process.inner.contributions.hooks.contains(&hook) {
             return Ok(None);
         }
+        let mut request = HookRequest {
+            hook,
+            payload,
+            context: self.context.clone(),
+        };
+        if hook == ExtensionHook::BeforeProviderRequest {
+            // Measure the exact wire request first: real hook name, real context,
+            // real identities and the real JSON-RPC envelope the transport builds.
+            let overhead = self.provider_phase_overhead(&request)?;
+            let limit = self.connection.frame_limit.max_message_bytes();
+            let budget = limit.saturating_sub(overhead);
+            if let Some(fields) = request.payload.as_object_mut() {
+                fields.insert("payload_limit_bytes".into(), budget.into());
+            }
+            // Re-measure with the budget field present; the body was already at
+            // the edge if this no longer fits.
+            self.require_provider_frame(&request)?;
+        }
         // Pin the exact connection; run_hook intentionally follows current
         // generations for other callers and is not the right boundary here.
         let result: ProviderPipelineReply = self
@@ -409,15 +509,16 @@ impl ProcessProviderRequestHook {
             .request_typed_on_connection(
                 self.connection.clone(),
                 methods::HOOK_RUN,
-                &HookRequest {
-                    hook,
-                    payload,
-                    context: self.context.clone(),
-                },
+                &request,
                 self.context.resource_owner.clone(),
             )
             .await
-            .map_err(|_| pipeline_refused("provider pipeline hook failed"))?;
+            .map_err(|error| {
+                pipeline_refused(provider_hook_refusal(
+                    &error,
+                    &self.process.inner.descriptor.manifest.name,
+                ))
+            })?;
         self.validate_binding()?;
         if result.disposition != ExtensionHookDisposition::Continue {
             return Err(pipeline_refused(
@@ -435,9 +536,23 @@ impl octet_ai::ProviderRequestHook for ProcessProviderRequestHook {
         context: &octet_ai::ProviderRequestContext,
         payload: serde_json::Value,
     ) -> Result<Option<serde_json::Value>, AiError> {
-        let Some(result) = self.dispatch(ExtensionHook::BeforeProviderRequest,
-            serde_json::json!({"operation_id":context.operation_id, "model":context.model, "payload":payload}),
-        ).await? else { return Ok(None) };
+        // The generation fence runs first and always: an oversized body must never
+        // turn a retired process into a request that proceeds without authority.
+        // Dispatch then measures the real frame and refuses rather than skipping.
+        self.validate_binding()?;
+        let Some(result) = self
+            .dispatch(
+                ExtensionHook::BeforeProviderRequest,
+                serde_json::json!({
+                    "operation_id": context.operation_id,
+                    "model": context.model,
+                    "payload": payload,
+                }),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
         if result.provider_headers.is_some() {
             return Err(pipeline_refused(
                 "provider payload hook returned a header transformation",
@@ -519,3 +634,58 @@ mod tests;
 
 #[cfg(test)]
 mod large_history_tests;
+
+#[cfg(test)]
+mod payload_frame_tests {
+    use super::*;
+
+    fn params(
+        operation_id: &str,
+        model: serde_json::Value,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "hook": "before_provider_request",
+            "context": {"workspace": "/workspace", "host": {"session_id": "s".repeat(64)}},
+            "payload": {"operation_id": operation_id, "model": model, "payload": body},
+        })
+    }
+
+    #[test]
+    fn the_frame_measurement_is_the_real_wire_request() {
+        let model = serde_json::json!({"id": "deepseek/deepseek-flash", "provider": "deepseek", "api": "openai-chat"});
+        let body = serde_json::json!({"input": ["x".repeat(1024)]});
+        let small =
+            frame_length_for_params(&params("attempt", model.clone(), body.clone())).unwrap();
+        // Hook name, context and identities are inside the measured frame.
+        assert!(small > 1024 + 200, "{small}");
+        let one_mib = ProtocolFrameLimit::new(1024 * 1024, false);
+        assert!(one_mib.accepts_message_bytes(small));
+        assert!(!one_mib.accepts_message_bytes(1024 * 1024 + 1));
+
+        // Longer identities and operation id grow the frame; an empty-identity
+        // measurement would have missed this.
+        let long = frame_length_for_params(&params(
+            &"o".repeat(200),
+            serde_json::json!({"id": "p/".to_string() + &"m".repeat(300), "provider": "p".repeat(64), "api": "openai-chat"}),
+            body.clone(),
+        ))
+        .unwrap();
+        assert!(long > small + 400, "{long} vs {small}");
+
+        // Escaping is counted.
+        let escaped = frame_length_for_params(&params(
+            "attempt",
+            model.clone(),
+            serde_json::json!({"input": ["\"".repeat(64 * 1024)]}),
+        ))
+        .unwrap();
+        let plain = frame_length_for_params(&params(
+            "attempt",
+            model,
+            serde_json::json!({"input": ["x".repeat(64 * 1024)]}),
+        ))
+        .unwrap();
+        assert!(escaped > plain, "{escaped} vs {plain}");
+    }
+}

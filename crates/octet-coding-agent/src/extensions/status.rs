@@ -411,9 +411,30 @@ impl ExecutableExtensions {
         target: String,
         expected_owner: &str,
     ) -> anyhow::Result<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> {
+        self.subagent_control(vec!["stop".into(), target], expected_owner)
+    }
+
+    /// Send an operator instruction without borrowing the active root run.
+    /// This has the same owner and first-party fences as stopping a worker;
+    /// the extension and host decide whether to steer or resume the target.
+    pub(crate) fn subagent_continue_control(
+        &self,
+        target: String,
+        message: String,
+        expected_owner: &str,
+    ) -> anyhow::Result<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> {
+        anyhow::ensure!(!message.trim().is_empty(), "subagent message is empty");
+        self.subagent_control(vec!["continue".into(), target, message], expected_owner)
+    }
+
+    fn subagent_control(
+        &self,
+        arguments: Vec<String>,
+        expected_owner: &str,
+    ) -> anyhow::Result<Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>> {
         anyhow::ensure!(
             !expected_owner.is_empty() && self.resource_owner.as_deref() == Some(expected_owner),
-            "subagent stop requires the active session owner"
+            "subagent control requires the active session owner"
         );
         anyhow::ensure!(
             self.command_owner("subagents").as_deref() == Some(SUBAGENTS_EXTENSION_NAME),
@@ -441,7 +462,7 @@ impl ExecutableExtensions {
             let output = execute_headless_command(
                 &process,
                 "subagents",
-                vec!["stop".into(), target],
+                arguments,
                 context,
                 0,
                 &mut diagnostics,
@@ -449,10 +470,20 @@ impl ExecutableExtensions {
             .await?;
             anyhow::ensure!(
                 output.context.is_empty(),
-                "subagent stop attempted context injection"
+                "subagent control attempted context injection"
             );
             anyhow::ensure!(!output.text.contains("failed closed"), "{}", output.text);
-            Ok(output.text)
+            let mut blocks = Vec::new();
+            if !output.text.trim().is_empty() {
+                blocks.push(output.text);
+            }
+            blocks.extend(
+                output
+                    .notifications
+                    .iter()
+                    .map(|notification| format_notification("subagents", notification)),
+            );
+            Ok(blocks.join("\n"))
         }))
     }
 
@@ -479,7 +510,12 @@ while IFS= read -r request; do
     *'"method":"command/execute"'*)
       printf '%s\n' "$request" >> "$OCTET_WORKSPACE/subagent-stop-fixture.jsonl"
       id=$(printf '%s' "$request" | request_id)
-      case "$request" in *'"stop"'*) sleep {} ;; esac
+      case "$request" in
+        *'"stop"'*) sleep {} ;;
+        *'"continue"'*)
+          printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"Message not sent.","notifications":[{{"level":"warning","message":"Worker is awaiting approval."}}],"context":[]}}}}\n' "$id"
+          continue ;;
+      esac
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"interrupt requested; state stopping (not settled)","notifications":[],"context":[]}}}}\n' "$id"
       ;;
     *'"method":"shutdown"'*)
@@ -539,7 +575,15 @@ commands = ["subagents"]
         let mut nodes = Vec::new();
         let mut actions = Vec::new();
         for (node_id, label, stop) in workers {
-            let mut action_ids = Vec::new();
+            let inspect_id = format!("inspect:{node_id}");
+            let mut action_ids = vec![inspect_id.clone()];
+            actions.push(octet_agent::ExtensionPresentationAction {
+                id: inspect_id,
+                label: format!("Inspect {label}"),
+                command: "subagents".into(),
+                arguments: vec!["inspect".into(), (*label).to_owned()],
+                destructive: false,
+            });
             if let Some(target) = stop {
                 let id = format!("stop:{node_id}");
                 actions.push(octet_agent::ExtensionPresentationAction {
@@ -572,7 +616,7 @@ commands = ["subagents"]
                 extension: name,
                 generation: process.health_snapshot().generation,
                 extension_instance_id: process.extension_instance_id().to_owned(),
-                resource_owner: None,
+                resource_owner: self.resource_owner.clone(),
                 snapshot: ExtensionPresentationSnapshot {
                     revision: 1,
                     status: None,

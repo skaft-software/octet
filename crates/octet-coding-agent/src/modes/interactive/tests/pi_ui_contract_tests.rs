@@ -21,6 +21,107 @@ async fn live_ui_app(factory: &str) -> (tempfile::TempDir, App, InteractiveShell
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_cosmetic_mount_waits_for_success_and_preserves_editor_seed() {
+    let (directory, mut app, mut shell) = live_ui_app(
+        r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  pi.registerCommand('failed', {handler: (_, ctx) => {
+    ctx.ui.setFooter(() => { appendFileSync(TRACE, 'failed-factory\n'); return {render: () => ['FAILED'], invalidate() {}}; });
+    throw new Error('origin failed');
+  }});
+  pi.registerCommand('mount', {handler: (_, ctx) => {
+    ctx.ui.setEditorText('seed-before-admission');
+    ctx.ui.setEditorComponent((tui, theme, keys) => new CustomEditor(tui, theme, keys));
+    ctx.ui.setFooter(() => ({render: () => ['SUCCESSFUL-ORIGIN-FOOTER'], invalidate() {}}));
+  }});
+};
+"#,
+    )
+    .await;
+    assert!(command(&mut app, &mut shell, "failed").await.is_err());
+    command(&mut app, &mut shell, "mount").await.unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("SUCCESSFUL-ORIGIN-FOOTER") && frame.contains("seed-before-admission")
+    })
+    .await;
+    assert_eq!(
+        shell.extension_editor_snapshot().text,
+        "seed-before-admission"
+    );
+    assert!(!directory.path().join("trace.jsonl").exists());
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_pending_cosmetic_obeys_hook_success_failure_and_cancellation() {
+    use octet_agent::extension_process::ExtensionHook;
+    let (directory, mut app, mut shell) = live_ui_app(
+        r#"
+import { appendFileSync } from 'node:fs';
+export default pi => pi.on('tool_call', async (event, ctx) => {
+  ctx.ui.setFooter(() => {
+    appendFileSync(TRACE, event.toolName + '\n');
+    return {render: () => ['LATE-' + event.toolName], invalidate() {}};
+  });
+  await ctx.ui.custom((_tui, _theme, _keys, done) => ({
+    render: () => ['PENDING-QUESTION'], invalidate() {}, handleInput() { done(); }
+  }));
+  if (event.toolName === 'failed') throw new Error('origin failed');
+});
+"#,
+    )
+    .await;
+    let process = app
+        .executable_extensions
+        .test_process("octet-pi-compat")
+        .unwrap();
+    for outcome in ["failed", "cancelled", "success"] {
+        let process = process.clone();
+        let context =
+            process.current_context_for_resource_owner(app.agent.session().resource_owner_key());
+        let task = tokio::spawn(async move {
+            process
+                .run_hook(
+                    ExtensionHook::BeforeToolCall,
+                    serde_json::json!({"name": outcome, "arguments": {}, "tool_call_id": outcome}),
+                    context,
+                )
+                .await
+        });
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("PENDING-QUESTION")
+        })
+        .await;
+        assert!(
+            !task.is_finished(),
+            "fullscreen question must keep its hook joined"
+        );
+        assert!(!directory.path().join("trace.jsonl").exists());
+        if outcome == "cancelled" {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            component_key(&mut app, &mut shell, KeyCode::Enter);
+            pump_until(&mut app, &mut shell, |_| task.is_finished()).await;
+            let result = task.await.unwrap();
+            assert_eq!(result.is_ok(), outcome == "success");
+        }
+        pump_until(&mut app, &mut shell, |frame| {
+            !frame.contains("PENDING-QUESTION")
+                && (outcome != "success" || frame.contains("LATE-success"))
+        })
+        .await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("trace.jsonl")).unwrap(),
+        "success\n"
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_desktop_notification_requires_foreground_terminal_admission() {
     let (directory, mut app, mut shell) = live_ui_app(
         r#"
@@ -427,6 +528,14 @@ export default function(pi) {
         r#"{"expanded":true}"#
     );
     shell.set_verbose_tools(false);
+    command(&mut app, &mut shell, "read").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("trace.jsonl"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [r#"{"expanded":true}"#, r#"{"expanded":false}"#]
+    );
     command(&mut app, &mut shell, "reset").await.unwrap();
     let reset = rendered(&mut shell).await;
     assert!(

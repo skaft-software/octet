@@ -75,7 +75,9 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   unsupported is refused loudly.
 - **Installed-Pi fallback (opt-in, experimental).** Same adapter and host
   boundary, but imports the shims lack or refuse resolve to the user's managed
-  Pi install (1.0.2 through 1.4.x). Selected with `--pi-runtime installed` or
+  Pi install. Pi 1.0.2 and 1.5.0 have reviewed manifests; other stable versions in
+  `>=1.0.2 <2.0.0` use a diagnosed, unverified nearest-older manifest. Selected with
+  `--pi-runtime installed` or
   `"pi_runtime": "installed"` in `bridge.json`. See
   [pi-compatibility.md](pi-compatibility.md#installed-pi-fallback-experimental-opt-in)
   for what it gives up. Path A failures it can fix report
@@ -107,7 +109,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_session_replacement_tests` | 8 | replacement, busy-turn deferral, setup/parentSession, withSession and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
-| `pi_ui_contract_tests` | 14 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
+| `pi_ui_contract_tests` | 16 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane, editor calls during prompt hooks and reply-gated cosmetics with seed preservation, failure and cancellation |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
 | `resource_paths::pi_app_tests` | 8 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
@@ -158,6 +160,10 @@ host features only fail once used), the same 4 need the fallback, the same 4
 need their own `npm install`, and `custom-provider-gitlab-duo` and `jev-router`
 are refused at load. `configure.mjs --reviewed --from-pi --mirror` imports a Pi
 1.4.0 setup with `custom-footer`, `rainbow-editor` and `with-deps`.
+
+These example-load records remain pinned to Pi 1.0.2/1.4.0; they are not a
+Pi 1.5.0 example-corpus run. Current Pi 1.5.0 manifest/helper support does not
+retroactively extend their evidence.
 
 Loading and registering is not behavioral qualification. The native suites above
 are the behavioral evidence.

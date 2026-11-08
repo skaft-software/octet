@@ -712,11 +712,17 @@ pub(super) fn dispatch_resource_request(
             .ok_or_else(|| resource_error("resource_unavailable"))?;
         // Pending + registry is the common lock order with caller cancellation.
         let pending = lock_std_mutex(&state.pending);
+        let negotiated_hook_reference = read_std_lock(&state.protocol)
+            .supports(crate::extension_process::bulk::EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1);
         let parent = pending
             .get(&parent_id)
             .filter(|p| {
-                p.tool_call_policy_digest.is_some()
-                    && p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                crate::extension_process::bulk::bulk_parent_admitted(
+                    p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE,
+                    p.tool_call_policy_digest.is_some(),
+                    p.bulk_hook_parent.clone(),
+                    negotiated_hook_reference,
+                )
             })
             .ok_or_else(|| resource_error("resource_unavailable"))?;
         let owner = parent

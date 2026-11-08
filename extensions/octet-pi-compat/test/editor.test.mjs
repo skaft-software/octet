@@ -98,18 +98,30 @@ for (const replace of [false, true]) for (const reject of [false, true]) test(`$
     await peer.wait(f => frame('seedul')(f) && f.params.surface_id === next.params.surface_id);
   }
   const response = await restore.response;
-  if (reject) assert.match(response.error?.message, /checkpoint refused/);
+  if (reject) {
+    // A void setter cannot fail the command, so the refusal has to stay visible
+    // on its own terms: one bounded diagnostic, no silently mounted replacement
+    // editor and no frame that pretends the refused draft was accepted.
+    assert.ok(response.result, JSON.stringify(response));
+    await peer.wait(f => f.method === 'notification' && /checkpoint refused/.test(f.params.message));
+    assert.equal(peer.seen.filter(f => f.method === 'ui/open').length, 1, 'a refused retire never mounts a replacement editor');
+    assert.equal(peer.seen.some(frame('seedu')), false, 'a refused checkpoint cannot paint its unaccepted draft');
+  }
   else assert.ok(response.result, JSON.stringify(response));
   await peer.close();
 });
 
-test('old hosts without editor_mount_id refuse explicitly and close the unusable mount', async t => {
+test('old hosts without editor_mount_id refuse the mount, close it and diagnose it', async t => {
   const peer = launch(t, [await fixture(t)], { editorFence: false });
   await peer.init();
-  const response = await peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
-  assert.match(response.error?.message, /unsupported_feature editor checkpoint.*editor_mount_id/);
+  const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
+  // Pi's setEditorComponent is void, so a refused mount cannot fail the hook;
+  // it must still refuse, restore the host and name the missing contract, and it
+  // must never construct or paint the unusable component.
+  assert.ok((await start.response).result);
   await peer.wait(f => f.method === 'ui/close');
-  assert.equal(peer.seen.some(f => f.method === 'ui/frame'), false);
+  await peer.wait(f => f.method === 'notification' && /unsupported_feature editor checkpoint.*editor_mount_id/.test(f.params.message));
+  assert.equal(peer.seen.some(f => f.method === 'ui/frame' || f.method === 'composer/get'), false);
   await peer.close();
 });
 
@@ -227,15 +239,18 @@ test('a failing input handler cannot checkpoint or display its intermediate onCh
   await peer.close();
 });
 
-test('normalized seed is checkpointed before the first frame or successful mount response', async t => {
+test('normalized seed is checkpointed before the first frame', async t => {
   const peer = launch(t, [await fixture(t)], { composer: '\tseed', hold: ['composer/set'] });
   await peer.init();
   const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
   const open = await peer.wait(f => f.method === 'ui/open');
   const write = await peer.wait(f => f.method === 'composer/set');
   checkpoint(write, open.params.surface_id, 0, 1); assert.equal(write.params.text, '    seed');
-  assert.equal(peer.seen.some(f => f.method === 'ui/frame' || f.id === start.id && !f.method), false);
-  ack(peer, write); assert.ok((await start.response).result); await peer.wait(frame('    seed'));
+  // The first frame still needs the matching normalized-seed checkpoint...
+  assert.equal(peer.seen.some(f => f.method === 'ui/frame'), false);
+  ack(peer, write); await peer.wait(frame('    seed'));
+  // ...while the void setter never gates an already-answered hook.
+  assert.ok((await start.response).result);
   await peer.close();
 });
 

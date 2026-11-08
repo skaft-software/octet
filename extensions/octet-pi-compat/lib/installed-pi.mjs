@@ -45,7 +45,7 @@ const REAL_EXPORT = Object.fromEntries(Object.entries(PACKAGES).map(([key]) => {
 const words = text => text.trim().split(/\s+/);
 
 // Real-only names (absent from the shims) refused in path B, with the seam each
-// one would open. Keep in sync with NOTES/docs; classified for Pi 1.0.2-1.4.0.
+// one would open. Keep in sync with the per-release manifests and docs.
 const DENIED = {
   'agent-core': [['Agent agentLoop agentLoopContinue runAgentLoop runAgentLoopContinue runToolCall setDefaultStreamFn streamProxy', 'agent loops and proxy inference remain host-owned']],
   'coding-agent': [

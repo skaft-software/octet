@@ -173,9 +173,8 @@ async fn fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, PathBuf) {
     .await
 }
 
-/// A fixture that may also be dispatched before-prompt (Pi `input`) hooks, with
-/// a host-visible deadline longer than the interactive input deadline so the
-/// host's own input deadline is the one that expires.
+/// A fixture that also accepts before-prompt (Pi `input`) hooks. These wait
+/// until completion or explicit cancellation, not an input-handler deadline.
 async fn input_hook_fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, PathBuf) {
     fixture_with(
         temp,
@@ -795,51 +794,67 @@ async fn remote_ui_footer_survives_command_then_resize_and_session_fencing() {
 }
 
 /// A Pi `input` (`before_prompt`) hook shares the extension's session-scoped
-/// resource owner with every other request it serves. When the host's input
-/// deadline expires, only the surfaces that request created may be retired: Pi
-/// keeps a mounted custom editor or footer mounted across a slow, abandoned
-/// hook, and an extension never has to re-mount after one.
+/// resource owner with every other request it serves. When the user cancels a
+/// pending input hook, only surfaces that request created may be retired. An
+/// existing editor must remain mounted across the abandoned sibling hook.
 #[tokio::test]
-async fn mounted_editor_survives_an_expired_input_hook() {
+async fn mounted_editor_survives_a_host_cancelled_input_hook() {
     let temp = tempfile::tempdir().unwrap();
-    let (mut extensions, _) = input_hook_fixture(&temp).await;
+    let (mut extensions, log) = input_hook_fixture(&temp).await;
     let mut frontend = Frontend::new([]);
     command(&mut extensions, &mut frontend, &["editor"]).await;
     let process = extensions.processes[0].clone();
     let owner = extensions.remote_ui.mounts[0].owner.clone();
     let surface_id = extensions.remote_ui.mounts[0].surface_id.clone();
 
-    // The hook stalls past the host's input deadline, exactly as a busy
-    // extension process does in an interactive session.
+    struct CancelAfterDispatch<'a> {
+        frontend: &'a mut Frontend,
+        log: &'a PathBuf,
+    }
+    impl crate::extensions::turns::PromptFrontend for CancelAfterDispatch<'_> {
+        fn serve(&mut self, extensions: &mut ExecutableExtensions) -> bool {
+            extensions.drain_events_for_shell(&mut self.frontend.shell);
+            !wire(self.log).iter().any(|message| {
+                message["method"] == "hook/run" && message["params"]["payload"]["phase"] == "input"
+            })
+        }
+    }
     let hold = temp.path().join("hold-input-hook");
     std::fs::write(&hold, "hold").unwrap();
-    // Like Pi's emitInput, a stalled handler is skipped and the input goes on.
-    let outcome = extensions
-        .process_input(
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        extensions.process_input_with_frontend(
             "steered while busy".into(),
             None,
             "interactive",
             Some("steer"),
-        )
-        .await;
-    assert!(
-        outcome.is_ok(),
-        "a stalled input hook is skipped, not fatal: {:?}",
-        outcome.err()
-    );
+            Some(&mut CancelAfterDispatch {
+                frontend: &mut frontend,
+                log: &log,
+            }),
+        ),
+    )
+    .await
+    .expect("the frontend must cancel the dispatched input hook");
+    let error = match outcome {
+        Ok(_) => panic!("cancellation must stop the input rather than skip its hook"),
+        Err(error) => error,
+    };
+    assert!(error.is::<crate::extensions::turns::PromptWaitCancelled>());
+    assert!(process.wait_until_idle(Duration::from_secs(2)).await);
     std::fs::remove_file(&hold).unwrap();
 
     assert!(
         process.remote_ui_surface_is_current(&owner, &surface_id),
-        "an expired sibling request retired the mounted editor's lease"
+        "a host-cancelled sibling request retired the mounted editor's lease"
     );
     extensions.drain_events_for_shell(&mut frontend.shell);
     assert!(
         !extensions.remote_ui.is_empty(),
-        "the mounted editor was retired when its sibling request expired"
+        "the mounted editor was retired when its sibling request was cancelled"
     );
     assert_eq!(extensions.remote_ui.mounts[0].surface_id, surface_id);
-    // The extension keeps its session resource owner after the expiry, so a
+    // The extension keeps its session resource owner after cancellation, so a
     // later mount still reaches the host without a reload.
     command(&mut extensions, &mut frontend, &["fullscreen"]).await;
     assert_eq!(extensions.remote_ui.mounts.len(), 2);

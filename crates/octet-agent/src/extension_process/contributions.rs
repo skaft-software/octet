@@ -845,11 +845,23 @@ pub struct ExtensionReasoningSelected {
 }
 
 /// Bounded user `!`/`!!` bash payload.
+///
+/// Pi's `user_bash` event carries `command`, `excludeFromContext` and `cwd`.
+/// `command` stays required; the other two are additive so an older peer that
+/// only reads the command keeps working, and the host never invents a flag it
+/// does not know (an unknown exclusion is omitted, not reported as `false`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionUserBash {
     /// Bounded command text the user ran.
     pub command: String,
+    /// Pi `excludeFromContext`: the `!!` prefix keeps the result out of model
+    /// context. Absent when the dispatching host path carries no prefix flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_from_context: Option<bool>,
+    /// Pi `cwd`: the working directory the command runs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Bounded `shortcut/trigger` payload.

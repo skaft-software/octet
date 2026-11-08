@@ -747,6 +747,9 @@ pub struct ExtensionHostState {
     /// Actual native palette facts, absent for hosts without a theme projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<serde_json::Value>,
+    /// Native tool-disclosure state, absent without an interactive frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_expanded: Option<bool>,
     /// Fresh native context-usage observation; explicit null clears stale facts.
     #[serde(default)]
     pub context_usage: Option<serde_json::Value>,
@@ -803,6 +806,24 @@ mod host_state_contract_tests {
             };
             let wire = serde_json::to_value(&state).unwrap();
             assert_eq!(wire["has_pending_messages"], pending);
+            assert_eq!(
+                serde_json::from_value::<ExtensionHostState>(wire).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn tools_expanded_snapshot_preserves_absence_and_both_boolean_values() {
+        let absent = serde_json::to_value(ExtensionHostState::default()).unwrap();
+        assert!(absent.get("tools_expanded").is_none());
+        for expanded in [false, true] {
+            let state = ExtensionHostState {
+                tools_expanded: Some(expanded),
+                ..Default::default()
+            };
+            let wire = serde_json::to_value(&state).unwrap();
+            assert_eq!(wire["tools_expanded"], expanded);
             assert_eq!(
                 serde_json::from_value::<ExtensionHostState>(wire).unwrap(),
                 state

@@ -4,6 +4,11 @@
 
 ### Added
 
+- Message a selected worker with Ctrl+G from the roster or worker transcript,
+  or with `/subagents continue <target> <message>`. Ctrl+O also expands or
+  collapses retained details within the transcript. Active workers are steered
+  and settled workers are resumed through the same owner-bound host service;
+  the selected worker is revalidated before sending.
 - Keep `/subagents` as the runtime worker surface in the terminal UI. Bare,
   `list` and `status` open the live roster (Enter shows a transcript, Ctrl+X
   stops the selected worker), including during a turn. `/subagents stop
@@ -50,6 +55,9 @@
 
 ### Changed
 
+- Keep delegation telemetry visible between parent turns, simplify worker rows,
+  and make failure reasons and requested/effective model settings easier to see.
+  Avoid recommending arbitrary small per-worker budgets.
 - Workers now inherit the parent's full standard tool scope (`read`, `search`,
   `edit`, `write`, `bash`) by default; pass `tools: [read, search]` for a hard
   read-only guarantee. The child prompt states the granted scope instead of a
@@ -71,6 +79,11 @@
 - Live status no longer waits behind a long-poll worker wait. Wait responses
   trigger a fresh, serialized host list rather than replaying an older snapshot
   over newer worker state; cancellation still leaves workers running.
+- Accept bounded safe host-confirmed custom model identifiers when reporting a
+  spawn, rather than rejecting an already-created worker because its model name
+  contains spaces or Unicode.
+- Correct the guide's claim of automatic parent completion delivery: extension
+  `agent/wait` observes workers but does not currently wake the parent.
 - Multiplexer commands no longer inherit the extension's protocol stdin. On
   Windows a child that shares that pipe can stall at startup while octet's
   reader waits on it.

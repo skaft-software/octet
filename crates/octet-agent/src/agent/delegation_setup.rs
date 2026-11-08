@@ -64,10 +64,18 @@ impl Agent {
         Ok(team_directory)
     }
 
-    /// Subscribe to the root session's latest worker telemetry, including
-    /// updates between prompts. Observers share a bounded, coalescing stream;
-    /// starting or settling a root run does not retire another observer.
-    /// Returns `None` without a root delegation binding.
+    /// Subscribes to the current root session's latest delegation telemetry.
+    ///
+    /// The independent, coalescing stream remains live between runs and can be
+    /// used alongside run events. A fresh snapshot is published on subscription;
+    /// intermediate snapshots may be skipped. It is observational only and
+    /// does not claim or acknowledge a worker result. Child agents and agents
+    /// without delegation return `None`.
+    ///
+    /// A receiver is bound to this agent's delegation manager, not a frontend's
+    /// currently selected session. Frontends must discard it and subscribe to
+    /// the replacement agent when the owner or runtime changes; events from an
+    /// old receiver must not be applied to the replacement session.
     pub fn delegation_telemetry(
         &self,
     ) -> Option<watch::Receiver<Option<DelegationTelemetrySnapshot>>> {
@@ -120,6 +128,118 @@ impl Agent {
         match &self.delegation {
             Some(binding) => binding.reattach_workers(),
             None => Ok(()),
+        }
+    }
+
+    /// Replaces an idle root session with a freshly owned delegation runtime.
+    ///
+    /// The caller must first park workers with [`Self::detach_delegated_workers`].
+    /// All final child usage is persisted to the old session before replacement.
+    /// `rebind` installs the new negotiated services without restarting extension
+    /// processes; if it fails, the old session/runtime is restored and `rebind`
+    /// is called again for that owner. The caller reattaches parked workers on
+    /// failure. The ordinary pointer-retargeting API continues to refuse V2.
+    pub fn replace_session_rebuilding_delegation_at_idle(
+        &mut self,
+        session: Session,
+        mut rebind: impl FnMut(&Self) -> Result<(), Box<AgentError>>,
+    ) -> Result<(), AgentError> {
+        let Some(binding) = self.delegation.as_ref() else {
+            return self.replace_session_at_idle(session);
+        };
+        let delegated = binding.delegated_usage_records();
+        // Everything that can fail while writing only to the old owner runs
+        // before a replacement runtime exists. Creating the runtime first meant
+        // a refused cache warmer or a failed usage record stranded a team
+        // directory, provenance journal and fleet artifact for a session that
+        // never became current.
+        self.prepare_session_replacement()?;
+        for delegated in delegated {
+            mirror_delegated_uncertainty(
+                &mut self.session,
+                &self.model,
+                &delegated.agent_id,
+                delegated.usage_uncertain,
+                delegated.usage_exposure,
+            )?;
+            record_delegated_usage_once(
+                &mut self.session,
+                DelegatedUsage {
+                    agent_id: delegated.agent_id,
+                    turn_count: delegated.turn_count,
+                    tool_call_count: delegated.tool_call_count,
+                    endpoint: self.model.endpoint.id.clone(),
+                    model: self.model.spec.id.clone(),
+                    usage: delegated.usage,
+                    cost: delegated.cost,
+                },
+            )?;
+        }
+        let replacement = self
+            .delegation
+            .as_ref()
+            .ok_or_else(|| {
+                AgentError::Delegation("delegation was disabled during session replacement".into())
+            })?
+            .rebuild_for_session(session.path())
+            .map_err(|error| AgentError::Delegation(error.to_string()))?;
+        replacement.set_span_context(self.telemetry_context().clone());
+        // Keep the previous owner and Bash lease alive until every negotiated
+        // service has rebound. No await or setup callback runs during this swap.
+        let owner = session.resource_owner_key();
+        let old_session = std::mem::replace(&mut self.session, session);
+        let old_session_id = std::mem::replace(&mut self.session_id, owner.clone());
+        let old_owner = std::mem::replace(&mut self.resource_owner, owner.clone());
+        let old_bash = std::mem::replace(&mut self.bash_owner, BashOwnerLease::acquire(&owner));
+        let old_lifecycle = self.last_run_lifecycle.take();
+        let old_display = self.prompt_display_text.take();
+        let old_binding = self.delegation.replace(replacement);
+        self.refresh_delegation_tool_bindings();
+        if let Err(error) = rebind(self) {
+            self.session = old_session;
+            self.session_id = old_session_id;
+            self.resource_owner = old_owner;
+            self.bash_owner = old_bash;
+            self.last_run_lifecycle = old_lifecycle;
+            self.prompt_display_text = old_display;
+            let discarded = self
+                .delegation
+                .replace(old_binding.expect("a delegation binding was installed before the swap"));
+            self.refresh_delegation_tool_bindings();
+            // A replacement runtime that never became current must not leave a
+            // team directory, provenance journal or fleet artifact behind.
+            let discard_error =
+                discarded.and_then(|binding| binding.discard_activation_artifacts().err());
+            if let Err(rollback) = rebind(self) {
+                return Err(AgentError::Delegation(format!(
+                    "session rebind failed ({error}); old-owner rebind failed ({rollback})"
+                )));
+            }
+            return Err(match discard_error {
+                Some(discard) => AgentError::Delegation(format!(
+                    "{error}; the unused replacement runtime could not be removed ({discard})"
+                )),
+                None => *error,
+            });
+        }
+        Ok(())
+    }
+
+    fn refresh_delegation_tool_bindings(&mut self) {
+        if let Some(binding) = &self.delegation {
+            for replacement in binding.root_tools() {
+                let name = replacement.definition().name;
+                // Replace only existing static root tools; policy-filtered
+                // tools stay absent, with the catalog and active set unchanged.
+                if let Some(tool) = self
+                    .extensions
+                    .tools
+                    .iter_mut()
+                    .find(|tool| tool.definition().name == name)
+                {
+                    *tool = replacement;
+                }
+            }
         }
     }
 

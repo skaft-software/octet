@@ -512,7 +512,9 @@ class Worker:
         """A session-owned worker that has been reattached at least once."""
         return self.reattach_count > 0 and not self.detached
 
-    def elapsed_ms(self, now_ms: int) -> int:
+    def elapsed_ms(self, now_ms: int) -> Optional[int]:
+        if self.terminal and self.completed_at_ms is None:
+            return None
         end = self.completed_at_ms if self.completed_at_ms is not None else now_ms
         return max(0, end - self.started_at_ms)
 

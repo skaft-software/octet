@@ -88,8 +88,8 @@ fn pi_prompt_is_a_three_row_full_width_band_without_a_chevron_or_model_wash() {
             model_lab: Some(ModelLab::Anthropic),
             prompt_color: Some("#ff0000".into()),
             persisted: false,
-                 injected: false,
-             };
+            injected: false,
+        };
         for width in [20, 80, 160] {
             let rows = render_block(None, &block, &theme, &renderer, &renderer, width, false);
             assert_eq!(rows.len(), 3, "{rows:?}");
@@ -372,8 +372,8 @@ fn pi_sources_render_uniform_transcript_padding_italic_reasoning_and_list_bullet
                 model_lab: None,
                 prompt_color: None,
                 persisted: true,
-                     injected: false,
-                 };
+                injected: false,
+            };
             assert_content_cell(&render(&user), "Prompt", 1, false, width);
             let notice = TranscriptBlock::Notice("Notice".into());
             assert_content_cell(&render(&notice), "Notice", 1, false, width);

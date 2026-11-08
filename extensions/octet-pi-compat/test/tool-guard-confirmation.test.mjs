@@ -37,10 +37,9 @@ test('tool guard confirmation without UI is not approved', async t => {
     payload: { name: 'bash', tool_call_id: 'call-1', arguments: { command: 'true' } },
     context: peer.context({ has_ui: false }),
   });
-  const question = await peer.wait(f => f.method === 'confirmation/request');
-  peer.send({ jsonrpc: '2.0', id: question.id, result: { confirmed: false } });
   const response = await request.response;
   assert.equal(response.result?.disposition.action, 'deny', JSON.stringify(response));
+  assert.equal(peer.seen.some(f => f.method === 'confirmation/request'), false);
   assert.equal(peer.seen.some(f => f.method === 'ui/open'), false);
   await peer.close();
 });

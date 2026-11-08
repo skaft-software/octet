@@ -30,13 +30,23 @@ or read `Cargo.toml` to choose the release version:
 
 ```sh
 scripts/package-octet-npm.sh VERSION release-assets npm-assets \
-  release-assets/OCTET_SHA256SUMS
+  release-assets/OCTET_SHA256SUMS SOURCE_COMMIT
 python3 scripts/create-octet-npm-manifest.py VERSION vVERSION \
   SOURCE_COMMIT WORKFLOW_COMMIT release-assets/OCTET_RELEASE_METADATA.json \
   npm-assets npm-assets/OCTET_NPM_MANIFEST.json npm-assets/OCTET_NPM_SHA256SUMS \
   --core-workflow-commit CORE_WORKFLOW_COMMIT
-python3 scripts/verify-octet-npm.py VERSION npm-assets
+OCTET_NPM_SOURCE_COMMIT=SOURCE_COMMIT \
+  python3 scripts/verify-octet-npm.py VERSION npm-assets
 ```
+
+The expected public documentation set is the canonical `vX.Y.Z` source commit's
+`docs/package-assets.txt`, never the packaging checkout's copy. Packaging and
+verification both require that commit, and fail closed when it is unset,
+malformed or absent from the repository object database. Bytes still come only
+from the verified native assets; no checkout documentation is ever substituted.
+Native licenses must agree apart from LF/CRLF line endings; every platform's
+original license bytes are preserved in its package, including the Windows CRLF
+license. Changed license text is rejected.
 
 `OCTET_RELEASE_METADATA.json` is generated from the signed native checksum
 manifest and records the tag, source commit, release-workflow identity, pinned

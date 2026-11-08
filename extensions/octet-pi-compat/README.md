@@ -1,7 +1,7 @@
 # Pi extension compatibility
 
 **The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
-Import your existing Pi setup (managed Pi 1.0.2 through 1.4.x) or select
+Import your existing Pi setup (reviewed managed Pi 1.0.2 and 1.5.0 manifests) or select
 extension entrypoints manually.
 One Node process loads unchanged extension factories; Rust owns the agent,
 sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
@@ -140,10 +140,14 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
-through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
-2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
-resolve through the same module table as Pi 1.4's extension loader:
+The adapter follows the reviewed subset of **Pi 1.5.0's extension API**. Shipped
+capability manifests describe **1.0.2 and 1.5.0**, with 1.5.0 as the emulated
+surface. Managed stable versions `>=1.0.2 <2.0.0` are admitted; a version without
+an exact manifest uses the nearest older manifest and diagnoses its unverified
+classification (1.4.x uses 1.0.2). This is not full SDK or original-package
+qualification. Pinned dependencies remain jiti 2.7.0 and `typebox` 1.3.27, plus
+selected MIT Pi TUI 1.0.2 modules. Imports resolve through the per-release
+manifest's route map, matching Pi's `virtual-modules.js` extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
 root, `pi-ai/compat` and `pi-ai/models` share one entry, and both
 `@earendil-works` and old `@mariozechner` Pi imports alias to the same host
@@ -159,7 +163,9 @@ command-argument parsing/path normalization are adapted from Pi 1.0.2 (tag
 license](LICENSE.pi); emulated helpers do not import Pi's session store or agent
 runtime. The [Pi 1.0.2 export inventory](shims/pi-1.0.2/README.md) records
 all public root/compat/core/TUI names, their pure/local or host binding, and
-explicit refusals. Additional reviewed local helpers lazily load individual
+explicit refusals. The [Pi 1.5.0 notes](shims/pi-1.5.0/README.md) describe the
+reviewed helper removals, TypeBox moves and argument-validation changes.
+Additional reviewed local helpers lazily load individual
 installed Pi dist modules and require a supported local/managed installation.
 Static `getModel`/`getModels` describe Pi's generated catalog, not native selected
 or authenticated models. The explicit installed-Pi route loads the managed Pi's own packages.
@@ -570,9 +576,12 @@ are redacted. Native code polices reserved headers and effects before send.
 
 For extension-owned provider streams, negotiated API 0.4
 `provider_request_hooks_v1` (requiring `provider_proxy_v1`) relays installed Pi's
-actual payload and HTTP-response callbacks through the live stream job. Header
-transforms run before the provider callback, matching Pi's model runtime. The
-host retains one hook-chain identity, reserved-header validation and deadlines;
+actual payload and HTTP-response callbacks through the live stream job. The
+attempt stays unclaimed until the real native or callback-bridge route is
+selected. Header transforms run at that route's actual outgoing HTTP boundary;
+process-owned credential headers stay outside the bridge projection and cannot
+be injected through its result. The host retains one hook-chain identity,
+reserved-header validation and deadlines;
 withdrawal, cancellation and terminal settlement invalidate pending callbacks.
 Native delegation and the callback bridge cannot both consume the same attempt.
 A callback that omits real wire phases cannot report a successful hooked stream.
@@ -655,6 +664,16 @@ redacted reasoning retains its host-owned replay state. Native deltas are relaye
 before the terminal response; final usage/cost remain native-owned. This is not
 permission to run installed Pi HTTP/auth runtimes, perform nested inference, or
 claim OAuth-dependent package behavior without an original-package journey.
+
+Negotiating request hooks does not eagerly claim an attempt before the stream
+chooses its route. Guarded delegates retain one native wire hook chain; only the
+adapter's exact forwarding callbacks are removed from their options. A package
+that has already used the callback bridge cannot switch that attempt to native
+delegation. Arbitrary response/header callbacks still refuse when the guarded
+route cannot wire-forward them. The supplied bridge fetch applies hooks to real
+outgoing non-credential headers, leaving process-owned authentication outside the
+host projection. Public installed-Pi stream helpers remain installed-Pi helpers;
+this routing does not silently replace them with guarded delegates.
 
 Custom stream preparation and inherited native delegation use the bundled pure Pi
 transcript helpers and timeout parser, without importing an installed Pi runtime.
@@ -743,8 +762,8 @@ gate and deferred-resume requests are not fabricated as logical model turns.
 
 The native Pi modules and their per-module counts, the adapter suite result and
 the recorded real-package matrix are in the
-[release status](../../docs/pi-compat-release-status.md), which also names the one
-interactive acceptance that is red on the test machine. Non-resource factories
+[dated release-status record](../../docs/pi-compat-release-status.md), including
+its historical failures and qualification limits. Non-resource factories
 also join
 deferred startup before command admission through the existing interactive or
 headless pump, without loading resources or changing themes. Native regressions
@@ -899,8 +918,11 @@ or overwrite a custom draft, even after its write queue drains. Command-time
 After a custom fullscreen surface's first frame, `command/execute` settles, but
 the unchanged JS handler keeps awaiting `custom()` until the component's actual
 `done(result)` or host dismissal. That continuation retains its numeric parent
-and complete owner for background owner-safe operations. Ordinary footer/header/
-widget setters await all openings before their request settles. Close, resize,
+and complete owner for background owner-safe operations. Cosmetic editor/footer/
+header/widget setters return void and do not hold the parent reply open. Their
+native mounts wait for the successful origin reply and callback outcome, then
+recheck owner, cancellation and drain fences; failed or preempted callbacks cannot
+mount. Close, resize,
 owner replacement, cancellation, EOF and shutdown dispose components and revoke
 their timers; Rust remains the restoration authority.
 
@@ -981,11 +1003,12 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated Pi-theme working-candidate adapter run is **932 tests: 912 passed, 0
-failed, 20 optional skips**, exit 0, with the freshly built native editor test host
+A historical isolated Pi-theme adapter run recorded **932 tests: 912 passed, 0
+failed, 20 optional skips**, exit 0, with a freshly built native editor test host
 and a read-only Pi reference checkout.
-This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
-`npm test` result; update them here when the adapter suite changes. Editor fixtures require the
+This is synthetic/native-peer evidence, not existing-setup or attended RC
+qualification. Those counts describe that run, not the current tree; rerun
+`npm test` for current-source evidence. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing
 peers fail explicitly, never substitute a JS model. The immutable 193 upstream cases plus the
 separate ownership guard pass **194/194 with zero skips**. See the

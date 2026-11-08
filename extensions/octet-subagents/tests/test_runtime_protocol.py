@@ -165,6 +165,9 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result["protocol"]["limits"]["max_concurrent_requests"], 4)
         spawn = next(tool for tool in result["tools"] if tool["name"] == "subagent_spawn")
         self.assertNotIn("max_tokens", spawn["parameters"]["properties"])
+        self.assertIn("unnecessarily small", spawn["description"])
+        for field in ("timeout_seconds", "max_turns", "max_cost_microdollars"):
+            self.assertIn("omit", spawn["parameters"]["properties"][field]["description"])
 
     def test_models_discovery_is_bounded_and_owner_correlated(self):
         self.running.start()
@@ -191,6 +194,53 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(calls[0]["params"]["policy"]["model_selection"],
                          {"provider": "anthropic", "model": "haiku", "reasoning": "max"})
         self.assertNotIn("reasoning_capability", calls[0]["params"]["policy"])
+
+    def test_inherited_model_with_spaces_and_reasoning_only_selection_are_reported(self):
+        original_spawn = self.responder.client.spawn_agent
+
+        def spawn_with_custom_model(**kwargs):
+            response = original_spawn(**kwargs)
+            resolved = {"provider": "custom", "model": "custom/Local Model",
+                        "reasoning": {"type": "effort", "value": "low"}}
+            response["policy"]["resolved_model"] = resolved
+            self.responder.host.agents[response["agent_id"]].policy["resolved_model"] = resolved
+            return response
+
+        self.responder.client.spawn_agent = spawn_with_custom_model
+        self.running.start()
+        self.running.reader.feed(rpc_request(75, "tool/call", {
+            "name": "subagent_spawn", "arguments": {"name": "reader", "task": "x",
+                "reasoning": "high"}, "context": tool_context()}))
+        response = self.running.writer.wait_for(lambda m: m.get("id") == 75)
+        self.assertFalse(response["result"]["is_error"])
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("requested selection: provider inherit / model inherit / reasoning high", text)
+        self.assertIn("effective selection: provider custom / model custom/Local Model / reasoning low", text)
+        self.assertIn("Host normalized reasoning=high to low", text)
+        calls = [m for m in self.responder.reverse if m["method"] == "agent/spawn"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["params"]["policy"]["model_selection"], {"reasoning": "high"})
+        self.assertIsNone(calls[0]["params"]["policy"]["max_turns"])
+        self.assertIsNone(calls[0]["params"]["policy"]["timeout_ms"])
+        self.assertIsNone(calls[0]["params"]["policy"]["max_cost_microdollars"])
+
+    def test_targeted_limit_status_identifies_partial_output_and_preserved_ceiling(self):
+        self.running.start()
+        self.running.reader.feed(rpc_request(76, "tool/call", {
+            "name": "subagent_spawn", "arguments": {"name": "reader", "task": "x", "max_turns": 2},
+            "context": tool_context()}))
+        self.assertFalse(self.running.writer.wait_for(lambda m: m.get("id") == 76)["result"]["is_error"])
+        self.responder.host.limit_reached("agent-1", "partial evidence", turns=2)
+        self.running.reader.feed(rpc_request(77, "tool/call", {
+            "name": "subagent_status", "arguments": {"target": "agent-1"}, "context": tool_context()}))
+        result = self.running.writer.wait_for(lambda m: m.get("id") == 77)["result"]
+        self.assertFalse(result["is_error"])
+        text = result["content"][0]["text"]
+        self.assertIn("Partial summary", text)
+        self.assertIn("2/2", text)
+        self.assertIn("ceilings remain", text)
+        self.assertIn("subagent_continue", text)
+        self.assertEqual(len([m for m in self.responder.reverse if m["method"] == "agent/spawn"]), 1)
 
     def test_explicit_selection_requires_feature_without_spawning(self):
         init = initialize_request()
@@ -409,6 +459,76 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(latest["activities"][0]["summary"], "audit · running")
         self.assertNotIn("completed_at_ms", latest["activities"][0])
         self.assertIn("Current phase/tool: read", latest["collection"]["detail"]["body"])
+
+    def test_continue_command_steers_and_resumes_with_fresh_owner_bound_requests(self):
+        self.running.start()
+        self.running.reader.feed(
+            rpc_request(
+                50, "tool/call",
+                {
+                    "name": "subagent_spawn",
+                    "arguments": {"name": "audit", "task": "Audit the extension."},
+                    "context": tool_context(),
+                },
+            )
+        )
+        self.running.writer.wait_for(lambda message: message.get("id") == 50)
+        message = "  Check  docs/\n  and preserve this whitespace.  "
+        self.running.reader.feed(
+            rpc_request(
+                51, "command/execute",
+                {
+                    "name": "subagents",
+                    "arguments": ["continue", "audit", message],
+                    "context": tool_context(),
+                },
+            )
+        )
+        response = self.running.writer.wait_for(lambda item: item.get("id") == 51)
+        self.assertIn("Message queued for audit (steered)", response["result"]["text"])
+        self.assertEqual(self.responder.steers, [("agent-1", message)])
+        reverse = [call for call in self.responder.reverse if call["params"]["parent_request_id"] == 51]
+        self.assertEqual([call["method"] for call in reverse], ["agent/list", "agent/message", "agent/list"])
+        self.assertEqual(reverse[1]["params"]["message"], message)
+
+        self.responder.host.complete("agent-1", "Done.")
+        self.running.reader.feed(
+            rpc_request(
+                52, "command/execute",
+                {
+                    "name": "subagents",
+                    "arguments": ["continue", "audit", "Follow up: check tests."],
+                    "context": tool_context(),
+                },
+            )
+        )
+        response = self.running.writer.wait_for(lambda item: item.get("id") == 52)
+        self.assertIn("Message queued for audit (resumed)", response["result"]["text"])
+        self.assertEqual(self.responder.follow_ups, [("agent-1", "Follow up: check tests.")])
+        reverse = [call for call in self.responder.reverse if call["params"]["parent_request_id"] == 52]
+        self.assertEqual([call["method"] for call in reverse], ["agent/list", "agent/follow_up", "agent/list"])
+
+    def test_continue_command_requires_current_owner_and_nonempty_message(self):
+        self.running.start()
+        for request_id, context, message in (
+            (53, {}, "Check the docs."),
+            (54, tool_context(), "  \n  "),
+        ):
+            self.running.reader.feed(
+                rpc_request(
+                    request_id, "command/execute",
+                    {
+                        "name": "subagents",
+                        "arguments": ["continue", "audit", message],
+                        "context": context,
+                    },
+                )
+            )
+            response = self.running.writer.wait_for(lambda item: item.get("id") == request_id)
+            self.assertTrue(response["result"]["notifications"])
+        self.assertEqual(self.responder.steers, [])
+        self.assertEqual(self.responder.follow_ups, [])
+        self.assertFalse(any(call["method"] in {"agent/message", "agent/follow_up"} for call in self.responder.reverse))
 
     def test_continue_rejects_orphaned_worker_with_stable_error(self):
         self.running.start()

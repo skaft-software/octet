@@ -169,6 +169,17 @@ impl Agent {
             Vec::new()
         };
         require_tool_schema_budget(&initial_tool_defs, self.tool_schema_budget_bytes)?;
+        // Bind this run owner's provider pipeline before the prompt append.
+        // A retired process generation, a missing negotiated binding or any
+        // other factory refusal is a deployment refusal, not a run outcome:
+        // returning it here leaves no durable prompt, so a caller that restores
+        // its draft can retry the same submission without duplicating the user
+        // entry. The bind stays owner-authority checked and is never skipped.
+        let client = provider_context::provider_request_client(
+            &self.client,
+            &self.extensions.provider_request_hooks,
+            &self.resource_owner,
+        )?;
         // Capture only settled context, before appending this submission.
         // Opening is deferred until the first request passes run admission;
         // merely constructing a Run (or an idle RPC host) performs no I/O.
@@ -237,11 +248,6 @@ impl Agent {
         // Disjoint borrows: the run stream owns clones of everything except
         // the session, which it borrows mutably for the run's lifetime —
         // preserving one authoritative head.
-        let client = provider_context::provider_request_client(
-            &self.client,
-            &self.extensions.provider_request_hooks,
-            &self.resource_owner,
-        )?;
         let model = self.model.clone();
         let inference_resolver = self.tool_inference_resolver.clone();
         let compaction_model = self

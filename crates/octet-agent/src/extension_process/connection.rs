@@ -159,6 +159,12 @@ pub(super) struct PendingRequest {
     pub(super) resource_owner: Option<ExtensionResourceOwner>,
     pub(super) last_progress_sequence: Option<u64>,
     pub(super) tool_call_policy_digest: Option<[u8; 32]>,
+    /// The exact hook parent admitted for negotiated bulk hook references.
+    ///
+    /// Set only by the host when it registers that hook request for a peer that
+    /// negotiated `bulk_hook_reference_v1`. It names one hook; it is never a
+    /// general permission for arbitrary bulk calls.
+    pub(super) bulk_hook_parent: Option<super::ExtensionHook>,
     pub(super) composition_files: Arc<CompositionFiles>,
 }
 
@@ -337,6 +343,29 @@ impl Drop for ZeroizingBytes {
     fn drop(&mut self) {
         self.0.fill(0);
     }
+}
+
+/// The hook parent this request may use for negotiated bulk references.
+///
+/// Only `before_prompt` opts in today: it is the large-input boundary that needs
+/// host-staged content, and admitting one hook by name is narrower than admitting
+/// hooks generally. The value is set per request, only for a peer that negotiated
+/// [`EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1`]; every other request keeps `None`,
+/// so tool policy and the live owner/generation fence keep deciding admission
+/// exactly as before.
+fn bulk_hook_parent_for(
+    connection: &Arc<ProcessConnection>,
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<ExtensionHook> {
+    if method != methods::HOOK_RUN {
+        return None;
+    }
+    if !read_std_lock(&connection.protocol).supports(EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1) {
+        return None;
+    }
+    let hook: ExtensionHook = serde_json::from_value(params.get("hook")?.clone()).ok()?;
+    matches!(hook, ExtensionHook::BeforePrompt).then_some(hook)
 }
 
 #[derive(Serialize)]
@@ -1189,6 +1218,7 @@ impl ProcessConnection {
                         resource_owner: resource_owner.clone(),
                         last_progress_sequence: None,
                         composition_files: Arc::new(CompositionFiles::default()),
+                        bulk_hook_parent: bulk_hook_parent_for(&connection, method, &params),
                         tool_call_policy_digest: (method == methods::TOOL_CALL)
                             .then(|| {
                                 Some(tool_call_policy_digest(

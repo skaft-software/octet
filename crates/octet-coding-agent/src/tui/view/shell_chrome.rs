@@ -321,7 +321,7 @@ fn shell_chrome_with_composer_rows(
     // Wrap queued messages in the available chrome, retaining transcript space
     // and the composer instead of letting a long queue push either off-screen.
     let pending_limit = remaining.saturating_sub(3);
-    let pending = render_pending_steering(state, width, pending_limit);
+    let pending = render_pending_steering(state, width, pending_limit, state.verbose_tools);
     remaining = remaining.saturating_sub(pending.len());
 
     // The one orchestration lifecycle is part of the semantic transcript,

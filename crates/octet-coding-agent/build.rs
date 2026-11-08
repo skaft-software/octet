@@ -1125,6 +1125,10 @@ fn optimize_macos_executable_linking() {
 }
 
 fn main() -> io::Result<()> {
+    println!(
+        "cargo:rustc-env=OCTET_BUILD_TARGET={}",
+        std::env::var("TARGET").expect("Cargo provides TARGET")
+    );
     reserve_windows_main_thread_stack();
     optimize_macos_executable_linking();
     let manifest_dir = PathBuf::from(

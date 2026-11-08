@@ -47,6 +47,15 @@ recoverable. The session stays on disk, hidden from the picker, and the web UI's
 trash can restore it. You can't trash the current session. A session from
 another workspace can't be resumed into the same live app.
 
+Pi-requested new/fork/switch operations wait for the active run to settle. With
+V2 delegation enabled, the host parks workers and rebuilds the session-owned
+runtime rather than retargeting it. Child sessions, accepted work and final
+usage remain with their old owner; they are not transplanted into the new
+session. Extension services rebind without restarting an admitted setup command.
+A failed runtime activation or service rebind keeps the old session/runtime;
+parked workers are reattached. Prepared-history and setup acknowledgements still
+fence publication of the new session.
+
 ## The session goal
 
 `/goal <objective>` stores a durable objective for the current session;

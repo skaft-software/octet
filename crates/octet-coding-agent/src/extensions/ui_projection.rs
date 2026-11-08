@@ -349,8 +349,8 @@ impl ExecutableExtensions {
         shell.set_extension_ui(self.semantic_ui_projection())
     }
 
-    /// Publish an already-resolved foreground palette, never render-time I/O or
-    /// a callback into the component factory. Existing process publication sends
+    /// Publish foreground palette and tool-disclosure facts, never render-time
+    /// I/O or a callback into the component factory. Existing publication sends
     /// owner-fenced context updates to every admitted remote mount.
     pub(crate) fn refresh_frontend_theme(&self, shell: &InteractiveShell) {
         // This runs for every UI sync (every streamed delta), and building the
@@ -360,17 +360,15 @@ impl ExecutableExtensions {
             .frontend_theme_key
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if published.as_ref() == Some(&key)
+        let theme_current = published.as_ref() == Some(&key)
             && self
                 .host_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .theme
-                .is_some()
-        {
-            return;
-        }
-        let theme = shell.extension_theme_get(None);
+                .is_some();
+        let theme = (!theme_current).then(|| shell.extension_theme_get(None));
+        let tools_expanded = Some(shell.verbose_tools());
         *published = Some(key);
         drop(published);
         let state = {
@@ -378,10 +376,15 @@ impl ExecutableExtensions {
                 .host_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state.theme == theme {
+            if theme.as_ref().is_none_or(|theme| state.theme == *theme)
+                && state.tools_expanded == tools_expanded
+            {
                 return;
             }
-            state.theme = theme;
+            if let Some(theme) = theme {
+                state.theme = theme;
+            }
+            state.tools_expanded = tools_expanded;
             state.clone()
         };
         for process in &self.processes {

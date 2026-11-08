@@ -32,7 +32,11 @@ for (const [platform, architecture] of [['win32', 'arm64'], ['linux', 'arm64']])
 console.log('npm platform map passed (including win32-x64)');
 JS
 script_directory="$repository_directory/scripts"
-for command in bash python3 node npm; do
+# The expected public documentation set is defined by the canonical source
+# commit, not by this (possibly dirty) checkout.
+source_commit=$(git -C "$repository_directory" rev-parse --verify "HEAD^{commit}")
+export OCTET_NPM_SOURCE_COMMIT="$source_commit"
+for command in bash git python3 node npm; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'required npm test command is unavailable: %s\n' "$command" >&2
         exit 1
@@ -45,6 +49,8 @@ native_directory="$work_directory/native"
 output_directory="$work_directory/npm"
 repeat_directory="$work_directory/npm-repeat"
 mkdir -p "$native_directory" "$work_directory/home" "$work_directory/tmp"
+inventory_file="$work_directory/source-inventory.txt"
+git -C "$repository_directory" show "$source_commit:docs/package-assets.txt" > "$inventory_file"
 # No user npm configuration, registry traffic, lifecycle hooks or shared caches.
 export HOME="$work_directory/home" TMPDIR="$work_directory/tmp"
 export NPM_CONFIG_USERCONFIG="$HOME/.npmrc" NPM_CONFIG_GLOBALCONFIG="$HOME/.npm-globalrc"
@@ -52,7 +58,7 @@ export NPM_CONFIG_CACHE="$work_directory/cache" NPM_CONFIG_OFFLINE=true
 export NPM_CONFIG_REGISTRY=http://127.0.0.1:9 NPM_CONFIG_IGNORE_SCRIPTS=true
 export NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false
 
-python3 - "$native_directory" "$version" "$repository_directory/docs/package-assets.txt" <<'PY'
+python3 - "$native_directory" "$version" "$inventory_file" <<'PY'
 import gzip
 import hashlib
 import pathlib
@@ -146,6 +152,9 @@ with tarfile.open(windows_tar, "r:gz") as source, zipfile.ZipFile(windows_zip, "
             relative, data = "octet.exe", b"MZ" + data
         elif relative == "octet-host":
             relative, data = "octet-host.exe", b"MZ" + data
+        elif relative == "LICENSE":
+            # Match the real signed Windows archive's checkout line endings.
+            data = data.replace(b"\n", b"\r\n")
         output.writestr(f"octet-{version}-x86_64-pc-windows-msvc/{relative}", data)
 windows_tar.unlink()
 
@@ -164,7 +173,8 @@ SOURCE_DATE_EPOCH=0 "$script_directory/package-octet-npm.sh" \
     "$version" \
     "$native_directory" \
     "$output_directory" \
-    "$native_directory/OCTET_SHA256SUMS"
+    "$native_directory/OCTET_SHA256SUMS" \
+    "$source_commit"
 python3 "$script_directory/generate-octet-release-metadata.py" \
     "$version" \
     "v$version" \
@@ -356,6 +366,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import pathlib
 import runpy
 import subprocess
@@ -381,6 +392,9 @@ for package in manifest["packages"]:
     root = f"octet-{version}-{package['target']}"
     native_archive = native / (f"octet-{version}-{package['target']}.zip" if package["target"] == "x86_64-pc-windows-msvc" else root + ".tar.gz")
     with zipfile.ZipFile(native_archive) if native_archive.suffix == ".zip" else tarfile.open(native_archive, mode="r:gz") as source, tarfile.open(output / package["artifact"]) as packed:
+        license_name = f"{root}/LICENSE"
+        license_stream = source.open(license_name) if native_archive.suffix == ".zip" else source.extractfile(license_name)
+        assert license_stream.read() == packed.extractfile("package/LICENSE").read(), package["artifact"]
         for name in sorted(files):
             source_name = f"{root}/{name}"
             source_stream = source.open(source_name) if native_archive.suffix == ".zip" else source.extractfile(source_name)
@@ -463,8 +477,11 @@ doc_root = stage / "share/octet"
 ignore = doc_root / benchmark / ".gitignore"
 installed_ignore = ignore.with_name(".npmignore")
 ignore_bytes = ignore.read_bytes()
-assert not installed_ignore.exists()
-ignore.rename(installed_ignore)
+ignore_paths = [doc_root / name for name in sorted(files) if pathlib.PurePosixPath(name).name == ".gitignore"]
+for path in ignore_paths:
+    renamed = path.with_name(".npmignore")
+    assert not renamed.exists()
+    path.rename(renamed)
 verification["check_documentation_bytes"](inspection, doc_root, npm_install=True)
 for data in (None, ignore_bytes + b"changed"):
     installed_ignore.unlink()
@@ -479,7 +496,8 @@ for data in (None, ignore_bytes + b"changed"):
     if installed_ignore.exists():
         installed_ignore.unlink()
     installed_ignore.write_bytes(ignore_bytes)
-installed_ignore.rename(ignore)
+for path in ignore_paths:
+    path.with_name(".npmignore").rename(path)
 
 # Exercise the exact private-stage restoration helper: it may add only missing
 # inventoried docs, never overwrite changed bytes or launder unsafe npm entries.
@@ -536,6 +554,7 @@ with tarfile.open(archive_path) as archive:
     contents = {member.name: archive.extractfile(member).read() for member in members if member.isfile()}
 for mutation, message in [("missing", b"missing a required native or inventoried documentation file"),
                           ("secret", b"secret scanner found a match"), ("checksum", b"checksum does not match"),
+                          ("license", b"native release archives do not share the same LICENSE"),
                           ("link", b"link or special file")]:
     try:
         with tarfile.open(archive_path, "w:gz") as archive:
@@ -547,6 +566,9 @@ for mutation, message in [("missing", b"missing a required native or inventoried
                 if mutation == "secret" and member.name.endswith("/.gitignore"):
                     data = b"-----BEGIN PRIVATE KEY-----\n"
                     member.size = len(data)
+                if mutation == "license" and member.name == f"octet-{version}-aarch64-apple-darwin/LICENSE":
+                    data += b"changed license text\n"
+                    member.size = len(data)
                 if mutation == "link" and member.name.endswith("/docs/current-reference.md"):
                     member.type, member.linkname, member.size = tarfile.SYMTYPE, "/outside", 0
                     data = None
@@ -555,7 +577,8 @@ for mutation, message in [("missing", b"missing a required native or inventoried
             sums.write_text("\n".join(f"{hashlib.sha256((native / line.split('  ./')[1]).read_bytes()).hexdigest()}  ./{line.split('  ./')[1]}"
                                       for line in original_sums.decode().splitlines()) + "\n")
         result = subprocess.run([str(scripts / "package-octet-npm.sh"), version, str(native),
-                                 str(work / ("bad-native-" + mutation)), str(sums)], capture_output=True, timeout=30)
+                                 str(work / ("bad-native-" + mutation)), str(sums),
+                                 os.environ["OCTET_NPM_SOURCE_COMMIT"]], capture_output=True, timeout=30)
         assert result.returncode != 0 and message in result.stderr, result.stderr.decode()
     finally:
         archive_path.write_bytes(original)
@@ -568,7 +591,8 @@ SOURCE_DATE_EPOCH=0 "$script_directory/package-octet-npm.sh" \
     "$version" \
     "$native_directory" \
     "$repeat_directory" \
-    "$native_directory/OCTET_SHA256SUMS" >/dev/null
+    "$native_directory/OCTET_SHA256SUMS" \
+    "$source_commit" >/dev/null
 for artifact in "$output_directory"/*.tgz; do
     name=${artifact##*/}
     cmp "$artifact" "$repeat_directory/$name"
@@ -616,7 +640,7 @@ mv "$work_directory/launcher-original.tgz" "$output_directory/octet-$version.tgz
 
 # Missing checksum metadata is a hard failure; packagers may not silently fall
 # back to a checkout or mutable download.
-if "$script_directory/package-octet-npm.sh" "$version" "$native_directory" "$work_directory/missing-output" "$work_directory/no-such-sums" >/dev/null 2>&1; then
+if "$script_directory/package-octet-npm.sh" "$version" "$native_directory" "$work_directory/missing-output" "$work_directory/no-such-sums" "$source_commit" >/dev/null 2>&1; then
     printf 'packager accepted missing immutable checksum metadata\n' >&2
     exit 1
 fi

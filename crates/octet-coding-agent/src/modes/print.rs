@@ -231,7 +231,7 @@ async fn run_prompt(
                 .await;
                 break HostRunOutcome::shutdown();
             }
-            event = run.next() => event,
+            event = app.executable_extensions.with_headless_events(run.next()) => event,
         };
         let Some(event) = event else {
             break HostRunOutcome::stream_lost();

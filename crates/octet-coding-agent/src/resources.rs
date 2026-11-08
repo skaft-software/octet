@@ -11,6 +11,10 @@ pub const BASE_PERSONA: &str = "You are octet, an expert coding assistant.";
 
 const MAX_CONTEXT_FILE_BYTES: usize = 256 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 512 * 1024;
+// One `--append-system-prompt` source. Pi reads an appended prompt file without a
+// bound; octet treats every resource file as bounded input and refuses nothing a
+// bridge writes (pi-acp's workspace-roots file is a few hundred bytes).
+const MAX_APPEND_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
 fn global_agents_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -462,8 +466,28 @@ pub fn dirs_from_workspace_to_cwd(workspace: &Path, cwd: &Path) -> Vec<PathBuf> 
     directories
 }
 
+/// Join a composed prompt with an appended section. An empty addendum leaves the
+/// prompt untouched, so repeated composition cannot duplicate it.
+fn join_prompt_sections(base: &str, addendum: Option<&str>) -> String {
+    match addendum {
+        Some(addendum) if !addendum.is_empty() && !base.is_empty() => {
+            format!("{base}\n\n{addendum}")
+        }
+        Some(addendum) if !addendum.is_empty() => addendum.to_owned(),
+        _ => base.to_owned(),
+    }
+}
+
+/// Compose the effective instructions. The resolved `--append-system-prompt`
+/// text follows Pi's section order: after the base prompt (or the full
+/// `--system-prompt` override) and before project context files. Context files
+/// are read on every call, so a reload still picks up edited `AGENTS.md`.
 fn compose_instructions_at(config: &Config, global: &Path) -> anyhow::Result<String> {
-    let base = base_prompt(config);
+    let addendum = config.append_system_prompt.as_deref();
+    if let Some(prompt) = config.system_prompt.as_deref() {
+        return Ok(join_prompt_sections(prompt, addendum));
+    }
+    let base = join_prompt_sections(&base_prompt(config), addendum);
     if !config.context_files {
         return Ok(base);
     }
@@ -520,10 +544,83 @@ pub(crate) fn wrap_project_context(blocks: &[String]) -> String {
 
 /// Compose global then workspace-root-to-leaf AGENTS.md instructions.
 pub fn compose_instructions(config: &Config) -> anyhow::Result<String> {
-    if let Some(prompt) = config.system_prompt.as_deref() {
-        Ok(prompt.to_owned())
+    compose_instructions_at(config, &global_agents_path())
+}
+
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+/// Read one appended-prompt source as bounded UTF-8 text.
+fn read_append_source(path: &Path) -> anyhow::Result<String> {
+    let Some(name) = path.file_name() else {
+        anyhow::bail!("the path has no file name");
+    };
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_owned(),
+        _ => PathBuf::from("."),
+    };
+    let opened_path = parent.canonicalize()?.join(name);
+    let bytes = octet_agent::secure_fs::read_regular_file_bounded(
+        &opened_path,
+        MAX_APPEND_SYSTEM_PROMPT_BYTES,
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("the file is not valid UTF-8"))?;
+    Ok(strip_bom(&text).to_owned())
+}
+
+/// Resolve one `--append-system-prompt` value exactly like Pi: an existing path
+/// contributes the file's contents (the prompt itself), and every other value is
+/// literal prompt text. A path that exists but cannot be read as a bounded
+/// regular file falls back to the literal value after a diagnostic, which is
+/// Pi's behavior and keeps an ACP spawn non-fatal. Contents are never logged.
+fn resolve_append_system_prompt_value(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let path = Path::new(value);
+    if !path.exists() {
+        return Some(value.to_owned());
+    }
+    match read_append_source(path) {
+        Ok(contents) if contents.is_empty() => {
+            crate::output::routine_diagnostic(format!(
+                "system prompt: appended source {} is empty",
+                path.display()
+            ));
+            None
+        }
+        Ok(contents) => {
+            crate::output::routine_diagnostic(format!(
+                "system prompt: appended {} bytes from {}",
+                contents.len(),
+                path.display()
+            ));
+            Some(contents)
+        }
+        Err(error) => {
+            crate::output::routine_diagnostic(format!(
+                "system prompt: using --append-system-prompt value verbatim because {} could not be read as a file: {error}",
+                path.display()
+            ));
+            Some(value.to_owned())
+        }
+    }
+}
+
+/// Resolve every `--append-system-prompt` value in invocation order, joined like
+/// Pi's repeated-flag form. Sources are read here and only here.
+pub(crate) fn resolve_appended_system_prompt(values: &[String]) -> Option<String> {
+    let sections: Vec<String> = values
+        .iter()
+        .filter_map(|value| resolve_append_system_prompt_value(value))
+        .collect();
+    if sections.is_empty() {
+        None
     } else {
-        compose_instructions_at(config, &global_agents_path())
+        Some(sections.join("\n\n"))
     }
 }
 

@@ -21,12 +21,15 @@ fi
 package_directory=$1
 version=$2
 repository_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# The expected documentation set is the canonical source commit inventory.
+source_commit=${OCTET_NPM_SOURCE_COMMIT:-$(git -C "$repository_directory" rev-parse --verify "HEAD^{commit}")}
+export OCTET_NPM_SOURCE_COMMIT="$source_commit"
 if [[ ! -d "$package_directory" || -L "$package_directory" ]]; then
     printf 'npm package directory must be a real directory: %s\n' "$package_directory" >&2
     exit 1
 fi
 package_directory=$(CDPATH= cd -- "$package_directory" && pwd -P)
-for command in npm uname python3; do
+for command in npm uname python3 git; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'required npm install test command is unavailable: %s\n' "$command" >&2
         exit 1
@@ -75,6 +78,7 @@ run_isolated() (
         XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" \
         XDG_CACHE_HOME="$home/.cache" CODEX_HOME="$home/.codex" \
         PI_CODING_AGENT_DIR="$home/.pi" TMPDIR="$work_directory/tmp" \
+        OCTET_NPM_SOURCE_COMMIT="$source_commit" \
         NPM_CONFIG_USERCONFIG="$home/.npmrc" NPM_CONFIG_GLOBALCONFIG="$home/.npm-globalrc" \
         NPM_CONFIG_CACHE="$cache" NPM_CONFIG_OFFLINE=true NPM_CONFIG_IGNORE_SCRIPTS=true \
         NPM_CONFIG_REGISTRY=http://127.0.0.1:9 NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false "$@"

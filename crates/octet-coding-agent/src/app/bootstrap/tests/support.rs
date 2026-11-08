@@ -26,6 +26,7 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
         theme: None,
         theme_explicit: false,
         system_prompt: None,
+        append_system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         plain: false,

@@ -32,6 +32,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         theme: None,
         theme_explicit: false,
         system_prompt: None,
+        append_system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,

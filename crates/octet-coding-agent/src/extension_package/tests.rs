@@ -631,3 +631,106 @@ async fn release_download_rejects_untrusted_initial_urls_before_sending() {
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(!destination.exists());
 }
+
+/// Build one installable bundle archive with a minimal manifest.
+fn bundle_archive(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let manifest = format!(
+        "name = \"{id}\"\nversion = \"{}\"\napi_version = \"0.4\"\nrequires_octet = \"={}\"\n[entrypoint]\ncommand = \"extension.sh\"\n",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION")
+    );
+    let script = "#!/bin/sh\nexit 0\n";
+    let path = root.join(format!("{id}.tar.gz"));
+    let encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&path).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut archive = tar::Builder::new(encoder);
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_mode(0o755);
+    dir.set_size(0);
+    dir.set_cksum();
+    archive.append_data(&mut dir, id, std::io::empty()).unwrap();
+    for (file, body, mode) in [
+        ("extension.toml", manifest.as_bytes(), 0o644),
+        ("extension.sh", script.as_bytes(), 0o755),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(mode);
+        header.set_size(body.len() as u64);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, format!("{id}/{file}"), body)
+            .unwrap();
+    }
+    archive.into_inner().unwrap().finish().unwrap();
+    path
+}
+
+/// `octet extension update` with no name refreshes exactly the managed official
+/// bundles — the set a host upgrade invalidates — never third-party ones.
+#[test]
+fn update_all_selects_only_installed_official_bundles() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("extensions");
+    let official = crate::extension_bundle::official_bundle_ids()
+        .next()
+        .expect("catalog has at least one official bundle")
+        .to_owned();
+    for id in [official.as_str(), "third-party-tool"] {
+        let archive = bundle_archive(temp.path(), id);
+        crate::extension_bundle::install_local(&root, &archive, false).unwrap();
+    }
+    assert_eq!(
+        super::official_bundle_ids_in(&root).unwrap(),
+        vec![official]
+    );
+}
+
+#[test]
+fn update_cli_supports_bulk_named_and_local_updates_without_ambiguity() {
+    #[derive(clap::Parser)]
+    struct Args {
+        #[command(subcommand)]
+        command: ExtensionCommand,
+    }
+    use clap::Parser as _;
+
+    assert!(matches!(
+        Args::try_parse_from(["extension", "update"])
+            .unwrap()
+            .command,
+        ExtensionCommand::Update {
+            name: None,
+            path: None
+        }
+    ));
+    assert!(matches!(
+        Args::try_parse_from(["extension", "update", "octet-mcp"])
+            .unwrap().command,
+        ExtensionCommand::Update { name: Some(name), path: None } if name == "octet-mcp"
+    ));
+    assert!(matches!(
+        Args::try_parse_from(["extension", "update", "--path", "bundle.tar.gz"])
+            .unwrap().command,
+        ExtensionCommand::Update { name: None, path: Some(path) } if path == Path::new("bundle.tar.gz")
+    ));
+    assert!(Args::try_parse_from([
+        "extension",
+        "update",
+        "octet-mcp",
+        "--path",
+        "bundle.tar.gz"
+    ])
+    .is_err());
+}
+
+#[test]
+fn update_all_distinguishes_empty_root_from_discovery_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("extensions");
+    assert!(super::official_bundle_ids_in(&root).unwrap().is_empty());
+    std::fs::write(&root, "not a directory").unwrap();
+    assert!(super::official_bundle_ids_in(&root).is_err());
+}

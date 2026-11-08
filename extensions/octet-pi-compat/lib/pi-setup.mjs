@@ -498,6 +498,41 @@ export function readPiSettings({ agentDir, env = process.env, cwd = process.cwd(
   return { settings: mergeSettings(global, project), diagnostics: ctx.diagnostics };
 }
 
+// The only Pi settings this mirror can apply: session defaults reachable through
+// resources_discover (`theme`, `defaultProvider`+`defaultModel`,
+// `defaultThinkingLevel`) and the resource path lists loaded below. Pi settings
+// with no native Octet destination stay the user's own state: naming them once
+// says what was not applied without inventing a mapping or rewriting settings.
+const PROJECTED_SETTING_KEYS = new Set(['theme', 'defaultProvider', 'defaultModel', 'defaultThinkingLevel',
+  'extensions', 'skills', 'prompts', 'themes', 'packages']);
+// Trust, credential and session state is never read here, so it is never named.
+const UNNAMED_SETTING_KEYS = new Set(['defaultProjectTrust']);
+const MAX_UNMAPPED_SETTING_NAMES = 16;
+
+// Names only, never a value; one grouping level keeps `compaction.enabled` and
+// `images.autoResize` visible. Count and name length are bounded so a crafted
+// settings.json cannot turn this into an unbounded diagnostic.
+function unmappedPiSettings(settings) {
+  const names = [];
+  const collect = (value, prefix) => {
+    for (const key of Object.keys(value)) {
+      const name = (prefix ? `${prefix}.${key}` : key).slice(0, 64).replace(/[\x00-\x1f\x7f]/g, '?');
+      if (!prefix && (PROJECTED_SETTING_KEYS.has(key) || UNNAMED_SETTING_KEYS.has(key))) continue;
+      const child = value[key];
+      if (!prefix && plainObject(child)) {
+        const before = names.length;
+        collect(child, name);
+        if (names.length === before) names.push(name);
+        continue;
+      }
+      names.push(name);
+    }
+  };
+  if (plainObject(settings)) collect(settings, '');
+  names.sort();
+  return { unmapped: names.slice(0, MAX_UNMAPPED_SETTING_NAMES), count: names.length };
+}
+
 // Contract: extensions and resource paths are exact enabled files, not roots
 // that a downstream loader could re-expand to excluded or linked resources.
 // projectTrusted defaults false, even for a reviewed global mirror. Callers
@@ -514,6 +549,14 @@ export function discoverPiSetup({ agentDir, env = process.env, cwd = process.cwd
   setup.defaultTheme = text(settings.theme);
   setup.defaultThinkingLevel = text(settings.defaultThinkingLevel);
   if (text(settings.defaultProvider) && text(settings.defaultModel)) setup.defaultModel = { provider: text(settings.defaultProvider), model: text(settings.defaultModel) };
+  // Everything Pi applies here and Octet cannot: compaction, image handling,
+  // steering/queue delivery and the active-tool selection have native Octet
+  // policy, but no session contribution channel this mirror may write. One
+  // grouped diagnostic states that instead of silently dropping the keys.
+  const unmapped = unmappedPiSettings(settings);
+  setup.unmappedSettings = unmapped.unmapped;
+  setup.unmappedSettingsCount = unmapped.count;
+  if (unmapped.count) diagnostic(ctx, `settings.json: ${unmapped.count} Pi setting${unmapped.count === 1 ? '' : 's'} not applied (no Octet equivalent): ${unmapped.unmapped.join(', ')}${unmapped.count > unmapped.unmapped.length ? `, +${unmapped.count - unmapped.unmapped.length} more` : ''}`);
   const maps = Object.fromEntries(RESOURCE_KINDS.map(kind => [kind, new Map()]));
   const packages = [
     ...packageEntries(projectSettings ?? {}, projectRoot, 'project', ctx),

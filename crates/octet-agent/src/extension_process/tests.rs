@@ -186,6 +186,7 @@ pub(super) fn insert_test_parent(
             resource_owner,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );
@@ -3122,6 +3123,7 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );
@@ -3169,6 +3171,7 @@ fn parent_settlement_cannot_overtake_child_registration() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );
@@ -3250,6 +3253,7 @@ fn non_tool_input_is_delivered_to_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );
@@ -3301,6 +3305,7 @@ fn non_tool_input_fails_closed_without_an_event_consumer() {
             resource_owner: None,
             last_progress_sequence: None,
             tool_call_policy_digest: None,
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );

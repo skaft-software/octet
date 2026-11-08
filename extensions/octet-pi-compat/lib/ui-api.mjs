@@ -62,9 +62,9 @@ function chromeChannel(state) {
 }
 
 export function chromeAPI(runtime, store) {
-  // The same synchronous transport used for durable append provides a real
-  // shell receipt. Getters never invent state, and set/get in one callback sees
-  // the committed value even when a native Ctrl+O happened between callbacks.
+  // Value-returning theme operations use a real shell receipt. Cosmetic setters
+  // update Pi's local state and deliver asynchronously; host snapshots publish
+  // native changes such as Ctrl+O without a synchronous getter round trip.
   //
   // A host without an interactive frontend is Pi's print/headless mode: its UI
   // context still exists and presentation setters do nothing, because there is
@@ -122,6 +122,8 @@ export function chromeAPI(runtime, store) {
     });
   };
   const queue = operation => {
+    runtime.assertOwner(store);
+    store.controller.signal.throwIfAborted();
     if (headless()) return headlessReceipt(operation);
     runtime.require('remote_ui');
     applyLocal(operation);

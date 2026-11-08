@@ -101,6 +101,22 @@ test('the supported range and the emulated surface come from the manifests', () 
   assert.equal(piModule('@earendil-works/pi-ai/providers/anthropic').unmapped, true);
 });
 
+test('current support docs name the emulated release without legacy support ceilings', () => {
+  for (const path of [
+    'docs/pi-compatibility.md', 'docs/pi-extension-api.md', 'docs/extensions.md',
+    'docs/distribution.md', 'docs/pi-migration.md',
+    'docs/pi-compat-release-status.md', 'extensions/octet-pi-compat/README.md',
+    'scripts/pi-eval/README.md',
+  ]) {
+    const text = readFileSync(join(root, '../..', path), 'utf8');
+    assert.ok(text.includes(PI_VERSION), `${path} must name Pi ${PI_VERSION}`);
+    assert.doesNotMatch(text, /Pi 1\.4(?:\.0)?['’]s (?:public )?extension API|1\.0\.2 through 1\.4\.x|1\.5\.0 is\s+out of scope/, path);
+  }
+  const lock = JSON.parse(readFileSync(join(root, '../../scripts/pi-eval/packages.lock.json'), 'utf8'));
+  assert.equal(lock.pi.version, '1.4.0', 'historical package reference is not the current support ceiling');
+  assert.equal(lock.packages.length, 23, 'preserve the original package corpus');
+});
+
 test('release resolution: exact manifest, diagnosed nearest older, unsupported outside it', () => {
   assert.equal(piRelease('1.0.2').exact, true);
   assert.equal(piRelease('1.5.0').exact, true);

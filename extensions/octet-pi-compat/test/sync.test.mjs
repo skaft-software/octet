@@ -10,7 +10,7 @@ import { entryPayload, leafGrant, appendReply } from '../lib/session-leaf.mjs';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const grant = (id = 'a', head = null) => ({ grant_id: id.repeat(64), activation_epoch: 7, operation_id: 'native-operation', owner, expected_head: head });
 const ack = (id = 'native-entry', successor = grant('b', id)) => ({ entry_id: id, head: id, successor });
-async function fixture(t) {
+async function fixture(t, features = ['session_entries']) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-pi-sync-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const entry = join(dir, 'sync.ts');
   await writeFile(entry, `export default pi => {
@@ -29,7 +29,7 @@ async function fixture(t) {
     pi.registerCommand('alongside', {async handler(_,ctx){const question=ctx.ui.confirm('Real async question');append('',ctx);ctx.ui.notify('question:'+await question)}});
     pi.on('tool_call', (event,ctx) => {append(event.input.mode,ctx)});
   };`);
-  const peer = launch(t, [entry], { hold: ['session/append_entry'] }); await peer.init(['session_entries']);
+  const peer = launch(t, [entry], { hold: ['session/append_entry'] }); await peer.init(features);
   peer.snapshot = { session_entries: [], session_branch: [], session_leaf_id: null };
   await peer.start(peer.snapshot);
   peer.invoke = (mode = '', leaf = grant()) => peer.request('hook/run', { hook: 'before_tool_call', payload: {name:'test',arguments:{mode}}, context: peer.context(peer.snapshot), ...(leaf === undefined ? {} : {session_leaf:leaf}) });
@@ -137,7 +137,7 @@ test('entry limits match native private envelope: LF/CR/TAB values only, strict 
 });
 
 test('async reverse replies and serialized notifications remain intact alongside a blocking append', async t => {
-  const peer=await fixture(t), parent=peer.command('alongside',[],peer.snapshot);
+  const peer=await fixture(t, ['session_entries', 'remote_ui']), parent=peer.command('alongside',[],peer.snapshot);
   const question=await peer.wait(f=>f.method==='confirmation/request'), append=await peer.wait(f=>f.method==='session/append_entry');
   peer.send({jsonrpc:'2.0',id:question.id,result:{confirmed:true}});
   await sleep(40);assert.ok(!peer.seen.some(f=>f.method==='notification'));

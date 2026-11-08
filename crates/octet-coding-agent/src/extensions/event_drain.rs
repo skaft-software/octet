@@ -25,6 +25,66 @@ where
 }
 
 impl ExecutableExtensions {
+    /// Observe readiness without consuming the primary, budgeted event queues.
+    /// Subscribe before checking those queues so an arrival on either side of
+    /// the check cannot be lost. The owned future leaves the fleet free to drain
+    /// and can be cancelled without losing a reverse request.
+    pub(crate) fn headless_event_ready(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut receivers = self
+            .receivers
+            .iter()
+            .filter(|receiver| !receiver.is_closed())
+            .map(broadcast::Receiver::resubscribe)
+            .collect::<Vec<_>>();
+        let queued = self.receivers.iter().any(|receiver| !receiver.is_empty());
+        async move {
+            if queued {
+                return;
+            }
+            if receivers.is_empty() {
+                std::future::pending::<()>().await;
+            } else {
+                let waits = receivers
+                    .iter_mut()
+                    .map(|receiver| Box::pin(receiver.recv()));
+                let _ = futures_util::future::select_all(waits).await;
+            }
+        }
+    }
+
+    /// Keep reverse requests live while a headless frontend awaits run or hook
+    /// work. Tool guards and after-response hooks can synchronously await
+    /// tools/snapshot here; they must not depend on another Agent event arriving
+    /// before the host answers. The awaited future is polled first, so this pump
+    /// never delays host progress. Event readiness wakes the ordinary drain
+    /// immediately; the 50 ms tick remains for non-event housekeeping. The drain
+    /// retains its budgets, owner/feature fences and unavailable-UI refusals.
+    pub(crate) async fn with_headless_events<F: std::future::Future>(
+        &mut self,
+        work: F,
+    ) -> F::Output {
+        if self.processes.is_empty() {
+            return work.await;
+        }
+        tokio::pin!(work);
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let events = self.headless_event_ready();
+            tokio::select! {
+                biased;
+                result = &mut work => return result,
+                _ = events => {},
+                _ = tick.tick() => {},
+            }
+            for message in self.drain_events() {
+                crate::output::stderr_multiline(message);
+            }
+            // A ready backlog must not monopolize the runtime between batches.
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Drain completed renderer and autocomplete work without waiting.
     pub fn drain_background_updates(&mut self) -> ExtensionBackgroundUpdates {
         self.poll_telemetry();

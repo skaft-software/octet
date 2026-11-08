@@ -63,6 +63,29 @@ test('mounting editor: held seed read defers first delivery in order and first f
   await peer.close();
 });
 
+test('mounting editor: keys, native text and pasted CRLF preserve arrival order across a held seed', async t => {
+  const { peer, start, id } = await mounting(t);
+  const seed = await peer.wait(f => f.method === 'composer/get');
+  peer.editorKey(id, 'u');
+  peer.notify('ui/editor-text', { surface_id: id, text: 'native' });
+  peer.notify('ui/editor-text', { surface_id: id, text: '\r\np', paste: true,
+    editor_input: { mount_id: `host-editor-${id}`, input_revision: 2 } });
+  peer.notify('ui/key', { surface_id: id, key: 'x', kind: 'press', modifiers: [],
+    editor_input: { mount_id: `host-editor-${id}`, input_revision: 3 } });
+  assert.deepEqual(await probe(peer), []); noFrame(peer);
+  peer.send({ jsonrpc: '2.0', id: seed.id, result: { text: 'seed' } });
+  for (const [index, [input, text]] of [[1, 'seedu'], [1, 'native'], [2, 'native\np'], [3, 'native\npx']].entries()) {
+    const write = await peer.wait(f => f.method === 'composer/set');
+    checkpoint(write, id, input, index + 1); assert.equal(write.params.text, text);
+    noFrame(peer); ack(peer, write);
+  }
+  assert.ok((await start.response).result);
+  await peer.wait(frame('px'));
+  assert.deepEqual(await probe(peer), ['u', '\x1b[200~\np\x1b[201~', 'x']);
+  assert.equal(peer.seen.some(f => f.method === 'ui/close'), false);
+  await peer.close();
+});
+
 test('mounting editor: input also waits through the normalized-seed checkpoint', async t => {
   const { peer, start, id } = await mounting(t);
   const seed = await peer.wait(f => f.method === 'composer/get');
@@ -77,6 +100,11 @@ test('mounting editor: input also waits through the normalized-seed checkpoint',
   assert.ok((await start.response).result); await peer.wait(frame('    seedul')); await peer.close();
 });
 
+// Pi's `setEditorComponent` returns void: the surface it requests is owner-bound
+// presentation, not hook output, so it is never joined to the hook's flush (a
+// host that does not answer `ui/open` must not hold or fail session_start). A
+// refused admission therefore still refuses, closes and diagnoses, without
+// corrupting an already-settled hook.
 for (const foreign of [false, true]) test(`mounting editor: pre-open-reply input ${foreign ? 'cannot choose its own mount' : 'waits for host mount identity and seed'}`, async t => {
   const { peer, start, open, id } = await mounting(t, ['ui/open', 'composer/get', 'composer/set']);
   peer.notify('ui/key', { surface_id: id, key: 'u', kind: 'press', modifiers: [],
@@ -84,9 +112,10 @@ for (const foreign of [false, true]) test(`mounting editor: pre-open-reply input
   assert.deepEqual(await probe(peer), []); noFrame(peer);
   peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24, editor_mount_id: `host-editor-${id}` } });
   if (foreign) {
-    assert.match((await start.response).error?.message, /editor input mount\/revision mismatch/);
+    assert.ok((await start.response).result, 'a refused mount never fails the hook that requested it');
     await peer.wait(f => f.method === 'ui/close');
-    assert.equal(peer.seen.some(f => f.method === 'composer/get' || f.method === 'composer/set'), false);
+    await peer.wait(f => f.method === 'notification' && /editor input mount\/revision mismatch/.test(f.params.message));
+    assert.equal(peer.seen.some(f => f.method === 'composer/get' || f.method === 'composer/set'), false); noFrame(peer);
   } else {
     const seed = await peer.wait(f => f.method === 'composer/get');
     peer.send({ jsonrpc: '2.0', id: seed.id, result: { text: 'seed' } });
@@ -94,6 +123,53 @@ for (const foreign of [false, true]) test(`mounting editor: pre-open-reply input
     checkpoint(write, id, 1, 1); assert.equal(write.params.text, 'seedu'); noFrame(peer); ack(peer, write);
     assert.ok((await start.response).result); await peer.wait(frame('seedu'));
   }
+  await peer.close();
+});
+
+test('mounting editor: a held ui/open ACK never holds or fails session_start, and the delayed mount still seeds and paints', async t => {
+  const { peer, start, open, id } = await mounting(t, ['ui/open']);
+  // The hook settles while the host has not admitted the surface yet. Nothing
+  // about that mount may be cancelled by the settlement it never depended on.
+  assert.ok((await start.response).result);
+  assert.equal(peer.seen.some(f => f.method === 'ui/close' || f.method === '$/cancelRequest' || f.method === 'composer/get'), false,
+    'a pending admission is neither cancelled nor closed by normal settlement');
+  peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24, editor_mount_id: `host-editor-${id}` } });
+  const seed = await peer.wait(f => f.method === 'composer/get');
+  assert.equal(seed.params.parent_request_id, start.id); assert.deepEqual(seed.params.resource_owner, owner);
+  await peer.wait(frame('existing draft'));
+  assert.equal(peer.seen.some(f => f.method === 'ui/close'), false);
+  await peer.close();
+});
+
+test('mounting a slot: a held ui/open ACK never holds session_start, and the delayed footer still paints', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'octet-slot-lifetime-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const entry = join(dir, 'footer.ts');
+  await writeFile(entry, `export default pi => {
+  pi.on('session_start', (_, ctx) => { ctx.ui.setFooter(() => ({ render: () => ['late footer line'], invalidate() {} })); });
+};`);
+  const peer = launch(t, [entry], { hold: ['ui/open'] });
+  await peer.init(['remote_ui', 'composer', 'session_entries']);
+  const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
+  const open = await peer.wait(f => f.method === 'ui/open');
+  assert.equal(open.params.placement, 'footer');
+  assert.ok((await start.response).result);
+  assert.equal(peer.seen.some(f => f.method === '$/cancelRequest'), false, 'a cosmetic slot mount is never cancelled by settlement');
+  peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24 } });
+  await peer.wait(f => f.method === 'ui/frame' && f.params.lines.join('\n').includes('late footer line'));
+  await peer.close();
+});
+
+test('mounting editor: explicit cancellation retires a pending mount; a late admission ACK cannot revive it', async t => {
+  const { peer, start, open, id } = await mounting(t, ['ui/open']);
+  assert.ok((await start.response).result);
+  peer.notify('$/cancelRequest', { id: start.id });
+  // The ACK arrives after the mount was retired: it can only be ignored. The
+  // host never acknowledged the open, so no restoring close may be invented.
+  peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24, editor_mount_id: `host-editor-${id}` } });
+  peer.notify('ui/key', { surface_id: id, key: 'u', kind: 'press', modifiers: [], editor_input: { mount_id: `host-editor-${id}`, input_revision: 1 } });
+  assert.deepEqual(await probe(peer), []);
+  assert.equal(peer.seen.some(f => f.method === 'composer/get' || f.method === 'composer/set' || f.method === 'ui/frame' || f.method === 'ui/close'), false);
   await peer.close();
 });
 

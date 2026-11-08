@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: %s VERSION NATIVE_ARCHIVE_DIRECTORY OUTPUT_DIRECTORY OCTET_SHA256SUMS\n' "$0" >&2
+    printf 'usage: %s VERSION NATIVE_ARCHIVE_DIRECTORY OUTPUT_DIRECTORY OCTET_SHA256SUMS SOURCE_COMMIT\n' "$0" >&2
     printf '\nPackage the three existing GitHub native release archives into four npm tarballs.\n' >&2
 }
 
@@ -10,7 +10,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     usage >&2
     exit 0
 fi
-if [[ $# -ne 4 ]]; then
+if [[ $# -ne 5 ]]; then
     usage
     exit 2
 fi
@@ -19,6 +19,7 @@ version=$1
 archive_directory=$2
 output_directory=$3
 checksums=$4
+source_commit=$5
 script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 template_directory="$script_directory/../packages/npm"
 
@@ -58,6 +59,19 @@ if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
     printf 'SOURCE_DATE_EPOCH must be an unsigned integer: %s\n' "$source_date_epoch" >&2
     exit 1
 fi
+
+# The immutable canonical source commit defines the expected public
+# documentation set. It is not inferred from this checkout: packaging and
+# verification must agree on bytes produced by the signed native release.
+if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'source commit must be a full lowercase commit SHA: %s\n' "$source_commit" >&2
+    exit 2
+fi
+if ! git -C "$script_directory/.." cat-file -e "$source_commit^{commit}" 2>/dev/null; then
+    printf 'canonical source commit is unavailable in this repository: %s\n' "$source_commit" >&2
+    exit 1
+fi
+export OCTET_NPM_SOURCE_COMMIT="$source_commit"
 
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/octet-npm.XXXXXX")
 trap 'rm -rf "$work_directory"' EXIT
@@ -324,7 +338,9 @@ for target, (_, _, _, artifact_name) in TARGETS.items():
     license_bytes = (extracted / "LICENSE").read_bytes()
     if licenses is None:
         licenses = license_bytes
-    elif license_bytes != licenses:
+    elif license_bytes.replace(b"\r\n", b"\n") != licenses.replace(b"\r\n", b"\n"):
+        # Windows checkouts use CRLF. Compare the text without rewriting any
+        # signed source bytes; every platform retains its own original LICENSE.
         fail("native release archives do not share the same LICENSE")
 
 if licenses is None:
@@ -365,8 +381,8 @@ for target, (package_name, operating_system, cpu, _) in TARGETS.items():
         render("platform/README.md.in", {"__TARGET__": target, "VERSION": version}),
         encoding="utf-8",
     )
-    (platform / "LICENSE").write_bytes(licenses)
     source = native[target]
+    copy_file(source / "LICENSE", platform / "LICENSE")
     windows = target == "x86_64-pc-windows-msvc"
     for binary_name in (("octet.exe", "octet-host.exe") if windows else ("octet", "octet-host")):
         copy_file(source / binary_name, platform / "bin" / binary_name, executable=True)

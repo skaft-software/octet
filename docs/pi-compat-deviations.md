@@ -29,6 +29,8 @@ verified), **deliberate** (Octet differs on purpose; documented and diagnosed),
 | `before_agent_start` `messageType: "custom"` | Emitted for `sendMessage(..., {triggerTurn:true})` | Always `"user"` | **open** |
 | Noninteractive message injection | Works in RPC/print | Incomplete | **open** |
 | Compaction summary bound | No refusal | Refuses a handoff over 2 MiB instead of truncating | **open — to free** — refusal is an Octet budget Pi does not have |
+| `--append-system-prompt` value semantics | A value that names an existing file contributes the file's contents, anything else is literal text; repeated flags join with a blank line; Pi re-reads the source on every resource reload | Same text-or-file resolution and Pi section order (after the base prompt or the full `--system-prompt` override, before project context), but a source is read **once at startup** into `Config::append_system_prompt`; every composition applies that text to whatever default/override and `AGENTS.md` files apply at that moment, so a reload still refreshes context and never re-reads the source | **fixed** — `cli.rs`, `config.rs` + `resources.rs`; `cli/tests.rs` and `resources/tests.rs` cover literal/file, override+append, repeated composition, an edited context file with the bridge source deleted, and addendum retention exactly once. Real ACP acceptance not run |
+| `--append-system-prompt` source bound | Unbounded read | One source is bounded to 256 KiB; a source that exists but cannot be read as a bounded regular file (directory, symlink, non-UTF-8, oversized) falls back to the literal value with a diagnostic | **deliberate** — a bounded resource read, diagnosed loudly; contents are never logged |
 
 ## Extensions and host features
 
@@ -47,6 +49,7 @@ verified), **deliberate** (Octet differs on purpose; documented and diagnosed),
 | `navigateTree`, `ctx.shutdown` | Supported | Incomplete | **open** |
 | `project_trust` events | Emitted | Unsupported | **open** |
 | MCP HTTP, credentials, namespaces | Supported | stdio subset only | **open** |
+| `--mcp-config` on the CLI | Pi's own option selects the MCP config file | Refused by the static parser on purpose: the reviewed pi-compat mirror declares pi-mcp-adapter's own `registerFlag("mcp-config", { type: "string" })`, so a selected, enabled and trusted bridge accepts `--mcp-config <path>` through the dynamic extension-flag path and receives it in `initialize.params.flag_values` | **fixed (mechanism proven; end-to-end unproven)** — the generated mirror manifest in `~/.octet/pi-import/octet-pi-compat/extension.toml` carries `{ name = "mcp-config", type = "string", default = "" }`; `cli/tests.rs` proves static refusal plus dynamic acceptance. The leg from `pi.getFlag("mcp-config")` to `loadMcpConfig` and an actual loopback MCP server invocation is read from the installed adapter (`pi-mcp-adapter/init.ts:111-124`) but has not been executed |
 | Windows `pi.exec` | Supported | Unix only | **open** |
 
 ## Security invariants (not compatibility refusals)

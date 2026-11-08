@@ -51,12 +51,10 @@ pub enum ExtensionCommand {
     List,
     /// Install a validated matching release, preserving the previous bundle on failure.
     Update {
-        /// Official extension bundle name.
-        #[arg(
-            value_name = "NAME",
-            required_unless_present = "path",
-            conflicts_with = "path"
-        )]
+        /// Official extension bundle name. Omit to update every installed
+        /// official bundle, which is what a host upgrade requires: bundles are
+        /// pinned to the release that built them.
+        #[arg(value_name = "NAME", conflicts_with = "path")]
         name: Option<String>,
         /// Update from a local release archive instead of downloading one.
         #[arg(long, value_name = "ARCHIVE")]
@@ -101,8 +99,7 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
                 let path = resolve_local_archive_path(&path)?;
                 let manifest = crate::extension_bundle::install_local(&root, &path, true)?;
                 print_bundle_installed("Updated", &manifest);
-            } else {
-                let name = name.expect("clap requires a name unless --path is present");
+            } else if let Some(name) = name {
                 if !crate::extension_bundle::is_official_bundle(&name) {
                     anyhow::bail!(
                         "{name:?} has no official update source; use 'octet extension update --path ARCHIVE'"
@@ -112,6 +109,32 @@ pub async fn run(command: ExtensionCommand) -> anyhow::Result<()> {
                     crate::extension_bundle::install_official(&root, &name, true, &|_, _| {})
                         .await?;
                 print_bundle_installed("Updated", &manifest);
+            } else {
+                // No name: refresh every installed official bundle. A host
+                // upgrade invalidates every bundle pinned to the previous
+                // release, and the refusal is otherwise silent at use time.
+                let pending = official_bundle_ids_in(&root)?;
+                if pending.is_empty() {
+                    crate::output::stdout_line("no installed official extension bundles to update");
+                    return Ok(());
+                }
+                let mut failures = Vec::new();
+                for id in &pending {
+                    match crate::extension_bundle::install_official(&root, id, true, &|_, _| {})
+                        .await
+                    {
+                        Ok(manifest) => print_bundle_installed("Updated", &manifest),
+                        Err(error) => failures.push(format!("{id}: {error:#}")),
+                    }
+                }
+                if !failures.is_empty() {
+                    anyhow::bail!(
+                        "could not update {} of {} bundles: {}",
+                        failures.len(),
+                        pending.len(),
+                        failures.join("; ")
+                    );
+                }
             }
             Ok(())
         }
@@ -345,12 +368,17 @@ pub(crate) fn installed_official_bundle_ids() -> Vec<String> {
     let Ok(root) = extensions_root() else {
         return Vec::new();
     };
-    crate::extension_bundle::list_installed(&root)
-        .unwrap_or_default()
+    official_bundle_ids_in(&root).unwrap_or_default()
+}
+
+/// The same selection against an explicit root, so the refresh set is testable
+/// without touching the operator's `~/.octet`.
+pub(crate) fn official_bundle_ids_in(root: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    Ok(crate::extension_bundle::list_installed(root)?
         .into_iter()
         .filter(|bundle| crate::extension_bundle::is_official_bundle(&bundle.id))
         .map(|bundle| bundle.id)
-        .collect()
+        .collect())
 }
 
 fn list_installed_bundles(root: &Path) -> anyhow::Result<()> {

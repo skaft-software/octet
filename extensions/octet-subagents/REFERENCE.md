@@ -1,14 +1,13 @@
 # octet-subagents reference
 
-**Distribution: 0.8.0.** This bundle requires exactly octet 0.8.0.
-Use the [version-matched installation](../../docs/installation.md) and the
-[0.8.0 release record](../../docs/releases/v0.8.0.md) for signed assets and
-public-install evidence. Reviewed source checkouts and local archives remain
-separate installation options.
+**Source candidate distribution: 0.9.6.** This bundle requires exactly octet
+0.9.6. See the [version-matched installation](../../docs/installation.md) and
+[0.9.6 candidate record](../../docs/releases/v0.9.6.md) for availability and
+qualification. Reviewed source checkouts and local archives are separate from
+published assets.
 
 [Usage guide](README.md). This is the bundled API `0.4` runtime contract, not a
-general extension-authoring tutorial. Source distribution `0.8.0` requires
-exactly octet `0.8.0`; API versions remain independent.
+general extension-authoring tutorial. Distribution and API versions are independent.
 
 The executable launches named, single-purpose child conversations through the
 host-owned `agent_sessions` service. It is not an agent team, graph/recipe runtime,
@@ -72,8 +71,12 @@ octet owns:
 - the child model conversations and durable session files;
 - ancestry, concurrency/depth/team limits, inherited permissions, and cost limits;
 - owner/principal checks for every `agent/*` request;
-- persistence, cancellation, restart service continuity, and descendant shutdown;
-- completion mailbox claim/ack and delivery as a legal new parent event/turn.
+- persistence, cancellation, restart service continuity, and descendant shutdown.
+
+The native collaboration tools have completion mailbox claim/ack; the extension's
+`agent/wait` is a roster observation, not that delivery path. An extension worker
+finishing does not currently start a parent turn automatically. Retrieve its
+result with `subagent_wait` or `subagent_status`.
 
 The extension calls only these SDK helpers, which map directly to API `0.4`:
 
@@ -86,21 +89,22 @@ The extension calls only these SDK helpers, which map directly to API `0.4`:
 - `follow_up_agent` → `agent/follow_up`.
 
 `agent/message` steers an active worker and `agent/follow_up` resumes a
-settled one; both are exposed only through `subagent_continue`. It does not
-use the graph/recipe spike, built-in team mailboxes, or another scheduler.
+settled one; both are exposed through `subagent_continue` and the owner-bound
+`/subagents continue` command. The extension does not use the graph/recipe spike,
+built-in team mailboxes, or another scheduler.
 
 ## Install, enable, and trust
 
-The source bundle requires local octet 0.8.0 and has one root directory named
-`octet-subagents`. With [octet 0.8.0](../../docs/installation.md)
+The source bundle requires local octet 0.9.6 and has one root directory named
+`octet-subagents`. With [octet 0.9.6](../../docs/installation.md)
 and verified version-matched published assets, use the catalog command:
 
 ```console
 octet extension install octet-subagents
 ```
 
-For source testing with a locally built octet 0.8.0 and reviewed local
-archive, use `octet extension install --path ./octet-subagents-0.8.0.tar.gz`.
+For source testing with a locally built octet 0.9.6 and reviewed local
+archive, use `octet extension install --path ./octet-subagents-0.9.6.tar.gz`.
 
 Installation/discovery is inert: it never enables, persists a trust grant, or
 starts the process. The bundle is disabled by default. Default full access
@@ -147,15 +151,7 @@ Launch a worker in the background by default:
   "name": "explore-auth",
   "task": "Trace authentication ownership and report relevant files and invariants.",
   "profile": "explore",
-  "provider": "inherit",
-  "model": "inherit",
-  "reasoning": "inherit",
   "tools": ["read"],
-  "timeout_seconds": 300,
-  "max_turns": 8,
-  "max_output_bytes": 8192,
-  "max_cost_microdollars": 200000,
-  "background": true,
   "idempotency_key": "auth-audit-v1"
 }
 ```
@@ -163,6 +159,8 @@ Launch a worker in the background by default:
 There is intentionally no `max_tokens` argument. The child gets a fresh model
 context with the parent's model context/output limits and inherits the parent's
 optional cumulative session-token ceiling exactly (`null` remains unlimited).
+Time, turn and cost limits also inherit by default; set separate ceilings only
+when required rather than guessing a short deadline or small turn budget.
 
 ### Per-worker provider, model, and reasoning
 
@@ -183,6 +181,9 @@ and is bounded to 1–100. Results contain `models` and `truncated`; rows expose
 provider/model identifiers, display name, reasoning levels, context window and
 maximum output tokens, never credentials. Narrow the query when truncated.
 Discovery is owner-bound and read-only; it does not authenticate or start workers.
+The current explicit provider/model input syntax is narrower than the configured
+host catalog: IDs containing spaces or Unicode may be discovered and inherited,
+but cannot yet be supplied as explicit selections through this extension.
 
 Reasoning identifiers are `inherit`, `off`, `on`, `minimal`, `low`, `medium`,
 `high`, `xhigh`, `max`, and `ultra`; use the choices returned for the target model.
@@ -199,7 +200,7 @@ the inspector, survive restoration, and are preserved by continuation. Host
 
 If no key is supplied, the extension derives one from the complete canonical request. Keys are scoped by octet to the extension principal and durable session owner. Identical retries return the same host-present child. Parent-turn completion does not retire live workers. If a reconstructed owner cannot yet attach a retained record, the worker is **detached**: still owned by this parent session, but not presently running in the host. The extension retains the last bounded summary/error, usage, and the complete sibling roster as recoverable evidence, reports the worker as `detached` with a reattach affordance, and reattaches it automatically when the owning session republishes the live record (see *Session-scoped delegation*). An explicit identical retry may also replace that detached cache entry and ask the host to create a new authoritative worker. Reuse with different input fails. The orchestration fingerprint is also placed in the canonical child message so a restart cannot accidentally make host-visible input equality narrower than extension input equality.
 
-The immediate result is an acknowledgement, not completion. Continue independent parent work and let octet deliver the worker's concise final output through its durable parent mailbox. Set `background: false` only when a bounded foreground wait is actually useful.
+The immediate result is an acknowledgement, not completion. Continue independent parent work, then retrieve the bounded output with `subagent_wait` or `subagent_status`. Extension worker completion does not currently wake the parent automatically. Set `background: false` only when a bounded foreground wait is actually useful.
 
 ### `subagent_status`
 
@@ -421,17 +422,22 @@ read-only. The TUI's live block is host-rendered from semantic activity metrics;
 no extension status or footer contribution is rendered. `/subagents` (also
 `/subagents list` or `/subagents status`) opens a host-owned live list, including
 during a turn:
-Up/Down moves between workers, Enter opens the selected scrollable read-only
-transcript, Ctrl+X stops the selected worker, and Escape or Left returns to the
-list. The same owner-bound status command used by the live tick
-and open panel reconciles authoritative `agent_sessions` state and publishes the
-next complete presentation revision; the frontend keeps focus by stable node ID
-and revalidates the latest owner-scoped reference before opening it.
-`/extensions inspect agent-session:<digest>` remains the explicit reference
-fallback. Both paths open only a child in the current parent's delegation team.
-Neither frontend can submit prompts or mutate a worker; all mutation remains on
-owner-bound `agent_sessions`. The package supplies no Rust TUI plugin, web code,
-or frontend scheduler. Generic rendering, selection/navigation, reconnect and
+Up/Down moves between workers, Enter opens the selected scrollable transcript,
+Ctrl+G composes a message, and Ctrl+X stops the selected worker. In the transcript,
+Ctrl+O toggles retained details and Ctrl+G composes a message to that worker;
+Escape or Left returns to the list. The message composer sends on Enter, adds a
+line on Shift+Enter and cancels on Escape. `/subagents continue <name-or-id> <message>`
+provides the same owner-bound steer or resume operation. The host revalidates the
+selected worker and owner after composition; a stale selection is not sent. The
+status command used by the open panel reconciles authoritative `agent_sessions`
+state and publishes the next complete presentation revision. The frontend keeps
+focus by stable node ID and revalidates the latest owner-scoped reference before
+opening it. `/extensions inspect agent-session:<digest>` remains the explicit
+reference fallback. Both transcript paths open only a child in the current
+parent's delegation team, and the recorded transcript stays read-only. TUI
+messages use owner-bound `agent_sessions`; Serve remains read-only. The package
+supplies no Rust TUI plugin, web code, or frontend
+scheduler. Generic rendering, selection/navigation, reconnect and
 instance/generation fencing, authenticated action routing, and Serve transport
 are host-owned.
 
@@ -445,12 +451,13 @@ Subagents · 1 running · 1 done
 
 Use `/subagents inspect <name-or-id>` for cached read-only detail. The octet coding
 host binds API `0.4` command requests to their host-derived owner, so the worker
-list's Ctrl+X, `/subagents stop <name-or-id|all>`, and the generic Serve stop
-action use the same owner-checked `agent_sessions` path. During an active turn,
-roster and stop controls run immediately without blocking the parent; other
-`/subagents` operations queue until idle. `/extensions` only manages extension
-enablement and configuration, not runtime workers. A host or headless integration that omits
-`context.resource_owner` fails closed without issuing a stop. The extension
+list's Ctrl+G/Ctrl+X, `/subagents continue` and `/subagents stop <name-or-id|all>`,
+and the generic Serve stop action use owner-checked `agent_sessions` paths. During
+an active turn, roster, message and stop controls run without waiting for the
+parent; other `/subagents` operations queue until idle. `/extensions` only manages
+extension enablement and configuration, not runtime workers. A host or headless
+integration that omits `context.resource_owner` fails closed without sending or
+stopping a worker. The extension
 never smuggles a stale request ID into a command. A cached list may lag; run
 `subagent_status` from an active model turn to resync.
 
@@ -486,4 +493,4 @@ From the package root:
 python3 -m unittest discover -s tests -v
 ```
 
-The package-owned fake host service covers owner/principal isolation, concurrency, duplicate keys, cancellation races, timeout interruption, supervised restart/resync, completion claim/ack and legal parent-turn delivery, session/export inspection, and descendant shutdown. Protocol tests run the vendored SDK over JSON-RPC streams and verify negotiation, owner correlation, presentation updates, `/subagents`, cancellation, and graceful shutdown. Release tests verify manifest/archive bounds, SDK synchronization, fixtures, executable bits, and the smoke report. Fixture coverage does not qualify live-provider behavior or measured gains.
+The package-owned fake host service covers owner/principal isolation, concurrency, duplicate keys, cancellation races, timeout interruption, supervised restart/resync, simulated completion claim/ack, session/export inspection, and descendant shutdown. The simulated completion path does not establish automatic parent delivery in the real extension host. Protocol tests run the vendored SDK over JSON-RPC streams and verify negotiation, owner correlation, presentation updates, `/subagents`, cancellation, and graceful shutdown. Release tests verify manifest/archive bounds, SDK synchronization, fixtures, executable bits, and the smoke report. Fixture coverage does not qualify live-provider behavior or measured gains.

@@ -29,6 +29,15 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 octet --version   # octet 0.10.3
 ```
 
+The installer downloads into a private directory under `TMPDIR` (default `/tmp`)
+and validates and extracts the archive there before installing anything. If that
+filesystem refuses the write, the installer reports the filesystem error itself,
+including the errno — for example `EDQUOT` (disk quota exceeded) or `ENOSPC` (no
+space left on device) — and the directory it was writing into, instead of
+reporting the archive as malformed. Check the quota or free space for `TMPDIR`,
+or point `TMPDIR` at a filesystem with room such as `$HOME`, and re-run the same
+command.
+
 When moving from Ygg, install octet afresh. Older installations and data stay
 untouched, and there's no automatic migration. Homebrew, crates.io and SDK
 registries remain separate, unpublished channels. CLI installation with Bun is unqualified.
@@ -146,6 +155,13 @@ host; do not reuse a 0.9.6 bundle with octet 0.10.3.
 octet extension install octet-web-search
 octet extension list
 ```
+
+After updating the host, run `octet extension update` to refresh every installed
+official bundle to the matching host release. Third-party bundles are left alone;
+update those from a reviewed local archive with `octet extension update --path
+./bundle.tar.gz`. A named update refreshes only that official bundle. Bulk updates
+attempt every selected bundle and report failures; each failed bundle retains its
+previous installation.
 
 For a reviewed local archive instead, use
 `octet extension install --path ./bundle.tar.gz`. Installing is inert: it

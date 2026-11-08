@@ -285,7 +285,11 @@ export function textOnly(content) {
 // transport timeout and then failed it, so resource discovery admitted no paths
 // and every later extension burned its own startup budget.
 function detachedUi(runtime, store, promise, slot) {
-  const observed = Promise.resolve(promise);
+  // Pin at queue admission, before the hook settles (or an earlier slot mounts).
+  // Release after the first frame/refusal so retained callbacks use publication.
+  const transport = runtime.sessionTransport, view = transport?.ownView(store);
+  if (view) transport.retain(view);
+  const observed = Promise.resolve(promise).finally(() => { if (view) transport.drop(view); });
   const state = store.state;
   observed.catch(error => {
     state.uiFailures ??= new Set();
@@ -314,6 +318,7 @@ export function createContext(runtime, store, replaced = false) {
     runtime.require('remote_ui'); foreground();
     if (factory !== undefined && typeof factory !== 'function' && !Array.isArray(factory)) invalid(`${slot} factory`);
     const action = async () => {
+      await runtime.presentationReady(store);
       let result;
       if (factory === undefined) result = await runtime.ui.clearSlot(store, slot);
       else {
@@ -325,6 +330,10 @@ export function createContext(runtime, store, replaced = false) {
     };
     const key = slot, prev = store.state.uiQueues.get(key) || Promise.resolve();
     const promise = prev.then(action); store.state.uiQueues.set(key, promise.catch(() => {}));
+    // Exactly Pi: a slot is presentation. The mount is delivered after the
+    // request returns, never holds or fails it, and its own lifetime (admission,
+    // seed, first frame) is bounded by the surface, the owner and an explicit
+    // cancellation - not by the settlement of the request that asked for it.
     return detachedUi(runtime, store, promise, slot);
   };
   const syncStatuses = () => {
@@ -332,7 +341,7 @@ export function createContext(runtime, store, replaced = false) {
     const state = foreground(), slot = 'statuses';
     if (state.host.has_ui === false) return;
     const action = async () => {
-      runtime.assertOwner(store); store.controller.signal.throwIfAborted();
+      await runtime.presentationReady(store);
       if (state.host.has_ui === false) return;
       if (!state.statuses.size || runtime.ui.slots.has(`${state.key}:footer`)) return runtime.ui.clearSlot(store, slot);
       const surface = runtime.ui.slots.get(`${state.key}:${slot}`);
@@ -423,13 +432,13 @@ export function createContext(runtime, store, replaced = false) {
         return editor;
       });
     },
-    setFooter: factory => setSlot('footer', 'footer', factory),
-    setHeader: factory => setSlot('header', 'header', factory),
+    setFooter(factory) { setSlot('footer', 'footer', factory); },
+    setHeader(factory) { setSlot('header', 'header', factory); },
     setWidget(key, value, options = {}) {
       bounded(key, 'widget key', 64); fields(options, ['placement'], 'widget options');
       const placement = { aboveEditor: 'above_editor', belowEditor: 'below_editor' }[options.placement || 'aboveEditor'];
       if (!placement) invalid('widget placement');
-      return setSlot(`widget:${key}`, placement, value);
+      setSlot(`widget:${key}`, placement, value);
     },
     ...editorAPI(runtime, store, setSlot),
     ...chromeAPI(runtime, store),

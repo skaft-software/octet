@@ -622,8 +622,8 @@ mod tests {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let activity = tool(
             "read",
             serde_json::json!({"path": "src/a.rs"}),
@@ -667,8 +667,8 @@ mod tests {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let prose = TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
             "hello".into(),
         )));
@@ -718,8 +718,8 @@ mod tests {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let renderer = theme.rich_renderer();
         let plan = compile_surface_plan(None, &prompt, &theme, 160);
         assert!(plan.bleeds(), "a capped band should bleed: {plan:?}");
@@ -757,8 +757,8 @@ mod tests {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let plan = compile_surface_plan(None, &prompt, &theme, 160);
         assert!(!plan.bleeds(), "an uncapped band must not bleed: {plan:?}");
         assert_eq!((plan.bleed_left, plan.bleed_right), (0, 0));
@@ -1097,8 +1097,8 @@ mod tests {
                     model_lab: None,
                     prompt_color: Some(source_color.into()),
                     persisted: true,
-                         injected: false,
-                     };
+                    injected: false,
+                };
                 let plan = compile_surface_plan(None, &user, &theme, 80);
                 assert_eq!(plan.frame_left, tool_plan.frame_left);
                 assert_eq!(plan.geometry.content_left, 2);
@@ -1151,8 +1151,8 @@ mod tests {
                     model_lab,
                     prompt_color: None,
                     persisted: true,
-                         injected: false,
-                     };
+                    injected: false,
+                };
                 let renderer = theme.rich_renderer();
                 let rows = render_block_planned(
                     None, &user, &theme, &renderer, &renderer, 80, false, 0, 0,
@@ -1186,8 +1186,8 @@ mod tests {
             model_lab: None,
             prompt_color: None,
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let bash = tool("bash", serde_json::json!({}), "ok".into(), None);
         let user_plan = compile_surface_plan(None, &user, &theme, 80);
         let tool_plan = compile_surface_plan(None, &bash, &theme, 80);
@@ -1243,8 +1243,8 @@ mod tests {
             model_lab: None,
             prompt_color: Some("#123456".into()),
             persisted: true,
-                 injected: false,
-             };
+            injected: false,
+        };
         let renderer = filled.rich_renderer();
         let rendered =
             render_block_planned(None, &user, &filled, &renderer, &renderer, 80, false, 0, 0)
@@ -1415,8 +1415,8 @@ mod tests {
                 model_lab: None,
                 prompt_color: None,
                 persisted: true,
-                     injected: false,
-                 };
+                injected: false,
+            };
             assert_eq!(
                 compile_surface_plan(None, &prompt, &theme, width).frame_width,
                 width

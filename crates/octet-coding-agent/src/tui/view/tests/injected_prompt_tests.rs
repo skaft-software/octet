@@ -2,8 +2,6 @@
 //! default so a long paste cannot consume the transcript's scrollable area;
 //! Ctrl+O (the existing expansion toggle) reveals it in full.
 
-use super::support::*;
-
 use super::*;
 
 fn steering_block(text: &str, injected: bool) -> TranscriptBlock {
@@ -13,7 +11,7 @@ fn steering_block(text: &str, injected: bool) -> TranscriptBlock {
         prompt_color: None,
         persisted: true,
         injected,
-}
+    }
 }
 
 fn rendered(text: &str, injected: bool, width: u16, verbose: bool) -> Vec<String> {
@@ -111,7 +109,10 @@ fn short_injected_prompt_is_untouched() {
     let short = "check the docs";
     let lines = rendered(short, true, 80, false);
     assert!(lines.iter().any(|line| line.contains(short)), "{lines:?}");
-    assert!(!lines.iter().any(|line| line.contains("ctrl+o")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("ctrl+o")),
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -120,12 +121,20 @@ fn queued_steering_preview_is_bounded_in_fullscreen() {
     let long = long_prompt();
     shell.queue_steering(&ComposedInput::from_text(long));
     shell.queue_steering(&ComposedInput::from_text("second queued steering".into()));
-    let preview = crate::tui::view::input_overlays::render_pending_steering(&shell.state.borrow(), 120, 3);
+    let preview = crate::tui::view::input_overlays::render_pending_steering(
+        &shell.state.borrow(),
+        120,
+        3,
+        false,
+    );
     assert!(
         preview.len() <= 3,
         "the queued steering preview must respect its row budget: {preview:?}"
     );
-    assert!(preview.iter().any(|line| line.contains("queued")), "{preview:?}");
+    assert!(
+        preview.iter().any(|line| line.contains("queued")),
+        "{preview:?}"
+    );
 }
 
 /// Ctrl+O must re-render historic blocks. The disclosure invalidation used to

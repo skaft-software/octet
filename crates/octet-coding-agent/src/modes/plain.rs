@@ -366,7 +366,7 @@ async fn run_prompt(
                 .await;
                 break HostRunOutcome::shutdown();
             }
-            event = run.next() => {
+            event = app.executable_extensions.with_headless_events(run.next()) => {
                 let Some(event) = event else {
                     let reason = RUN_STREAM_LOST_MESSAGE;
                     let outcome = tracker

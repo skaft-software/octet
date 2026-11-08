@@ -1080,9 +1080,14 @@ async fn run_update(
     crate::output::stdout_line(format!(
         "octet updated to {latest}. Restart octet to use it."
     ));
-    for extension in crate::extension_package::installed_official_bundle_ids() {
+    // Bundles are pinned to the release that built them, so every installed
+    // official bundle is stale until it is refreshed. Say it once, with the one
+    // command that now refreshes them all.
+    let stale = crate::extension_package::installed_official_bundle_ids();
+    if !stale.is_empty() {
         crate::output::stdout_line(format!(
-            "Run `octet extension update {extension}` to install the bundle matching octet {latest}."
+            "{} extension bundle(s) still target the previous release; run `octet extension update` to install the bundles matching octet {latest}.",
+            stale.len()
         ));
     }
     Ok(())

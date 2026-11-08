@@ -193,8 +193,8 @@ fn transcript_events_prompt_and_composer_share_one_grid() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     let assistant =
         TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("answer".into())));
     let mut working =

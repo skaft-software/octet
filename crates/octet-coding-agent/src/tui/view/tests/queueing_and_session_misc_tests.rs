@@ -138,7 +138,7 @@ fn queued_follow_up_preview_is_bounded_and_control_safe() {
     ));
     shell.queue_follow_up(ComposedInput::from_text("second".into()));
     for width in [20, 40, 80] {
-        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
+        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10, true);
         assert_eq!(rows.len(), 10);
         let notice = strip_terminal_sequences(rows.last().unwrap());
         assert!(notice.starts_with("    … "), "{notice}");
@@ -156,7 +156,7 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
     let mut steering_shell = InteractiveShell::test_shell();
     steering_shell.queue_steering(&ComposedInput::from_text("steering only".into()));
     let steering_only =
-        input_overlays::render_pending_steering(&steering_shell.state.borrow(), 80, 2);
+        input_overlays::render_pending_steering(&steering_shell.state.borrow(), 80, 2, false);
     let heading = strip_terminal_sequences(&steering_only[0]);
     assert!(heading.contains("Steering"), "{heading:?}");
     assert!(
@@ -167,7 +167,8 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
 
     let mut shell = InteractiveShell::test_shell();
     shell.queue_follow_up(ComposedInput::from_text("local follow-up".into()));
-    let with_follow_up = input_overlays::render_pending_steering(&shell.state.borrow(), 80, 2);
+    let with_follow_up =
+        input_overlays::render_pending_steering(&shell.state.borrow(), 80, 2, false);
     let heading = strip_terminal_sequences(&with_follow_up[0]);
     // Windows and WSL use the Windows-flavoured key set, which binds Alt+Q.
     let wsl = cfg!(target_os = "linux")
@@ -188,7 +189,7 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
         "  └ local follow-up"
     );
     for width in [20, 40, 80] {
-        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10);
+        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), width, 10, false);
         assert!(rows.iter().all(|row| visible_width(row) <= width as usize));
     }
 }
@@ -501,8 +502,8 @@ fn colored_prompt_preserves_markdown_runs_inside_its_highlight() {
         model_lab: Some(ModelLab::OpenAi),
         prompt_color: Some("#123456".into()),
         persisted: true,
-             injected: false,
-         };
+        injected: false,
+    };
     assert_eq!(block_copy_text(&block), source);
     let rows = render_block(
         None,

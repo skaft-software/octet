@@ -6,6 +6,8 @@ use base64::Engine as _;
 mod builtin_override_replay;
 #[path = "pending_messages_tests.rs"]
 mod pending_messages_tests;
+#[path = "session_replacement_tests.rs"]
+mod session_replacement_tests;
 #[path = "tool_schema_budget_tests.rs"]
 mod tool_schema_budget_tests;
 

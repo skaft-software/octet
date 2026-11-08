@@ -61,7 +61,7 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/skills ...` | List, search, inspect, load, unload or reload [skills](instructions.md#skills). |
 | `/skill:NAME [arguments]` | Expand a skill as a user prompt when sent, not as a local slash command. During a run, Enter or Ctrl+S queues it, so it expands at the next idle prompt. |
 | `/extensions [install\|status\|reload]` | Enable, disable and configure extensions (below), or show or reload extension state. `/extensions install` downloads and installs every missing first-party bundle with live progress; installed bundles stay off until you enable them. Menu changes and installs wait for idle during a run. |
-| `/subagents [list\|status\|inspect\|wait\|reattach\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents stop <name-or-id\|all>` requests owner-bound interruption immediately. Other operations wait for idle. |
+| `/subagents [list\|status\|inspect\|wait\|reattach\|continue\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents continue <name-or-id> <message>` and `/subagents stop <name-or-id\|all>` send owner-bound controls immediately. Other operations wait for idle. |
 | `/settings [show\|theme\|tui fullscreen/inline\|steering one-at-a-time/all\|follow-up one-at-a-time/all\|images on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme, terminal screen, steering and follow-up modes and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model-cycling scope. Changes apply to Ctrl+P at once and persist as an exact ordered pattern list (`models` in the user config). `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/help [command]` | Help for a command. |
@@ -242,7 +242,7 @@ See [Discovery and trust](resources.md).
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the resolved `--models` scope (or the available catalog with no scope). Backward is Alt+P on Windows and WSL. Drafts are kept. |
 | Ctrl+L | Open the model selector. |
 | Ctrl+Up / Ctrl+Down | Jump between prompt boundaries. |
-| Ctrl+O | Show kept reasoning, compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
+| Ctrl+O | Expand or collapse kept reasoning, compaction, subagent activity, tool commands, tool evidence and shell output, including in a worker transcript. It can't recover discarded output. |
 | PageUp / PageDown | Scroll the transcript. PageUp pins the view, PageDown returns toward live output. |
 | Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. History never submits. |
 | Tab | Complete the selected slash command without running it, or insert the selected path or `@` file suggestion. Directories stay open, and spaces are backslash-escaped. |
@@ -250,7 +250,8 @@ See [Discovery and trust](resources.md).
 
 The [resume picker](sessions.md#resume-and-branch) and the [subagent worker
 list](../extensions/octet-subagents/README.md#tui-and-serve-presentation)
-(Ctrl+X stops the selected worker) have their own keys. [Terminal
+(Ctrl+G messages and Ctrl+X stops the selected worker) have their own keys.
+Ctrl+G also messages the worker from its transcript. [Terminal
 scrolling](terminal.md#scrolling-and-rendering) covers the mouse.
 
 <details>

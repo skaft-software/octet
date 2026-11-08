@@ -552,6 +552,7 @@ pub(super) async fn spawn_connection(
     }
     if offered_host_services.bulk_objects {
         optional_features.push(EXTENSION_FEATURE_BULK_OBJECTS_V1.to_owned());
+        optional_features.push(EXTENSION_FEATURE_BULK_HOOK_REFERENCE_V1.to_owned());
     }
     if offered_host_services.tool_composition {
         optional_features.push(EXTENSION_FEATURE_TOOL_COMPOSITION.to_owned());

@@ -28,7 +28,7 @@ test('private provider callback exception is redacted, not emitted with wire bod
   assert.ok(peer.seen.filter(frame => frame.method === 'notification').every(frame => !JSON.stringify(frame).includes('NEVER-LOG-ME'))); await peer.close();
 });
 test('provider pipeline cancellation has no late success or header/payload publication', async t => {
-  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] }); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] }); await peer.init(['pipeline_hooks_v1', 'remote_ui']); await peer.start();
   const request = peer.request('hook/run', { hook: 'before_provider_request', context: peer.context({ session_name: 'wait' }), payload: { operation_id: 'attempt', model, payload: {} } });
   const call = await peer.wait(frame => frame.method === 'confirmation/request'); peer.notify('$/cancelRequest', { id: request.id });
   assert.equal((await request.response).error.code, -32800);

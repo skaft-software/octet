@@ -4,6 +4,17 @@ import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
 export const pipelineHooks = ['before_provider_request', 'before_provider_headers', 'after_provider_response'];
+// Fallback body budget for a host that does not state one. A current host sends
+// the exact budget that fits its protocol frame (`payload_limit_bytes`), so the
+// extension validates against the real transport instead of guessing an
+// envelope; 768 KiB refused legitimate long-context requests outright.
+export const PIPELINE_PAYLOAD_BYTES = 1000 * 1024;
+export const MAX_PIPELINE_PAYLOAD_BYTES = 64 * 1024 * 1024;
+function payloadBudget(value) {
+  if (value === undefined) return PIPELINE_PAYLOAD_BYTES;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_PIPELINE_PAYLOAD_BYTES) invalid('provider payload budget');
+  return value;
+}
 function headers(value, deleting = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 256) invalid('provider header map');
   const result = Object.create(null);
@@ -24,7 +35,7 @@ export async function providerPipeline(runtime, params, store) {
   if (!pipelineHooks.includes(hook) || !runtime.metadata().hooks.includes(hook)) invalid('undeclared provider pipeline hook');
   ownerKey(params.context?.resource_owner);
   const body = params.payload;
-  fields(body, hook === 'before_provider_request' ? ['operation_id', 'model', 'payload'] : hook === 'before_provider_headers' ? ['operation_id', 'model', 'headers'] : ['operation_id', 'model', 'status', 'headers'], 'provider pipeline');
+  fields(body, hook === 'before_provider_request' ? ['operation_id', 'model', 'payload', 'payload_limit_bytes'] : hook === 'before_provider_headers' ? ['operation_id', 'model', 'headers'] : ['operation_id', 'model', 'status', 'headers'], 'provider pipeline');
   bounded(body.operation_id, 'provider operation', 256);
   if (!body.operation_id) invalid('provider operation');
   fields(body.model, ['id', 'provider', 'api'], 'provider model');
@@ -33,11 +44,15 @@ export async function providerPipeline(runtime, params, store) {
   const signal = store.controller.signal, live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
-    let payload = hook === 'before_provider_request' ? plainJSON(body.payload, 'provider payload', 786432) : undefined;
+    // One budget governs both directions: the body this phase receives and the
+    // replacement it returns must each fit the same protocol frame, or the host
+    // transport would reject the reply after the hook has already run.
+    const budget = hook === 'before_provider_request' ? payloadBudget(body.payload_limit_bytes) : PIPELINE_PAYLOAD_BYTES;
+    let payload = hook === 'before_provider_request' ? plainJSON(body.payload, 'provider payload', budget) : undefined;
     const originalHeaders = hook !== 'before_provider_request' ? headers(body.headers) : undefined;
     const mutableHeaders = originalHeaders && structuredClone(originalHeaders);
     if (hook === 'after_provider_response' && (!Number.isInteger(body.status) || body.status < 100 || body.status > 599)) invalid('provider response status');
-    const budget = new HookBudget(runtime, store, hook);
+    const hooks = new HookBudget(runtime, store, hook);
     for (const entry of [...runtime.events.get(hook) || []]) {
       live(); const child = { ...store, factory: entry.factory };
       const event = hook === 'before_provider_request' ? { type: hook, payload }
@@ -45,7 +60,7 @@ export async function providerPipeline(runtime, params, store) {
         : { type: hook, status: body.status, headers: Object.fromEntries(Object.entries(originalHeaders).map(([key, value]) => [key, Array.isArray(value) ? value.join(', ') : value])) };
       let result;
       try {
-        const run = await cancellable(budget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(facade(event, `${hook} event`), createContext(runtime, child)))), signal);
+        const run = await cancellable(hooks.run(entry, child, () => runtime.scope.run(child, () => entry.handler(facade(event, `${hook} event`), createContext(runtime, child)))), signal);
         if (!run.ran) continue; // a stalled provider callback must not hold the model request
         result = run.value;
       }
@@ -57,11 +72,11 @@ export async function providerPipeline(runtime, params, store) {
         runtime.reportCallbackError(hook, entry.factory, error); continue;
       }
       live();
-      if (hook === 'before_provider_request' && result !== undefined) payload = plainJSON(result, 'provider payload', 786432);
+      if (hook === 'before_provider_request' && result !== undefined) payload = plainJSON(result, 'provider payload', budget);
       // Pi header/response callback return values have no semantic effect;
       // headers are changed in place, and response arrival is observation only.
     }
-    budget.finish();
+    hooks.finish();
     await cancellable(runtime.flush(store), signal); live();
     if (hook === 'before_provider_request') {
       if (!payload || typeof payload !== 'object') invalid('provider payload replacement must be JSON object/array');

@@ -1345,6 +1345,7 @@ async fn handle_idle_command(
     command: Value,
     output: &mut RpcOutput,
     settings: &mut RpcSettings,
+    pending_messages: usize,
 ) -> anyhow::Result<App> {
     let id = command_id(&command).map(str::to_owned);
     let kind = command_type(&command).unwrap_or("parse").to_owned();
@@ -1359,7 +1360,7 @@ async fn handle_idle_command(
         "get_state" => output.success(
             id.as_deref(),
             &kind,
-            Some(state_value(&app, settings, false, 0, None)),
+            Some(state_value(&app, settings, false, pending_messages, None)),
         )?,
         "get_messages" => output.success(
             id.as_deref(),
@@ -1822,7 +1823,8 @@ async fn run_rpc_loop(
         }
 
         if kind != "prompt" {
-            app = handle_idle_command(app, command, &mut output, &mut settings).await?;
+            app =
+                handle_idle_command(app, command, &mut output, &mut settings, queue.len()).await?;
             continue;
         }
 
@@ -1914,20 +1916,22 @@ async fn run_rpc_loop(
         output.send(json!({"type": "message_start", "message": user_message}))?;
         output.send(json!({"type": "message_end", "message": user_message}))?;
 
-        let (queued, input_eof, finish) = drive_run(
-            &mut run,
-            &mut input,
-            &mut output,
-            &state,
-            &commands,
-            skills,
-            prompts,
-            workspace,
-            &mut translator,
-            &mut queue,
-            &mut settings,
-        )
-        .await?;
+        let (queued, input_eof, finish) = app
+            .executable_extensions
+            .with_headless_events(drive_run(
+                &mut run,
+                &mut input,
+                &mut output,
+                &state,
+                &commands,
+                skills,
+                prompts,
+                workspace,
+                &mut translator,
+                &mut queue,
+                &mut settings,
+            ))
+            .await?;
         drop(run);
         if let Some(notice) = crate::commands::cache_miss_notice(&app, prior_cache_misses) {
             crate::output::stderr_line(notice);

@@ -3552,29 +3552,51 @@ impl ShellState {
         self.theme.is_pi_theme() && !self.extension_ui.footer.is_empty() && self.panel.is_none()
     }
 
+    fn has_active_subagent_panel(&self) -> bool {
+        let Some(Panel::SelectList {
+            items,
+            descriptions,
+            selected: _,
+            filter,
+            action,
+            ..
+        }) = self.panel.as_ref()
+        else {
+            return false;
+        };
+        let Some(panel) = action.subagent_panel() else {
+            return false;
+        };
+        filtered_indices_for_action(items, descriptions, action, filter)
+            .into_iter()
+            .any(|index| matches!(panel.group_label(index), Some("Running" | "Queued")))
+    }
+
     fn has_active_event_dot(&self) -> bool {
         let markers_enabled = self.theme.resolve::<bool>("margin_markers").unwrap_or(true);
         let thinking_spinner = self
             .theme
             .resolve::<bool>("thinking_spinner")
             .unwrap_or(false);
-        self.active_event_blocks
-            .iter()
-            .filter(|index| self.animation_block_is_addressable(**index))
-            .any(|index| match self.transcript.get(*index) {
-                Some(TranscriptBlock::Reasoning(_)) => false,
-                Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
-                Some(TranscriptBlock::NoticeStatus {
-                    tone: NoticeTone::ToolActive,
-                    ..
-                }) => markers_enabled,
-                Some(TranscriptBlock::Subagents(summary)) => {
-                    markers_enabled && summary.active_count() > 0
-                }
-                Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
-                _ => false,
-            })
-            && (markers_enabled || thinking_spinner)
+        self.has_active_subagent_panel()
+            || (self
+                .active_event_blocks
+                .iter()
+                .filter(|index| self.animation_block_is_addressable(**index))
+                .any(|index| match self.transcript.get(*index) {
+                    Some(TranscriptBlock::Reasoning(_)) => false,
+                    Some(TranscriptBlock::Tool(panel)) => markers_enabled && !panel.finished,
+                    Some(TranscriptBlock::NoticeStatus {
+                        tone: NoticeTone::ToolActive,
+                        ..
+                    }) => markers_enabled,
+                    Some(TranscriptBlock::Subagents(summary)) => {
+                        markers_enabled && summary.active_count() > 0
+                    }
+                    Some(TranscriptBlock::Shell(shell)) => markers_enabled && shell.running,
+                    _ => false,
+                })
+                && (markers_enabled || thinking_spinner))
     }
 
     fn status_rainbow_strength(&self) -> u16 {
@@ -3964,9 +3986,8 @@ pub(super) fn truncate_injected_prompt(
     lines.truncate(COLLAPSED_INJECTED_PROMPT_ROWS);
     // Keep the hint legible on narrow terminals, then drop it when not even the
     // short form fits; the row budget is a bound, never an overflow.
-    let fits = |candidate: &str| {
-        u16::try_from(visible_width(candidate)).unwrap_or(u16::MAX) <= width
-    };
+    let fits =
+        |candidate: &str| u16::try_from(visible_width(candidate)).unwrap_or(u16::MAX) <= width;
     let long = format!("… +{hidden} lines · ctrl+o");
     let short = format!("… +{hidden} ctrl+o");
     let hint = if fits(&long) {
@@ -5837,7 +5858,7 @@ impl InteractiveShell {
     #[cfg(test)]
     pub(crate) fn debug_pending_controls(&self) -> String {
         let state = self.state.borrow();
-        input_overlays::render_pending_steering(&state, 200, 3).join("\n")
+        input_overlays::render_pending_steering(&state, 200, 3, false).join("\n")
     }
 
     /// Only authoritative completion or an explicit Escape dispatch arms the

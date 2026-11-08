@@ -1,4 +1,5 @@
 """Release wiring: the bundle is complete, deterministic and Node/Python-free."""
+import asyncio
 import os
 from pathlib import Path
 import shutil
@@ -9,7 +10,13 @@ import tempfile
 import tomllib
 import unittest
 
-from support import REPOSITORY, ROOT, run_checked
+from support import REPOSITORY, ROOT, run_checked, runner_binary
+
+TARGET = os.environ.get("CODEMODE_RELEASE_TARGET") or next(
+    line.removeprefix("host: ") for line in
+    subprocess.check_output(["rustc", "-vV"], text=True).splitlines() if line.startswith("host: ")
+)
+SUFFIX = ".exe" if "-windows-" in TARGET else ""
 
 REQUIRED_BUNDLE_FILES = (
     "extension.toml",
@@ -82,6 +89,9 @@ class BundleTests(unittest.TestCase):
             manifest = tomllib.loads((REPOSITORY / "Cargo.toml").read_text())
             version = manifest["workspace"]["package"]["version"]
             self.assertFalse((staging / "target").exists())
+            native = staging / "target" / TARGET / "release" / f"octet-codemode{SUFFIX}"
+            native.parent.mkdir(parents=True)
+            shutil.copy2(runner_binary(), native)
             command = [
                 "bash",
                 str(REPOSITORY / "scripts/package-octet-extension-release.sh"),
@@ -89,10 +99,11 @@ class BundleTests(unittest.TestCase):
                 str(directory / "out"),
                 f"v{version}",
                 str(staging),
+                TARGET,
             ]
             environment = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
             run_checked(command, env=environment)
-            archive = directory / f"out/octet-codemode-{version}.tar.gz"
+            archive = directory / f"out/octet-codemode-{version}-{TARGET}.tar.gz"
             first = archive.read_bytes()
             run_checked(command, env=environment)
             self.assertEqual(archive.read_bytes(), first, "archive is not reproducible")
@@ -101,24 +112,48 @@ class BundleTests(unittest.TestCase):
             with tarfile.open(archive) as bundle:
                 names = set(bundle.getnames())
                 for required in REQUIRED_BUNDLE_FILES:
+                    if required == "bin/codemode":
+                        required += SUFFIX
                     self.assertIn(f"octet-codemode/{required}", names)
+                self.assertFalse(any("/target/" in name for name in names))
                 self.assertTrue(all(member.isfile() or member.isdir() for member in bundle))
                 bundle.extractall(unpacked, filter="data")
             extracted = unpacked / "octet-codemode"
-            self.assertTrue(os.access(extracted / "bin/codemode", os.X_OK))
+            executable = extracted / f"bin/codemode{SUFFIX}"
+            self.assertTrue(os.access(executable, os.X_OK))
+            self.assertEqual(executable.read_bytes(), native.read_bytes())
+            installed_manifest = tomllib.loads((extracted / "extension.toml").read_text())
+            self.assertEqual(installed_manifest["entrypoint"], {"command": f"bin/codemode{SUFFIX}", "args": ["serve"]})
             self.assertFalse((extracted / "extension.py").exists())
             self.assertFalse((extracted / "runtime.mjs").exists())
 
-            # Without a prebuilt binary the bundle tells the operator exactly
-            # what is missing: Rust. It never falls back to Node or Python.
-            missing = subprocess.run(
-                [str(extracted / "bin/codemode"), "serve"],
-                capture_output=True, text=True, env={"PATH": "", "OCTET_EXTENSION_DIR": str(extracted)},
-                timeout=30)
-            self.assertEqual(missing.returncode, 1)
-            self.assertIn("cargo is unavailable", missing.stderr)
-            self.assertNotIn("node", missing.stderr.lower())
-            self.assertNotIn("python", missing.stderr.lower())
+            # Exercise the extracted native entrypoint and its embedded WASM,
+            # outside the checkout, with no cargo, Node or Python on PATH.
+            from test_adapter import Broker, text
+            scratch = directory / "scratch"
+            scratch.mkdir()
+            async def probe():
+                broker = Broker("wasi", scratch, executable,
+                                command=[str(executable), "serve"], cwd=directory,
+                                env={"OCTET_EXTENSION_DIR": str(extracted)})
+                try:
+                    await broker.start()
+                    result = await broker.run("return 1 + 2;")
+                    self.assertFalse(result.get("is_error", False), result)
+                    output = text(result)
+                    self.assertTrue(output.startswith("Script completed\n"), output)
+                    summary, separator, value = output.partition("\nOutput:\n")
+                    self.assertIn("Wall time ", summary)
+                    self.assertEqual(separator, "\nOutput:\n", output)
+                    self.assertEqual(value, "3", "the installed WASM runner must evaluate the script")
+                finally:
+                    await broker.close()
+            asyncio.run(probe())
+
+            native.unlink()
+            missing = subprocess.run(command, capture_output=True, text=True, env=environment)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing regular native codemode executable", missing.stderr)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ fn config(workspace: PathBuf) -> Config {
         theme: None,
         theme_explicit: false,
         system_prompt: None,
+        append_system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,

@@ -210,6 +210,27 @@ gh() {
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("python3 scripts/test_release_source_qualification.py", ci)
 
+    def test_npm_release_binds_the_expected_docs_to_the_canonical_source(self):
+        # Packaging and both verification jobs must resolve the expected public
+        # documentation set from the immutable canonical source commit, never
+        # from the mutable tooling checkout that dispatches the job.
+        identity = "OCTET_NPM_SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}"
+        self.assertEqual(self.workflow.count(identity), 3)
+        self.assertIn('"$PWD/release-assets/OCTET_SHA256SUMS" \\\n            "$SOURCE_COMMIT"', self.workflow)
+        packager = (ROOT / "scripts/package-octet-npm.sh").read_text()
+        self.assertIn('export OCTET_NPM_SOURCE_COMMIT="$source_commit"', packager)
+        self.assertIn('cat-file -e "$source_commit^{commit}"', packager)
+        self.assertIn("OCTET_SHA256SUMS SOURCE_COMMIT", packager)
+        self.assertIn("if [[ $# -ne 5 ]]; then", packager)
+        verifier = (ROOT / "scripts/verify-octet-npm.py").read_text()
+        self.assertIn('SOURCE_COMMIT_ENVIRONMENT = "OCTET_NPM_SOURCE_COMMIT"', verifier)
+        self.assertIn('f"{source_commit}:{INVENTORY_PATH}"', verifier)
+        self.assertNotIn(
+            'pathlib.Path(__file__).resolve().parent.parent / "docs/package-assets.txt"',
+            verifier,
+        )
+        verifier_job = self.workflow.split("- name: Check out immutable verifier", 1)[1][:360]
+        self.assertIn("fetch-depth: 0", verifier_job)
 
 if __name__ == "__main__":
     unittest.main()

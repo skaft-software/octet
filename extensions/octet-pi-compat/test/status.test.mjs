@@ -194,16 +194,19 @@ test('UI denial skips existing-surface repaints and clears, not metadata validat
 
 test('queued ambient status synchronization rechecks UI availability before mounting', async () => {
   const { runtime, store, effects, ui } = statusContext();
+  // A status refresh is cosmetic and never joins a request's flush, so the test
+  // drains the one queued refresh explicitly instead of assuming flush does.
+  const drained = async () => { await runtime.flush(store); await store.state.uiQueues.get('statuses'); };
   store.state.host.has_ui = true;
   ui.setStatus('kept', 'QUEUED');
   effects.length = 0;
   store.state.host.has_ui = false;
-  await runtime.flush(store);
+  await drained();
   assert.deepEqual(effects, []);
   assert.deepEqual([...store.state.statuses.values()], ['QUEUED']);
   store.state.host.has_ui = true;
   ui.setStatus('kept', 'RESTORED');
-  await runtime.flush(store);
+  await drained();
   assert.deepEqual(effects, ['render', 'mount']);
 });
 

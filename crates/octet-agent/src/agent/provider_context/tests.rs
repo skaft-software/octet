@@ -1,6 +1,6 @@
 use super::*;
 use crate::extension::ProviderContextProjection;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 async fn project_with_fresh_session(
     request: Request,
@@ -121,14 +121,14 @@ impl ProviderContextHook for InvalidProjection {
     }
 }
 
-
 /// A projection that produces an unrepresentable request must not kill the run
 /// (the 116-tool Pi-fleet failure), and the notice must name the validator
 /// reason once. Authority/identity refusals stay fatal and have their own tests.
 #[tokio::test]
 async fn invalid_projection_is_skipped_with_the_validator_reason() {
-    let hooks: Vec<Arc<dyn ProviderContextHook>> =
-        vec![Arc::new(InvalidProjection { failure_notice_id: "pi-bridge" })];
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(InvalidProjection {
+        failure_notice_id: "pi-bridge",
+    })];
     let mut notices = Vec::new();
     let workspace = tempfile::tempdir().unwrap();
     let mut session = Session::create(workspace.path().join("invalid-projection.jsonl")).unwrap();
@@ -170,7 +170,37 @@ async fn invalid_projection_is_skipped_with_the_validator_reason() {
     )
     .await
     .expect("second preparation also survives");
-    assert!(more.is_empty(), "notice reported once per session: {more:?}");
+    assert!(
+        more.is_empty(),
+        "notice reported once per session: {more:?}"
+    );
+}
+
+fn fixture_stream(model: octet_ai::HostStreamModel) -> octet_ai::ResponseStream {
+    Box::pin(futures_util::stream::iter(vec![
+        Ok(StreamEvent::Started { response_id: None }),
+        Ok(StreamEvent::TextStart { index: 0 }),
+        Ok(StreamEvent::TextDelta {
+            index: 0,
+            delta: "answer".into(),
+        }),
+        Ok(StreamEvent::TextEnd { index: 0 }),
+        Ok(StreamEvent::Finished(octet_ai::Response {
+            message: AssistantMessage {
+                content: vec![AssistantPart::Text("answer".into())],
+                model: model.id,
+                protocol: model.protocol,
+            },
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            cost: Some(Cost::default()),
+            response_id: None,
+            responses_output: None,
+            deferred: None,
+            inference: None,
+            diagnostics: Vec::new(),
+        })),
+    ]))
 }
 
 struct Capture(Arc<Mutex<Vec<Request>>>);
@@ -183,30 +213,40 @@ impl octet_ai::HostStreamTransport for Capture {
         _: Vec<octet_ai::Diagnostic>,
     ) -> Result<octet_ai::ResponseStream, AiError> {
         self.0.lock().unwrap().push(request);
-        Ok(Box::pin(futures_util::stream::iter(vec![
-            Ok(StreamEvent::Started { response_id: None }),
-            Ok(StreamEvent::TextStart { index: 0 }),
-            Ok(StreamEvent::TextDelta {
-                index: 0,
-                delta: "answer".into(),
-            }),
-            Ok(StreamEvent::TextEnd { index: 0 }),
-            Ok(StreamEvent::Finished(octet_ai::Response {
-                message: AssistantMessage {
-                    content: vec![AssistantPart::Text("answer".into())],
-                    model: model.id,
-                    protocol: model.protocol,
-                },
-                stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
-                cost: Some(Cost::default()),
-                response_id: None,
-                responses_output: None,
-                deferred: None,
-                inference: None,
-                diagnostics: Vec::new(),
-            })),
-        ])))
+        Ok(fixture_stream(model))
+    }
+}
+
+/// The same canonical request fixture, but it negotiates encoded request hooks so
+/// a bound provider pipeline can dispatch through a host transport.
+struct HookAwareCapture(Arc<Mutex<Vec<Request>>>);
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for HookAwareCapture {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: Request,
+        _: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, AiError> {
+        self.0.lock().unwrap().push(request);
+        Ok(fixture_stream(model))
+    }
+    fn supports_request_hooks(&self) -> bool {
+        true
+    }
+    async fn stream_with_request_hooks(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: Request,
+        diagnostics: Vec<octet_ai::Diagnostic>,
+        _: Option<octet_ai::NativeRequestContinuation>,
+        hooks: octet_ai::HostProviderRequestHooks,
+    ) -> Result<octet_ai::ResponseStream, AiError> {
+        // Applying the payload seam proves this attempt dispatched through the
+        // owner-bound pipeline instead of bypassing it.
+        let payload = serde_json::json!({"attempt": "host"});
+        hooks.payload(payload).await?;
+        self.stream(model, request, diagnostics).await
     }
 }
 fn agent(host: ExtensionHost) -> (Agent, Arc<Mutex<Vec<Request>>>, tempfile::TempDir) {
@@ -1385,4 +1425,127 @@ fn async_projection_registration_refuses_optional_synchronous_responses_prewarm(
     );
     assert!(observations.lock().unwrap().is_empty());
     assert!(captures.lock().unwrap().is_empty());
+}
+
+/// A negotiated pipeline whose owning process generation has retired must refuse
+/// the bind exactly like the real process factory does.
+struct RetiredPipelineGeneration {
+    retired: Arc<AtomicBool>,
+    owners: Arc<Mutex<Vec<String>>>,
+    dispatched: Arc<AtomicUsize>,
+}
+
+struct CountingPipelineHook(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl octet_ai::ProviderRequestHook for CountingPipelineHook {
+    async fn before_request(
+        &self,
+        _: &octet_ai::ProviderRequestContext,
+        _: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AiError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
+impl crate::extension_provider::ProviderRequestHookFactory for RetiredPipelineGeneration {
+    fn bind_provider_request_hook(
+        &self,
+        resource_owner: &str,
+    ) -> Result<Arc<dyn octet_ai::ProviderRequestHook>, AiError> {
+        self.owners.lock().unwrap().push(resource_owner.to_owned());
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(AiError::Config(octet_ai::ConfigError::Parse(
+                "provider hook process generation retired".into(),
+            )));
+        }
+        Ok(Arc::new(CountingPipelineHook(self.dispatched.clone())))
+    }
+}
+
+fn count_user_task(session: &Session, task: &str) -> usize {
+    session
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.value,
+                crate::session::EntryValue::Message(octet_ai::Message::User(message))
+                    if message.content.len() == 1
+                        && matches!(
+                            &message.content[0],
+                            octet_ai::UserPart::Text(text) if text == task
+                        )
+            )
+        })
+        .count()
+}
+
+/// A refused provider-pipeline binding is run admission, not a run outcome.
+/// The prompt must stay out of the durable journal so a frontend that restores
+/// the draft can retry the same submission without duplicating the user entry.
+#[tokio::test]
+async fn refused_pipeline_binding_admits_no_prompt_and_the_retry_is_single() {
+    let retired = Arc::new(AtomicBool::new(true));
+    let owners = Arc::new(Mutex::new(Vec::new()));
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let mut host = ExtensionHost::new();
+    host.provider_request_hook(RetiredPipelineGeneration {
+        retired: retired.clone(),
+        owners: owners.clone(),
+        dispatched: hook_calls.clone(),
+    });
+    let (mut agent, captures, _workspace) = agent(host);
+    // A host transport that negotiates encoded hooks, so an admitted retry
+    // really dispatches through the bound pipeline.
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(HookAwareCapture(captures.clone())),
+    );
+    let owner = agent.resource_owner.clone();
+    let path = agent.session.path().to_path_buf();
+    let task = "canonical task";
+
+    let error = agent
+        .prompt(UserInput::from(vec![InputPart::Text(task.into())]))
+        .await
+        .err()
+        .expect("a retired pipeline generation must refuse the run");
+    assert!(
+        matches!(
+            &error,
+            AgentError::Ai(AiError::Config(octet_ai::ConfigError::Parse(reason)))
+                if reason == "provider hook process generation retired"
+        ),
+        "{error:?}"
+    );
+    // The refusal is still owner-authority checked; it is never skipped or
+    // downgraded to a notice.
+    assert_eq!(
+        owners.lock().unwrap().as_slice(),
+        std::slice::from_ref(&owner)
+    );
+    // No durable prompt, no provider dispatch, no bound middleware.
+    assert!(agent.session().entries().is_empty());
+    assert!(Session::open_read_only(&path).unwrap().entries().is_empty());
+    assert!(captures.lock().unwrap().is_empty());
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+
+    // The replaced generation admits the same draft exactly once.
+    retired.store(false, Ordering::SeqCst);
+    agent.complete(task).await.unwrap();
+    assert_eq!(owners.lock().unwrap().as_slice(), [owner.clone(), owner]);
+    assert_eq!(
+        hook_calls.load(Ordering::SeqCst),
+        1,
+        "the admitted run still dispatches through its bound hook"
+    );
+    assert_eq!(captures.lock().unwrap().len(), 1);
+    assert_eq!(count_user_task(&agent.session, task), 1);
+    assert_eq!(
+        count_user_task(&Session::open_read_only(&path).unwrap(), task),
+        1,
+        "the retry must not duplicate the user entry"
+    );
 }

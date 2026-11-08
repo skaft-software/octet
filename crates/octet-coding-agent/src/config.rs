@@ -599,6 +599,13 @@ pub struct Config {
     /// instructions, while `Some("")` intentionally blanks the system
     /// prompt.
     pub system_prompt: Option<String>,
+    /// Resolved `--append-system-prompt` text, appended to the effective
+    /// instructions at every composition (after the override or the composed
+    /// default, before project context). It never replaces instructions, so a
+    /// reload still re-reads `AGENTS.md`; the text itself is resolved once at
+    /// startup so a bridge that deletes its temporary source file cannot change
+    /// or break a later composition.
+    pub append_system_prompt: Option<String>,
     /// Additional theme directories or individual TOML files for discovery.
     pub theme_paths: Vec<PathBuf>,
     pub color: ColorMode,

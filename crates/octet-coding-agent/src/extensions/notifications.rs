@@ -129,7 +129,7 @@ impl ExecutableExtensions {
         let command = bounded_notification_command(command);
         self.notify_lifecycle_v2(EXTENSION_FEATURE_LIFECYCLE_EVENTS_V2, |process| {
             process
-                .notify_user_bash(command)
+                .notify_user_bash(command, None)
                 .map_err(|error| error.to_string())
         });
     }

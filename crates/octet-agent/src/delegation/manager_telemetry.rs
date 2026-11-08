@@ -161,10 +161,10 @@ impl DelegationManager {
             failure_reason,
             failure_class,
         };
-        if let Some(sender) = telemetry.sender.clone() {
-            if sender.send(Some(snapshot)).is_err() {
-                telemetry.sender = None;
-            }
+        if let Some(sender) = &telemetry.sender {
+            // A run ending or one frontend unsubscribing must not retire other
+            // subscribers. Retain the latest value even with no receivers.
+            sender.send_replace(Some(snapshot));
         }
         // Keep the state snapshot and telemetry revision/send in one ordered
         // critical section. Otherwise an older captured roster can be

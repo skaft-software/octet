@@ -436,6 +436,13 @@ pub struct Cli {
         default_missing_value = ""
     )]
     pub system_prompt: Option<String>,
+    /// Append text or the contents of an existing file to the composed system
+    /// prompt (repeatable, Pi compatible). Each value is resolved once at
+    /// startup: an existing path contributes the file's contents as the prompt,
+    /// anything else is literal text. ACP bridges such as pi-acp pass their
+    /// workspace-roots prompt through a temporary file here.
+    #[arg(long = "append-system-prompt", value_name = "TEXT")]
+    pub append_system_prompts: Vec<String>,
     /// Additional directory paths to scan for agent skills.
     #[arg(long = "skill-dir", value_name = "DIR")]
     pub skill_dirs: Vec<PathBuf>,
@@ -924,7 +931,9 @@ pub(crate) fn apply_extension_toggle(config: &mut Config, name: &str, enabled: b
     if enabled {
         config.enabled_extensions.push(name.to_owned());
     }
-    config.disabled_extensions.retain(|disabled| disabled != name);
+    config
+        .disabled_extensions
+        .retain(|disabled| disabled != name);
     if !enabled {
         config.disabled_extensions.push(name.to_owned());
     }
@@ -2076,6 +2085,7 @@ fn build_config_with_global_path_and_diagnostics(
         None => config::TernMode::Auto,
     };
     let system_prompt = cli.system_prompt.or(values.system_prompt);
+    let append_system_prompts = cli.append_system_prompts;
     let effect_policy_source = if cli.safe_mode || cli.effect_policy.is_some() {
         PolicyValueSource::Cli
     } else {
@@ -2353,7 +2363,8 @@ fn build_config_with_global_path_and_diagnostics(
     let mut enabled_extensions = values.enabled_extensions.unwrap_or_default();
     enabled_extensions.extend(cli.enable_extensions);
     let enabled_extensions = normalize_extension_names(enabled_extensions)?;
-    let disabled_extensions = normalize_extension_names(values.disabled_extensions.unwrap_or_default())?;
+    let disabled_extensions =
+        normalize_extension_names(values.disabled_extensions.unwrap_or_default())?;
     let trusted_extensions =
         normalize_extension_trust_grants(values.trusted_extensions.unwrap_or_default())?;
     let invocation_trusted_extensions = normalize_extension_names(cli.trust_extensions)?;
@@ -2377,6 +2388,11 @@ fn build_config_with_global_path_and_diagnostics(
         theme_explicit,
         theme: cli.theme.or(values.theme),
         system_prompt,
+        // Resolved once here: the sources are read exactly once, and composition
+        // applies the text on every recomposition.
+        append_system_prompt: crate::resources::resolve_appended_system_prompt(
+            &append_system_prompts,
+        ),
         theme_paths: cli.theme_dirs,
         color,
         mouse,

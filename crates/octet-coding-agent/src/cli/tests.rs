@@ -75,6 +75,7 @@ fn base() -> Cli {
         bash_timeout_secs: None,
         max_output_bytes: None,
         system_prompt: None,
+        append_system_prompts: vec![],
     }
 }
 
@@ -213,7 +214,10 @@ mod pi_codemode_tests {
         // Derive the pin from the shipped manifest: a hardcoded version silently
         // turned this case into a valid manifest after the last release bump.
         let pinned = format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION"));
-        assert!(valid.contains(&pinned), "bundle pin must match this release");
+        assert!(
+            valid.contains(&pinned),
+            "bundle pin must match this release"
+        );
         for invalid in [
             "not a TOML manifest".to_owned(),
             valid.replace("name = \"octet-codemode\"", "name = \"different-name\""),
@@ -1581,15 +1585,24 @@ fn disabling_records_a_saved_off_entry_and_enabling_clears_it() {
     // alone cannot express "off". The write still has to record it.
     persist_extension_enabled_to_path(CODEMODE_EXTENSION, false, &path).unwrap();
     let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
-    assert_eq!(saved.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
-    assert_eq!(saved.enabled_extensions, Some(vec!["octet-web-search".into()]));
+    assert_eq!(
+        saved.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        saved.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
 
     persist_extension_enabled_to_path(CODEMODE_EXTENSION, true, &path).unwrap();
     let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
     assert_eq!(saved.disabled_extensions, None);
     let mut enabled = saved.enabled_extensions.unwrap();
     enabled.sort();
-    assert_eq!(enabled, vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]);
+    assert_eq!(
+        enabled,
+        vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]
+    );
 }
 
 #[test]
@@ -1603,8 +1616,14 @@ fn a_project_layer_cannot_silence_an_extension() {
         disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
         ..ConfigLayer::default()
     });
-    assert_eq!(layer.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
-    assert_eq!(layer.enabled_extensions, Some(vec!["octet-web-search".into()]));
+    assert_eq!(
+        layer.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        layer.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
 }
 
 #[test]
@@ -1622,13 +1641,192 @@ fn pi_surface_reducing_flags_are_accepted_and_semantic_ones_still_refused() {
         assert_eq!(cli.no_skills, flags.contains(&"--no-skills"), "{flags:?}");
     }
     // Flags that would change semantics octet cannot honor stay refused rather
-    // than silently dropping MCP servers or extra workspace roots.
-    for flag in ["--mcp-config", "--append-system-prompt", "--no-such-flag"] {
+    // than silently dropping MCP servers. `--mcp-config` is owned by the dynamic
+    // extension-flag path: the reviewed pi-compat mirror declares it for
+    // pi-mcp-adapter, so a selected bridge accepts it while a bare static parse
+    // still refuses it (see `mcp_config_is_refused_statically_and_accepted_from_a_declaring_extension`).
+    for flag in ["--mcp-config", "--no-such-flag"] {
         assert!(
             Cli::try_parse_from(["octet", flag, "x"]).is_err(),
             "{flag} must not be silently accepted"
         );
     }
+}
+
+#[test]
+fn append_system_prompt_is_a_repeatable_static_flag() {
+    // pi-acp passes one temporary workspace-roots file; Pi also accepts repeated
+    // flags and joins them, so both forms must parse without extension help.
+    let cli = Cli::try_parse_from(["octet", "--mode", "rpc", "--no-themes"]).unwrap();
+    assert!(cli.append_system_prompts.is_empty());
+    let cli = Cli::try_parse_from([
+        "octet",
+        "--append-system-prompt",
+        "literal context",
+        "--append-system-prompt",
+        "/tmp/does-not-exist/roots.txt",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.append_system_prompts,
+        vec![
+            "literal context".to_owned(),
+            "/tmp/does-not-exist/roots.txt".to_owned()
+        ]
+    );
+    // Pi requires a value; refusing is better than accepting an empty addendum.
+    assert!(Cli::try_parse_from(["octet", "--append-system-prompt"]).is_err());
+}
+
+#[test]
+fn append_system_prompt_file_contents_extend_an_explicit_override() {
+    let directory = cwd();
+    let roots = directory.path().join("workspace-roots.txt");
+    std::fs::write(
+        &roots,
+        "<workspace_roots>\nPrimary working directory: /repo\nAdditional workspace roots (also part of the user's workspace):\n- /other\n</workspace_roots>",
+    )
+    .unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.system_prompt = Some("OVERRIDE INSTRUCTIONS".into());
+    cli.append_system_prompts = vec![roots.display().to_string()];
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+
+    // The override keeps its full-replacement meaning; the addendum is resolved
+    // text stored beside it, not folded into it.
+    assert_eq!(
+        config.system_prompt.as_deref(),
+        Some("OVERRIDE INSTRUCTIONS")
+    );
+    let instructions = crate::resources::compose_instructions(&config).unwrap();
+    assert_eq!(
+        instructions,
+        "OVERRIDE INSTRUCTIONS\n\n<workspace_roots>\nPrimary working directory: /repo\nAdditional workspace roots (also part of the user's workspace):\n- /other\n</workspace_roots>"
+    );
+    // The value is the prompt, not the pathname the bridge passed.
+    assert!(!instructions.contains(&roots.display().to_string()));
+}
+
+#[test]
+fn append_system_prompt_keeps_the_default_composition_and_recomposition_is_idempotent() {
+    let directory = cwd();
+    let workspace = directory.path().canonicalize().unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(workspace.clone());
+    // Context files are exercised against an isolated global path in
+    // `resources::tests`; this case keeps the default composition deterministic.
+    cli.no_context_files = true;
+    cli.append_system_prompts = vec!["ADDENDUM SENTINEL".into()];
+    let config = config_with_empty_global(cli, &workspace).unwrap();
+
+    let instructions = crate::resources::compose_instructions(&config).unwrap();
+    assert!(
+        instructions.starts_with(crate::resources::BASE_PERSONA),
+        "{instructions}"
+    );
+    assert!(
+        instructions.ends_with("\n\nADDENDUM SENTINEL"),
+        "{instructions}"
+    );
+    // Recomposition, as a resource or session reload performs, is idempotent.
+    assert_eq!(
+        crate::resources::compose_instructions(&config).unwrap(),
+        instructions
+    );
+    assert_eq!(instructions.matches("ADDENDUM SENTINEL").count(), 1);
+}
+
+#[test]
+fn append_system_prompt_survives_a_bridge_that_deletes_its_temp_file() {
+    let directory = cwd();
+    let roots = directory.path().join("workspace-roots.txt");
+    std::fs::write(&roots, "ROOTS SENTINEL").unwrap();
+
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.system_prompt = Some("OVERRIDE".into());
+    cli.append_system_prompts = vec![roots.display().to_string()];
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+
+    // pi-acp removes its temporary directory as soon as the child exits.
+    std::fs::remove_file(&roots).unwrap();
+    let instructions = crate::resources::compose_instructions(&config).unwrap();
+    assert!(instructions.contains("ROOTS SENTINEL"));
+    assert!(!instructions.contains("workspace-roots.txt"));
+}
+
+#[test]
+fn append_system_prompt_missing_path_is_literal_text() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    cli.system_prompt = Some("OVERRIDE".into());
+    cli.append_system_prompts = vec![directory
+        .path()
+        .join("missing-roots.txt")
+        .display()
+        .to_string()];
+    let config = config_with_empty_global(cli, directory.path()).unwrap();
+    // Pi appends a value that is not an existing file as literal text.
+    let addendum = config.append_system_prompt.as_deref().unwrap();
+    assert!(addendum.ends_with("missing-roots.txt"), "{addendum}");
+    let instructions = crate::resources::compose_instructions(&config).unwrap();
+    assert!(instructions.starts_with("OVERRIDE\n\n"), "{instructions}");
+    assert!(
+        instructions.ends_with("missing-roots.txt"),
+        "{instructions}"
+    );
+}
+
+#[test]
+fn mcp_config_is_refused_statically_and_accepted_from_a_declaring_extension() {
+    // The reviewed pi-compat mirror declares pi-mcp-adapter's own
+    // `registerFlag("mcp-config", { type: "string" })`, so the same invocation is
+    // refused by the static parser and accepted once that manifest is selected.
+    // The supplied value is the real temporary config path an ACP bridge writes.
+    let directory = cwd();
+    let config_path = directory.path().join("mcp-config.json");
+    std::fs::write(&config_path, r#"{"mcpServers":{}}"#).unwrap();
+    let args: Vec<OsString> = [
+        "octet",
+        "--mode",
+        "rpc",
+        "--no-themes",
+        "--mcp-config",
+        config_path.to_str().unwrap(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    assert!(Cli::try_parse_from(args.clone()).is_err());
+
+    let declarations = vec![(
+        "octet-pi-compat".to_owned(),
+        octet_agent::extension_process::ExtensionFlag {
+            name: "mcp-config".to_owned(),
+            kind: octet_agent::extension_process::ExtensionFlagType::String,
+            default: serde_json::json!(""),
+            description: Some("Path to MCP config file".to_owned()),
+        },
+    )];
+    let (cli, values, explicit) =
+        extension_flags::parse_declared_extension_flags(args, declarations).unwrap();
+    assert!(explicit.contains(&("octet-pi-compat".into(), "mcp-config".into())));
+    assert_eq!(cli.mode.as_deref(), Some("rpc"));
+    assert_eq!(
+        values["octet-pi-compat"]["mcp-config"],
+        serde_json::json!(config_path.to_str().unwrap())
+    );
+    // An undeclared value never reaches the config.
+    let mut config = config_with_empty_global(base(), directory.path()).unwrap();
+    config.extension_flag_values = values;
+    assert_eq!(
+        config.extension_flag_values["octet-pi-compat"]["mcp-config"],
+        serde_json::json!(config_path.to_str().unwrap())
+    );
 }
 
 #[test]

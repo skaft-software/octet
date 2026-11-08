@@ -465,13 +465,11 @@ impl ExecutableExtensions {
                     .iter()
                     .map(|descriptor| descriptor.manifest.name.clone())
                     .collect::<Vec<_>>();
-                // A pending first-party subagents extension is the same one the
-                // synchronous path would have measured, so delegation readiness
-                // is decided at discovery and the process binds at attach.
+                // Every admitted child-session owner needs the native runtime
+                // before deferred attach, including the Pi bridge. Use the same
+                // authority predicate as the eager activation path.
                 let agent_sessions_pending = agent_sessions_tool_available
-                    && startable_names
-                        .iter()
-                        .any(|name| name == SUBAGENTS_EXTENSION_NAME);
+                    && startable_names.iter().any(|name| agent_session_owner(name));
                 crate::app::bootstrap::startup_count(
                     "extensions.handshake.requested",
                     startable_names.len(),
@@ -628,9 +626,9 @@ impl ExecutableExtensions {
             .unwrap_or_default()
     }
 
-    /// Whether a pending first-party `octet-subagents` was admitted with the
-    /// `subagent_spawn` tool. Delegation readiness uses this until the process
-    /// attaches, so a deferred boot cannot silently downgrade Ultra reasoning.
+    /// Whether a first-party child-session owner was admitted with the
+    /// `subagent_spawn` tool. Delegation runtime readiness uses this until the
+    /// process attaches; a Pi service alone does not supply the Ultra tool surface.
     pub(crate) fn pending_agent_session_service(&self) -> bool {
         self.deferred_startup
             .as_ref()

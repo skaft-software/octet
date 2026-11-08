@@ -35,6 +35,142 @@ async fn event_drain_obeys_the_per_extension_frame_budget() {
     );
 }
 
+#[tokio::test]
+async fn headless_event_readiness_keeps_queued_events_for_the_primary_drain() {
+    let (sender, receiver) = broadcast::channel(2);
+    let mut extensions = ExecutableExtensions::default();
+    extensions.receivers.push(receiver);
+    sender
+        .send(ExtensionEvent::Diagnostic {
+            message: "queued".into(),
+        })
+        .unwrap();
+    let mut wake = tokio_test::task::spawn(extensions.headless_event_ready());
+    tokio_test::assert_ready!(wake.poll());
+    assert_eq!(extensions.receivers[0].len(), 1);
+    extensions.drain_events();
+    assert_eq!(extensions.diagnostics.len(), 1);
+}
+
+#[tokio::test]
+async fn headless_event_readiness_watches_all_receivers_and_survives_cancelled_waits() {
+    let (_first, first) = broadcast::channel(2);
+    let (second, receiver) = broadcast::channel(2);
+    let mut extensions = ExecutableExtensions::default();
+    extensions.receivers.extend([first, receiver]);
+    let mut cancelled = tokio_test::task::spawn(extensions.headless_event_ready());
+    tokio_test::assert_pending!(cancelled.poll());
+    drop(cancelled);
+    let mut wake = tokio_test::task::spawn(extensions.headless_event_ready());
+    tokio_test::assert_pending!(wake.poll());
+    second
+        .send(ExtensionEvent::Diagnostic {
+            message: "live".into(),
+        })
+        .unwrap();
+    assert!(wake.is_woken());
+    tokio_test::assert_ready!(wake.poll());
+    assert_eq!(extensions.receivers[1].len(), 1);
+    extensions.drain_events();
+    assert_eq!(extensions.diagnostics.len(), 1);
+}
+
+#[tokio::test]
+async fn headless_event_readiness_does_not_spin_on_empty_or_closed_fleets() {
+    let mut extensions = ExecutableExtensions::default();
+    let mut empty = tokio_test::task::spawn(extensions.headless_event_ready());
+    tokio_test::assert_pending!(empty.poll());
+    let (sender, receiver) = broadcast::channel(2);
+    extensions.receivers.push(receiver);
+    drop(sender);
+    let mut closed = tokio_test::task::spawn(extensions.headless_event_ready());
+    tokio_test::assert_pending!(closed.poll());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_event_drain_wakes_without_waiting_for_the_poll_tick() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = lifecycle_fixture(&temp).await;
+    let (sender, receiver) = broadcast::channel(128);
+    extensions.receivers = vec![receiver];
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producer = sender.clone();
+    let produced = published.clone();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        for index in 0..100 {
+            producer
+                .send(ExtensionEvent::Diagnostic {
+                    message: format!("headless-{index}"),
+                })
+                .unwrap();
+        }
+        produced.store(true, Ordering::SeqCst);
+    });
+    // Only draining the receiver can unblock this work. More than one drain
+    // budget also exercises re-arming while the primary queue is still ready.
+    let work = futures_util::future::poll_fn(|_| {
+        if published.load(Ordering::SeqCst) && sender.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    });
+    extensions.with_headless_events(work).await;
+    let elapsed = started.elapsed();
+    task.await.unwrap();
+    tokio::time::resume();
+    assert_eq!(extensions.diagnostics.len(), 100);
+    extensions.shutdown().await;
+    assert!(elapsed < Duration::from_millis(10), "{elapsed:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_event_drain_yields_between_batches_and_prioritizes_ready_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = lifecycle_fixture(&temp).await;
+    let (sender, receiver) = broadcast::channel(128);
+    extensions.receivers = vec![receiver];
+    for _ in 0..100 {
+        sender
+            .send(ExtensionEvent::Diagnostic {
+                message: "queued".into(),
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        extensions
+            .with_headless_events(std::future::ready(42))
+            .await,
+        42
+    );
+    assert_eq!(
+        extensions.receivers[0].len(),
+        100,
+        "ready work must win over queued events"
+    );
+    let observer = sender.clone();
+    let task = tokio::spawn(async move { !observer.is_empty() });
+    let work = futures_util::future::poll_fn(|_| {
+        if sender.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    });
+    extensions.with_headless_events(work).await;
+    assert!(
+        task.await.unwrap(),
+        "a ready backlog starved a scheduled peer"
+    );
+    assert_eq!(extensions.diagnostics.len(), 100);
+    extensions.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn hung_renderer_rpc_never_blocks_the_interactive_boundary() {

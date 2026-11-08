@@ -1620,7 +1620,8 @@ async fn rpc_raw_input_precedes_templates_and_preserves_or_replaces_images() {
         assert_eq!(pair[0]["phase"], "input");
         assert_eq!(pair[0]["text"], text);
         assert_eq!(pair[0]["source"], "rpc");
-        assert_eq!(pair[0]["streaming_behavior"], "followUp");
+        // Idle input has no delivery hint, even if the caller supplied one.
+        assert_eq!(pair[0]["streaming_behavior"], Value::Null);
         assert_eq!(pair[0]["images"].as_array().unwrap().len(), 1);
         assert!(pair[1]["prompt"]
             .as_str()
@@ -1658,7 +1659,8 @@ async fn rpc_handled_input_acknowledges_without_provider_persistence_or_queue_re
             .iter()
             .find(|frame| frame["id"] == "handled")
             .unwrap(),
-        &json!({"type": "response", "command": "prompt", "id": "handled", "success": true})
+        &json!({"type": "response", "command": "prompt", "id": "handled", "success": true,
+            "data": {"disposition": "handled"}})
     );
     assert_eq!(
         frames.iter().find(|frame| frame["id"] == "state").unwrap()["data"]["pendingMessageCount"],

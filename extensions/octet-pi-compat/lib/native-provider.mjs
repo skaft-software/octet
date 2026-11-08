@@ -30,11 +30,23 @@ function fromTranscript(context) {
   if (traceEnabled) tracePhase('pi-compat.provider.unfold', `took_us=${Math.round((performance.now() - preparedAt) * 1000)} messages=${messages.length}`);
   return result;
 }
+// Only the adapter's exact forwarding callbacks can be handed back to the
+// native chain. Package callbacks still require independent real wire support.
+function nativeRequestOptions(job, options) {
+  if (job.hookRoute === 'bridge') unsupported('native provider stream', 'the callback bridge already owns this attempt');
+  if (!job.callbacks) return options;
+  const forwarded = { ...options };
+  for (const name of ['onPayload', 'onResponse', 'transformHeaders', 'fetch']) {
+    if (forwarded[name] === job.callbacks[name]) delete forwarded[name];
+  }
+  return forwarded;
+}
 export function nativeProviderDelegate(model, context, options = {}) {
   context = fromTranscript(context);
   const bound = scope.getStore();
   if (!bound) unsupported('native provider stream', 'an admitted provider request is required');
   const { runtime, job } = bound;
+  options = nativeRequestOptions(job, options);
   runtime.require('provider_inheritance_v1');
   if (model.api === 'google-generative-ai') runtime.require('provider_google_generative_ai_v1');
   if (!job.entry.inherited || !isDeepStrictEqual(model, job.model.pi)) unsupported('native provider stream', 'the delegate is bound to the selected inherited model');
@@ -53,6 +65,7 @@ export function customProviderDelegate(model, context, options = {}) {
   const bound = scope.getStore();
   if (!bound) unsupported('custom provider stream', 'an admitted provider request is required');
   const { runtime, job } = bound;
+  options = nativeRequestOptions(job, options);
   runtime.require('provider_inheritance_v1');
   job.controller.signal.throwIfAborted();
   if (!job.entry.custom || job.entry.inherited || !['openai-completions', 'openai-responses'].includes(model.api)) unsupported('custom provider stream', 'the selected custom OpenAI provider is required');
@@ -82,6 +95,7 @@ export const openaiResponsesDelegate = (model, context, options) => openaiDelega
 function delegatedStream(runtime, job, model, context, options, customHttp, customOpenaiChat) {
   if (job.delegated) unsupported('native provider stream', 'a provider attempt can delegate only once');
   job.delegated = true;
+  job.hookRoute = 'native';
   job.onPayload = options.onPayload;
   const request = { ...job.request, system: context.systemPrompt ?? null, messages: piToCanonical(context.messages) };
   if (context.systemPrompt !== undefined) bounded(context.systemPrompt, 'provider system', 786432, { controls: true });

@@ -37,6 +37,7 @@ pub(in crate::extensions) fn executable_extension_config(
         theme: None,
         theme_explicit: false,
         system_prompt: None,
+        append_system_prompt: None,
         theme_paths: vec![],
         color: crate::config::ColorMode::Auto,
         mouse: crate::config::MouseMode::Auto,

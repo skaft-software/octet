@@ -1,10 +1,13 @@
 # Pi extensions eval
 
-Measures whether octet runs real Pi extensions the way Pi does, in production shape:
-the real `octet` binary with the shipped `extensions/octet-pi-compat` bundle in
-auto-mirror mode, against real Pi **1.4.0** (`@earendil-works/pi-coding-agent@1.4.0`; 1.5.0 is
-out of scope), both on a PTY, both with the same ~23 real npm Pi packages and the same mock
-provider. Startup is the first metric; parity metrics ride along.
+The original package/PTY harness measures whether octet runs real Pi extensions
+the way Pi does, in production shape: the real `octet` binary with the shipped
+`extensions/octet-pi-compat` bundle in auto-mirror mode, against real Pi **1.4.0**
+(`@earendil-works/pi-coding-agent@1.4.0`), both on a PTY with the same 23 pinned npm
+Pi packages and mock provider. That historical reference pin remains unchanged;
+it is not the adapter's current support ceiling. Startup is the first metric;
+parity metrics ride along. The separate prompt/tool loop below compares Pi
+1.0.2 and **1.5.0** by default.
 
 ## Prompt/tool comparison loop (no installation)
 
@@ -26,9 +29,12 @@ python3 -B scripts/pi-eval/prompts.py \
 
 Use `--cases input-transform,input-chain,input-handled` for a narrow retry,
 `--octet-mode plain` to exercise the plain frontend, and a fresh `--out` each run.
-Both reference versions must already exist in the managed install. Pi 1.5 is a
-comparison reference here, **not** a claim that Octet supports its runtime/helper
-routes. The older package/PTY evaluation below remains scoped to Pi 1.4.
+Both reference versions must already exist in the managed install. Octet supports
+Pi **1.5.0** through its reviewed capability manifest and version-specific helper
+routes; see [compatibility and limits](../../docs/pi-compatibility.md). This loop
+checks only its listed synthetic prompt/tool cases, not complete runtime, helper
+or original-package parity. The older 23-package/PTY evaluation below remains
+pinned to Pi **1.4.0**.
 
 Every leg retains raw provider requests, semantic observations and stdout/stderr;
 `results.jsonl` records failed legs and `comparisons.jsonl` records equality.

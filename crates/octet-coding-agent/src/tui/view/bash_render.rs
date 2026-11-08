@@ -492,7 +492,9 @@ mod tests {
             "{:?}",
             collapsed[BUDGET]
         );
-        assert!(!collapsed.join("\n").contains(&format!("line{}", BUDGET + 1)));
+        assert!(!collapsed
+            .join("\n")
+            .contains(&format!("line{}", BUDGET + 1)));
         assert!(expanded.join("\n").contains(&format!("line{}", BUDGET + 3)));
     }
 
@@ -602,7 +604,11 @@ mod tests {
             );
             // 8 wrapped command rows: shown in full (no hint row) while it fits
             // the terse budget, otherwise the budget plus one disclosure hint.
-            let expected = if expanded || 8 <= BUDGET { 8 } else { BUDGET + 1 };
+            let expected = if expanded || 8 <= BUDGET {
+                8
+            } else {
+                BUDGET + 1
+            };
             assert_eq!(input.len(), expected);
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);

@@ -105,6 +105,7 @@ fn state() -> (
             resource_owner: Some(owner),
             last_progress_sequence: None,
             tool_call_policy_digest: Some([0; 32]),
+            bulk_hook_parent: None,
             composition_files: Arc::new(CompositionFiles::default()),
         },
     );

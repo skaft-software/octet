@@ -88,7 +88,9 @@ The former install/plan/preflight/publish/list/rollback workflow is no longer
 available. Do not use inventory results to execute Pi package code, auto-enable
 an extension, or infer trust. The [optional Pi adapter](pi-compatibility.md) uses
 explicitly reviewed entrypoints and normal octet enablement/trust. Its bounded
-API support and measured qualification are independent of scanner categories.
+Pi 1.5.0 public API support and measured qualification are independent of scanner
+categories. The scanner's historical profile below is not the adapter's current
+support ceiling.
 Uncovered behavior still needs an explicitly scoped port to
 [octet's extension API](extensions.md).
 

@@ -202,6 +202,47 @@ pub(super) struct ExtensionDurableSpawn {
 }
 
 impl DelegationBinding {
+    pub(crate) fn rebuild_for_session(&self, session: &Path) -> Result<Self, DelegationError> {
+        if !self.is_root() || self.active_worker_count() != 0 {
+            return Err(DelegationError::InvalidConfig(
+                "session replacement requires a root binding with all workers parked".into(),
+            ));
+        }
+        let manager = DelegationManager::create(
+            self.manager.config.clone(),
+            self.manager.template.snapshot(),
+            session,
+            self.manager.root_tools,
+        )?;
+        manager
+            .ensure_fleet_lease()
+            .map_err(DelegationError::InvalidConfig)?;
+        Ok(manager.root_binding())
+    }
+
+    /// Removes the artifacts of a replacement runtime that never became current.
+    ///
+    /// The runtime is dropped first so its shutdown record reaches the journal,
+    /// then the journal and the then-empty team directory are removed. The
+    /// returned error is a diagnostic for the caller; the session rollback has
+    /// already happened by the time this runs.
+    pub(crate) fn discard_activation_artifacts(self) -> Result<(), String> {
+        let storage = self.manager.team_storage.clone();
+        drop(self);
+        match storage {
+            Some(storage) => helpers::cleanup_failed_team_activation(&storage),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn root_tools(&self) -> Vec<Arc<dyn Tool>> {
+        if self.manager.root_tools {
+            self.manager.tools(&self.identity)
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn team_directory(&self) -> &Path {
         &self.manager.team_directory
     }

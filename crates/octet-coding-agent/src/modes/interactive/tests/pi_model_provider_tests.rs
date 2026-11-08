@@ -801,8 +801,14 @@ pi.registerCommand('remove-native', {handler() {pi.unregisterProvider('anthropic
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_custom_http_delegate_uses_process_fetch_and_current_host_hooks() {
+    // Exercise the guarded custom-HTTP delegate, not the installed-Pi helper.
+    // This fixture deliberately has no managed Pi installation. Public Pi
+    // helpers use their own HTTP runtime and are covered by adapter tests.
+    let delegate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/octet-pi-compat/lib/native-provider.mjs");
+    let delegate = url::Url::from_file_path(delegate.canonicalize().unwrap()).unwrap();
     let factory = r#"
-import {streamOpenAICompletions} from '@earendil-works/pi-ai';
+import {openaiCompletionsDelegate as streamOpenAICompletions} from NATIVE_DELEGATE;
 import {appendFileSync} from 'node:fs';
 export default pi => {
   const model={id:'custom-model',provider:'custom-http-fixture',api:'openai-completions',baseUrl:'https://custom.invalid/v1',
@@ -826,6 +832,10 @@ export default pi => {
   pi.registerCommand('select-custom-http',{handler:async(_,ctx)=>{const selected=ctx.modelRegistry.find(model.provider,model.id);if(!selected||!await pi.setModel(selected))throw Error('custom model missing');}});
 };
 "#;
+    let factory = factory.replace(
+        "NATIVE_DELEGATE",
+        &serde_json::to_string(delegate.as_str()).unwrap(),
+    );
     struct CurrentHooks(Arc<std::sync::Mutex<Vec<&'static str>>>);
     #[async_trait::async_trait]
     impl octet_ai::ProviderRequestHook for CurrentHooks {
@@ -865,7 +875,7 @@ export default pi => {
             Ok(())
         }
     }
-    let (directory, mut app) = pi_app(factory);
+    let (directory, mut app) = pi_app(&factory);
     let mut shell = InteractiveShell::test_shell();
     app.synchronize_extension_provider_catalog();
     request_extension_ui(&mut shell, &mut app);
@@ -895,10 +905,16 @@ export default pi => {
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "{error}; completed hook phases: {:?}",
+            observations.lock().unwrap()
+        )
+    });
     assert_eq!(
         *observations.lock().unwrap(),
-        ["headers", "payload", "response"]
+        // Native codecs build the payload before final outgoing headers.
+        ["payload", "headers", "response"]
     );
     assert_eq!(response.usage.input_tokens, 2);
     assert_eq!(response.usage.output_tokens, 3);

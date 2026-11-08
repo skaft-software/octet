@@ -9,7 +9,7 @@ import { launch, root, owner } from './helper.mjs';
 // Actual factory + process + Runtime + Transport. A TEST-ONLY runner stops after
 // the opening hook dispatch/flush, BEFORE Runtime.receive writes its terminal
 // reply. No timer, fabricated parent ID, altered production API or fake ACK.
-async function boundary(t, editor = true) {
+async function boundary(t, editor = true, beforeReply = false) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-editor-lifetime-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const entry = join(dir, 'editor.ts'), runner = join(dir, 'barrier.mjs');
@@ -49,14 +49,16 @@ await import(${JSON.stringify(pathToFileURL(join(root, 'runner.mjs')).href)});`)
   const peer = launch(t, [entry], { runner, composer: 'seed', hold: ['composer/set'] }); await peer.init();
   const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
   await peer.wait(f => f.method === 'notification' && f.params.message === 'test: opening hook dispatch complete');
-  if (!editor) return { peer, start };
+  assert.equal(peer.seen.some(f => f.method === 'ui/open'), false, 'cosmetic admission waits for the successful origin reply');
+  if (!editor || beforeReply) return { peer, start };
+  await settle(peer, start);
   const open = await peer.wait(f => f.method === 'ui/open'), id = open.params.surface_id;
   peer.editorKey(id, 'u');
   const write = await peer.wait(f => f.method === 'composer/set');
   assert.equal(write.params.parent_request_id, start.id); assert.deepEqual(write.params.resource_owner, owner);
   assert.deepEqual(write.params.editor_checkpoint, { surface_id: id, mount_id: `host-editor-${id}`, input_revision: 1, checkpoint_revision: 1 });
   assert.equal(write.params.text, 'seedu');
-  assert.equal(peer.seen.some(f => f.id === start.id && !f.method), false, 'checkpoint is actually sent before opening hook reply');
+  assert.equal(peer.seen.some(f => f.id === start.id && !f.method), true, 'editor admission, seed and checkpoint follow the opening hook reply');
   return { peer, start, id, write };
 }
 async function settle(peer, start, code) {
@@ -74,7 +76,7 @@ const frame = text => f => f.method === 'ui/frame' && f.params.lines.join('\n').
 const cancelled = id => f => f.method === '$/cancelRequest' && f.params.id === id;
 const probe = (peer, mode, context = peer.context()) => peer.request('tool/call', { name: 'retained_probe', arguments: { mode }, context });
 
-test('retained editor: withheld checkpoint ACK survives the opening hook reply, preserving FIFO and exact frame barriers', async t => {
+test('retained editor: withheld checkpoint ACK after the opening hook reply preserves FIFO and exact frame barriers', async t => {
   const { peer, start, id, write } = await boundary(t);
   peer.editorKey(id, 'l');
   await settle(peer, start);
@@ -112,11 +114,16 @@ test('retained context: generic composer/set without checkpoint still cancels on
 });
 
 for (const after of [false, true]) test(`retained editor: genuine opening-request cancellation ${after ? 'after' : 'before'} reply still aborts held work once`, async t => {
-  const { peer, start, id, write } = await boundary(t);
-  if (after) await settle(peer, start);
+  const { peer, start, id, write } = await boundary(t, true, !after);
   peer.notify('$/cancelRequest', { id: start.id });
+  if (!after) {
+    await settle(peer, start, -32800);
+    assert.equal(peer.seen.some(f => ['ui/open', 'composer/set', 'ui/frame'].includes(f.method)), false, 'cancelled queued presentation never starts');
+    assert.ok((await probe(peer).response).result, 'cancellation does not retire the healthy owner');
+    await peer.close();
+    return;
+  }
   await peer.wait(cancelled(write.id)); await peer.wait(f => f.method === 'ui/close');
-  if (!after) await settle(peer, start, -32800);
   ack(peer, write); peer.editorKey(id, 'x');
   assert.ok((await probe(peer).response).result);
   assert.equal(peer.seen.filter(cancelled(write.id)).length, 1);

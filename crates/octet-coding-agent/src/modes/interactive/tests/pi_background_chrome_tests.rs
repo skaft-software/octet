@@ -25,9 +25,13 @@ export default pi => {
     trace({hook: 'session_start'});
     setTimeout(() => {
       trace({background: 'issued'});
-      ctx.ui.setFooter(() => ({render: () => ['U27-BACKGROUND-FOOTER'], invalidate() {}}))
-        .then(() => trace({background: 'applied'}))
-        .catch(error => trace({background: 'error', message: String((error && error.message) || error)}));
+      // Pi's setter returns void. Observe real component delivery instead of
+      // treating a non-contractual Promise as proof of a native mount.
+      const result = ctx.ui.setFooter(() => ({render() {
+        trace({background: 'applied'});
+        return ['U27-BACKGROUND-FOOTER'];
+      }, invalidate() {}}));
+      if (result !== undefined) trace({background: 'error', message: 'setter must return void'});
     }, 25);
   });
 };
@@ -119,4 +123,12 @@ async fn pi_background_chrome_from_a_settled_hook_reaches_the_live_shell() {
         rows.iter().any(|row| row["background"] == "applied"),
         "{rows:?}"
     );
+    shell.render();
+    assert!(shell
+        .dump_rendered_frame()
+        .await
+        .unwrap()
+        .join("\n")
+        .contains("U27-BACKGROUND-FOOTER"));
+    app.executable_extensions.shutdown().await;
 }

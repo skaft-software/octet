@@ -1277,6 +1277,20 @@ impl Agent {
                 "active session changes require a rebuild while V2 delegation is enabled".into(),
             ));
         }
+        self.prepare_session_replacement()?;
+        let resource_owner = session.resource_owner_key();
+        self.bash_owner = BashOwnerLease::acquire(&resource_owner);
+        self.session_id = resource_owner.clone();
+        self.resource_owner = resource_owner;
+        self.session = session;
+        self.last_run_lifecycle = None;
+        // This is a one-shot transcript projection for a future prompt in the
+        // old session, not a durable cross-session setting.
+        self.prompt_display_text = None;
+        Ok(())
+    }
+
+    fn prepare_session_replacement(&mut self) -> Result<(), AgentError> {
         if self
             .last_run_lifecycle
             .as_ref()
@@ -1288,15 +1302,6 @@ impl Agent {
         }
         self.cache_warmer
             .cancel(&mut self.session, "session changed")?;
-        let resource_owner = session.resource_owner_key();
-        self.bash_owner = BashOwnerLease::acquire(&resource_owner);
-        self.session_id = resource_owner.clone();
-        self.resource_owner = resource_owner;
-        self.session = session;
-        self.last_run_lifecycle = None;
-        // This is a one-shot transcript projection for a future prompt in the
-        // old session, not a durable cross-session setting.
-        self.prompt_display_text = None;
         Ok(())
     }
 

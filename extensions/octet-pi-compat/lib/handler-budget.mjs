@@ -1,6 +1,7 @@
 import { basename, dirname } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { nativeTimer } from './timers.mjs';
+import { rpcError } from './errors.mjs';
 import { tracePhase, traceEnabled } from './startup-trace.mjs';
 
 // Wall-clock budgets for factory handlers.
@@ -224,9 +225,21 @@ export class HookBudget {
       return { ran: false, busy: false };
     }
     const started = performance.now();
+    // Attribute a handler even if it never settles before the host deadline.
+    this.trace(entry, 0, 'started');
     const pendingBefore = new Set(store.pending);
     const userWait = USER_WAIT_EVENTS.has(this.event) ? child.userWait = new UserWait() : undefined;
-    const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
+    // Separate callback success from the hook's normalized host reply. Stores
+    // captured by queued presentation share this outcome through shallow copies.
+    let settlePresentation;
+    child.presentationOutcome = new Promise(resolve => { settlePresentation = resolve; });
+    const settled = Promise.resolve().then(call).then(value => {
+      settlePresentation();
+      return { value };
+    }, error => {
+      settlePresentation(error);
+      return { error };
+    });
     if (budget) entry.busy = true;
     settled.then(late => {
       if (budget) entry.busy = false;
@@ -263,12 +276,14 @@ export class HookBudget {
     } finally { signal.removeEventListener('abort', release); }
     if (budget) this.excluded += userWait?.spent() ?? 0;
     if (outcome === PREEMPTED) {
+      settlePresentation(rpcError(-32800, 'presentation origin preempted'));
       child.detached = true;
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
       this.trace(entry, performance.now() - started, 'preempted');
       return { ran: false, busy: false };
     }
     if (outcome === TIMED_OUT) {
+      settlePresentation(rpcError(-32800, 'presentation origin did not settle'));
       // Work the handler already queued on this hook must not hold the hook's
       // own flush, and anything it queues later is observed but never joined.
       child.detached = true;

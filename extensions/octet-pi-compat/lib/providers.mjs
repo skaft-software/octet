@@ -413,16 +413,23 @@ export function piSessionId(id) {
   const h = createHash('sha256').update(`octet-pi-session:${id}`).digest('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${(8 | (parseInt(h[16], 16) & 3)).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
-function providerRequestCallbacks(runtime, id, controller) {
+function providerRequestCallbacks(runtime, id, controller, job) {
   const call = async (phase, body) => {
     controller.signal.throwIfAborted();
+    if (job.delegated) unsupported('provider hook route', 'native delegation owns this attempt');
+    job.hookRoute = 'bridge';
     const result = await runtime.transport.request(`provider/hooks/${phase}`, { stream_id: id, ...body });
     controller.signal.throwIfAborted();
     return result;
   };
-  return {
+  const callbacks = {
     async onPayload(payload) {
-      const result = await call('payload', { payload: plainJSON(payload, 'provider payload', 786432, { omitUndefined: true }) });
+      payload = plainJSON(payload, 'provider payload', 786432, { omitUndefined: true });
+      // A wrapper may compose this exact callback with its own payload edit.
+      // The native continuation has already applied the host chain to these
+      // bytes; forwarding again would consume the competing bridge claim.
+      if (job.delegated) return payload;
+      const result = await call('payload', { payload });
       fields(result, ['payload'], 'provider payload reply');
       return plainJSON(result.payload, 'provider payload', 786432);
     },
@@ -432,11 +439,36 @@ function providerRequestCallbacks(runtime, id, controller) {
       return plainJSON(result.headers, 'provider headers', 65536);
     },
     async onResponse(response) {
+      if (job.delegated) return;
       fields(response, ['status', 'headers'], 'provider response');
       const result = await call('response', { status: response.status, headers: plainJSON(response.headers, 'provider response headers', 65536) });
       if (result?.accepted !== true || Object.keys(result).length !== 1) invalid('provider response reply');
     },
   };
+  const fetch = globalThis.fetch;
+  callbacks.fetch = async (input, init) => {
+    controller.signal.throwIfAborted();
+    // Native custom HTTP already carries the real host header phase. A package
+    // fetch wrapper may forward this supplied fetch without running it twice.
+    if (job.delegated) return fetch(input, init);
+    // This wrapper is the bridge route's only header phase. A package that does
+    // its own HTTP instead never runs it, which leaves the host hook job
+    // incomplete: the host refuses that stream at finish rather than reporting
+    // a skipped phase as success, and octet does not claim the bridge route
+    // before a wrapper actually chooses it.
+    const headers = new Headers(init?.headers ?? input?.headers);
+    // As in native HTTP, process-owned authentication is applied outside the
+    // host hook projection. Never forward a custom key into the hook bridge.
+    const credential = name => /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-goog-api-key|x-auth-token)$|^x-amz-/i.test(name);
+    const projected = Object.fromEntries([...headers].filter(([name]) => !credential(name)));
+    const transformed = await callbacks.transformHeaders(projected);
+    for (const name of Object.keys(transformed)) if (credential(name)) unsupported('provider hook headers', 'authentication remains transport-owned');
+    for (const name of [...headers.keys()]) if (!credential(name)) headers.delete(name);
+    for (const [name, values] of Object.entries(transformed)) for (const value of Array.isArray(values) ? values : [values]) headers.append(name, value);
+    controller.signal.throwIfAborted();
+    return fetch(input, { ...init, headers });
+  };
+  return callbacks;
 }
 export async function prepareProviderStream(runtime, params, store) {
   runtime.require('provider_proxy_v1');
@@ -454,14 +486,16 @@ export async function prepareProviderStream(runtime, params, store) {
   const context = requestContext(params.request, runtime), controller = new AbortController();
   // Pi's agent passes no maxTokens to provider streams; the model's own limit
   // applies inside the package's code exactly as under Pi.
+  const job = { id: params.stream_id, request: params.request, entry, model, context, controller, store, sequence: 0 };
+  const callbacks = params.request_hooks ? providerRequestCallbacks(runtime, params.stream_id, controller, job) : undefined;
   const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: undefined,
     temperature: params.request.temperature ?? undefined, cacheRetention: params.request.cache_retention, sessionId: piSessionId(params.request.session_id),
     reasoning: undefined, onPayload: undefined, onResponse: undefined, transformHeaders: undefined, ...piRequestOptions(runtime, store),
-    ...(params.request_hooks ? providerRequestCallbacks(runtime, params.stream_id, controller) : {}) };
+    ...callbacks };
   const reasoning = params.request.reasoning;
   if (reasoning?.type === 'effort' && levels.has(reasoning.value)) options.reasoning = reasoning.value;
   else if (reasoning?.type !== 'off') unsupported('provider reasoning', 'only portable effort controls are supported');
-  state.jobs.set(params.stream_id, { id: params.stream_id, request: params.request, entry, model, context, options, controller, store, sequence: 0 });
+  state.jobs.set(params.stream_id, Object.assign(job, { options, callbacks }));
   if (traceEnabled) tracePhase('pi-compat.provider.prepare', `took_us=${Math.round((performance.now() - preparedAt) * 1000)} messages=${params.request.messages.length} tools=${params.request.tools?.length ?? 0}`);
   return { stream_id: params.stream_id, accepted: true };
 }
@@ -488,12 +522,6 @@ export function startProviderStream(runtime, id) {
       if (!resolution) unsupported('custom provider auth', 'provider is not configured');
       if (resolution?.auth.baseUrl) model.baseUrl = resolution.auth.baseUrl;
       job.options = { ...job.options, apiKey: resolution?.auth.apiKey, headers: { ...resolution?.auth.headers, ...model.headers }, env: resolution?.env };
-    }
-    if (job.options.transformHeaders) {
-      const { transformHeaders, ...options } = job.options;
-      const headers = await transformHeaders(options.headers ?? {});
-      job.controller.signal.throwIfAborted();
-      job.options = { ...options, headers };
     }
     const callback = job.entry.inherited && !job.entry.native && job.entry.config.api !== job.model.pi.api ? nativeProviderDelegate : job.entry.stream;
     const stream = callback(model, job.context, strict(job.options, 'provider stream options'));

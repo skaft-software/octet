@@ -24,6 +24,12 @@ code, attributed to the owner, instance and dispatch generation. Discovery repor
 that retained failure without retrying startup or exposing remote error text/data.
 A successful process generation cutover does not establish successful startup.
 
+Headless startup/discovery and run/hook waits wake on queued extension events,
+so reverse requests do not have to wait for the 50 ms housekeeping tick. The
+same budgeted drain still enforces foreground ownership, generation and feature
+checks, and refuses unavailable UI services. This does not extend hook deadlines,
+retry failed callbacks or admit partial resources.
+
 Response (not the generic hook disposition envelope):
 
 ```json

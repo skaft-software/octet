@@ -58,15 +58,17 @@ test('settings-only history remains on the actual editor and is recalled newest-
   await peer.close();
 });
 
-test('a refused actual editor mount cannot settle the opening hook successfully or invoke its factory', async t => {
+test('a refused cosmetic editor mount is diagnosed without invoking its factory or failing the hook', async t => {
   const entry = await extension(t, 'const make = (tui, theme, kb) => new CustomEditor(tui, theme, kb);');
   const peer = launch(t, [entry], { hold: ['ui/open'] });
   await peer.init();
   const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
   const open = await peer.wait(f => f.method === 'ui/open');
   peer.send({ jsonrpc: '2.0', id: open.id, error: { code: -32002, message: 'not_foreground_owner editor owner retired' } });
-  assert.equal((await start.response).error?.code, -32002);
+  assert.ok((await start.response).result);
+  await peer.wait(f => f.method === 'notification' && /not_foreground_owner editor owner retired/.test(f.params.message));
   assert.equal(peer.seen.some(f => f.method === 'notification' && f.params.message.startsWith('{"factory":')), false);
+  assert.equal(peer.seen.some(f => f.method === 'ui/frame' || f.method === 'composer/get'), false);
   await peer.close();
 });
 
@@ -79,6 +81,7 @@ const make = (tui, theme, kb) => new VimEditor(tui, theme, kb);`);
   await peer.init(); await peer.start();
   const open = await peer.wait(f => f.method === 'ui/open' && f.params.placement === 'editor');
   assert.equal(open.params.placement, 'editor');
+  await peer.wait(f => f.method === 'notification' && f.params.message.startsWith('{"factory":'));
   assert.equal(peer.seen.filter(f => f.method === 'notification' && f.params.message.startsWith('{"factory":')).length, 1);
   await peer.close();
 });
