@@ -78,18 +78,22 @@ impl Agent {
             return Ok(());
         };
         let (config, root_tools) = binding.root_configuration();
-        binding.request_shutdown();
         let template = self.delegation_template();
+        // Create the replacement before shutting the outgoing runtime down: if
+        // creation fails, the old binding, its tools and its parked workers
+        // are all still intact and the workers are handed back.
         match enable_root_delegation(self, config, template, root_tools, session.path()) {
-            Ok(binding) => self.delegation = Some(binding),
+            Ok(binding) => {
+                if let Some(outgoing) = self.delegation.replace(binding) {
+                    outgoing.request_shutdown();
+                }
+                Ok(())
+            }
             Err(error) => {
-                // The outgoing session and tools are still installed if creating
-                // the replacement runtime fails. Give its parked workers back.
                 let _ = self.reattach_delegated_workers();
-                return Err(AgentError::Delegation(error.to_string()));
+                Err(AgentError::Delegation(error.to_string()))
             }
         }
-        Ok(())
     }
 
     /// Subscribe to the root session's latest worker telemetry, including

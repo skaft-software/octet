@@ -1336,12 +1336,15 @@ impl ExtensionHost {
     /// active selection. Session-scoped delegation uses the same definitions.
     pub(crate) fn replace_static_tool(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.definition().name;
-        let installed = self
+        match self
             .tools
             .iter_mut()
             .find(|installed| installed.definition().name == name)
-            .expect("delegation tool is already installed");
-        *installed = tool;
+        {
+            Some(installed) => *installed = tool,
+            // Not expected (the root surface installed it), but never panic.
+            None => self.register_tool_arc(tool, false),
+        }
     }
 
     fn register_tool_arc(&mut self, tool: Arc<dyn Tool>, builtin: bool) {
