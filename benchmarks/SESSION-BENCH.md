@@ -21,7 +21,8 @@ python3 benchmarks/session_bench.py --binary "$CARGO_TARGET_DIR/release/octet" \
 uses a new HOME/workspace; one warmup is discarded by default. The JSON includes
 raw samples, median/min/max, a binary SHA-256, platform and metric definitions.
 It fails on missing, duplicate or out-of-order requests, missing tool rounds,
-incorrect streamed output, incorrect file contents, failure to edit the PTY
+unsuccessful or incorrect shell output, incorrect streamed output, incorrect file
+contents, failure to edit the PTY
 composer, abnormal shutdown or failure to restore terminal modes.
 
 * **startup**: process spawn to the first completed PTY frame containing the

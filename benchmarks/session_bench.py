@@ -105,9 +105,14 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             scenario = self.server.scenario
             calls, text, results, index = response_plan(scenario, body)
+            messages = body.get("messages", [])
+            user_index = max((i for i, item in enumerate(messages) if item.get("role") == "user"), default=-1)
+            tool_outputs = [content_text(item.get("content")) for item in messages[user_index + 1:]
+                            if item.get("role") == "tool"] if scenario == "tools" else []
             with self.server.lock:
                 self.server.exchanges.append({"prompt": index, "tool_results": results,
-                                              "tool_calls": len(calls), "stream": bool(body.get("stream"))})
+                                              "tool_outputs": tool_outputs, "tool_calls": len(calls),
+                                              "stream": bool(body.get("stream"))})
             call_objects = [{"index": i, "id": f"call_{index}_{results}_{i}", "type": "function",
                              "function": {"name": name, "arguments": json.dumps(args)}}
                             for i, (name, args) in enumerate(calls)]
@@ -231,6 +236,13 @@ def verify_exchanges(scenario, exchanges, prompts=1):
         raise AssertionError(f"prompts missing, duplicated or reordered: {exchanges!r}")
     if scenario in ("tools", "write") and sum(x["tool_calls"] for x in exchanges) != len(expected) - 1:
         raise AssertionError("tool calls missing")
+    if scenario == "tools":
+        for item in exchanges:
+            outputs = item.get("tool_outputs", [])
+            if len(outputs) != item["tool_results"] or any(
+                    f"step-{index}" not in output or "exit=0" not in output
+                    for index, output in enumerate(outputs)):
+                raise AssertionError("tool output missing or unsuccessful")
     if not all(item["stream"] for item in exchanges):
         raise AssertionError("non-streaming provider request")
 

@@ -25,10 +25,13 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(len(text), 60_000)
 
     def test_exchange_validation_fails_closed(self):
-        exchange = lambda n, call: {"tool_results": n, "tool_calls": call, "stream": True}
+        exchange = lambda n, call: {"tool_results": n, "tool_calls": call, "stream": True,
+                                    "tool_outputs": [f"exit=0\nstep-{i}" for i in range(n)]}
         good = [exchange(n, int(n < 4)) for n in range(5)]
         bench.verify_exchanges("tools", good)
-        for broken in (good[:-1], good[:1] + good[2:], [dict(x, stream=False) for x in good]):
+        for broken in (good[:-1], good[:1] + good[2:], [dict(x, stream=False) for x in good],
+                       good[:-1] + [dict(good[-1], tool_outputs=[])],
+                       good[:-1] + [dict(good[-1], tool_outputs=["exit=1\nstep-0"] * 4)]):
             with self.assertRaises(AssertionError):
                 bench.verify_exchanges("tools", broken)
         with self.assertRaises(AssertionError):
