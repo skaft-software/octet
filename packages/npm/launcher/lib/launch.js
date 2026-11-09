@@ -47,7 +47,7 @@ function launch(commandName, args = process.argv.slice(2)) {
   const executable = path.join(platformRoot, 'bin', executableName);
   const versionPath = path.join(platformRoot, 'share', 'octet', '.octet-version');
   const required = [
-    'package.json', 'README.md', 'LICENSE', executable,
+    ...['package.json', 'README.md', 'LICENSE'].map((name) => path.join(platformRoot, name)), executable,
     path.join(platformRoot, 'share', 'octet', 'README.md'),
     path.join(platformRoot, 'share', 'octet', 'docs'),
     path.join(platformRoot, 'share', 'octet', 'examples'),

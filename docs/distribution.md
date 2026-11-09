@@ -66,8 +66,9 @@ The release workflows don't publish every source package automatically:
 
 Normal native and extension publication starts with the single canonical
 `vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
-creates the GitHub Release from the checked-in notes, and publishes signed native
-assets; the extension workflow waits for that binary run before publishing its
+creates a draft GitHub Release from the checked-in notes, verifies the uploaded
+signed native assets' GitHub digests, then publishes the release as Latest; the
+extension workflow waits for that binary run before publishing its
 bundles. The protected environment must admit the canonical tag without removing
 required reviewers. Dedicated `octet-binaries-vX.Y.Z` and `octet-serve-vX.Y.Z`
 tooling tags remain available for workflow-only repairs. See the
@@ -75,10 +76,9 @@ tooling tags remain available for workflow-only repairs. See the
 protected-environment policy does not yet allow `v*` tags; an authorized
 administrator must update it separately before the one-tag flow can publish.
 
-The existing npm, Homebrew and installer-repair handoffs still expect the legacy
-binary tooling tag and signer ref. They cannot consume a binary release signed
-from the canonical tag without separate changes; this workflow change does not
-alter those channels.
+The npm, Homebrew and installer-repair handoffs accept native signatures from
+either the canonical tag (with workflow commit equal to the source commit) or
+the legacy binary tooling tag. They remain separate publication channels.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
@@ -218,9 +218,10 @@ architecture URLs and rejection of a changed digest.
 
 ## Release handoff and tap publication
 
-Rendering and publishing the formula need an explicit dispatch from the matching
-`octet-binaries-vX.Y.Z` tooling tag. Finishing a binary release never changes
-the tap, and the workflow only ever opens a protected tap pull request. If an
+Rendering and publishing the formula need an explicit dispatch from the native
+signer's matching `vX.Y.Z` or `octet-binaries-vX.Y.Z` tag. Finishing a binary
+release never changes the tap, and the workflow only ever opens a protected tap
+pull request. If an
 update used a wrong or incomplete release, close the pull request unmerged and
 regenerate from the same immutable metadata. Never edit SHA-256 values by hand.
 

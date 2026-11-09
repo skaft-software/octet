@@ -166,6 +166,10 @@ gh() {
         self.assertNotEqual(0, result.returncode)
         self.assertIn("binary release run 42 did not succeed", result.stderr)
         self.assertEqual("", output)
+        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="", draft="true")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("still a draft", result.stderr)
+        self.assertEqual("", output)
 
     def test_release_source_must_be_on_main_even_without_a_repair(self):
         result, output = self.run_resolve(ancestor=False)

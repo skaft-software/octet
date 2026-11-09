@@ -49,8 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           release_tag=$INPUT_RELEASE_TAG
-          if [[ "$CURRENT_REF_TYPE" != tag || "$CURRENT_REF_NAME" != "octet-binaries-$release_tag" ]]; then
-            echo "formula renders must run from octet-binaries-$release_tag" >&2
+          if [[ "$CURRENT_REF_TYPE" != tag \
+            || ( "$CURRENT_REF_NAME" != "$release_tag" && "$CURRENT_REF_NAME" != "octet-binaries-$release_tag" ) ]]; then
+            echo "formula renders must run from $release_tag or octet-binaries-$release_tag" >&2
             exit 1
           fi
           workflow_tag=$CURRENT_REF_NAME
@@ -93,8 +94,12 @@ jobs:
             --clobber \
             --pattern 'install-octet.sh' \
             --pattern 'install-octet.sh.sigstore.json' \
+            --pattern 'install-octet.ps1' \
+            --pattern 'install-octet.ps1.sigstore.json' \
             --pattern 'octet-*.tar.gz' \
             --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern 'octet-*.zip' \
+            --pattern 'octet-*.zip.sigstore.json' \
             --pattern 'OCTET_SHA256SUMS' \
             --pattern 'OCTET_SHA256SUMS.sigstore.json' \
             --pattern 'OCTET_RELEASE_METADATA.json' \
@@ -109,12 +114,18 @@ jobs:
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
-          for artifact in ./*.tar.gz ./install-octet.sh ./OCTET_SHA256SUMS ./OCTET_RELEASE_METADATA.json; do
+          shopt -s nullglob
+          for artifact in ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1 ./OCTET_SHA256SUMS ./OCTET_RELEASE_METADATA.json; do
+            [[ -f "$artifact" ]] || continue
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               "${verify[@]}" \
               "$artifact"
           done
+          metadata_flags=()
+          if [[ -f "octet-${RELEASE_TAG#v}-x86_64-pc-windows-msvc.zip" ]]; then
+            metadata_flags+=(--include-windows-msvc)
+          fi
           python3 ../scripts/generate-octet-release-metadata.py \
             "${RELEASE_TAG#v}" \
             "$RELEASE_TAG" \
@@ -123,7 +134,8 @@ jobs:
             "$WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
             OCTET_SHA256SUMS \
-            "$RUNNER_TEMP/recomputed-release-metadata.json"
+            "$RUNNER_TEMP/recomputed-release-metadata.json" \
+            "${metadata_flags[@]}"
           cmp OCTET_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
       - name: Render and validate Homebrew formula offline
         shell: bash
@@ -140,7 +152,10 @@ jobs:
           test "$(grep -c '^class Octet < Formula$' "$RUNNER_TEMP/octet.rb")" = 1
           grep -F "# Release tag: $RELEASE_TAG" "$RUNNER_TEMP/octet.rb"
           grep -F 'depends_on :macos' "$RUNNER_TEMP/octet.rb"
-          grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/octet.rb"
+          if grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/octet.rb"; then
+            echo "Homebrew formula must not require the optional ripgrep helper" >&2
+            exit 1
+          fi
           if rg -n 'Cargo\.toml|api\.github\.com|releases/latest' "$RUNNER_TEMP/octet.rb" scripts/generate-homebrew-formula.py; then
             echo "Homebrew handoff contains a mutable release source" >&2
             exit 1

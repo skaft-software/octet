@@ -52,6 +52,7 @@ jobs:
       source_commit: ${{ steps.release.outputs.source_commit }}
       workflow_commit: ${{ steps.release.outputs.workflow_commit }}
       core_workflow_commit: ${{ steps.release.outputs.core_workflow_commit }}
+      core_workflow_tag: ${{ steps.release.outputs.core_workflow_tag }}
       mode: ${{ steps.release.outputs.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -183,23 +184,44 @@ jobs:
           fi
 
           core_workflow_commit=$workflow_commit
-          if [[ "$mode" == npm ]]; then
-            core_workflow_tag="octet-binaries-$tag"
+          core_workflow_tag=$GITHUB_REF_NAME
+          if [[ "$mode" == npm || "$mode" == installer ]]; then
+            # Metadata is only a hint here: select its exact allowed tag, resolve
+            # that tag independently, and verify the signature in the consuming
+            # job before trusting or using any native artifacts. This also works
+            # when both a canonical and a legacy tooling tag exist.
+            mkdir -p "$RUNNER_TEMP/core-release-identity"
+            gh release download "$tag" --dir "$RUNNER_TEMP/core-release-identity" \
+              --clobber --pattern OCTET_RELEASE_METADATA.json
+            core_workflow_tag=$(python3 - "$RUNNER_TEMP/core-release-identity/OCTET_RELEASE_METADATA.json" \
+              "$GITHUB_REPOSITORY" "$tag" "$source_commit" <<'PY'
+          import json
+          import sys
+
+          path, repository, tag, source = sys.argv[1:]
+          with open(path, encoding="utf-8") as stream:
+              metadata = json.load(stream)
+          prefix = f"{repository}/.github/workflows/release-octet.yml@refs/tags/"
+          ref = metadata.get("workflow_ref")
+          if (metadata.get("repository") != repository or metadata.get("tag") != tag
+                  or metadata.get("source_commit") != source
+                  or ref not in (prefix + tag, prefix + "octet-binaries-" + tag)):
+              raise SystemExit("native release metadata has an unexpected signing identity")
+          print(ref.removeprefix(prefix))
+          PY
+            )
             git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
             core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
+            if [[ "$core_workflow_tag" == "$tag" && "$core_workflow_commit" != "$source_commit" ]]; then
+              echo "canonical native signer does not match the source commit" >&2
+              exit 1
+            fi
             if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
               echo "native release tooling $core_workflow_commit does not descend from $source_commit" >&2
               exit 1
             fi
           fi
           if [[ "$mode" == installer ]]; then
-            core_workflow_tag="octet-binaries-$tag"
-            git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
-            core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
-            if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
-              echo "core release tooling $core_workflow_commit does not descend from $source_commit" >&2
-              exit 1
-            fi
             if ! git merge-base --is-ancestor "$core_workflow_commit" "$workflow_commit"; then
               echo "installer repair tooling $workflow_commit does not descend from core tooling $core_workflow_commit" >&2
               exit 1
@@ -224,8 +246,20 @@ jobs:
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
             IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
-            if [[ "$release_tag" != "$tag" || "$draft" != false || "$prerelease" != false ]]; then
-              echo "canonical release $tag is not a published stable release" >&2
+            if [[ "$release_tag" != "$tag" || "$prerelease" != false ]]; then
+              echo "canonical release $tag is not a stable release" >&2
+              exit 1
+            fi
+            if [[ "$draft" == true ]]; then
+              marker="<!-- octet-binary-release-run:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$source_commit:$workflow_commit -->"
+              if [[ "$mode" != binaries || "$GITHUB_REF_TYPE" != tag \
+                || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-binaries-$tag" ) ]] \
+                || ! gh release view "$tag" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+                echo "canonical release $tag is a draft owned by another run" >&2
+                exit 1
+              fi
+            elif [[ "$draft" != false ]]; then
+              echo "canonical release $tag has an invalid draft state" >&2
               exit 1
             fi
           elif [[ "$mode" != binaries || "$GITHUB_REF_TYPE" != tag \
@@ -366,6 +400,7 @@ jobs:
             echo "source_commit=$source_commit"
             echo "workflow_commit=$workflow_commit"
             echo "core_workflow_commit=$core_workflow_commit"
+            echo "core_workflow_tag=$core_workflow_tag"
             echo "mode=$mode"
           } >> "$GITHUB_OUTPUT"
 
@@ -780,6 +815,7 @@ jobs:
             fi
           }
           verify_release_refs building
+          marker="<!-- octet-binary-release-run:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$SOURCE_COMMIT:$WORKFLOW_COMMIT -->"
           if ! release_state=$(gh release view "$RELEASE_TAG" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
@@ -788,16 +824,35 @@ jobs:
               echo "canonical release $RELEASE_TAG no longer exists" >&2
               exit 1
             fi
-            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
-              --notes-file "docs/releases/$RELEASE_TAG.md"
+            { cat "docs/releases/$RELEASE_TAG.md"; printf '\n\n%s\n' "$marker"; } > "$RUNNER_TEMP/new-release-notes.md"
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" \
+              --notes-file "$RUNNER_TEMP/new-release-notes.md"
             release_state=$(gh release view "$RELEASE_TAG" \
               --json tagName,isDraft,isPrerelease \
               --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
           fi
           IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
-          if [[ "$release_tag" != "$RELEASE_TAG" || "$draft" != false || "$prerelease" != false ]]; then
-            echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$prerelease" != false \
+            || ( "$draft" != true && "$draft" != false ) ]]; then
+            echo "canonical release $RELEASE_TAG is not a stable release" >&2
             exit 1
+          fi
+          if [[ "$draft" == true ]]; then
+            if [[ "$GITHUB_REF_TYPE" != tag \
+              || ( "$WORKFLOW_TAG" != "$RELEASE_TAG" && "$WORKFLOW_TAG" != "octet-binaries-$RELEASE_TAG" ) ]] \
+              || ! gh release view "$RELEASE_TAG" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+              echo "canonical release $RELEASE_TAG is a draft owned by another run" >&2
+              exit 1
+            fi
+            draft_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+            while IFS=$'\t' read -r name digest; do
+              [[ -n "$name" ]] || continue
+              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" \
+                || "$digest" != "sha256:$(sha256sum "release-assets/$name" | awk '{print $1}')" ]]; then
+                echo "draft contains an unexpected or mismatched asset: $name" >&2
+                exit 1
+              fi
+            done <<< "$draft_digests"
           fi
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then
             waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
@@ -832,6 +887,37 @@ jobs:
             echo "all release assets already match the immutable candidate"
           fi
           verify_release_refs publishing
+          # Upload success is not evidence that every hosted asset has settled.
+          # Compare GitHub's immutable digest for every candidate before making a
+          # draft visible or changing the repository's Latest release.
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! awk -F '\t' -v wanted="$name" -v digest="sha256:$local_digest" \
+              '$1 == wanted { count++; if ($2 != digest) bad=1 } END { exit !(count == 1 && !bad) }' <<< "$published_digests"; then
+              echo "uploaded release asset is missing or has a mismatched digest: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ "$draft" == true ]]; then
+            while IFS=$'\t' read -r name digest; do
+              [[ -n "$name" ]] || continue
+              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" \
+                || "$digest" != "sha256:$(sha256sum "release-assets/$name" | awk '{print $1}')" ]]; then
+                echo "draft contains an unexpected or mismatched asset: $name" >&2
+                exit 1
+              fi
+            done <<< "$published_digests"
+            release_state=$(gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
+            if [[ "$release_state" != "$RELEASE_TAG"$'\t'true$'\t'false ]] \
+              || ! gh release view "$RELEASE_TAG" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+              echo "draft release state or ownership changed before publication" >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
 
   verify-published:
     name: Verify binary install on ${{ matrix.target }}
@@ -948,7 +1034,7 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
-          CORE_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-octet.yml@refs/tags/${{ needs.resolve.outputs.core_workflow_tag }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -1518,6 +1604,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          CORE_WORKFLOW_TAG: ${{ needs.resolve.outputs.core_workflow_tag }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -1526,7 +1613,7 @@ jobs:
             --dir upstream-assets \
             --pattern OCTET_SHA256SUMS \
             --pattern OCTET_SHA256SUMS.sigstore.json
-          core_identity="https://github.com/$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/octet-binaries-$RELEASE_TAG"
+          core_identity="https://github.com/$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/$CORE_WORKFLOW_TAG"
           cosign verify-blob \
             --bundle upstream-assets/OCTET_SHA256SUMS.sigstore.json \
             --certificate-identity "$core_identity" \
@@ -1603,7 +1690,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-          CORE_WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_TAG: ${{ needs.resolve.outputs.core_workflow_tag }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
           INSTALLER_WORKFLOW_TAG: ${{ github.ref_name }}
           INSTALLER_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}

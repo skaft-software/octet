@@ -51,17 +51,18 @@ latest exact-source `main` push CI run, then requires its successful conclusion
 and all required lanes. Repairs also accept exact-source merge-group and manual
 CI runs. A failed run or timeout stops publication; inspect the failure rather
 than treating it as qualified. After the existing protected publish approval,
-the workflow creates the GitHub Release from the checked-in notes and attaches
-signed binary assets.
+the workflow creates a draft GitHub Release from the checked-in notes, attaches
+signed binary assets, verifies their GitHub digests, and only then publishes it as
+Latest. A failed upload leaves the previous Latest release available.
 The extension workflow waits for that exact binary tag-push run to succeed before
 building and attaching the six official bundles. Its wait is bounded at 350
 minutes, including binary build and approval time. Signing, environment approval,
 and source/version checks remain mandatory.
 
 npm and Homebrew remain separate, explicitly dispatched channels; a tag push
-alone does not publish them. Their existing handoffs and the installer-repair
-path still expect the legacy binary tooling tag and signer ref and cannot consume
-a release signed from the canonical tag without separate changes. See the
+alone does not publish them. Their handoffs and the installer-repair path accept
+both the canonical-tag signer (bound to the source commit) and the legacy binary
+tooling-tag signer. See the
 [npm trusted-publishing contract](../../../release/npm-trusted-publishing.md) and
 [distribution guide](../../../distribution.md).
 
@@ -86,5 +87,7 @@ records **Source CI qualification WAIVED: <reason> by <actor>**. The protected
 binary and installer publish jobs also put the waiver first in the release notes;
 npm-only dispatches record it in the summary. This waives only the source CI
 gate, not main ancestry, version, audit, protected publishing or signing.
-Inspect failed jobs before recovery and never replace immutable assets or
-silently relabel a waiver as a CI pass.
+A binary draft is owned by its workflow run; reruns can resume it only when its
+existing assets match the new candidate's digests. Otherwise stop and inspect
+it rather than publishing or replacing assets. Inspect failed jobs before recovery
+and never replace immutable assets or silently relabel a waiver as a CI pass.

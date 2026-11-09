@@ -172,10 +172,14 @@ gh() {
 set -euo pipefail
 git() {
   case "$1" in
-    fetch) return 0 ;;
+    fetch)
+      printf '%s\n' "$*" >> "$TEST_FETCHES"
+      if [[ "$TEST_MISSING_CORE_TAG" == true && "$*" == *refs/tags/octet-binaries-* ]]; then return 1; fi ;;
     rev-parse)
       if [[ "$2" == "$GITHUB_SHA^{commit}" ]]; then
         printf '%s\n' "$GITHUB_SHA"
+      elif [[ "$2" == octet-binaries-* ]]; then
+        printf '%s\n' "$TEST_CORE_SHA"
       else
         printf '%s\n' "$TEST_SOURCE"
       fi ;;
@@ -194,7 +198,20 @@ gh() {
   case "$*" in
     'release view '*)
       [[ "$TEST_MISSING_RELEASE" != true ]] || return 1
-      printf '%s\t%s\t%s\n' "$TEST_TAG" "$TEST_DRAFT" "$TEST_PRERELEASE" ;;
+      if [[ "$*" == *'--json body'* ]]; then
+        printf '%s\n' "$TEST_BODY"
+      else
+        printf '%s\t%s\t%s\n' "$TEST_TAG" "$TEST_DRAFT" "$TEST_PRERELEASE"
+      fi ;;
+    'release download '*)
+      mkdir -p "$5"
+      python3 - "$5/OCTET_RELEASE_METADATA.json" <<'PY'
+import json, os, sys
+with open(sys.argv[1], 'w') as out:
+    json.dump({'repository': os.environ['GITHUB_REPOSITORY'], 'tag': os.environ['TEST_TAG'],
+               'source_commit': os.environ['TEST_SOURCE'], 'workflow_ref': os.environ['TEST_METADATA_REF']}, out)
+PY
+      ;;
     *'/ci.yml/runs'*) printf '42\n' ;;
     *'/jobs?'*) printf '%s\n' "$TEST_JOBS" ;;
     *'/actions/runs/42'*) printf '%s\tcompleted\tsuccess\n' "$TEST_SOURCE" ;;
@@ -218,11 +235,15 @@ gh() {
                 "TEST_PATHS": ".github/workflows/release-octet.yml", "TEST_WORKFLOW_CHANGED": "true",
                 "TEST_VERSION": "0.10.0", "TEST_TAG": "v0.10.0",
                 "TEST_DRAFT": "false", "TEST_PRERELEASE": "false", "TEST_MISSING_RELEASE": "false",
+                "TEST_BODY": "", "TEST_CORE_SHA": "b" * 40, "TEST_MISSING_CORE_TAG": "false",
+                "TEST_METADATA_REF": "skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v0.10.0",
+                "TEST_FETCHES": str(Path(temporary) / "fetches"), "RUNNER_TEMP": temporary,
                 "TEST_JOBS": "\n".join(f"{name}\tsuccess" for name in REQUIRED),
             }
             env.update(overrides)
             result = subprocess.run([shutil.which("bash"), "-c", stubs + script], env=env,
                                     capture_output=True, text=True, timeout=10)
+            self.fetches = Path(env["TEST_FETCHES"]).read_text() if Path(env["TEST_FETCHES"]).exists() else ""
             return result, output.read_text() if output.exists() else ""
 
     def test_manual_tooling_tag_keeps_the_canonical_product_source(self):
@@ -245,6 +266,47 @@ gh() {
         result, output = self.run_forced_resolve(TEST_MISSING_RELEASE="true")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("tag=v0.10.0\n", output)
+
+    def test_resolve_only_accepts_drafts_owned_by_the_same_binary_run(self):
+        marker = f"<!-- octet-binary-release-run:skaft-software/octet:123:{SOURCE}:{SOURCE} -->"
+        options = dict(GITHUB_EVENT_NAME="push", GITHUB_REF_NAME="v0.10.0", GITHUB_REF="refs/tags/v0.10.0",
+                       GITHUB_SHA=SOURCE, INPUT_RELEASE_TAG="", INPUT_FORCE_RELEASE="false",
+                       TEST_DRAFT="true", TEST_BODY=marker)
+        result, _ = self.run_forced_resolve(**options)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for change in ({"TEST_BODY": "other draft"}, {"GITHUB_RUN_ID": "124"},
+                       {"TEST_PRERELEASE": "true"}):
+            with self.subTest(change=change):
+                result, _ = self.run_forced_resolve(**(options | change))
+                self.assertNotEqual(0, result.returncode)
+
+    def test_npm_and_installer_resolve_native_signer_from_exact_metadata_tag(self):
+        prefix = "skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/"
+        npm_options = dict(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF_TYPE="branch",
+                           GITHUB_REF_NAME="main", GITHUB_REF="refs/heads/main", GITHUB_SHA="b" * 40,
+                           INPUT_PUBLISH_NPM="true", TEST_PATHS="")
+        for tag, commit in (("v0.10.0", SOURCE), ("octet-binaries-v0.10.0", "b" * 40)):
+            with self.subTest(tag=tag):
+                result, output = self.run_forced_resolve(**(npm_options | {
+                    "TEST_METADATA_REF": prefix + tag, "TEST_MISSING_CORE_TAG": str(tag == "v0.10.0").lower()}))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"core_workflow_tag={tag}\n", output)
+                self.assertIn(f"core_workflow_commit={commit}\n", output)
+                self.assertIn(f"refs/tags/{tag}:refs/tags/{tag}", self.fetches)
+        for tag in ("refs/heads/main", "v0.10.1", "octet-binaries-v0.10.1"):
+            result, _ = self.run_forced_resolve(**(npm_options | {"TEST_METADATA_REF": prefix + tag}))
+            self.assertNotEqual(0, result.returncode)
+        result, _ = self.run_forced_resolve(**(npm_options | {"TEST_MISSING_CORE_TAG": "true"}))
+        self.assertNotEqual(0, result.returncode)
+        for tag in ("v0.10.0", "octet-binaries-v0.10.0"):
+            with self.subTest(installer_signer=tag):
+                result, output = self.run_forced_resolve(
+                    GITHUB_EVENT_NAME="push", GITHUB_REF_NAME="octet-installer-v0.10.0",
+                    GITHUB_REF="refs/tags/octet-installer-v0.10.0", INPUT_RELEASE_TAG="",
+                    INPUT_FORCE_RELEASE="false", TEST_METADATA_REF=prefix + tag)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"core_workflow_tag={tag}\n", output)
+        self.assertIn("needs.resolve.outputs.core_workflow_tag", self.workflow)
 
     def test_source_must_be_on_main_even_when_force_is_set(self):
         result, output = self.run_forced_resolve(TEST_ANCESTOR="false")
@@ -272,14 +334,14 @@ gh() {
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("", output)
 
-    def test_canonical_push_creates_release_only_after_ref_validation(self):
+    def run_attach(self, *, draft=None, body=None, assets="", upload="ok", prerelease="false"):
         step = self.workflow.split('      - name: Attach assets to canonical release\n', 1)[1]
         script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n  verify-published:', 1)[0])
         stubs = r'''
 set -euo pipefail
 git() {
   case "$1" in
-    fetch) : ;;
+    fetch) printf 'git %s\n' "$*" >> "$TEST_REQUESTS" ;;
     rev-parse) printf '%s\n' "$SOURCE_COMMIT" ;;
     *) return 98 ;;
   esac
@@ -288,13 +350,26 @@ gh() {
   printf '%s\n' "$*" >> "$TEST_REQUESTS"
   case "$1 $2" in
     'release view')
-      if [[ "$*" == *'--json assets'* ]]; then return 0; fi
       [[ -e "$TEST_RELEASE" ]] || return 1
-      printf '%s\tfalse\tfalse\n' "$RELEASE_TAG" ;;
+      if [[ "$*" == *'--json assets'* ]]; then cat "$TEST_ASSETS"
+      elif [[ "$*" == *'--json body'* ]]; then cat "$TEST_BODY"
+      else printf '%s\t%s\t%s\n' "$RELEASE_TAG" "$(cat "$TEST_RELEASE")" "$TEST_PRERELEASE"; fi ;;
     'release create')
-      [[ "$*" == *'--verify-tag'* && "$*" == *'--notes-file docs/releases/v0.10.3.md'* ]] || return 1
-      touch "$TEST_RELEASE" ;;
-    'release upload') : ;;
+      [[ "$*" == *'--verify-tag'* && "$*" == *'--draft'* && "$*" == *'--notes-file'* ]] || return 1
+      cp "${@: -1}" "$TEST_BODY"
+      printf true > "$TEST_RELEASE" ;;
+    'release upload')
+      [[ "$TEST_UPLOAD" != fail ]] || return 1
+      shift 3
+      for file in "$@"; do
+        [[ "$TEST_UPLOAD" != missing ]] || continue
+        digest=$(sha256sum "$file" | awk '{print $1}')
+        [[ "$TEST_UPLOAD" != bad ]] || digest=bad
+        printf '%s\tsha256:%s\n' "${file##*/}" "$digest" >> "$TEST_ASSETS"
+      done ;;
+    'release edit')
+      [[ "$*" == *'--draft=false --latest'* ]] || return 99
+      printf false > "$TEST_RELEASE" ;;
     *) return 99 ;;
   esac
 }
@@ -303,18 +378,64 @@ gh() {
             root = Path(temporary)
             (root / "release-assets").mkdir()
             (root / "release-assets" / "artifact").write_text("fixture")
-            requests = root / "requests"
+            (root / "docs/releases").mkdir(parents=True)
+            (root / "docs/releases/v0.10.3.md").write_text("Release notes\n")
+            requests, state, body_file, asset_file = (root / x for x in ("requests", "state", "body", "assets"))
+            if draft is not None:
+                state.write_text(str(draft).lower())
+            marker = f"<!-- octet-binary-release-run:skaft-software/octet:123:{SOURCE}:{SOURCE} -->"
+            body_file.write_text(marker + "\n" if body is None else body)
+            asset_file.write_text(assets)
             env = {"PATH": os.defpath, "GITHUB_EVENT_NAME": "push", "GITHUB_REF_TYPE": "tag",
-                   "RELEASE_TAG": "v0.10.3",
-                   "SOURCE_COMMIT": SOURCE, "WORKFLOW_COMMIT": SOURCE, "WORKFLOW_TAG": "v0.10.3",
-                   "INPUT_FORCE_RELEASE": "", "INPUT_FORCE_REASON": "", "RUNNER_TEMP": temporary,
-                   "TEST_RELEASE": str(root / "release"), "TEST_REQUESTS": str(requests)}
+                   "GITHUB_REPOSITORY": "skaft-software/octet", "GITHUB_RUN_ID": "123",
+                   "RELEASE_TAG": "v0.10.3", "SOURCE_COMMIT": SOURCE, "WORKFLOW_COMMIT": SOURCE,
+                   "WORKFLOW_TAG": "v0.10.3", "INPUT_FORCE_RELEASE": "", "INPUT_FORCE_REASON": "",
+                   "RUNNER_TEMP": temporary, "TEST_RELEASE": str(state), "TEST_REQUESTS": str(requests),
+                   "TEST_BODY": str(body_file), "TEST_ASSETS": str(asset_file), "TEST_UPLOAD": upload,
+                   "TEST_PRERELEASE": prerelease}
             result = subprocess.run(["bash", "-c", stubs + script], cwd=root, env=env,
                                     capture_output=True, text=True)
-            self.assertEqual(0, result.returncode, result.stderr)
-            calls = requests.read_text()
-            self.assertIn('release create v0.10.3 --verify-tag', calls)
-            self.assertIn('release upload v0.10.3', calls)
+            return result, requests.read_text() if requests.exists() else "", state.read_text() if state.exists() else None
+
+    def test_draft_is_published_only_after_upload_ref_and_digest_verification(self):
+        result, calls, state = self.run_attach()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("false", state)
+        self.assertIn('release create v0.10.3 --verify-tag --draft', calls)
+        self.assertIn('release upload v0.10.3', calls)
+        self.assertIn('release edit v0.10.3 --draft=false --latest', calls)
+        self.assertLess(calls.index('release create'), calls.index('release upload'))
+        self.assertLess(calls.index('release upload'), calls.rindex('--json assets'))
+        self.assertLess(calls.rindex('--json assets'), calls.index('release edit'))
+        self.assertTrue(calls.rstrip().endswith('release edit v0.10.3 --draft=false --latest'))
+
+    def test_draft_failures_leave_latest_untouched(self):
+        import hashlib
+        good = hashlib.sha256(b"fixture").hexdigest()
+        for options in (
+            {"upload": "fail"}, {"upload": "missing"}, {"upload": "bad"},
+            {"draft": True, "body": "someone else's draft\n"},
+            {"draft": True, "assets": "unknown\tsha256:" + good + "\n"},
+            {"draft": True, "assets": "artifact\tsha256:" + "0" * 64 + "\n"},
+            {"draft": True, "assets": "artifact\t\n"},
+            {"draft": True, "prerelease": "true"},
+        ):
+            with self.subTest(options=options):
+                result, calls, state = self.run_attach(**options)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("true", state)
+                self.assertNotIn('--draft=false --latest', calls)
+        result, calls, state = self.run_attach(draft=True, assets=f"artifact\tsha256:{good}\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("false", state)
+        self.assertNotIn("release upload", calls)
+
+    def test_existing_published_release_can_keep_unrelated_extension_assets(self):
+        result, calls, state = self.run_attach(draft=False, assets="extension\tsha256:unrelated\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("false", state)
+        self.assertIn("release upload", calls)
+        self.assertNotIn("--draft=false --latest", calls)
 
     def test_release_notes_waiver_preserves_existing_text_and_is_idempotent(self):
         start = self.workflow.index('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then',
