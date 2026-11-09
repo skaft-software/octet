@@ -59,10 +59,12 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   assert.ok(await projectContext(runtime, params, store));
   assert.deepEqual(reports, [[event, 0, failure]]);
   assert.equal(kept, 1);
+  const expectedReports = [[event, 0, failure]];
   for (const code of [-32601, -32602]) {
     const failure = Object.assign(new Error('callback failure'), { code });
     handlers[0].handler = () => { throw failure; };
     assert.ok(await projectContext(runtime, params, store));
+    expectedReports.push([event, 0, failure]);
   }
   const hostRefusal = Object.assign(new Error('owner refused'), { code: -32002 });
   handlers[0].handler = () => { throw hostRefusal; };
@@ -77,7 +79,14 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   const cancelled = Object.assign(new Error('cancelled'), { code: -32800 });
   handlers[0].handler = () => { store.controller.abort(cancelled); throw failure; };
   await assert.rejects(projectContext(runtime, params, store), error => error === cancelled);
-  assert.equal(reports.length, 3); assert.equal(kept, 3);
+  // ff433cf2 reports a callback that throws while cancellation wins the hook.
+  // Pi reports throwing context handlers: scripts/fixtures/pi-reference/node_modules/
+  // @earendil-works/pi-coding-agent/dist/core/extensions/runner.js:1023-1031,1052-1060.
+  // That diagnostic is not a successful projection or permission to run a later handler.
+  expectedReports.push([event, 0, failure]);
+  assert.deepEqual(reports, expectedReports);
+  assert.equal(reports.length, 4); assert.equal(kept, 3);
+  assert.equal(store.controller.signal.reason, cancelled);
 });
 
 test('coded callback failures retain the last good projection and run remaining callbacks', async () => {

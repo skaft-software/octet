@@ -48,10 +48,15 @@ test('credential resolution cannot redirect a reviewed request to another model'
   assert.doesNotMatch(peer.stderr(), /fixture-secret/);
   await peer.close();
 });
-test('hasUI is false when remote_ui was not offered and custom fails explicitly', async t => {
+test('hasUI is false without remote_ui and custom returns undefined without invoking its factory', async t => {
   const peer = launch(t); await peer.init(['request_progress']);
   assert.match((await peer.call('normal').response).result.content[0].text, /\|false\|/);
-  assert.match((await peer.command('surface').response).error.message, /unsupported_feature remote_ui/);
+  // Pi 1.0.2: scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:132-147.
+  assert.ok((await peer.command('surface').response).result);
+  await peer.wait(f => f.method === 'notification' && f.params.message === 'done:undefined');
+  await peer.close();
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/frame'), false);
+  assert.doesNotMatch(peer.stderr(), /surface factory invoked/);
 });
 test('custom settles its command after mount but keeps JS done result, timers, owner and input live', async t => {
   const peer = launch(t); await peer.init();
@@ -126,12 +131,16 @@ test('unsupported options/results and unnegotiated child calls never silently di
   const peer = launch(t); await peer.init(); await peer.start();
   for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
-test('headless chrome setters are inert; dialogs and theme catalogs still refuse', async t => {
+test('headless chrome and custom UI are inert; native theme catalogs still refuse', async t => {
   const peer = launch(t); await peer.init([]); await peer.start();
   // Pi's print mode has a UI context whose presentation setters do nothing.
   assert.ok((await peer.call('chrome').response).result);
-  assert.match((await peer.call('dialog').response).error.message, /unsupported_feature remote_ui/);
+  // Pi's noOpUIContext.custom never calls its factory (runner.js:147).
+  assert.equal((await peer.call('dialog').response).result.content[0].text, 'undefined');
   assert.match((await peer.call('theme').response).error.message, /unsupported_feature ctx\.ui\.theme/);
+  await peer.close();
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/frame' || f.method === 'ui/chrome'), false);
+  assert.doesNotMatch(peer.stderr(), /dialog factory invoked/);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {
   const dir = await temporary(t), a = join(dir, 'a.ts'), b = join(dir, 'b.ts');
