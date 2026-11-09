@@ -481,6 +481,8 @@ async fn deferred_subagents_binds_observation_before_ultra_selection() {
             let launch = resolve_launch_print(&boot, "deferred-ultra").unwrap();
             let mut app = build_app_first_frame_first(boot, launch, "system".into()).unwrap();
             assert!(app.executable_extensions.startup_pending());
+            assert!(app.executable_extensions.pending_agent_session_service());
+            assert!(app.executable_extensions.pending_subagents_service());
             assert!(!app.subagents_available());
             let session = app.agent.session().path().to_path_buf();
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);

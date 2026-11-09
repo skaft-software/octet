@@ -1039,7 +1039,11 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
     );
     let pro_row = listing
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro"))
+        .find(|line| {
+            let mut columns = line.split_whitespace();
+            columns.next() == Some("deepseek")
+                && matches!(columns.next(), Some("deepseek-v4-pro" | "deepseek/deepseek-v4-pro"))
+        })
         .unwrap_or_else(|| panic!("missing text-only row: {listing}"));
     assert_eq!(
         pro_row.split_whitespace().last(),

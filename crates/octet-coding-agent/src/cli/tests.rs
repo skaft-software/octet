@@ -612,6 +612,9 @@ mod pi_codemode_tests {
             "trusted_extensions = ['octet-codemode']\n",
         )
         .unwrap();
+        // The child clears its environment and must not discover an unrelated
+        // repository above TMPDIR as its workspace.
+        std::fs::create_dir(fixture.workspace.join(".git")).unwrap();
         let home = fixture.global.parent().unwrap();
         let pi = home.join(".pi/agent");
         std::fs::create_dir_all(&pi).unwrap();

@@ -351,8 +351,8 @@ pub(crate) struct DeferredExtensionStartup {
     descriptors: BTreeMap<String, DiscoveredExtension>,
     /// Tool-name clashes already resolved during discovery.
     tool_clashes: BTreeMap<String, String>,
-    /// Whether a pending `octet-subagents` was admitted with `subagent_spawn`.
-    /// Keeps delegation readiness honest while its handshake is in flight.
+    /// Whether a pending first-party child-session owner was admitted with
+    /// `subagent_spawn`, so its runtime can be prepared before attach.
     agent_sessions_pending: bool,
     pi_preparation: Option<lifecycle::DeferredPiPreparation>,
     /// Activation tasks; aborting cancels the still-starting processes.

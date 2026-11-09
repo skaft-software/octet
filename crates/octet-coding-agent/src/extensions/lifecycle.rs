@@ -465,13 +465,11 @@ impl ExecutableExtensions {
                     .iter()
                     .map(|descriptor| descriptor.manifest.name.clone())
                     .collect::<Vec<_>>();
-                // A pending first-party subagents extension is the same one the
-                // synchronous path would have measured, so delegation readiness
-                // is decided at discovery and the process binds at attach.
+                // Both first-party child-session owners may negotiate this
+                // service. Prepare the runtime before either deferred process
+                // attaches, including the automatic Pi mirror.
                 let agent_sessions_pending = agent_sessions_tool_available
-                    && startable_names
-                        .iter()
-                        .any(|name| name == SUBAGENTS_EXTENSION_NAME);
+                    && startable_names.iter().any(|name| agent_session_owner(name));
                 crate::app::bootstrap::startup_count(
                     "extensions.handshake.requested",
                     startable_names.len(),
@@ -628,13 +626,19 @@ impl ExecutableExtensions {
             .unwrap_or_default()
     }
 
-    /// Whether a pending first-party `octet-subagents` was admitted with the
-    /// `subagent_spawn` tool. Delegation readiness uses this until the process
-    /// attaches, so a deferred boot cannot silently downgrade Ultra reasoning.
+    /// Whether an admitted first-party child-session owner is still starting.
     pub(crate) fn pending_agent_session_service(&self) -> bool {
         self.deferred_startup
             .as_ref()
             .is_some_and(|deferred| deferred.agent_sessions_pending)
+    }
+
+    /// Pi can use child sessions too, but only subagents supplies the worker
+    /// observation surface required for Ultra reasoning.
+    pub(crate) fn pending_subagents_service(&self) -> bool {
+        self.deferred_startup.as_ref().is_some_and(|deferred| {
+            deferred.agent_sessions_pending && deferred.pending.contains(SUBAGENTS_EXTENSION_NAME)
+        })
     }
 
     /// Installs every extension handshake that already settled.
@@ -1525,6 +1529,16 @@ impl ExecutableExtensions {
         self.deactivate_session_lifecycle_driver();
         self.remote_ui
             .revoke("the foreground extension binding ended");
+        // Aborting a Tokio task only requests cancellation. Wait until its
+        // process-group guard has actually dropped before releasing the owner;
+        // otherwise an old Pi capture can continue writing after release.
+        if let Some(preparation) = self
+            .deferred_startup
+            .as_mut()
+            .and_then(|startup| startup.pi_preparation.as_mut())
+        {
+            preparation.cancel().await;
+        }
         self.cancel_background_work();
         self.settle_session_lifecycle(reload).await;
         for process in &self.processes {
@@ -1961,6 +1975,13 @@ pub(super) struct DeferredPiPreparation {
 }
 
 impl DeferredPiPreparation {
+    async fn cancel(&mut self) {
+        if self.result.is_none() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+    }
+
     async fn wait(&mut self) {
         if self.result.is_none() {
             self.result = Some(
