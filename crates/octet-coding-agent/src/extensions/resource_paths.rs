@@ -617,7 +617,7 @@ fn user_global_roots(
 fn pi_agent_dirs(workspace: &Path) -> Vec<PathBuf> {
     ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"]
         .into_iter()
-        .find_map(|name| std::env::var_os(name))
+        .find_map(std::env::var_os)
         .filter(|value| !value.is_empty())
         .map(|value| {
             let path = PathBuf::from(value);

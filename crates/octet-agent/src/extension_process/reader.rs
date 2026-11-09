@@ -702,7 +702,10 @@ pub(super) fn queue_registered_session_lifecycle_operation(
                             "active-session lifecycle service is unavailable",
                         )
                     }
-                    Err(ExtensionSessionLifecycleError::Failed) => api_v03_session_lifecycle_error(
+                    Err(
+                        ExtensionSessionLifecycleError::Failed
+                        | ExtensionSessionLifecycleError::Refused(_),
+                    ) => api_v03_session_lifecycle_error(
                         &request_id,
                         "internal_error",
                         "active-session lifecycle operation failed",

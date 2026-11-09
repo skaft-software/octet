@@ -16,7 +16,7 @@ impl ReplacementReceiver {
             Self::Setup(receiver) => receiver
                 .await
                 .map_err(|_| ExtensionSessionLifecycleError::Unavailable)?
-                .map_err(|_| ExtensionSessionLifecycleError::Failed),
+                .map_err(ExtensionSessionLifecycleError::Refused),
         }
     }
 }
@@ -399,6 +399,10 @@ pub(super) fn queue_replacement(
                             "active-session lifecycle service is unavailable",
                         )
                     }
+                    Err(ExtensionSessionLifecycleError::Refused(reason)) => Ok(serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": reason},
+                    })),
                     Err(ExtensionSessionLifecycleError::Failed) => api_v03_session_lifecycle_error(
                         &id,
                         "internal_error",

@@ -44,11 +44,24 @@ impl Agent {
         if self.delegation.is_some() {
             return Err(DelegationError::AlreadyEnabled);
         }
-        let template = DelegationTemplate {
+        let template = self.delegation_template();
+        let session_path = self.session.path().to_owned();
+        let binding = enable_root_delegation(self, config, template, root_tools, &session_path)?;
+        let team_directory = binding.team_directory().to_path_buf();
+        self.delegation = Some(binding);
+        Ok(team_directory)
+    }
+
+    fn delegation_template(&self) -> DelegationTemplate {
+        DelegationTemplate {
             model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
             model: std::sync::RwLock::new(self.model.clone()),
-            base_system: std::sync::RwLock::new(self.system.clone()),
+            base_system: std::sync::RwLock::new(
+                self.delegation
+                    .as_ref()
+                    .map_or_else(|| self.system.clone(), DelegationBinding::base_system),
+            ),
             sandbox: self.sandbox.clone(),
             effect_broker: self.effect_broker.clone(),
             extensions: self.extensions.clone(),
@@ -57,11 +70,30 @@ impl Agent {
             reasoning_mode: self.reasoning_mode,
             cache_retention: self.cache_retention,
             runtime: std::sync::RwLock::new(self.delegation_runtime_settings()),
+        }
+    }
+
+    pub(super) fn rebind_delegation(&mut self, session: &Session) -> Result<(), AgentError> {
+        let Some(binding) = &self.delegation else {
+            return Ok(());
         };
-        let binding = enable_root_delegation(self, config, template, root_tools)?;
-        let team_directory = binding.team_directory().to_path_buf();
-        self.delegation = Some(binding);
-        Ok(team_directory)
+        let (config, root_tools) = binding.root_configuration();
+        let template = self.delegation_template();
+        // Create the replacement before shutting the outgoing runtime down: if
+        // creation fails, the old binding, its tools and its parked workers
+        // are all still intact and the workers are handed back.
+        match enable_root_delegation(self, config, template, root_tools, session.path()) {
+            Ok(binding) => {
+                if let Some(outgoing) = self.delegation.replace(binding) {
+                    outgoing.request_shutdown();
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.reattach_delegated_workers();
+                Err(AgentError::Delegation(error.to_string()))
+            }
+        }
     }
 
     /// Subscribe to the root session's latest worker telemetry, including
@@ -198,6 +230,12 @@ impl Agent {
     pub(crate) fn install_delegation_tools(&mut self, tools: Vec<Arc<dyn Tool>>) {
         for tool in tools {
             self.extensions.tool_arc(tool);
+        }
+    }
+
+    pub(crate) fn replace_delegation_tools(&mut self, tools: Vec<Arc<dyn Tool>>) {
+        for tool in tools {
+            self.extensions.replace_static_tool(tool);
         }
     }
 

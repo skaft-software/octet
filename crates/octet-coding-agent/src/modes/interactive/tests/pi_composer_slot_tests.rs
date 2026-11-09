@@ -41,13 +41,17 @@ async fn live_slot_app() -> (tempfile::TempDir, App, InteractiveShell) {
     let (directory, mut app, mut shell) =
         pi_ui_app_with_native_command(SLOT_FACTORY, "first-owner", "shared");
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-    tokio::time::timeout(
+    let problems = tokio::time::timeout(
         Duration::from_secs(8),
-        resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input),
+        resource_paths::refresh_resource_paths_reporting(&mut app, &mut shell, &mut input),
     )
     .await
     .expect("native resource/lifecycle startup timed out")
     .unwrap();
+    assert!(
+        problems.is_empty(),
+        "native resource/lifecycle startup failed: {problems:?}"
+    );
     shell.finish_startup();
     (directory, app, shell)
 }
@@ -71,20 +75,26 @@ async fn pump_until(
     shell: &mut InteractiveShell,
     mut ready: impl FnMut(&str) -> bool,
 ) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let mut last_frame = String::new();
+    let mut notices = Vec::new();
+    if tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             for message in app.executable_extensions.drain_events_for_shell(shell) {
+                notices.push(message.clone());
                 shell.notice(message);
             }
-            let frame = rendered(shell).await;
-            if ready(&frame) {
+            last_frame = rendered(shell).await;
+            if ready(&last_frame) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("real adapter UI did not reach its acceptance barrier");
+    .is_err()
+    {
+        panic!("real adapter UI did not reach its acceptance barrier: notices={notices:?} extensions={} frame={last_frame}", app.executable_extensions.inspect_text());
+    }
 }
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {

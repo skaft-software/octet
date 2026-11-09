@@ -676,7 +676,9 @@ fn static_reasoning_capability(model: &StaticModelPreset) -> Option<ReasoningCap
 }
 
 fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
-    catalog.resolve(&ModelId(id.to_owned())).is_ok()
+    // `resolve` also accepts provider-qualified aliases; registration needs to
+    // distinguish those from an actual catalog key.
+    catalog.models().any(|model| model.id.0 == id)
 }
 
 /// Return all endpoint ids declared by a provider. Tests use this to ensure
@@ -697,6 +699,16 @@ mod tests {
         CLOUDFLARE_AI_GATEWAY, CLOUDFLARE_WORKERS_AI, META, MINIMAX, MISTRAL, OPENAI, OPENCODE,
         OPENCODE_GO,
     };
+
+    #[test]
+    fn model_id_registration_checks_exact_keys_not_resolvable_aliases() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        assert!(has_model_id(&catalog, "gpt-4o-mini"));
+        assert!(catalog
+            .resolve(&ModelId("openai/gpt-4o-mini".into()))
+            .is_ok());
+        assert!(!has_model_id(&catalog, "openai/gpt-4o-mini"));
+    }
 
     #[test]
     fn pinned_reasoning_refresh_preserves_source_holes_defaults_and_wire_values() {

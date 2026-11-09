@@ -58,15 +58,20 @@ test('settings-only history remains on the actual editor and is recalled newest-
   await peer.close();
 });
 
-test('a refused actual editor mount cannot settle the opening hook successfully or invoke its factory', async t => {
+test('a refused actual editor mount is diagnosed without failing its hook or invoking its factory', async t => {
   const entry = await extension(t, 'const make = (tui, theme, kb) => new CustomEditor(tui, theme, kb);');
   const peer = launch(t, [entry], { hold: ['ui/open'] });
   await peer.init();
   const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
   const open = await peer.wait(f => f.method === 'ui/open');
   peer.send({ jsonrpc: '2.0', id: open.id, error: { code: -32002, message: 'not_foreground_owner editor owner retired' } });
-  assert.equal((await start.response).error?.code, -32002);
+  // Pi observes editor presentation failures separately from hook results:
+  // scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:813-839.
+  assert.equal((await start.response).result?.disposition.action, 'continue');
+  await peer.waitStderr(/not_foreground_owner editor owner retired/);
+  await peer.wait(f => f.method === 'notification' && /editor owner retired/.test(f.params.message));
   assert.equal(peer.seen.some(f => f.method === 'notification' && f.params.message.startsWith('{"factory":')), false);
+  assert.equal(peer.seen.some(f => ['ui/frame', 'composer/get', 'composer/set'].includes(f.method)), false);
   await peer.close();
 });
 
