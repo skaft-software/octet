@@ -247,6 +247,11 @@ def verify_exchanges(scenario, exchanges, prompts=1):
         raise AssertionError("non-streaming provider request")
 
 
+def verify_stream_output(stdout):
+    if stdout != STREAM_DATA.encode():
+        raise AssertionError("stream output differs from 60,000-character fixture")
+
+
 def headless(binary, server, scenario, timeout):
     server.reset(scenario)
     with tempfile.TemporaryDirectory(prefix="octet-bench-") as tmp:
@@ -278,8 +283,7 @@ def headless(binary, server, scenario, timeout):
             if child.returncode != 0:
                 raise RuntimeError(f"headless exit {child.returncode}: {stderr[-3000:]!r}")
             if scenario == "stream":
-                if STREAM_DATA.encode() not in stdout:
-                    raise AssertionError("stream output differs from 60,000-character fixture")
+                verify_stream_output(stdout)
             elif b"BENCH_DONE" not in stdout:
                 raise AssertionError(f"answer missing: {stdout[-1000:]!r} {stderr[-1000:]!r}")
             if scenario == "write" and (workspace / "bench-output.txt").read_text() != FILE_DATA:

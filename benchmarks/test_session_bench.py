@@ -24,6 +24,13 @@ class FixtureTests(unittest.TestCase):
         _, text, _, _ = bench.response_plan("stream", {})
         self.assertEqual(len(text), 60_000)
 
+    def test_stream_output_must_match_exactly(self):
+        expected = bench.STREAM_DATA.encode()
+        bench.verify_stream_output(expected)
+        for broken in (expected[:-1], expected + b"extra", b"x" + expected[1:]):
+            with self.assertRaises(AssertionError):
+                bench.verify_stream_output(broken)
+
     def test_exchange_validation_fails_closed(self):
         exchange = lambda n, call: {"tool_results": n, "tool_calls": call, "stream": True,
                                     "tool_outputs": [f"exit=0\nstep-{i}" for i in range(n)]}
