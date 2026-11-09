@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Check live models.dev metadata before a version change freezes release source.
+"""Legacy event-aware check of live models.dev metadata; no longer run by CI.
 
-PR version changes and manual dispatch always use the live check. A main squash
-push may reuse a successful exact-PR-head dispatch freshness check with API/Git
-proof of identical source (see check-pr-model-metadata-proof.py). Missing proof
-falls back to the live check; it never waives CI or refreshes frozen inputs.
+For historical CI event inputs, version-changing PRs and manual dispatch use a
+live check. A main squash push may reuse an exact-PR-head dispatch with API/Git
+proof (see check-pr-model-metadata-proof.py), or fall back to the live check.
+The former CI freshness step is no longer produced, so new runs cannot prove it.
 
-Ordinary same-version CI is offline for this gate. This script only compares
-reviewed snapshots; refreshes and review remain explicit maintainer operations.
-It is not part of compilation or the historical signed-release workflows.
+This script only compares reviewed snapshots; refreshes and review remain
+explicit maintainer operations. The advisory workflow runs the refresher's live
+check separately; required CI uses offline fixture tests.
 """
 
 from __future__ import annotations

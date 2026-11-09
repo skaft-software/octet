@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Prove a main squash push is the identical, dispatch-qualified PR source.
+"""Prove a historical main squash push had identical dispatch-qualified source.
 
-Only the parent gate calls this helper, with a 35-second *whole-process* bound.
-GitHub API evidence is read-only, fixed-origin, bounded and never redirected.
+This legacy helper and its parent are no longer wired into CI; new CI runs no
+longer produce the freshness step it requires. The parent calls this helper
+with a 35-second *whole-process* bound. GitHub API evidence is read-only, fixed-origin, bounded and never redirected.
 A deleted PR branch may require a bounded fetch of its immutable API-proven head
 SHA from the verified public GitHub origin. No proof means the parent does the
 existing live check. This does not waive any other main/release CI checks.
-The repository's squash-only, strict protected-main policy remains required.
-Only an exact-head workflow_dispatch run qualifies: dispatch runs this source's
-workflow directly and always checks live metadata, independent of base version.
+Only an exact-head historical workflow_dispatch run qualifies: the old dispatch
+ran that source's workflow and checked live metadata independent of base version.
 A PR run alone cannot prove that: its merge-tree workflow can differ, its live
 check can skip on same-version bases, and run.pull_requests associations mutate.
-PR CI remains independently required by branch protection and release policy.
 """
 
 from __future__ import annotations
