@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pi extension new/switch/fork session requests work with V2 delegation enabled.
+  Workers park before replacement, outgoing child sessions remain recoverable,
+  and the retained extension process receives the new session's delegation
+  service without duplicate tools or instructions. A worker-parking timeout
+  names the refusal and asks users to wait or stop the workers before retrying.
 - Pi background contexts retain session reads without gaining foreground UI or
   write authority. Coalesced chrome updates recheck ownership and cancellation
   before native delivery; retained same-session contexts still survive turns.

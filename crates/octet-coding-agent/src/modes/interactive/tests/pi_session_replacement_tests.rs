@@ -174,20 +174,51 @@ export default pi => {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_new_session_runs_with_session_bound_to_the_replacement() {
-    assert_new_session(NEW_SESSION).await;
+    assert_new_session(NEW_SESSION, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_new_session_with_explicit_start_hook_preserves_command_parent() {
-    assert_new_session(&NEW_SESSION.replace(
-        "export default pi => {",
-        "export default pi => { pi.on('session_start', () => {});",
-    ))
+    assert_new_session(
+        &NEW_SESSION.replace(
+            "export default pi => {",
+            "export default pi => { pi.on('session_start', () => {});",
+        ),
+        false,
+    )
     .await;
 }
 
-async fn assert_new_session(factory: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_new_session_with_delegation_keeps_extension_process() {
+    assert_new_session(NEW_SESSION, true).await;
+}
+
+fn enable_test_delegation(mut app: App, uri: &str) -> App {
+    let mut model = super::support::scripted_model(uri);
+    Arc::make_mut(&mut model.spec).capabilities.agent_delegation =
+        Some(octet_ai::AgentDelegation::V2);
+    app.catalog
+        .register_endpoint((*model.endpoint).clone())
+        .unwrap();
+    app.catalog.register_model((*model.spec).clone()).unwrap();
+    let app = rebuild_app(app, Some(model), None, None, None).unwrap();
+    assert!(app.agent.delegation_team_directory().is_some());
+    app.executable_extensions
+        .activate_session_lifecycle_driver();
+    app
+}
+
+async fn assert_new_session(factory: &str, delegation: bool) {
     let (directory, mut app) = pi_app(factory);
+    if delegation {
+        app = enable_test_delegation(app, "http://127.0.0.1:9");
+    }
+    let old_team = app
+        .agent
+        .delegation_team_directory()
+        .map(std::path::Path::to_path_buf);
+    let generations = app.executable_extensions.running_generations();
     let old_path = app.agent.session().path().to_owned();
     let old_id = session_id(app.agent.session());
     let old_bytes = std::fs::read(&old_path).unwrap();
@@ -195,11 +226,16 @@ async fn assert_new_session(factory: &str) {
     let output = probe(&mut app, &mut shell).await;
     let new_path = app.agent.session().path().to_owned();
     let new_id = session_id(app.agent.session());
+    let actual_generations = app.executable_extensions.running_generations();
     app.executable_extensions.shutdown().await;
     let trace = trace(&directory);
     let observed = format!("{output:?}\n{trace:#?}\n{}", shell.debug_snapshot());
     let output = output.unwrap_or_else(|error| panic!("{error:#}\n{observed}"));
     assert_ne!(new_id, old_id, "{observed}");
+    if delegation {
+        assert_ne!(app.agent.delegation_team_directory(), old_team.as_deref());
+        assert_eq!(actual_generations, generations);
+    }
     assert_eq!(step(&trace, "before")["id"], old_id, "{observed}");
     assert_eq!(step(&trace, "with")["id"], new_id, "{observed}");
     assert_eq!(step(&trace, "appended")["id"], new_id, "{observed}");
@@ -245,7 +281,24 @@ export default pi => {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_switch_session_runs_with_session_on_the_saved_target_and_completes_command() {
+    assert_switch_session(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_switch_session_with_delegation_keeps_extension_process() {
+    assert_switch_session(true).await;
+}
+
+async fn assert_switch_session(delegation: bool) {
     let (directory, mut app) = pi_app(SWITCH_SESSION);
+    if delegation {
+        app = enable_test_delegation(app, "http://127.0.0.1:9");
+    }
+    let old_team = app
+        .agent
+        .delegation_team_directory()
+        .map(std::path::Path::to_path_buf);
+    let generations = app.executable_extensions.running_generations();
     let old_path = app.agent.session().path().to_owned();
     let old_id = session_id(app.agent.session());
     let old_bytes = std::fs::read(&old_path).unwrap();
@@ -272,6 +325,7 @@ async fn pi_switch_session_runs_with_session_on_the_saved_target_and_completes_c
     )
     .await;
     let actual_path = app.agent.session().path().to_owned();
+    let actual_generations = app.executable_extensions.running_generations();
     app.executable_extensions.shutdown().await;
     let trace = trace(&directory);
     let observed = format!("{output:?}\n{trace:#?}\n{}", shell.debug_snapshot());
@@ -279,6 +333,10 @@ async fn pi_switch_session_runs_with_session_on_the_saved_target_and_completes_c
     // observing a session switch or an invocation of withSession.
     let output = output.unwrap_or_else(|error| panic!("{error:#}\n{observed}"));
     assert_eq!(actual_path, target_path, "{observed}");
+    if delegation {
+        assert_ne!(app.agent.delegation_team_directory(), old_team.as_deref());
+        assert_eq!(actual_generations, generations);
+    }
     assert_ne!(target_id, old_id, "{observed}");
     assert_eq!(step(&trace, "before")["id"], old_id, "{observed}");
     let before: Vec<_> = trace
@@ -632,7 +690,6 @@ async fn pi_before_fork_cancels_before_entry_lookup() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "known v0.10.3 failure: ctx.newSession() requested during a busy run fails after session_shutdown, before setup (bridge reports -32603; suspected session-scoped delegation ownership). Fix pending; do not delete."]
 async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup() {
     use super::support::{scripted_model, text_turn, HeldApi};
     let factory = SETUP_SESSION

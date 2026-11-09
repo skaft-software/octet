@@ -5803,6 +5803,10 @@ fn busy_worker_refusal(app: &App, count: usize) -> String {
 /// Returns a refusal notice when a worker did not stop in time; the workers
 /// that did park are reattached so the current App keeps them.
 async fn park_workers_for_reload(app: &App) -> Result<(), String> {
+    park_workers_for_replacement(app, "reload").await
+}
+
+async fn park_workers_for_replacement(app: &App, operation: &str) -> Result<(), String> {
     if app.agent.active_delegated_worker_count() == 0 {
         return Ok(());
     }
@@ -5813,7 +5817,7 @@ async fn park_workers_for_reload(app: &App) -> Result<(), String> {
     if remaining > 0 {
         let _ = app.agent.reattach_delegated_workers();
         return Err(format!(
-            "reload refused: {remaining} subagent worker(s) did not stop within {}s; the current application is unchanged",
+            "{operation} refused: {remaining} subagent worker(s) still running after {}s. Wait for them to finish or stop them, then retry; the current application is unchanged",
             WORKER_DETACH_TIMEOUT.as_secs()
         ));
     }
@@ -7925,6 +7929,12 @@ fn replace_extension_active_session_with_setup(
             reason,
             setup,
         );
+    // Pi 1.0.2 dist/core/agent-session-runtime.js:120-125 rebinds the
+    // retained extension runner before withSession. Native code must rebind
+    // its owner-scoped services too; restarting the process loses the command.
+    if app.agent.delegation_team_directory().is_some() {
+        app.executable_extensions.bind_agent_sessions(&app.agent)?;
+    }
     Ok(session_id)
 }
 
@@ -8354,6 +8364,23 @@ where
             }
         }
     }
+    let active_session_operation = matches!(
+        &operation,
+        ExtensionSessionLifecycleOperation::Create
+            | ExtensionSessionLifecycleOperation::CreateWithOptions { .. }
+            | ExtensionSessionLifecycleOperation::Fork { .. }
+            | ExtensionSessionLifecycleOperation::Switch { .. }
+    );
+    if active_session_operation {
+        // Park before retiring extension ownership or creating a new session.
+        // A timeout keeps the outgoing writer and all its services installed.
+        if let Err(notice) = park_workers_for_replacement(app, "session replacement").await {
+            request
+                .respond_replacement(Err(ExtensionSessionLifecycleError::Refused(notice.clone())));
+            shell.error(notice);
+            return false;
+        }
+    }
     let mut session_replaced = false;
     let mut result = match operation.clone() {
         ExtensionSessionLifecycleOperation::Setup {
@@ -8399,6 +8426,9 @@ where
                 let owner = octet_agent::extension_process::ExtensionResourceOwner { session_id: app.agent.session().resource_owner_key(), ..parent.1 };
                 Ok(serde_json::json!({"session_id":id,"context":app.executable_extensions.session_setup_context(&owner)?}))
             }).map_err(|e| e.to_string());
+            if !session_replaced {
+                let _ = app.agent.reattach_delegated_workers();
+            }
             request.respond_setup(result);
             request_extension_ui(shell, app);
             update_status(shell, app);
@@ -8538,13 +8568,9 @@ where
         // session itself stays as it is.
         ExtensionSessionLifecycleOperation::Reload => Ok(Some(app.goal_session_id.clone())),
     };
-    let active_session_operation = matches!(
-        &operation,
-        ExtensionSessionLifecycleOperation::Create
-            | ExtensionSessionLifecycleOperation::CreateWithOptions { .. }
-            | ExtensionSessionLifecycleOperation::Fork { .. }
-            | ExtensionSessionLifecycleOperation::Switch { .. }
-    );
+    if active_session_operation && !session_replaced {
+        let _ = app.agent.reattach_delegated_workers();
+    }
     let active_session_replaced = session_replaced
         || (active_session_operation
             && result.as_ref().is_ok_and(|session_id| session_id.is_some()));
