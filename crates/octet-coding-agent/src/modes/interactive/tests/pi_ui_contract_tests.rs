@@ -446,7 +446,12 @@ export default function(pi) {
     .await
     .expect("terminal title delivery");
     assert_eq!(shell.extension_window_title(), "NATIVE-PI-TITLE");
-    let visible = rendered(&mut shell).await;
+    // The title and the loader message are separate deliveries; wait for the
+    // loader too, then check it is shown exactly once.
+    let visible = rendered_when(&mut app, &mut shell, "custom loader never shown", |frame| {
+        frame.contains("NATIVE-PI-WORKING")
+    })
+    .await;
     assert_eq!(
         visible.matches("NATIVE-PI-WORKING").count(),
         1,
