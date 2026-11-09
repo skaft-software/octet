@@ -20,6 +20,18 @@ test('actual encoded phases: replacement, ordered in-place mutation, exact heade
   assert.deepEqual((await peer.request('hook/run', params('after_provider_response', { status: 429, headers: { 'retry-after': '2' } })).response).result, {});
   await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'actual-arrival:429'); await peer.close();
 });
+test('Pi-style handler quirks never refuse the request: numeric-code errors continue, headers and payloads normalize like fetch/JSON', async t => {
+  const quirks = join(root, 'test/fixtures/provider-pipeline-pi-quirks.ts');
+  const peer = launch(t, [quirks]); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  const params = (hook, body) => ({ hook, context: peer.context(), payload: { operation_id: 'quirk-attempt', model, ...body } });
+  const request = (await peer.request('hook/run', params('before_provider_request', { payload: { model: 'wire-model', temperature: 0.2 } })).response);
+  assert.equal(request.error, undefined, JSON.stringify(request.error));
+  assert.deepEqual(request.result, { provider_payload: { model: 'wire-model', sent_at: '1970-01-01T00:00:00.000Z', tags: ['kept'] } });
+  const headers = (await peer.request('hook/run', params('before_provider_headers', { headers: { authorization: 'Bearer original', 'x-gone': 'old', 'x-keep': 'same' } })).response);
+  assert.equal(headers.error, undefined, JSON.stringify(headers.error));
+  assert.deepEqual(headers.result, { provider_headers: { authorization: 'Bearer replaced', 'x-gone': null, 'x-retry-count': '3', 'x-flag': 'true' } });
+  await peer.close();
+});
 test('private provider callback exception is redacted, not emitted with wire body', async t => {
   const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']); await peer.start();
   const reply = await peer.request('hook/run', { hook: 'before_provider_request', context: peer.context(), payload: { operation_id: 'attempt', model, payload: { secret: 'NEVER-LOG-ME' } } }).response;

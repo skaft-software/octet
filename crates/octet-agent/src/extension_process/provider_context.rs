@@ -240,6 +240,7 @@ struct ProcessProviderRequestHook {
     process: ExtensionProcess,
     connection: Arc<ProcessConnection>,
     context: ExtensionExecutionContext,
+    warnings: crate::extension_provider::ProviderHookWarnings,
 }
 
 #[derive(Deserialize)]
@@ -263,7 +264,7 @@ pub(super) enum PipelineHeaderValue {
 fn pipeline_refused(reason: &'static str) -> AiError {
     // Never surface a remote exception, payload/header contents or validation
     // value through normal provider errors, traces, session records or UI.
-    octet_ai::ConfigError::Parse(reason.to_owned()).into()
+    octet_ai::ConfigError::ExtensionHook(reason.to_owned()).into()
 }
 
 pub(super) fn pipeline_header_projection(
@@ -358,9 +359,10 @@ impl crate::extension_provider::ProviderRequestHookFactory for ExtensionProcess 
     fn bind_provider_request_hook(
         &self,
         resource_owner: &str,
-    ) -> Result<Arc<dyn octet_ai::ProviderRequestHook>, AiError> {
+        warnings: &crate::extension_provider::ProviderHookWarnings,
+    ) -> Result<Option<Arc<dyn octet_ai::ProviderRequestHook>>, String> {
         if !self.has_provider_pipeline_hooks() || resource_owner.is_empty() {
-            return Err(pipeline_refused("provider pipeline binding unavailable"));
+            return Ok(None);
         }
         let connection = read_std_lock(&self.inner.connection).clone();
         let mut context = self.execution_context();
@@ -373,78 +375,124 @@ impl crate::extension_provider::ProviderRequestHookFactory for ExtensionProcess 
             process: self.clone(),
             connection,
             context,
+            warnings: warnings.clone(),
         };
-        hook.validate_binding()?;
-        Ok(Arc::new(hook))
+        if !hook.binding_is_live() {
+            return Err(format!(
+                "Extension {} is not running, so its provider hooks were skipped for this run; requests are sent without its changes.",
+                display_identity(&self.inner.descriptor.manifest.name),
+            ));
+        }
+        Ok(Some(Arc::new(hook)))
+    }
+}
+
+/// How a provider hook invocation ended when it did not produce a result.
+enum HookFailure {
+    /// The extension could not take part (stopped, timed out, malformed
+    /// reply). The request continues without its change, as in Pi.
+    Skip(&'static str),
+    /// The extension explicitly vetoed the request, with its stated reason.
+    Deny(String),
+}
+
+/// Bounded, control-free identity for host-authored diagnostics. Never used
+/// for remote error text or wire data.
+fn display_identity(value: &str) -> String {
+    format!("\"{}\"", display_bounded(value, 48))
+}
+
+/// Strip control and bidi characters and bound to `max` bytes.
+fn display_bounded(value: &str, max: usize) -> String {
+    let mut result = String::new();
+    for c in value.chars().filter(|c| {
+        !c.is_control()
+            && !matches!(c, '"' | '\\' | '\u{061c}' | '\u{200e}' | '\u{200f}'
+                | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }) {
+        if result.len() + c.len_utf8() > max {
+            result.push('…');
+            break;
+        }
+        result.push(c);
+    }
+    result
+}
+
+fn hook_stage(hook: ExtensionHook) -> &'static str {
+    match hook {
+        ExtensionHook::BeforeProviderRequest => "before_provider_request",
+        ExtensionHook::BeforeProviderHeaders => "before_provider_headers",
+        ExtensionHook::AfterProviderResponse => "after_provider_response",
+        _ => "provider",
     }
 }
 
 impl ProcessProviderRequestHook {
-    fn diagnostic(
-        &self,
-        hook: ExtensionHook,
-        context: &octet_ai::ProviderRequestContext,
-        reason: &str,
-    ) -> AiError {
-        // Identities are useful for locating the hook and route, but neither
-        // remote error text nor private wire data is safe to display here.
-        fn identity(value: &str) -> String {
-            let mut result = String::new();
-            for c in value.chars().filter(|c| {
-                !c.is_control()
-                    && !matches!(c, '"' | '\\' | '\u{061c}' | '\u{200e}' | '\u{200f}'
-                        | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-            }) {
-                if result.len() + c.len_utf8() > 36 {
-                    result.push('…');
-                    break;
-                }
-                result.push(c);
-            }
-            result
-        }
-        let (stage, sent) = match hook {
-            ExtensionHook::BeforeProviderRequest => ("before_provider_request", ""),
-            ExtensionHook::BeforeProviderHeaders => ("before_provider_headers", ""),
-            ExtensionHook::AfterProviderResponse => (
-                "after_provider_response",
-                " The provider may already have received the request; do not retry blindly.",
-            ),
-            _ => unreachable!("only provider pipeline hooks are dispatched here"),
-        };
-        octet_ai::ConfigError::Parse(format!(
-            "provider pipeline {stage} for extension {:?}: {reason}. Update or disable the extension and check its provider hook configuration.{sent} Route: provider {:?}, model {:?}, API {:?}",
-            identity(&self.process.inner.descriptor.manifest.name),
-            identity(&context.model.provider),
-            identity(&context.model.id),
-            identity(&context.model.api),
-        ))
-        .into()
-    }
-
-    fn validate_binding(&self) -> Result<(), AiError> {
-        if !connection_is_usable(&self.connection)
-            || self.connection.draining.load(Ordering::Acquire)
-            || !Arc::ptr_eq(
+    fn binding_is_live(&self) -> bool {
+        connection_is_usable(&self.connection)
+            && !self.connection.draining.load(Ordering::Acquire)
+            && Arc::ptr_eq(
                 &read_std_lock(&self.process.inner.connection),
                 &self.connection,
             )
-        {
-            return Err(pipeline_refused("provider hook process generation retired"));
+    }
+
+    fn route(context: &octet_ai::ProviderRequestContext) -> String {
+        format!(
+            "provider {}, model {}",
+            display_identity(&context.model.provider),
+            display_identity(&context.model.id),
+        )
+    }
+
+    /// Apply the isolation policy: a skipped hook leaves the request
+    /// unchanged and is reported once; only an explicit veto fails it.
+    fn settle<T>(
+        &self,
+        hook: ExtensionHook,
+        context: &octet_ai::ProviderRequestContext,
+        outcome: Result<T, HookFailure>,
+        unchanged: T,
+    ) -> Result<T, AiError> {
+        let name = display_identity(&self.process.inner.descriptor.manifest.name);
+        let stage = hook_stage(hook);
+        match outcome {
+            Ok(value) => Ok(value),
+            Err(HookFailure::Skip(reason)) => {
+                let effect = if hook == ExtensionHook::AfterProviderResponse {
+                    "the response was not affected"
+                } else {
+                    "the request was sent without its change"
+                };
+                self.warnings.push(format!(
+                    "Extension {name} {stage} hook skipped: {reason}; {effect}. Update or disable the extension if this keeps happening. ({})",
+                    Self::route(context),
+                ));
+                Ok(unchanged)
+            }
+            Err(HookFailure::Deny(reason)) => Err(octet_ai::ConfigError::ExtensionHook(format!(
+                "Extension {name} blocked this provider request in its {stage} hook{}. Disable the extension or check its settings to continue. ({})",
+                match display_bounded(reason.trim(), 240) {
+                    reason if reason.is_empty() => String::new(),
+                    reason => format!(": {reason}"),
+                },
+                Self::route(context),
+            ))
+            .into()),
         }
-        Ok(())
     }
 
     async fn dispatch(
         &self,
         hook: ExtensionHook,
-        context: &octet_ai::ProviderRequestContext,
         payload: serde_json::Value,
-    ) -> Result<Option<ProviderPipelineReply>, AiError> {
-        self.validate_binding()
-            .map_err(|_| self.diagnostic(hook, context, "extension process generation retired"))?;
+    ) -> Result<Option<ProviderPipelineReply>, HookFailure> {
         if !self.process.inner.contributions.hooks.contains(&hook) {
             return Ok(None);
+        }
+        if !self.binding_is_live() {
+            return Err(HookFailure::Skip("the extension stopped or restarted during this run"));
         }
         // Pin the exact connection; run_hook intentionally follows current
         // generations for other callers and is not the right boundary here.
@@ -452,7 +500,7 @@ impl ProcessProviderRequestHook {
             .process
             .request_typed_on_connection(
                 self.connection.clone(),
-                methods::HOOK_RUN,
+                "hook/run",
                 &HookRequest {
                     hook,
                     payload,
@@ -462,30 +510,27 @@ impl ProcessProviderRequestHook {
             )
             .await
             .map_err(|error| {
-                let reason = match error {
-                    ExtensionRuntimeError::MessageTooLarge { .. } => "hook message exceeded the extension transport size limit; reduce request size",
-                    ExtensionRuntimeError::Timeout { .. } => "extension hook request timed out",
+                HookFailure::Skip(match error {
+                    ExtensionRuntimeError::MessageTooLarge { .. } => {
+                        "the hook message exceeded the extension transport size limit"
+                    }
+                    ExtensionRuntimeError::Timeout { .. } => "the extension did not answer in time",
                     ExtensionRuntimeError::Cancelled { .. }
-                    | ExtensionRuntimeError::Remote { code: -32800, .. } => "extension hook request was cancelled",
-                    ExtensionRuntimeError::Remote { code: -32602, .. } => "extension rejected the hook request or callback result as invalid",
-                    ExtensionRuntimeError::Remote { .. } => "extension returned a hook RPC error",
-                    ExtensionRuntimeError::Closed(_) => "extension process or connection closed",
-                    ExtensionRuntimeError::Protocol(_) => "extension hook request or protocol failed",
-                    _ => "extension hook request could not be completed",
-                };
-                self.diagnostic(hook, context, reason)
+                    | ExtensionRuntimeError::Remote { code: -32800, .. } => {
+                        "the extension cancelled the hook"
+                    }
+                    ExtensionRuntimeError::Remote { .. } => "the extension reported an error",
+                    ExtensionRuntimeError::Closed(_) => "the extension process exited",
+                    _ => "the hook request could not be completed",
+                })
             })?;
-        let result: ProviderPipelineReply = serde_json::from_value(result).map_err(|_| {
-            self.diagnostic(
-                hook,
-                context,
-                "extension returned an invalid hook response; check result field types",
-            )
-        })?;
-        self.validate_binding()
-            .map_err(|_| self.diagnostic(hook, context, "extension process generation retired"))?;
-        if result.disposition != ExtensionHookDisposition::Continue {
-            return Err(self.diagnostic(hook, context, "extension denied the attempt"));
+        let result: ProviderPipelineReply = serde_json::from_value(result)
+            .map_err(|_| HookFailure::Skip("the extension returned a malformed hook result"))?;
+        if !self.binding_is_live() {
+            return Err(HookFailure::Skip("the extension stopped or restarted during this run"));
+        }
+        if let ExtensionHookDisposition::Deny { reason } = &result.disposition {
+            return Err(HookFailure::Deny(reason.clone()));
         }
         Ok(Some(result))
     }
@@ -499,28 +544,30 @@ impl octet_ai::ProviderRequestHook for ProcessProviderRequestHook {
         payload: serde_json::Value,
     ) -> Result<Option<serde_json::Value>, AiError> {
         let hook = ExtensionHook::BeforeProviderRequest;
-        let Some(result) = self.dispatch(hook, context,
-            serde_json::json!({"operation_id":context.operation_id, "model":context.model, "payload":payload}),
-        ).await? else { return Ok(None) };
-        if result.provider_headers.is_some() {
-            return Err(self.diagnostic(
-                hook,
-                context,
-                "payload hook returned a header transformation",
-            ));
+        let outcome = async {
+            let Some(result) = self
+                .dispatch(
+                    hook,
+                    serde_json::json!({"operation_id":context.operation_id, "model":context.model, "payload":payload}),
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            if result.provider_headers.is_some() {
+                return Err(HookFailure::Skip("a payload hook returned a header change"));
+            }
+            if result
+                .provider_payload
+                .as_ref()
+                .is_some_and(|payload| !payload.is_object() && !payload.is_array())
+            {
+                return Err(HookFailure::Skip("the replacement payload was not a JSON object"));
+            }
+            Ok(result.provider_payload)
         }
-        if result
-            .provider_payload
-            .as_ref()
-            .is_some_and(|payload| !payload.is_object() && !payload.is_array())
-        {
-            return Err(self.diagnostic(
-                hook,
-                context,
-                "payload replacement must be a JSON object or array",
-            ));
-        }
-        Ok(result.provider_payload)
+        .await;
+        self.settle(hook, context, outcome, None)
     }
 
     async fn before_headers(
@@ -529,40 +576,37 @@ impl octet_ai::ProviderRequestHook for ProcessProviderRequestHook {
         headers: &mut reqwest::header::HeaderMap,
     ) -> Result<(), AiError> {
         let hook = ExtensionHook::BeforeProviderHeaders;
-        if !self.process.inner.contributions.hooks.contains(&hook) {
-            return self.validate_binding().map_err(|_| {
-                self.diagnostic(hook, context, "extension process generation retired")
-            });
+        let outcome = async {
+            if !self.process.inner.contributions.hooks.contains(&hook) {
+                return Ok(None);
+            }
+            let projected = pipeline_header_projection(headers)
+                .map_err(|_| HookFailure::Skip("the request headers exceed hook limits"))?;
+            let Some(result) = self
+                .dispatch(
+                    hook,
+                    serde_json::json!({"operation_id":context.operation_id, "model":context.model, "headers":projected}),
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            if result.provider_payload.is_some() {
+                return Err(HookFailure::Skip("a header hook returned a payload change"));
+            }
+            let Some(patch) = result.provider_headers else {
+                return Ok(None);
+            };
+            // Apply to a copy so a rejected patch never leaves the request
+            // with half of an extension's header changes.
+            let mut patched = headers.clone();
+            apply_pipeline_headers(&mut patched, patch)
+                .map_err(|_| HookFailure::Skip("the extension returned an invalid header change"))?;
+            Ok(Some(patched))
         }
-        let projected = pipeline_header_projection(headers).map_err(|_| {
-            self.diagnostic(
-                hook,
-                context,
-                "request headers cannot be represented within hook limits",
-            )
-        })?;
-        let Some(result) = self
-            .dispatch(
-                hook,
-                context,
-                serde_json::json!({"operation_id":context.operation_id, "model":context.model,
-                "headers":projected}),
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        if result.provider_payload.is_some() {
-            return Err(self.diagnostic(
-                hook,
-                context,
-                "header hook returned a payload transformation",
-            ));
-        }
-        if let Some(patch) = result.provider_headers {
-            apply_pipeline_headers(headers, patch).map_err(|_| {
-                self.diagnostic(hook, context, "extension returned an invalid header patch")
-            })?;
+        .await;
+        if let Some(patched) = self.settle(hook, context, outcome, None)? {
+            *headers = patched;
         }
         Ok(())
     }
@@ -574,36 +618,24 @@ impl octet_ai::ProviderRequestHook for ProcessProviderRequestHook {
         headers: &reqwest::header::HeaderMap,
     ) -> Result<(), AiError> {
         let hook = ExtensionHook::AfterProviderResponse;
-        if !self.process.inner.contributions.hooks.contains(&hook) {
-            return self.validate_binding().map_err(|_| {
-                self.diagnostic(hook, context, "extension process generation retired")
-            });
-        }
-        let projected = pipeline_header_projection(headers).map_err(|_| {
-            self.diagnostic(
-                hook,
-                context,
-                "response headers cannot be represented within hook limits",
-            )
-        })?;
-        if let Some(result) = self
-            .dispatch(
-                hook,
-                context,
-                serde_json::json!({"operation_id":context.operation_id, "model":context.model,
-                "status":status.as_u16(), "headers":projected}),
-            )
-            .await?
-        {
-            if result.provider_payload.is_some() || result.provider_headers.is_some() {
-                return Err(self.diagnostic(
-                    hook,
-                    context,
-                    "response observation cannot transform the request",
-                ));
+        let outcome = async {
+            if !self.process.inner.contributions.hooks.contains(&hook) {
+                return Ok(());
             }
+            let projected = pipeline_header_projection(headers)
+                .map_err(|_| HookFailure::Skip("the response headers exceed hook limits"))?;
+            // Response observation has no transforming effect; a stray
+            // change is ignored rather than failing an answered request.
+            self.dispatch(
+                hook,
+                serde_json::json!({"operation_id":context.operation_id, "model":context.model,
+                    "status":status.as_u16(), "headers":projected}),
+            )
+            .await
+            .map(|_| ())
         }
-        Ok(())
+        .await;
+        self.settle(hook, context, outcome, ())
     }
 }
 

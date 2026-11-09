@@ -291,18 +291,25 @@ hook cannot return a header patch, a header hook cannot return a payload, and a
 response observer cannot transform either. The host still validates header names,
 values, limits and reserved headers. For example, a JSON-RPC result containing
 `{"provider_headers":{"x-example":17}}` is valid JSON but not a valid hook
-reply; it is refused rather than sent to the provider.
+reply.
 
-On the native encoded HTTP path, process-hook request, reply-decoding and
-validation failures stop the attempt and identify the hook stage, extension
-process, provider/endpoint, model and API, with a category and an action. Check
-`/extensions status`, then update or disable the named extension and review its
-hook configuration. For a transport-size refusal, reduce the request size as
-well. A process may host multiple Pi factories, so a process-level diagnostic
-does not necessarily identify the individual factory. Prompt bodies, headers
-and remote exception text are not included. A failure in
-`after_provider_response` occurs after a request may have reached the provider;
-inspect its state rather than blindly retrying.
+A provider hook never blocks the request by failing. If the extension is not
+running, times out, reports an error or returns an invalid reply, octet skips
+that extension's change, sends the request without it and shows a warning that
+names the extension and hook stage. This matches Pi, where a throwing
+`before_provider_*` handler is reported and the request continues. Only an
+explicit veto (`{"disposition":{"action":"deny","reason":"..."}}`) stops the
+request, and the error names the extension, the stage and its reason. Prompt
+bodies, headers and remote exception text are never shown. A process may host
+multiple Pi factories, so the warning names the process, not the individual
+factory. If a warning repeats, check `/extensions status` and update or
+disable the named extension.
+
+The Pi bridge applies Pi's own semantics before replying: header values set to
+numbers or booleans are sent as strings, as `fetch` would; header names are
+case-insensitive and the last assignment wins; a header `fetch` would reject is
+dropped with a warning; payload replacements are encoded like
+`JSON.stringify`, so `undefined` members disappear and dates become strings.
 
 ### Typed values, native resources and immutable bulk (API `0.4`)
 

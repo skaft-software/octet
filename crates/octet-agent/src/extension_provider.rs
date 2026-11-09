@@ -15,12 +15,40 @@ use crate::extension_api_v03 as api_v03;
 /// A process implementation also pins its current connection/generation here;
 /// callbacks must never follow a reload into a different owner or generation.
 pub trait ProviderRequestHookFactory: Send + Sync {
-    /// Create the request-local hook. Failure aborts preparation, never silently
-    /// omits a declared transformation or substitutes canonical request data.
+    /// Create the run-local hook. An extension that cannot take part (stopped,
+    /// restarting, retired) returns `Err`; the caller skips it for this run and
+    /// reports the returned host-authored reason through `warnings`, matching
+    /// Pi, where one failing extension never blocks the provider request.
+    /// Failures inside a bound hook are isolated the same way; only an
+    /// explicit veto from the extension fails the request.
     fn bind_provider_request_hook(
         &self,
         resource_owner: &str,
-    ) -> Result<Arc<dyn octet_ai::ProviderRequestHook>, octet_ai::AiError>;
+        warnings: &ProviderHookWarnings,
+    ) -> Result<Option<Arc<dyn octet_ai::ProviderRequestHook>>, String>;
+}
+
+/// Host-authored, payload-free notices about provider hooks that were skipped
+/// during one run. Deduplicated and bounded; drained into
+/// `AgentEvent::ExtensionObservationWarning`.
+#[derive(Clone, Default)]
+pub struct ProviderHookWarnings(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ProviderHookWarnings {
+    const MAX: usize = 16;
+
+    /// Record one notice unless an identical one is already pending.
+    pub fn push(&self, message: String) {
+        let mut pending = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if pending.len() < Self::MAX && !pending.contains(&message) {
+            pending.push(message);
+        }
+    }
+
+    /// Take every pending notice.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|poison| poison.into_inner()))
+    }
 }
 
 /// Identity of the extension generation which owns a provider catalog entry.
