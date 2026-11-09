@@ -1376,7 +1376,7 @@ fn persist_extension_enabled_to_path(
     // a mirrored extension is missing from `enabled_extensions`, so its off
     // entry is new even though no saved name changed.
     let persisted = document.contains_key("enabled_extensions")
-        && document.contains_key("disabled_extensions") == !disabled.is_empty();
+        && document.contains_key("disabled_extensions") != disabled.is_empty();
     if !changed && persisted {
         return Ok(names.into_iter().collect());
     }

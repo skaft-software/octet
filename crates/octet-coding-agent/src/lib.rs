@@ -106,7 +106,7 @@ async fn run() -> anyhow::Result<()> {
     // parsing so both spellings behave identically.
     let args = std::env::args_os()
         .map(|arg| {
-            if arg == OsString::from("-ne") {
+            if arg == "-ne" {
                 OsString::from("--no-extensions")
             } else {
                 arg
