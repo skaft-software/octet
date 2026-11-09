@@ -413,6 +413,12 @@ deliberate differences from Pi's unbounded, blocking chain.
   the actual live request; numeric ID reuse cannot revive an old captured context.
   Native admission implements the corresponding narrow checkpoint-lifetime rule;
   adapter tests alone cannot qualify it.
+- Editor presentation setters remain synchronous void, like Pi. A refused mount
+  or checkpoint is diagnosed independently instead of failing an unrelated hook
+  or command. This is not an effect receipt: refused mounts never invoke their
+  factories or activate frames, and a failed checkpoint prevents later draft
+  writes, frames and replacement mounts. Missing mount fences still close the
+  unusable surface before factory construction.
 - Same-owner `setEditorText` and `pasteToEditor`, including cross-factory callers,
   mutate the active custom component and await its fenced checkpoint. Paste uses
   the component's real cursor API, never an invented append. Without a custom
