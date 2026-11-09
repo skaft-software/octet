@@ -29,6 +29,7 @@ test('chrome getter consumes authoritative receipt rather than cached JS state',
     return {tools_expanded: nativeExpanded};
   };
   const runtime = {
+    foreground: store.state,
     features: new Set(['remote_ui']),
     require: feature => assert.equal(feature, 'remote_ui'), assertOwner: current => assert.equal(current, store),
     backgroundError: error => { throw error; },
@@ -87,6 +88,7 @@ test('an older disclosure receipt cannot replace a newer pending setter', async 
   const requests = [];
   let nativeExpanded = false, reads = 0;
   const runtime = {
+    foreground: store.state,
     features: new Set(['remote_ui']), require() {}, assertOwner() {},
     backgroundError: error => { throw error; },
     transport: {
