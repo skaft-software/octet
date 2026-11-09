@@ -289,11 +289,12 @@ pub(super) async fn project_provider_context(
     session: &mut Session,
     notices: &mut Vec<String>,
 ) -> Result<Request, AgentError> {
-    // Every refusal names the shape that caused it: an unactionable "hook
-    // refused preparation" cost a whole run and could not be diagnosed.
-    let descriptor = request_descriptor(&request);
-    match project_context_hooks(request, hooks, context, model, abort, session, notices).await {
+    // Keep the original for validation and, only on refusal, diagnostics. In
+    // the successful case avoid serializing the entire history just to describe
+    // an error that did not occur.
+    match project_context_hooks(&request, hooks, context, model, abort, session, notices).await {
         Err(AgentError::ProviderContextPreparation(reason)) => {
+            let descriptor = request_descriptor(&request);
             Err(refused_owned(format!("{reason}; request {descriptor}")))
         }
         other => other,
@@ -301,7 +302,7 @@ pub(super) async fn project_provider_context(
 }
 
 async fn project_context_hooks(
-    mut request: Request,
+    canonical: &Request,
     hooks: &[Arc<dyn ProviderContextHook>],
     context: &ProviderContextProjectionContext,
     model: &Model,
@@ -309,8 +310,8 @@ async fn project_context_hooks(
     session: &mut Session,
     notices: &mut Vec<String>,
 ) -> Result<Request, AgentError> {
-    validate_size(&request)?;
-    let canonical = request.clone();
+    validate_size(canonical)?;
+    let mut request = canonical.clone();
     // Keep only currently registered instances; dropping/reopening the Session
     // releases/resets the ledger. Never persist extension IDs in the transcript.
     session.context_failure_notices.retain(|id| {
@@ -466,7 +467,7 @@ async fn project_context_hooks(
                 ));
             }
         }
-        validate_identities(&canonical, &request, model)?;
+        validate_identities(canonical, &request, model)?;
         // Name the failing validation. The alternative — a bare "invalid
         // canonical provider context" — leaves an operator with a 116-tool
         // request and no way to tell which tool or field is unacceptable.

@@ -61,3 +61,14 @@ Wall time, tick CPU and RSS are noisy on shared CI; retain the raw distributions
 and compare on matched runners rather than importing thresholds from other
 hardware. Do not infer attribution or a regression's introducing commit solely
 from these process-level measurements.
+
+For an isolated context-hook preparation probe, including one no-op hook and
+150 messages of 2 KiB each, run the ignored test below. It reports wall time
+for 500 preparations without provider or terminal I/O. This deliberately
+measures hook-enabled requests only; it is not an end-to-end session result.
+Compare identical release builds, warmups, and hosts; there is no timing assertion.
+
+```sh
+cargo test --release -p octet-agent --lib context_hook_preparation_performance_probe \
+  -- --ignored --nocapture
+```

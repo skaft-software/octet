@@ -979,6 +979,79 @@ async fn host_owned_context_hook_still_fails_closed_by_default() {
     assert!(notices.is_empty());
 }
 
+#[tokio::test]
+async fn context_refusal_describes_the_original_request_after_a_projection() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("descriptor.jsonl")).unwrap();
+    let mut notices = Vec::new();
+    let canonical = request();
+    let descriptor = super::request_descriptor(&canonical);
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(Rewrite {
+            system: Some("projected system".into()),
+            text: "projected content".repeat(100),
+            observations: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(Refuse {
+            calls: Arc::new(AtomicUsize::new(0)),
+            wait: false,
+            cancel: None,
+        }),
+    ];
+    let error = super::project_provider_context(
+        canonical,
+        &hooks,
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, AgentError::ProviderContextPreparation(reason) if reason.ends_with(&format!("; request {descriptor}")))
+    );
+}
+
+// Optional local microbenchmark; no timing assertion because hosts vary.
+#[tokio::test]
+#[ignore = "performance probe"]
+async fn context_hook_preparation_performance_probe() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("perf.jsonl")).unwrap();
+    let mut canonical = request();
+    canonical.messages = (0..150)
+        .map(|_| projected_user(&"x".repeat(2048)))
+        .collect();
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(DeadlineSuccess {
+        extension: false,
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let identity = identity();
+    let model = model();
+    let abort = AbortFlag::default();
+    let mut notices = Vec::new();
+    let start = std::time::Instant::now();
+    for _ in 0..500 {
+        super::project_provider_context(
+            canonical.clone(),
+            std::slice::from_ref(&hook),
+            &identity,
+            &model,
+            &abort,
+            &mut session,
+            &mut notices,
+        )
+        .await
+        .unwrap();
+    }
+    eprintln!(
+        "context_hook_probe_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn tool_history() -> Request {
     let mut request = request();
     request.messages = vec![
