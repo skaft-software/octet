@@ -649,3 +649,315 @@ async fn native_and_bridge_claim_are_mutually_exclusive_under_race() {
         fixture.finish().await;
     }
 }
+
+struct FakeHttpSender(AtomicUsize);
+
+#[async_trait::async_trait]
+impl octet_ai::HostHttpSender for FakeHttpSender {
+    async fn send(
+        &self,
+        _: octet_ai::HostHttpRequest,
+    ) -> Result<octet_ai::HostHttpResponse, AiError> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Ok(http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::from("data: [DONE]\n\n"))
+            .unwrap())
+    }
+}
+
+async fn pipeline_process(temp: &TempDir, stage: &str) -> ExtensionProcess {
+    write_executable_script(
+        &temp.path().join("extension.py"),
+        include_str!("../fixtures/provider-pipeline-invalid.py"),
+    );
+    let manifest = ExtensionManifest::parse(&format!(
+        "name = \"malformed-hook\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = \"extension.py\"\n[contributes]\nhooks = [\"{stage}\"]\n"
+    ))
+    .unwrap();
+    let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+    runtime.provider_pipeline = true;
+    ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
+        .await
+        .unwrap()
+}
+
+fn pipeline_model(base_url: &str) -> octet_ai::Model {
+    let mut model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.endpoint).id = octet_ai::EndpointId("fixture-provider".into());
+    Arc::make_mut(&mut model.endpoint).auth = octet_ai::Auth::None;
+    Arc::make_mut(&mut model.endpoint).base_url = base_url.parse().unwrap();
+    Arc::make_mut(&mut model.endpoint).default_headers.clear();
+    Arc::make_mut(&mut model.spec).endpoint = model.endpoint.id.clone();
+    model
+}
+
+fn pipeline_request() -> octet_ai::Request {
+    serde_json::from_value(serde_json::json!({
+        "system":null, "messages":[{"User":{"content":[{"Text":"PRIVATE_FIXTURE_PROMPT"}]}}],
+        "tools":[], "tool_choice":"auto", "max_output_tokens":32, "temperature":null,
+        "stop":[], "reasoning":{"type":"off"}, "output_modalities":{"type":"text"}
+    }))
+    .unwrap()
+}
+
+fn pipeline_case(temp: &TempDir, stage: &str, reply: serde_json::Value) {
+    std::fs::write(
+        temp.path().join("case.json"),
+        serde_json::to_vec(&serde_json::json!({"hook":stage,"reply":reply})).unwrap(),
+    )
+    .unwrap();
+}
+
+fn assert_pipeline_diagnostic(error: &str, stage: &str, reason: &str) {
+    for expected in [
+        stage,
+        "malformed-hook",
+        "fixture-provider",
+        "gpt-4o-mini",
+        reason,
+        "disable",
+    ] {
+        assert!(
+            error.contains(expected),
+            "missing {expected:?} in {error:?}"
+        );
+    }
+    assert!(!error.contains("PRIVATE_FIXTURE_SECRET"), "{error}");
+    assert!(!error.contains("PRIVATE_FIXTURE_PROMPT"), "{error}");
+    assert!(!error.contains("fixture.invalid"), "{error}");
+}
+
+#[tokio::test]
+async fn malformed_pipeline_reply_reports_stage_extension_and_route_before_send() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    let hook = process.bind_provider_request_hook("fixture-owner").unwrap();
+    let model = pipeline_model("https://fixture.invalid/v1/");
+    let sender = Arc::new(FakeHttpSender(AtomicUsize::new(0)));
+    let client = octet_ai::AiClient::new().with_provider_request_hooks(vec![hook]);
+    let result = client
+        .stream_custom_http_with_host_options(
+            &model,
+            pipeline_request(),
+            Default::default(),
+            Default::default(),
+            sender.clone(),
+        )
+        .await;
+    let error = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("malformed header reply must fail the attempt"),
+    };
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("hook-called")).unwrap(),
+        "before_provider_headers\n"
+    );
+    assert_eq!(
+        sender.0.load(Ordering::Acquire),
+        0,
+        "failure precedes provider dispatch"
+    );
+    assert_pipeline_diagnostic(&error, "before_provider_headers", "invalid hook response");
+    assert!(error.contains("check result field types"), "{error}");
+
+    // A malformed response fails this attempt, not the process or future turns.
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{}}),
+    );
+    let result = client
+        .stream_custom_http_with_host_options(
+            &model,
+            pipeline_request(),
+            Default::default(),
+            Default::default(),
+            sender.clone(),
+        )
+        .await;
+    assert!(result.is_ok(), "a later valid hook reply must work");
+    assert_eq!(sender.0.load(Ordering::Acquire), 1);
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn pipeline_failure_phases_and_remote_errors_are_attributed_and_redacted() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    for (stage, reply, reason, sent) in [
+        (
+            "before_provider_request",
+            serde_json::json!({"result":{"provider_payload":17}}),
+            "JSON object or array",
+            0,
+        ),
+        (
+            "before_provider_headers",
+            serde_json::json!({"result":{"provider_headers":{"invalid name":"PRIVATE_FIXTURE_SECRET"}}}),
+            "invalid header patch",
+            0,
+        ),
+        (
+            "before_provider_request",
+            serde_json::json!({"error":{"code":-32602,"message":"PRIVATE_FIXTURE_SECRET","data":{"private":"PRIVATE_FIXTURE_PROMPT"}}}),
+            "rejected",
+            0,
+        ),
+        (
+            "after_provider_response",
+            serde_json::json!({"result":{"provider_headers":{"x-private":"PRIVATE_FIXTURE_SECRET"}}}),
+            "cannot transform",
+            1,
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        pipeline_case(&temp, stage, reply);
+        let process = pipeline_process(&temp, stage).await;
+        let hook = process.bind_provider_request_hook("fixture-owner").unwrap();
+        let sender = Arc::new(FakeHttpSender(AtomicUsize::new(0)));
+        let client = octet_ai::AiClient::new().with_provider_request_hooks(vec![hook]);
+        let result = client
+            .stream_custom_http_with_host_options(
+                &pipeline_model("https://fixture.invalid/v1/"),
+                pipeline_request(),
+                Default::default(),
+                Default::default(),
+                sender.clone(),
+            )
+            .await;
+        let error = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{stage} must fail the attempt"),
+        };
+        assert_pipeline_diagnostic(&error, stage, reason);
+        assert_eq!(sender.0.load(Ordering::Acquire), sent);
+        if sent == 1 {
+            assert!(error.contains("may already have received"), "{error}");
+            assert!(error.contains("do not retry blindly"), "{error}");
+        }
+        assert!(process.shutdown().await);
+    }
+}
+
+#[tokio::test]
+async fn oversized_pipeline_message_fails_before_hook_with_attribution() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    let process = pipeline_process(&temp, "before_provider_request").await;
+    let hook = process.bind_provider_request_hook("fixture-owner").unwrap();
+    let context = octet_ai::ProviderRequestContext {
+        operation_id: "fixture-operation".into(),
+        model: octet_ai::HookModelContext::from_model(&pipeline_model(
+            "https://fixture.invalid/v1/",
+        )),
+    };
+    let error = hook
+        .before_request(&context, serde_json::json!({"text":"x".repeat(1_100_000)}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_pipeline_diagnostic(&error, "before_provider_request", "size limit");
+    assert!(!temp.path().join("hook-called").exists());
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn public_pipeline_diagnostic_keeps_action_and_route_with_long_identities() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    pipeline_case(
+        &temp,
+        "after_provider_response",
+        serde_json::json!({
+            "error":{"code":-32602,"message":"PRIVATE_FIXTURE_SECRET"}
+        }),
+    );
+    let process = pipeline_process(&temp, "after_provider_response").await;
+    let hook = process.bind_provider_request_hook("fixture-owner").unwrap();
+    let context = octet_ai::ProviderRequestContext {
+        operation_id: "fixture-operation".into(),
+        model: octet_ai::HookModelContext {
+            provider: format!("{}\u{1b}SECRET", "p".repeat(200)),
+            id: "模型".repeat(100),
+            api: "a".repeat(200),
+        },
+    };
+    let error = hook
+        .after_response(&context, http::StatusCode::OK, &http::HeaderMap::new())
+        .await
+        .unwrap_err();
+    let public = crate::public_error_diagnostic(&crate::AgentError::Ai(error), "route", "model");
+    for expected in [
+        "after_provider_response",
+        "malformed-hook",
+        "disable",
+        "do not retry blindly",
+        "Route:",
+        "provider",
+        "model",
+        "API",
+        "…",
+    ] {
+        assert!(
+            public.contains(expected),
+            "missing {expected:?} in {public:?}"
+        );
+    }
+    assert!(!public.contains("PRIVATE_FIXTURE_SECRET"));
+    assert!(!public.contains('\u{1b}'));
+    assert!(!public.contains("SECRET"));
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn malformed_pipeline_reply_reaches_the_agent_without_a_provider_request() {
+    use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig, Session};
+
+    let temp = TempDir::new().unwrap();
+    let server = wiremock::MockServer::start().await;
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    let mut host = ExtensionHost::new();
+    process.register(&mut host);
+    let mut agent = Agent::new(AgentConfig {
+        client: octet_ai::AiClient::try_with_proxy_environment(Default::default()).unwrap(),
+        model: pipeline_model(&format!("{}/v1/", server.uri())),
+        session: Session::create(temp.path().join("session.jsonl")).unwrap(),
+        extensions: host,
+        system: "fixture".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning: octet_ai::ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: Some("fixture-session".into()),
+    })
+    .unwrap();
+    let error = agent.complete("PRIVATE_FIXTURE_PROMPT").await.unwrap_err();
+    assert_pipeline_diagnostic(
+        &error.to_string(),
+        "before_provider_headers",
+        "invalid hook response",
+    );
+    let public = crate::public_error_diagnostic(&error, "fixture-provider", "gpt-4o-mini");
+    assert_pipeline_diagnostic(&public, "before_provider_headers", "invalid hook response");
+    assert!(public.contains("check result field types"), "{public}");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("hook-called")).unwrap(),
+        "before_provider_headers\n"
+    );
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "fake provider was never called"
+    );
+    assert!(process.shutdown().await);
+}

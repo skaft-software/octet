@@ -279,6 +279,31 @@ status and presentation surfaces stay available subject to their existing host
 gates. A documented approval or secret broker isn't automatically offered by a
 host.
 
+### Encoded provider pipeline hooks (API `0.4`)
+
+When a host offers and the extension negotiates `pipeline_hooks_v1`, the declared
+`before_provider_request`, `before_provider_headers` and `after_provider_response`
+hooks run at the actual encoded HTTP boundaries. Their `hook/run` result is an
+object: `provider_payload` may replace the request body with a JSON object or
+array; `provider_headers` is a patch whose values are strings, arrays of strings,
+or null (delete). Omitted or null replacement fields mean no change. A payload
+hook cannot return a header patch, a header hook cannot return a payload, and a
+response observer cannot transform either. The host still validates header names,
+values, limits and reserved headers. For example, a JSON-RPC result containing
+`{"provider_headers":{"x-example":17}}` is valid JSON but not a valid hook
+reply; it is refused rather than sent to the provider.
+
+On the native encoded HTTP path, process-hook request, reply-decoding and
+validation failures stop the attempt and identify the hook stage, extension
+process, provider/endpoint, model and API, with a category and an action. Check
+`/extensions status`, then update or disable the named extension and review its
+hook configuration. For a transport-size refusal, reduce the request size as
+well. A process may host multiple Pi factories, so a process-level diagnostic
+does not necessarily identify the individual factory. Prompt bodies, headers
+and remote exception text are not included. A failure in
+`after_provider_response` occurs after a request may have reached the provider;
+inspect its state rather than blindly retrying.
+
 ### Typed values, native resources and immutable bulk (API `0.4`)
 
 The [Python](../sdk/python/README.md) and [Rust](../sdk/rust/README.md) SDKs
