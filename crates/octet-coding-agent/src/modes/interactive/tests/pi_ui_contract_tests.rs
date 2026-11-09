@@ -78,6 +78,31 @@ async fn rendered(shell: &mut InteractiveShell) -> String {
     sexy_tui_rs::strip_terminal_sequences(&frame)
 }
 
+/// Pi chrome setters are coalesced and delivered after the command settles,
+/// as Pi's local setters are. Drain extension events and re-render until the
+/// frame satisfies `ready` instead of racing that delivery.
+async fn rendered_when(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    what: &str,
+    ready: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        for message in app.executable_extensions.drain_events_for_shell(shell) {
+            shell.notice(message);
+        }
+        let frame = rendered(shell).await;
+        if ready(&frame) {
+            return frame;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{what}: {frame}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn component_key(app: &mut App, shell: &mut InteractiveShell, code: KeyCode) {
     let event = Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
     assert!(
@@ -429,7 +454,13 @@ export default function(pi) {
     );
     assert!(!shell.verbose_tools());
     command(&mut app, &mut shell, "hide").await.unwrap();
-    assert!(!rendered(&mut shell).await.contains("NATIVE-PI-WORKING"));
+    rendered_when(
+        &mut app,
+        &mut shell,
+        "hidden loader still visible",
+        |frame| !frame.contains("NATIVE-PI-WORKING"),
+    )
+    .await;
     shell.set_verbose_tools(true); // Native Ctrl+O must remain authoritative.
     command(&mut app, &mut shell, "read").await.unwrap();
     assert_eq!(
@@ -440,15 +471,17 @@ export default function(pi) {
     );
     shell.set_verbose_tools(false);
     command(&mut app, &mut shell, "reset").await.unwrap();
-    let reset = rendered(&mut shell).await;
-    assert!(
-        !reset.contains("NATIVE-PI-WORKING") && !reset.contains("NATIVE-PI-HIDDEN"),
-        "{reset}"
-    );
-    assert!(
-        reset.contains("Working"),
-        "native loader default was not restored: {reset}"
-    );
+    rendered_when(
+        &mut app,
+        &mut shell,
+        "native loader default was not restored",
+        |frame| {
+            !frame.contains("NATIVE-PI-WORKING")
+                && !frame.contains("NATIVE-PI-HIDDEN")
+                && frame.contains("Working")
+        },
+    )
+    .await;
     shell.interrupt_run(run);
     app.executable_extensions.shutdown().await;
 }
