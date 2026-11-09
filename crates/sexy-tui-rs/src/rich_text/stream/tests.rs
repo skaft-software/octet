@@ -43,6 +43,24 @@ fn finalized_constructor_parses_once_without_streaming_work() {
     }
 }
 
+#[test]
+fn finishing_releases_unstable_source_capacity_without_changing_output() {
+    let source = format!("```text\n{}", "x".repeat(200_000));
+    let mut stream = StreamingMarkdown::new();
+    stream.push_str(&source);
+    assert!(stream.tail.capacity() >= source.len());
+    assert_eq!(stream.finish(), &markdown::parse(&source));
+    assert_eq!(
+        stream.tail.capacity(),
+        0,
+        "completed streams must release their unstable buffer"
+    );
+    assert_eq!(stream.raw_bytes(), source.as_bytes());
+    assert_eq!(stream.raw_text(), source);
+    assert!(stream.unstable_source().is_empty());
+    assert_eq!(stream.finish(), &markdown::parse(&source));
+}
+
 fn prior_list_marker(line: &str) -> bool {
     line.starts_with("- ")
         || line.starts_with("* ")
