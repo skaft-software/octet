@@ -39,7 +39,7 @@ for (const mode of ['replace', 'in-place', 'throws', 'throws-coded']) test(`real
     assert.ok(issue, peer.stderr());
     assert.equal(issue.params.level, 'warning');
     assert.match(issue.params.message, /^Octet Pi Compat: context hook failed and was skipped\./);
-    assert.match(peer.stderr(), /\[Extension issues\]/);
+    await peer.waitStderr(/\[Extension issues\]/);
     assert.doesNotMatch(issue.params.message + peer.stderr(), /ordinary context failure|coded context failure/);
   }
   await peer.close();

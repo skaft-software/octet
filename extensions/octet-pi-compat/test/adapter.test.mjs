@@ -20,7 +20,7 @@ test('static TypeScript registrations, flags, stdout isolation, useful truthful 
   assert.equal(result.result.content[0].text, `${root}|true|host-value`);
   assert.deepEqual(result.result.metadata.pi_details.model.cost, { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 });
   assert.equal(result.result.metadata.pi_details.model.contextWindow, 32768);
-  assert.match(peer.stderr(), /console diagnostic/); assert.match(peer.stderr(), /direct stdout diagnostic/);
+  await peer.waitStderr(/console diagnostic/); await peer.waitStderr(/direct stdout diagnostic/);
   await peer.close();
 });
 test('reviewed extension requests only the active model credential from its real host', async t => {
@@ -109,7 +109,8 @@ test('ordered async hook callbacks and queued cancellation remain serviceable', 
   const first = invoke(1, 80), second = invoke(2, 0), third = invoke(3, 0);
   peer.notify('$/cancelRequest', { id: second.id });
   assert.ok((await first.response).result); assert.equal((await second.response).error.code, -32800); assert.ok((await third.response).result);
-  assert.match(peer.stderr(), /ordered:1[\s\S]*ordered:3/); assert.doesNotMatch(peer.stderr(), /ordered:2/);
+  // stderr is a separate pipe from the responses; wait for the diagnostic.
+  assert.match(await peer.waitStderr(/ordered:1[\s\S]*ordered:3/), /ordered:1[\s\S]*ordered:3/); assert.doesNotMatch(peer.stderr(), /ordered:2/);
   assert.equal((await peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'blocked', arguments: {} }, context: peer.context() }).response).result.disposition.action, 'deny');
 });
 test('cancelling tools and reverse calls rejects once, ignores late response, and preserves other calls', async t => {
