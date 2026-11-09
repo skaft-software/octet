@@ -50,7 +50,7 @@ octet SDK, generated bindings and the shipped bundles listed in
 `extensions/release-catalog.txt` — is built
 and tested with octet. **Community compatibility** material — the Pi factories loaded by the optional
 first-party adapter, retained legacy API examples and generic single-file
-helpers — has its own compatibility boundaries. The 0.10.0 release catalog
+helpers — has its own compatibility boundaries. The 0.10.3 release catalog
 includes the Pi adapter; see [Pi compatibility](pi-compatibility.md) for setup.
 
 Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
@@ -60,7 +60,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for the **octet 0.10.0 source SDK**: the
+only the contributions you need. It's a source recipe for the **octet 0.10.3 source SDK**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact
@@ -209,11 +209,11 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, Python/TypeScript source SDKs and six candidate
-executable bundles have distribution version **0.10.0** (the independent Rust
+names or imports. The local host, Python/TypeScript source SDKs and the six
+executable bundles have distribution version **0.10.3** (the independent Rust
 SDK remains 0.8.2). That doesn't select an extension API or publish SDK registries.
-Use reviewed source or an explicit local archive; public 0.10.0 artifacts do not
-exist. See [installation](installation.md) and the [RC notes](releases/v0.10.0.md).
+Use the version-matched bundle published with the release, or an explicit local
+archive. See [installation](installation.md) and the [release notes](releases/v0.10.3.md).
 
 Installation and discovery of Pi are inert. Enabling the stock bridge automatically
 mirrors/runs enabled Pi factories with OS permissions. It does not silently opt

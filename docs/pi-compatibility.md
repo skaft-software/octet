@@ -1,6 +1,6 @@
 # Pi compatibility
 
-**v0.10.3 is octet's first Pi-compatible release.** Use your existing Pi
+**v0.10.0 was octet's first Pi-compatible release.** Use your existing Pi
 extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
@@ -40,7 +40,7 @@ octet --enable-extension octet-pi-compat
 For source development, install locked adapter dependencies as described below,
 then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
 To install a downloaded bundle explicitly, use
-`octet extension install --path /absolute/path/octet-pi-compat-0.10.0.tar.gz`.
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.3.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for

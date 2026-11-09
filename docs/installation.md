@@ -37,27 +37,23 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
-**v0.10.3 is not yet published to npm.**
+**v0.10.3 is not yet published to npm.** No package for the 0.10.x line exists
+on npm, so there is no npm install command for this release: use the
+[native installer](#install-native-binaries) above. npm's `latest` dist-tag
+still resolves to the 0.8.1 package from an earlier release line, which is not
+this release.
 
-After approved npm publication, Node.js can install the same signed platform
-package on macOS Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64:
-
-```sh
-npm install -g @skaft/octet@0.10.3
-octet --version   # octet 0.10.3
-```
-
-This installs the `@skaft/octet` launcher plus the matching platform package
+The planned npm channel would install the same signed platform package on macOS
+Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64: the
+`@skaft/octet` launcher plus the matching platform package
 (`@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`,
-`@skaft/octet-linux-x64-gnu`, or `@skaft/octet-win32-x64`) with npm provenance,
-from the same verified
-release assets as the native installer. The launcher has no install-time
-lifecycle scripts. To pin an exact version instead of tracking `latest`, use
-`npm install -g @skaft/octet@0.10.3` ([distribution](distribution.md)). npm
-publication is separate from native publication; do not use this command until
-v0.10.3 registry publication and provenance are recorded on the release page.
-See [Windows](windows.md) for native versus unsigned test-build boundaries. [Distribution channels](distribution.md) has the exact
-boundaries. The [historical Ygg
+`@skaft/octet-linux-x64-gnu`, or `@skaft/octet-win32-x64`), with npm provenance,
+from the same verified release assets as the native installer. The launcher has
+no install-time lifecycle scripts. npm publication is separate from native
+publication, so this page gives no npm command until v0.10.3 registry
+publication and provenance are recorded on the release page. [Distribution
+channels](distribution.md) has the exact boundaries. See [Windows](windows.md)
+for native versus unsigned test-build boundaries. The [historical Ygg
 instructions](reference/historical-installation.md) describe older releases, not
 a way to install or migrate to octet.
 

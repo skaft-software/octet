@@ -22,7 +22,7 @@ include locked production dependencies. Installation/discovery are inert.
 Enabling the stock bundle automatically mirrors this
 machine's enabled Pi setup and runs its factories with OS permissions. Native
 provider-credential disclosure remains a separate reviewed opt-in, and native
-TOML appearance is independent. With octet 0.10.0 or later:
+TOML appearance is independent. With octet 0.10.3 or later:
 
 ```sh
 octet extension install octet-pi-compat
@@ -116,7 +116,7 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The 0.10.0 release catalog includes this adapter. For an installed bundle,
+The 0.10.3 release catalog includes this adapter. For an installed bundle,
 generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
@@ -140,7 +140,7 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
+octet 0.10.3 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
 through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
 2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
 resolve through the same module table as Pi 1.4's extension loader:

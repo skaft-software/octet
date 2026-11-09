@@ -1,10 +1,10 @@
 # Distribution channels
 
-The [version-pinned v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+The [version-pinned v0.10.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
 records actual channel availability, immutable assets, signatures and source
-qualification. The [release notes](releases/v0.10.0.md) describe octet's first
-Pi-compatible launch. Native binaries and the six optional extension bundles
-are separate downloads; installation never enables an extension.
+qualification. The [0.10.0 release notes](releases/v0.10.0.md) describe octet's
+first Pi-compatible launch. Native binaries and the six optional extension
+bundles are separate downloads; installation never enables an extension.
 
 The planned npm channel is `@skaft/octet@0.10.3` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
@@ -100,16 +100,14 @@ aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.10.3 is not published to npm.** Only
-after verified publication, pin the version to reproduce one exact release:
-
-```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.3
-```
-
-`npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
-installation of an exact version. Published versions are immutable,
-so a pinned install can't be silently replaced.
+and registry provenance verification. **0.10.3 is not published to npm.** No
+0.10.x package exists yet, so this page gives no npm install command: use the
+version-pinned native release that [installation](installation.md) describes.
+Only after verified publication does the pinned `@skaft/octet@0.10.3` reproduce
+exactly one release; the `latest` dist-tag would track whichever version npm
+publishes as current, which is not an installation of an exact version.
+Published versions are immutable, so a pinned install can't be silently
+replaced.
 
 ## Unsigned dogfood candidates
 
