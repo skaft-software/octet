@@ -330,7 +330,7 @@ fn assert_error(reply: &serde_json::Value, id: u64, code: i64) {
 async fn mark_terminal(fixture: &Fixture, state: &ProtocolReadState) {
     dispatch_provider_stream_event(
         state,
-        api_v03::ProviderStreamEvent {
+        api_v04::ProviderStreamEvent {
             stream_id: fixture.stream_id.clone(),
             sequence: 0,
             kind: "finished".into(),

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::extension_api_v03 as api_v03;
+use crate::extension_api_v04 as api_v04;
 
 /// Binds private HTTP hooks to one authoritative session owner before an attempt.
 /// A process implementation also pins its current connection/generation here;
@@ -60,7 +60,7 @@ impl ExtensionProviderAuthorizationStatus {
         }
     }
 
-    /// Returns the stable API 0.3 wire name.
+    /// Returns the stable provider authorization wire name.
     pub fn as_wire(self) -> &'static str {
         match self {
             Self::Ready => "ready",
@@ -78,9 +78,9 @@ pub struct ExtensionProviderCatalogEntry {
     /// Generation that owns the declaration.
     pub owner: ExtensionProviderOwner,
     /// Secret-free provider metadata.
-    pub provider: api_v03::ProviderDefinition,
+    pub provider: api_v04::ProviderDefinition,
     /// Current complete model catalog for the provider.
-    pub models: Vec<api_v03::ProviderModelDefinition>,
+    pub models: Vec<api_v04::ProviderModelDefinition>,
     /// Host-owned authorization availability, with no lease retained.
     pub authorization: ExtensionProviderAuthorizationStatus,
 }
@@ -94,9 +94,9 @@ pub struct ExtensionProviderRoute {
     /// Generation that owns the provider stream endpoint.
     pub owner: ExtensionProviderOwner,
     /// Secret-free provider declaration.
-    pub provider: api_v03::ProviderDefinition,
+    pub provider: api_v04::ProviderDefinition,
     /// Selected model declaration.
-    pub model: api_v03::ProviderModelDefinition,
+    pub model: api_v04::ProviderModelDefinition,
     /// Validated API 0.4 facts held in the native registration, never the frozen wire model.
     pub model_metadata: Option<crate::extension_process::PiProviderModelMetadata>,
 }
@@ -111,9 +111,9 @@ pub trait ExtensionProviderAuthorizationPolicy: Send + Sync {
     fn authorize(
         &self,
         owner: &ExtensionProviderOwner,
-        provider: &api_v03::ProviderDefinition,
-        request: &api_v03::ProviderAuthorizationRequest,
-    ) -> api_v03::ProviderAuthorizationResult;
+        provider: &api_v04::ProviderDefinition,
+        request: &api_v04::ProviderAuthorizationRequest,
+    ) -> api_v04::ProviderAuthorizationResult;
 }
 
 /// Errors from a lifecycle-owned provider registry operation.
@@ -137,8 +137,8 @@ pub enum ExtensionProviderRegistryError {
 struct ProviderRecord {
     revision: usize,
     owner: ExtensionProviderOwner,
-    provider: api_v03::ProviderDefinition,
-    models: BTreeMap<String, api_v03::ProviderModelDefinition>,
+    provider: api_v04::ProviderDefinition,
+    models: BTreeMap<String, api_v04::ProviderModelDefinition>,
     model_admission_revisions: BTreeMap<String, usize>,
     model_metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
     authorization: ExtensionProviderAuthorizationStatus,
@@ -246,8 +246,8 @@ impl ExtensionProviderRegistry {
     pub fn register(
         &self,
         owner: ExtensionProviderOwner,
-        request: api_v03::ProviderRegisterParams,
-    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+        request: api_v04::ProviderRegisterParams,
+    ) -> Result<api_v04::ProviderCatalogResult, ExtensionProviderRegistryError> {
         self.replace(
             owner,
             request.provider,
@@ -265,8 +265,8 @@ impl ExtensionProviderRegistry {
     pub fn update(
         &self,
         owner: ExtensionProviderOwner,
-        request: api_v03::ProviderUpdateParams,
-    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+        request: api_v04::ProviderUpdateParams,
+    ) -> Result<api_v04::ProviderCatalogResult, ExtensionProviderRegistryError> {
         self.replace(
             owner,
             request.provider,
@@ -282,10 +282,10 @@ impl ExtensionProviderRegistry {
     pub fn replace_pi_provider(
         &self,
         owner: ExtensionProviderOwner,
-        request: api_v03::ProviderRegisterParams,
+        request: api_v04::ProviderRegisterParams,
         metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
         update: bool,
-    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+    ) -> Result<api_v04::ProviderCatalogResult, ExtensionProviderRegistryError> {
         if request.provider.auth.kind != "none"
             || metadata.len() != request.models.len()
             || request
@@ -314,7 +314,7 @@ impl ExtensionProviderRegistry {
         &self,
         owner: &ExtensionProviderOwner,
         provider_id: &str,
-    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+    ) -> Result<api_v04::ProviderCatalogResult, ExtensionProviderRegistryError> {
         validate_identifier(provider_id, "provider_id")?;
         let mut state = lock_registry(&self.state);
         let Some(record) = state.providers.get(provider_id) else {
@@ -582,8 +582,8 @@ impl ExtensionProviderRegistry {
     pub fn request_authorization(
         &self,
         owner: &ExtensionProviderOwner,
-        request: api_v03::ProviderAuthorizationRequest,
-    ) -> Result<api_v03::ProviderAuthorizationResult, ExtensionProviderRegistryError> {
+        request: api_v04::ProviderAuthorizationRequest,
+    ) -> Result<api_v04::ProviderAuthorizationResult, ExtensionProviderRegistryError> {
         validate_authorization_request(&request)?;
         let provider = {
             let state = lock_registry(&self.state);
@@ -603,19 +603,19 @@ impl ExtensionProviderRegistry {
                 // Revocation is fail-closed even when no credential service is
                 // currently configured: a caller's explicit request must never
                 // leave an earlier Ready route callable.
-                None => api_v03::ProviderAuthorizationResult {
+                None => api_v04::ProviderAuthorizationResult {
                     status: "revoked".to_owned(),
                     lease: None,
                 },
             }
         } else {
             match (&provider.auth.kind[..], &self.authorization_policy) {
-                ("none", _) => api_v03::ProviderAuthorizationResult {
+                ("none", _) => api_v04::ProviderAuthorizationResult {
                     status: "ready".to_owned(),
                     lease: None,
                 },
                 (_, Some(policy)) => policy.authorize(owner, &provider, &request),
-                (_, None) => api_v03::ProviderAuthorizationResult {
+                (_, None) => api_v04::ProviderAuthorizationResult {
                     status: "unavailable".to_owned(),
                     lease: None,
                 },
@@ -636,11 +636,11 @@ impl ExtensionProviderRegistry {
     fn replace(
         &self,
         owner: ExtensionProviderOwner,
-        provider: api_v03::ProviderDefinition,
-        models: Vec<api_v03::ProviderModelDefinition>,
+        provider: api_v04::ProviderDefinition,
+        models: Vec<api_v04::ProviderModelDefinition>,
         update_only: bool,
         model_metadata: BTreeMap<String, crate::extension_process::PiProviderModelMetadata>,
-    ) -> Result<api_v03::ProviderCatalogResult, ExtensionProviderRegistryError> {
+    ) -> Result<api_v04::ProviderCatalogResult, ExtensionProviderRegistryError> {
         validate_provider(&provider, &models)?;
         let provider_id = provider.id.clone();
         let model_ids = models
@@ -677,7 +677,7 @@ impl ExtensionProviderRegistry {
         } else {
             state.providers.len().saturating_add(1)
         };
-        if next_providers > api_v03::MAX_PROVIDERS {
+        if next_providers > api_v04::MAX_PROVIDERS {
             return Err(ExtensionProviderRegistryError::ResourceExhausted(
                 "providers",
             ));
@@ -689,7 +689,7 @@ impl ExtensionProviderRegistry {
             .sum::<usize>()
             .saturating_sub(replacing_models)
             .saturating_add(model_map.len());
-        if model_count > api_v03::MAX_PROVIDER_MODELS {
+        if model_count > api_v04::MAX_PROVIDER_MODELS {
             return Err(ExtensionProviderRegistryError::ResourceExhausted(
                 "provider models",
             ));
@@ -752,8 +752,8 @@ fn catalog_result(
     revision: usize,
     provider_ids: Vec<String>,
     model_ids: Vec<String>,
-) -> api_v03::ProviderCatalogResult {
-    api_v03::ProviderCatalogResult {
+) -> api_v04::ProviderCatalogResult {
+    api_v04::ProviderCatalogResult {
         revision,
         provider_ids,
         model_ids,
@@ -761,7 +761,7 @@ fn catalog_result(
 }
 
 fn authorization_for(
-    auth: &api_v03::ProviderAuthRequirement,
+    auth: &api_v04::ProviderAuthRequirement,
 ) -> ExtensionProviderAuthorizationStatus {
     if auth.kind == "none" {
         ExtensionProviderAuthorizationStatus::Ready
@@ -771,13 +771,13 @@ fn authorization_for(
 }
 
 fn validate_provider(
-    provider: &api_v03::ProviderDefinition,
-    models: &[api_v03::ProviderModelDefinition],
+    provider: &api_v04::ProviderDefinition,
+    models: &[api_v04::ProviderModelDefinition],
 ) -> Result<(), ExtensionProviderRegistryError> {
     validate_identifier(&provider.id, "provider id")?;
     validate_label(&provider.label, "provider label")?;
     validate_auth_requirement(&provider.auth)?;
-    if models.len() > api_v03::MAX_PROVIDER_MODELS {
+    if models.len() > api_v04::MAX_PROVIDER_MODELS {
         return Err(ExtensionProviderRegistryError::ResourceExhausted(
             "provider models",
         ));
@@ -791,7 +791,7 @@ fn validate_provider(
             ));
         }
         if model.api_name.trim().is_empty()
-            || model.api_name.len() > api_v03::MAX_PROVIDER_ID_BYTES
+            || model.api_name.len() > api_v04::MAX_PROVIDER_ID_BYTES
             || model.api_name.chars().any(char::is_control)
         {
             return Err(ExtensionProviderRegistryError::Invalid(
@@ -821,7 +821,7 @@ fn validate_provider(
 }
 
 fn validate_auth_requirement(
-    auth: &api_v03::ProviderAuthRequirement,
+    auth: &api_v04::ProviderAuthRequirement,
 ) -> Result<(), ExtensionProviderRegistryError> {
     match auth.kind.as_str() {
         "none" => {
@@ -861,7 +861,7 @@ fn validate_auth_requirement(
 }
 
 fn validate_authorization_request(
-    request: &api_v03::ProviderAuthorizationRequest,
+    request: &api_v04::ProviderAuthorizationRequest,
 ) -> Result<(), ExtensionProviderRegistryError> {
     validate_identifier(&request.provider_id, "provider_id")?;
     if !matches!(request.action.as_str(), "authorize" | "refresh" | "revoke") {
@@ -873,7 +873,7 @@ fn validate_authorization_request(
 }
 
 fn validate_requested_scopes(
-    auth: &api_v03::ProviderAuthRequirement,
+    auth: &api_v04::ProviderAuthRequirement,
     requested: Option<&[String]>,
 ) -> Result<(), ExtensionProviderRegistryError> {
     let Some(requested) = requested else {
@@ -907,7 +907,7 @@ fn validate_requested_scopes(
 }
 
 fn validate_authorization_result(
-    result: &api_v03::ProviderAuthorizationResult,
+    result: &api_v04::ProviderAuthorizationResult,
 ) -> Result<(), ExtensionProviderRegistryError> {
     if ExtensionProviderAuthorizationStatus::from_wire(&result.status).is_none() {
         return Err(ExtensionProviderRegistryError::Invalid(
@@ -915,7 +915,7 @@ fn validate_authorization_result(
         ));
     }
     if let Some(lease) = &result.lease {
-        if !is_opaque(lease, api_v03::MAX_PROVIDER_AUTH_LEASE_BYTES) {
+        if !is_opaque(lease, api_v04::MAX_PROVIDER_AUTH_LEASE_BYTES) {
             return Err(ExtensionProviderRegistryError::Invalid(
                 "authorization lease is not an opaque bounded identifier".into(),
             ));
@@ -933,14 +933,14 @@ fn validate_scopes(scopes: Option<&[String]>) -> Result<(), ExtensionProviderReg
     let Some(scopes) = scopes else {
         return Ok(());
     };
-    if scopes.len() > api_v03::MAX_PROVIDER_AUTH_SCOPES {
+    if scopes.len() > api_v04::MAX_PROVIDER_AUTH_SCOPES {
         return Err(ExtensionProviderRegistryError::ResourceExhausted(
             "authorization scopes",
         ));
     }
     let mut seen = BTreeMap::new();
     for scope in scopes {
-        if !is_opaque(scope, api_v03::MAX_PROVIDER_ID_BYTES)
+        if !is_opaque(scope, api_v04::MAX_PROVIDER_ID_BYTES)
             || scope.chars().any(char::is_whitespace)
             || seen.insert(scope, ()).is_some()
         {
@@ -953,7 +953,7 @@ fn validate_scopes(scopes: Option<&[String]>) -> Result<(), ExtensionProviderReg
 }
 
 fn validate_identifier(value: &str, label: &str) -> Result<(), ExtensionProviderRegistryError> {
-    if value.len() > api_v03::MAX_PROVIDER_ID_BYTES
+    if value.len() > api_v04::MAX_PROVIDER_ID_BYTES
         || value.is_empty()
         || !value.is_ascii()
         || !value.as_bytes()[0].is_ascii_lowercase()
@@ -970,7 +970,7 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), ExtensionProvider
 
 fn validate_label(value: &str, label: &str) -> Result<(), ExtensionProviderRegistryError> {
     if value.trim().is_empty()
-        || value.len() > api_v03::MAX_PROVIDER_LABEL_BYTES
+        || value.len() > api_v04::MAX_PROVIDER_LABEL_BYTES
         || value.chars().any(char::is_control)
     {
         return Err(ExtensionProviderRegistryError::Invalid(format!(
@@ -1000,11 +1000,11 @@ mod tests {
         }
     }
 
-    fn provider() -> api_v03::ProviderDefinition {
-        api_v03::ProviderDefinition {
+    fn provider() -> api_v04::ProviderDefinition {
+        api_v04::ProviderDefinition {
             id: "fixture".into(),
             label: "Fixture".into(),
-            auth: api_v03::ProviderAuthRequirement {
+            auth: api_v04::ProviderAuthRequirement {
                 kind: "none".into(),
                 subject: None,
                 scopes: None,
@@ -1012,14 +1012,14 @@ mod tests {
         }
     }
 
-    fn model() -> api_v03::ProviderModelDefinition {
-        api_v03::ProviderModelDefinition {
+    fn model() -> api_v04::ProviderModelDefinition {
+        api_v04::ProviderModelDefinition {
             id: "model".into(),
             api_name: "fixture-model".into(),
             protocol: "openai_chat".into(),
             context_window: 32_768,
             max_output_tokens: 4_096,
-            capabilities: api_v03::ProviderModelCapabilities {
+            capabilities: api_v04::ProviderModelCapabilities {
                 tools: true,
                 parallel_tool_calls: false,
                 structured_output: true,
@@ -1029,13 +1029,13 @@ mod tests {
         }
     }
 
-    fn register_params(provider_id: &str, model_id: &str) -> api_v03::ProviderRegisterParams {
+    fn register_params(provider_id: &str, model_id: &str) -> api_v04::ProviderRegisterParams {
         let mut provider = provider();
         provider.id = provider_id.into();
         let mut model = model();
         model.id = model_id.into();
         model.api_name = model_id.into();
-        api_v03::ProviderRegisterParams {
+        api_v04::ProviderRegisterParams {
             provider,
             models: vec![model],
         }
@@ -1076,7 +1076,7 @@ mod tests {
             mutating
                 .update(
                     owner(1),
-                    api_v03::ProviderUpdateParams {
+                    api_v04::ProviderUpdateParams {
                         provider: request.provider,
                         models: request.models,
                     },
@@ -1127,7 +1127,7 @@ mod tests {
                     registry
                         .update(
                             owner(1),
-                            api_v03::ProviderUpdateParams {
+                            api_v04::ProviderUpdateParams {
                                 provider: request.provider,
                                 models: request.models,
                             },
@@ -1257,7 +1257,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1300,7 +1300,7 @@ mod tests {
         registry
             .register(
                 owner(1),
-                api_v03::ProviderRegisterParams {
+                api_v04::ProviderRegisterParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1314,7 +1314,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![model(), other],
                 },
@@ -1327,7 +1327,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![changed],
                 },
@@ -1336,7 +1336,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1378,7 +1378,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![replacement],
                 },
@@ -1402,7 +1402,7 @@ mod tests {
         registry
             .register(
                 owner(1),
-                api_v03::ProviderRegisterParams {
+                api_v04::ProviderRegisterParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1412,7 +1412,7 @@ mod tests {
         registry
             .update(
                 owner(2),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1427,7 +1427,7 @@ mod tests {
         assert!(matches!(
             registry.update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1442,7 +1442,7 @@ mod tests {
         registry
             .register(
                 owner(1),
-                api_v03::ProviderRegisterParams {
+                api_v04::ProviderRegisterParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1459,7 +1459,7 @@ mod tests {
         registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: provider(),
                     models: vec![replacement],
                 },
@@ -1484,7 +1484,7 @@ mod tests {
             delayed
                 .register(
                     owner(1),
-                    api_v03::ProviderRegisterParams {
+                    api_v04::ProviderRegisterParams {
                         provider: provider(),
                         models: vec![model()],
                     },
@@ -1496,7 +1496,7 @@ mod tests {
             delayed
                 .register(
                     owner(1),
-                    api_v03::ProviderRegisterParams {
+                    api_v04::ProviderRegisterParams {
                         provider: second_provider,
                         models: vec![model()],
                     },
@@ -1517,7 +1517,7 @@ mod tests {
         incomplete
             .register(
                 owner(2),
-                api_v03::ProviderRegisterParams {
+                api_v04::ProviderRegisterParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1541,7 +1541,7 @@ mod tests {
         registry
             .register(
                 owner(1),
-                api_v03::ProviderRegisterParams {
+                api_v04::ProviderRegisterParams {
                     provider: provider(),
                     models: vec![model()],
                 },
@@ -1555,7 +1555,7 @@ mod tests {
         assert!(registry
             .update(
                 owner(1),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: authenticated,
                     models: vec![model()],
                 },

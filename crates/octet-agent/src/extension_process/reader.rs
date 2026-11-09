@@ -456,49 +456,49 @@ pub(super) fn queue_session_compaction_operation(
     Ok(())
 }
 
-pub(super) fn api_v03_session_lifecycle_success(
+pub(super) fn session_lifecycle_success(
     request_id: &ExtensionRequestId,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
-    let result = api_v03::SessionLifecycleResult { session_id };
+    let result = api_v04::SessionLifecycleResult { session_id };
     let result = serde_json::to_value(result).map_err(|error| error.to_string())?;
-    api_v03::parse_session_lifecycle_result(result.clone()).map_err(|error| error.to_string())?;
+    api_v04::parse_session_lifecycle_result(result.clone()).map_err(|error| error.to_string())?;
     let response = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
         "result": result,
     });
-    api_v03::parse_json_rpc_envelope(response.clone()).map_err(|error| error.to_string())?;
+    api_v04::validate_session_response(&response).map_err(|error| error.to_string())?;
     Ok(response)
 }
 
-pub(super) fn api_v03_session_lifecycle_error(
+pub(super) fn session_lifecycle_error(
     request_id: &ExtensionRequestId,
     semantic: &str,
     reason: &str,
 ) -> Result<serde_json::Value, String> {
-    let error = api_v03::error_object(semantic, Some(serde_json::json!({ "reason": reason })))
+    let error = api_v04::error_object(semantic, Some(serde_json::json!({ "reason": reason })))
         .map_err(|error| error.to_string())?;
     let response = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
         "error": error,
     });
-    api_v03::parse_json_rpc_envelope(response.clone()).map_err(|error| error.to_string())?;
+    api_v04::validate_session_response(&response).map_err(|error| error.to_string())?;
     Ok(response)
 }
 
-pub(super) fn api_v03_session_lifecycle_submit_error(
+pub(super) fn session_lifecycle_submit_error(
     request_id: &ExtensionRequestId,
     error: SessionLifecycleSubmitError,
 ) -> Result<serde_json::Value, String> {
     match error {
-        SessionLifecycleSubmitError::Unavailable => api_v03_session_lifecycle_error(
+        SessionLifecycleSubmitError::Unavailable => session_lifecycle_error(
             request_id,
             "internal_error",
             "active-session lifecycle service is unavailable",
         ),
-        SessionLifecycleSubmitError::Full => api_v03_session_lifecycle_error(
+        SessionLifecycleSubmitError::Full => session_lifecycle_error(
             request_id,
             "resource_exhausted",
             "active-session lifecycle queue is full",
@@ -506,19 +506,19 @@ pub(super) fn api_v03_session_lifecycle_submit_error(
     }
 }
 
-/// Canonically serialize and atomically admit one API 0.3 child response. This
+/// Serialize and atomically admit one session/model-control child response. This
 /// mirrors the connection-owned response path instead of using the legacy
 /// best-effort writer queue, so cancellation cannot race a second terminal
 /// response into the stream.
-pub(super) async fn queue_api_v03_child_response(
+pub(super) async fn queue_child_response(
     child_requests: &ChildRequests,
     request_id: &ExtensionRequestId,
     writer: &mpsc::Sender<WriterFrame>,
     frame_limit: &Arc<ProtocolFrameLimit>,
     response: serde_json::Value,
 ) -> Result<ChildResponseAdmission, String> {
-    api_v03::parse_json_rpc_envelope(response.clone()).map_err(|error| error.to_string())?;
-    let mut line = api_v03::canonical_json(&response)
+    api_v04::validate_session_response(&response).map_err(|error| error.to_string())?;
+    let mut line = api_v04::portable_json(&response)
         .map_err(|error| error.to_string())?
         .into_bytes();
     line.push(b'\n');
@@ -550,9 +550,9 @@ pub(super) async fn queue_api_v03_child_response(
                     id: request_id.clone(),
                     response_state,
                     admitted: false,
-                    // This path is API 0.3-only. A response-admission failure
-                    // resets the child to active; its owner settles it rather
-                    // than emitting a noncanonical best-effort cancellation.
+                    // A response-admission failure resets the child to active;
+                    // its owner settles it rather than emitting a best-effort
+                    // cancellation. Preserve the existing terminal boundary.
                     abort_cancel: None,
                 };
                 let (completed, completion) = oneshot::channel();
@@ -604,7 +604,7 @@ pub(super) async fn queue_api_v03_child_response(
     }
 }
 
-pub(super) async fn deliver_api_v03_session_lifecycle_response(
+pub(super) async fn deliver_session_lifecycle_response(
     child_requests: ChildRequests,
     request_id: ExtensionRequestId,
     writer: mpsc::Sender<WriterFrame>,
@@ -613,7 +613,7 @@ pub(super) async fn deliver_api_v03_session_lifecycle_response(
     events: broadcast::Sender<ExtensionEvent>,
     response: serde_json::Value,
 ) {
-    if let Err(message) = queue_api_v03_child_response(
+    if let Err(message) = queue_child_response(
         &child_requests,
         &request_id,
         &writer,
@@ -669,8 +669,8 @@ pub(super) fn queue_registered_session_lifecycle_operation(
 
     let Ok(worker) = worker else {
         let response =
-            api_v03_session_lifecycle_submit_error(&request_id, SessionLifecycleSubmitError::Full)?;
-        tokio::spawn(deliver_api_v03_session_lifecycle_response(
+            session_lifecycle_submit_error(&request_id, SessionLifecycleSubmitError::Full)?;
+        tokio::spawn(deliver_session_lifecycle_response(
             child_requests,
             request_id,
             writer,
@@ -691,32 +691,30 @@ pub(super) fn queue_registered_session_lifecycle_operation(
                     result = receiver => result.unwrap_or(Err(ExtensionSessionLifecycleError::Unavailable)),
                 };
                 match result {
-                    Ok(session_id) => api_v03_session_lifecycle_success(&request_id, session_id),
+                    Ok(session_id) => session_lifecycle_success(&request_id, session_id),
                     Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({
                         "jsonrpc":"2.0", "id":request_id, "result":{"cancelled":true}
                     })),
-                    Err(ExtensionSessionLifecycleError::Unavailable) => {
-                        api_v03_session_lifecycle_error(
-                            &request_id,
-                            "internal_error",
-                            "active-session lifecycle service is unavailable",
-                        )
-                    }
+                    Err(ExtensionSessionLifecycleError::Unavailable) => session_lifecycle_error(
+                        &request_id,
+                        "internal_error",
+                        "active-session lifecycle service is unavailable",
+                    ),
                     Err(
                         ExtensionSessionLifecycleError::Failed
                         | ExtensionSessionLifecycleError::Refused(_),
-                    ) => api_v03_session_lifecycle_error(
+                    ) => session_lifecycle_error(
                         &request_id,
                         "internal_error",
                         "active-session lifecycle operation failed",
                     ),
                 }
             }
-            Err(error) => api_v03_session_lifecycle_submit_error(&request_id, error),
+            Err(error) => session_lifecycle_submit_error(&request_id, error),
         };
         match response {
             Ok(response) => {
-                deliver_api_v03_session_lifecycle_response(
+                deliver_session_lifecycle_response(
                     child_requests,
                     request_id,
                     writer,
