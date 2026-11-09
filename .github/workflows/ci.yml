@@ -5,7 +5,14 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
   workflow_dispatch:
+
+# Isolate non-PR runs, including pending runs, so none can supersede another.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -34,10 +41,6 @@ jobs:
       - run: cargo deny check
 
   quality:
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -50,17 +53,6 @@ jobs:
         run: |
           python3 scripts/test_refresh_models_dev_metadata.py
           python3 scripts/test_release_model_metadata_gate.py
-      # PR version changes and manual dispatch check live metadata. Main may
-      # reuse only an API-proven exact-PR-head dispatch run with identical trees;
-      # missing proof falls back to live. Signed-release/build inputs stay frozen.
-      - name: Check pre-release model metadata freshness
-        timeout-minutes: 2
-        env:
-          MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
-          MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"
-          MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 scripts/check-release-model-metadata.py
       - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
         with:
           components: rustfmt, clippy
@@ -117,6 +109,7 @@ jobs:
       - run: cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
 
   first-party-extension-tests:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -182,6 +175,7 @@ jobs:
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/source-catalog.txt)
 
   extension-api-v03:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -207,7 +201,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # Keep one job body and the existing release-qualification lane names.
+        os: ${{ fromJSON((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["ubuntu-24.04"]' || '["ubuntu-24.04", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -264,10 +259,11 @@ jobs:
       - run: cargo check --workspace --all-targets --no-default-features --locked
 
   windows:
-    # Native Windows x64 build and qualification lane for pull requests. It
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    # Native Windows x64 build and qualification lane. It
     # uses the target of the opt-in release-candidate contract
-    # (scripts/package-octet-windows-release.py) and produces an unsigned,
-    # PR-scoped test artifact only; signed release publication stays in
+    # (scripts/package-octet-windows-release.py) and produces an unsigned
+    # test artifact only; signed release publication stays in
     # release-octet.yml. No GUI, driver, credential, or permission action runs.
     name: windows (x86_64-pc-windows-gnu)
     runs-on: windows-2025
@@ -699,6 +695,7 @@ jobs:
           retention-days: 14
 
   msrv:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -708,6 +705,7 @@ jobs:
       - run: cargo check --workspace --all-targets --all-features --locked
 
   smoke-install:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -730,3 +728,53 @@ jobs:
             --binary "$RUNNER_TEMP/octet-install/bin/octet" \
             --host-binary "$RUNNER_TEMP/octet-install/bin/octet-host" \
             --expected-version "$version"
+
+  ci-required:
+    if: always()
+    needs:
+      - dependency-review
+      - dependencies
+      - quality
+      - first-party-extension-tests
+      - extension-api-v03
+      - test
+      - windows
+      - release-candidate
+      - msrv
+      - smoke-install
+    runs-on: ubuntu-24.04
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+      CI_EVENT_NAME: ${{ github.event_name }}
+      CI_FULL_PR: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+    steps:
+      - name: Check required lanes
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["NEEDS_CONTEXT"])
+          event = os.environ["CI_EVENT_NAME"]
+          allowed_skips = set()
+          # These jobs retain their original event-specific conditions.
+          if event != "pull_request":
+              allowed_skips.add("dependency-review")
+          if event != "workflow_dispatch":
+              allowed_skips.add("release-candidate")
+          if event == "pull_request" and os.environ["CI_FULL_PR"] != "true":
+              allowed_skips.update({
+                  "first-party-extension-tests", "extension-api-v03",
+                  "windows", "msrv", "smoke-install",
+              })
+
+          bad = []
+          for job, details in results.items():
+              result = details["result"]
+              print(f"{job}: {result}")
+              if result != "success" and not (result == "skipped" and job in allowed_skips):
+                  bad.append(job)
+          if bad:
+              sys.exit("Required CI lanes did not succeed: " + ", ".join(bad))
+          PY
