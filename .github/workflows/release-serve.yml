@@ -3,6 +3,7 @@ name: octet extension release
 on:
   push:
     tags:
+      - "v*"
       - "octet-serve-v*"
   workflow_dispatch:
     inputs:
@@ -30,6 +31,7 @@ jobs:
     # Never allocate a default-branch cache scope for manually selected source.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -52,10 +54,6 @@ jobs:
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=${GITHUB_REF_NAME#octet-serve-}
-            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then
-              echo "extension release tags must start with octet-serve-" >&2
-              exit 1
-            fi
           else
             echo "release_tag is required when this workflow is not running for a tag" >&2
             exit 1
@@ -69,13 +67,19 @@ jobs:
               echo "manual releases must dispatch this workflow from the exact canonical tag $tag" >&2
               exit 1
             fi
-          elif [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
-            echo "extension release pushes must use octet-serve-$tag" >&2
+          elif [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF_TYPE" != tag \
+            || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-serve-$tag" ) ]]; then
+            echo "extension release pushes must use $tag or octet-serve-$tag" >&2
             exit 1
           fi
 
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "$tag^{commit}")
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main; then
+            echo "release tags must point at a commit on main: $tag resolves to $source_commit" >&2
+            exit 1
+          fi
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
             if [[ "$GITHUB_EVENT_NAME" != push \
@@ -115,6 +119,42 @@ jobs:
           if [[ "$cargo_version" != "$version" ]]; then
             echo "Cargo version $cargo_version does not match release tag $tag" >&2
             exit 1
+          fi
+
+          # On the one-tag path the binary workflow owns CI qualification and
+          # creates the release. Wait for that exact tag-push run to succeed so
+          # an existing release cannot let extensions bypass a failed CI gate.
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+            for attempt in {0..700}; do
+              binary_run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/release-octet.yml/runs" \
+                -f head_sha="$source_commit" -f per_page=100 \
+                --jq "[.workflow_runs[] | select(.event == \"push\" and .head_branch == \"$tag\")] | max_by(.id) | .id // empty")
+              if [[ "$binary_run" =~ ^[0-9]+$ ]]; then
+                binary_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$binary_run" \
+                  --jq '[.head_sha, .status, .conclusion] | @tsv')
+                IFS=$'\t' read -r binary_sha binary_status binary_conclusion <<< "$binary_identity"
+                if [[ "$binary_sha" != "$source_commit" ]]; then
+                  echo "binary release run $binary_run is not bound to $source_commit" >&2
+                  exit 1
+                fi
+                if [[ "$binary_status" == completed ]]; then
+                  if [[ "$binary_conclusion" != success ]]; then
+                    echo "binary release run $binary_run did not succeed: $binary_identity" >&2
+                    exit 1
+                  fi
+                  break
+                fi
+                echo "waiting for binary release run $binary_run: $binary_status"
+              else
+                echo "waiting for the binary release run for $tag"
+              fi
+              if (( attempt == 700 )); then
+                echo "timed out after 350 minutes waiting for the binary release for $tag" >&2
+                exit 1
+              fi
+              sleep 30
+            done
           fi
 
           if ! release_state=$(gh release view "$tag" \

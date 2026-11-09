@@ -70,6 +70,19 @@ class RepositoryIdentityTests(unittest.TestCase):
                 with self.assertRaises(metadata.MetadataError):
                     metadata.validate_identity(version, f"v{version}", source, commit, workflow(other, version), repository)
 
+    def test_metadata_accepts_canonical_tag_only_for_exact_source(self):
+        version = "0.10.3"
+        source = "a" * 40
+        ref = f"{CANONICAL_REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/v{version}"
+        metadata.validate_identity(version, f"v{version}", source, source, ref, CANONICAL_REPOSITORY)
+        with self.assertRaises(metadata.MetadataError):
+            metadata.validate_identity(version, f"v{version}", source, "b" * 40, ref, CANONICAL_REPOSITORY)
+        for wrong_ref in (ref + "-rc.1", ref.replace(version, "0.10.2"),
+                          ref.replace("refs/tags/", "refs/heads/")):
+            with self.subTest(ref=wrong_ref), self.assertRaises(metadata.MetadataError):
+                metadata.validate_identity(version, f"v{version}", source, source,
+                                           wrong_ref, CANONICAL_REPOSITORY)
+
     def test_formula_accepts_current_fixture_and_historical_metadata(self):
         for value in [self.fixture, self.legacy_metadata()]:
             with self.subTest(repository=value["repository"]):

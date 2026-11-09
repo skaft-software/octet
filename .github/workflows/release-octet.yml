@@ -3,6 +3,7 @@ name: octet binary release
 on:
   push:
     tags:
+      - "v*"
       - "octet-binaries-v*"
       - "octet-installer-v*"
   workflow_dispatch:
@@ -16,6 +17,10 @@ on:
         required: false
         default: false
         type: boolean
+      force_reason:
+        description: Reason for waiving source CI qualification (required with force_release)
+        required: false
+        type: string
       require_provider_acceptance:
         description: Opt in to requiring approved live-provider acceptance (optional)
         required: false
@@ -40,6 +45,7 @@ jobs:
   resolve:
     name: Resolve canonical release
     runs-on: ubuntu-24.04
+    timeout-minutes: 85
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -58,6 +64,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
           INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
           INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
         run: |
@@ -67,6 +74,9 @@ jobs:
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
             case "$GITHUB_REF_NAME" in
+              v*)
+                tag=$GITHUB_REF_NAME
+                ;;
               octet-binaries-v*)
                 mode=binaries
                 tag=${GITHUB_REF_NAME#octet-binaries-}
@@ -76,7 +86,7 @@ jobs:
                 tag=${GITHUB_REF_NAME#octet-installer-}
                 ;;
               *)
-                echo "release tooling tags must start with octet-binaries- or octet-installer-" >&2
+                echo "release tags must be canonical vX.Y.Z or dedicated octet-binaries-/octet-installer- tags" >&2
                 exit 1
                 ;;
             esac
@@ -102,7 +112,12 @@ jobs:
             : # no additional constraint beyond release_tag being provided
           else
             case "$mode" in
-              binaries) expected_workflow_tag="octet-binaries-$tag" ;;
+              binaries)
+                expected_workflow_tag="octet-binaries-$tag"
+                if [[ "$GITHUB_REF_NAME" == "$tag" ]]; then
+                  expected_workflow_tag=$tag
+                fi
+                ;;
               installer) expected_workflow_tag="octet-installer-$tag" ;;
               *)
                 echo "invalid release mode: $mode" >&2
@@ -119,6 +134,11 @@ jobs:
 
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "$tag^{commit}")
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main; then
+            echo "release tags must point at a commit on main: $tag resolves to $source_commit" >&2
+            exit 1
+          fi
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
             if [[ "$mode" == npm ]]; then
@@ -200,23 +220,17 @@ jobs:
             exit 1
           fi
 
-          if ! release_state=$(gh release view "$tag" \
+          if release_state=$(gh release view "$tag" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
-            echo "canonical release $tag does not exist" >&2
-            exit 1
-          fi
-          IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
-          if [[ "$release_tag" != "$tag" ]]; then
-            echo "resolved release tag $release_tag does not match $tag" >&2
-            exit 1
-          fi
-          if [[ "$draft" != false ]]; then
-            echo "canonical release $tag is still a draft" >&2
-            exit 1
-          fi
-          if [[ "$prerelease" != false ]]; then
-            echo "canonical release $tag is marked as a prerelease" >&2
+            IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
+            if [[ "$release_tag" != "$tag" || "$draft" != false || "$prerelease" != false ]]; then
+              echo "canonical release $tag is not a published stable release" >&2
+              exit 1
+            fi
+          elif [[ "$mode" != binaries || "$GITHUB_REF_TYPE" != tag \
+            || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-binaries-$tag" ) ]]; then
+            echo "canonical release $tag does not exist; create it from a binary release tag" >&2
             exit 1
           fi
 
@@ -224,9 +238,15 @@ jobs:
           # tooling SHA or a PR merge ref. Only an explicit manual override may
           # waive this CI gate; source validation and signing remain mandatory.
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "${INPUT_FORCE_RELEASE:-false}" == true ]]; then
-            echo "::warning::force_release=true: source CI qualification waived for $source_commit by $GITHUB_ACTOR"
+            if [[ ! "${INPUT_FORCE_REASON:-}" =~ [^[:space:]] || "$INPUT_FORCE_REASON" == *$'\n'* || "$INPUT_FORCE_REASON" == *$'\r'* ]]; then
+              echo "force_release requires a non-empty, single-line force_reason" >&2
+              exit 1
+            fi
+            echo "::warning::Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR"
             {
               echo "## Manual CI override"
+              echo
+              printf '**Source CI qualification WAIVED: %s by %s**\n' "$INPUT_FORCE_REASON" "$GITHUB_ACTOR"
               echo
               echo "- Source CI qualification: **WAIVED, not passed** (force_release=true)"
               echo "- Immutable source: \`$source_commit\`"
@@ -236,20 +256,44 @@ jobs:
               echo "- Source checks, dependency audit, build checks, protected publishing and signatures remain required."
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            ci_run=$(gh api --method GET \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-              -f head_sha="$source_commit" -f per_page=100 \
-              --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
-            if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
-              echo "no source-bound CI qualification run for $source_commit" >&2
-              exit 1
+            # A main push run may not exist yet when its tag is pushed. Do not
+            # let earlier merge-group or dispatch runs race that canonical run.
+            # Repairs retain the latest exact-source push/merge-group/dispatch.
+            if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+              ci_filter='[.workflow_runs[] | select(.event == "push" and .head_branch == "main")] | max_by(.id) | .id // empty'
+            else
+              ci_filter='[.workflow_runs[] | select((.event == "push" and .head_branch == "main") or .event == "merge_group" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty'
             fi
-            ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
-              --jq '[.head_sha, .status, .conclusion] | @tsv')
-            if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
-              echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
-              exit 1
-            fi
+            for attempt in {0..150}; do
+              ci_run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+                -f head_sha="$source_commit" -f per_page=100 \
+                --jq "$ci_filter")
+              if [[ "$ci_run" =~ ^[0-9]+$ ]]; then
+                ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+                  --jq '[.head_sha, .status, .conclusion] | @tsv')
+                IFS=$'\t' read -r ci_sha ci_status ci_conclusion <<< "$ci_identity"
+                if [[ "$ci_sha" != "$source_commit" ]]; then
+                  echo "CI run $ci_run is not bound to $source_commit: $ci_identity" >&2
+                  exit 1
+                fi
+                if [[ "$ci_status" == completed ]]; then
+                  if [[ "$ci_conclusion" != success ]]; then
+                    echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+                    exit 1
+                  fi
+                  break
+                fi
+                echo "waiting for CI run $ci_run for $source_commit: $ci_status"
+              else
+                echo "waiting for a source-bound CI run for $source_commit"
+              fi
+              if (( attempt == 150 )); then
+                echo "timed out after 75 minutes waiting for source CI for $source_commit" >&2
+                exit 1
+              fi
+              sleep 30
+            done
             ci_jobs=$(gh api --paginate \
               "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
               --jq '.jobs[] | [.name, .conclusion] | @tsv')
@@ -716,8 +760,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-          WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          WORKFLOW_TAG: ${{ github.ref_name }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
         run: |
           set -euo pipefail
           verify_release_refs() {
@@ -737,13 +783,29 @@ jobs:
           if ! release_state=$(gh release view "$RELEASE_TAG" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
-            echo "canonical release $RELEASE_TAG no longer exists" >&2
-            exit 1
+            if [[ "$GITHUB_REF_TYPE" != tag \
+              || ( "$WORKFLOW_TAG" != "$RELEASE_TAG" && "$WORKFLOW_TAG" != "octet-binaries-$RELEASE_TAG" ) ]]; then
+              echo "canonical release $RELEASE_TAG no longer exists" >&2
+              exit 1
+            fi
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
+              --notes-file "docs/releases/$RELEASE_TAG.md"
+            release_state=$(gh release view "$RELEASE_TAG" \
+              --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
           fi
           IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
           if [[ "$release_tag" != "$RELEASE_TAG" || "$draft" != false || "$prerelease" != false ]]; then
             echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
             exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then
+            waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
+            gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
+            if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
+              printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
+              gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+            fi
           fi
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
           uploads=()
@@ -1003,6 +1065,21 @@ jobs:
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
           cosign-release: v3.1.3
+      - name: Record a source CI waiver in the release notes
+        if: github.event_name == 'workflow_dispatch' && inputs.force_release == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
+        run: |
+          set -euo pipefail
+          waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
+          gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
+          if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
+            printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
       - name: Install the pinned trusted-publishing npm CLI
         shell: bash
         run: |
@@ -1363,6 +1440,21 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
+      - name: Record a source CI waiver in the release notes
+        if: github.event_name == 'workflow_dispatch' && inputs.force_release == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
+        run: |
+          set -euo pipefail
+          waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
+          gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
+          if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
+            printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
       - name: Generate version-pinned portable installer
         shell: bash
         env:

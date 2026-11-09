@@ -64,7 +64,8 @@ class ServeReleaseTrustTests(unittest.TestCase):
     def run_resolve(self, *, event="workflow_dispatch", ref_type="tag", ref="v0.8.2",
                     tag="v0.8.2", workflow_sha=SOURCE, ancestor=True,
                     changed_paths=".github/workflows/release-serve.yml",
-                    serve_changed=True, version="0.8.2", draft="false", prerelease="false"):
+                    serve_changed=True, version="0.8.2", draft="false", prerelease="false",
+                    binary_status="completed", binary_conclusion="success", binary_states=None):
         bash = shutil.which("bash")
         if bash is None:
             self.skipTest("bash is required")
@@ -93,9 +94,22 @@ git() {
     *) return 98 ;;
   esac
 }
+sleep() { :; }
 gh() {
-  [[ "$1 $2" == 'release view' ]] || return 99
-  printf '%s\t%s\t%s\n' "$TEST_TAG" "$TEST_DRAFT" "$TEST_PRERELEASE"
+  case "$*" in
+    *'/release-octet.yml/runs'*)
+      count=$(cat "$TEST_POLLS" 2>/dev/null || echo 0)
+      count=$((count + 1))
+      printf '%s' "$count" > "$TEST_POLLS"
+      state=$(printf '%s\n' "$TEST_BINARY_STATES" | sed -n "${count}p")
+      [[ "$state" == missing ]] || printf '42\n' ;;
+    *'/actions/runs/42'*)
+      count=$(cat "$TEST_POLLS")
+      state=$(printf '%s\n' "$TEST_BINARY_STATES" | sed -n "${count}p")
+      printf '%s\t%s\t%s\n' "$TEST_SOURCE" "${state:-$TEST_BINARY_STATUS}" "$TEST_BINARY_CONCLUSION" ;;
+    'release view '*) printf '%s\t%s\t%s\n' "$TEST_TAG" "$TEST_DRAFT" "$TEST_PRERELEASE" ;;
+    *) return 99 ;;
+  esac
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,6 +118,7 @@ gh() {
                 "PATH": os.defpath, "HOME": temporary,
                 "GITHUB_EVENT_NAME": event, "GITHUB_REF_TYPE": ref_type,
                 "GITHUB_REF_NAME": ref, "GITHUB_SHA": workflow_sha,
+                "GITHUB_REPOSITORY": "skaft-software/octet",
                 "INPUT_RELEASE_TAG": tag, "INPUT_REQUIRE_PROVIDER_ACCEPTANCE": "false",
                 "GITHUB_OUTPUT": str(output),
                 "GITHUB_STEP_SUMMARY": str(pathlib.Path(temporary) / "summary"),
@@ -111,6 +126,9 @@ gh() {
                 "TEST_PATHS": changed_paths, "TEST_SERVE_CHANGED": str(serve_changed).lower(),
                 "TEST_VERSION": version, "TEST_TAG": tag or "v0.8.2",
                 "TEST_DRAFT": draft, "TEST_PRERELEASE": prerelease,
+                "TEST_BINARY_STATUS": binary_status, "TEST_BINARY_CONCLUSION": binary_conclusion,
+                "TEST_BINARY_STATES": "\n".join(binary_states or []),
+                "TEST_POLLS": str(pathlib.Path(temporary) / "polls"),
             }
             result = subprocess.run([bash, "-c", stubs + script], env=env,
                                     capture_output=True, text=True, timeout=10)
@@ -133,6 +151,27 @@ gh() {
                 result, output = self.run_resolve(**overrides)
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("", output)
+
+    def test_canonical_push_waits_for_successful_binary_release(self):
+        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"source_commit={SOURCE}\n", output)
+        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="",
+                                          binary_states=["missing", "in_progress", "completed"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("waiting for the binary release run", result.stdout)
+        self.assertIn("waiting for binary release run 42: in_progress", result.stdout)
+        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="",
+                                          binary_conclusion="failure")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("binary release run 42 did not succeed", result.stderr)
+        self.assertEqual("", output)
+
+    def test_release_source_must_be_on_main_even_without_a_repair(self):
+        result, output = self.run_resolve(ancestor=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("release tags must point at a commit on main", result.stderr)
+        self.assertEqual("", output)
 
     def test_dedicated_push_retains_immutable_source_for_tooling_repairs(self):
         for sha in (SOURCE, TOOLING):
