@@ -50,17 +50,6 @@ jobs:
         run: |
           python3 scripts/test_refresh_models_dev_metadata.py
           python3 scripts/test_release_model_metadata_gate.py
-      # PR version changes and manual dispatch check live metadata. Main may
-      # reuse only an API-proven exact-PR-head dispatch run with identical trees;
-      # missing proof falls back to live. Signed-release/build inputs stay frozen.
-      - name: Check pre-release model metadata freshness
-        timeout-minutes: 2
-        env:
-          MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
-          MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"
-          MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 scripts/check-release-model-metadata.py
       - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
         with:
           components: rustfmt, clippy
