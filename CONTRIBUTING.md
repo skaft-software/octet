@@ -6,7 +6,7 @@ changes small and back them with evidence.
 
 ## Development setup
 
-The octet source supports macOS and Linux and needs Rust 1.88 or newer. A native
+The octet source supports macOS and Linux and needs Rust 1.89 or newer. A native
 Windows x64 GNU build is tested in CI; the MSVC release channel remains a
 preview with separate qualification: see [Windows](docs/windows.md). Install Rust through
 [rustup](https://rustup.rs/). `rg` (ripgrep) is preferred for content search when
@@ -71,7 +71,7 @@ and the Docker context.
 
 ## Tests
 
-For a first credential-free pass (Python 3.10+ and Rust 1.88+):
+For a first credential-free pass (Python 3.10+ and Rust 1.89+):
 
 ```sh
 cargo fetch --locked                 # one-time dependency download, if needed
