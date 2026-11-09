@@ -95,7 +95,7 @@ export function chromeAPI(runtime, store) {
     if (operation.kind === 'tools_expanded') store.state.host.tools_expanded = operation.expanded;
   };
   const deliver = operation => {
-    if (runtime.stopping || !store.state.alive) return;
+    if (runtime.stopping || !store.state.alive || store.state !== runtime.foreground || store.controller.signal.aborted) return;
     const channel = chromeChannel(store.state);
     const version = channel.expandedVersion;
     const settleExpanded = () => {
@@ -130,6 +130,8 @@ export function chromeAPI(runtime, store) {
     });
   };
   const queue = operation => {
+    runtime.assertOwner(store);
+    store.controller.signal.throwIfAborted();
     if (headless()) return headlessReceipt(operation);
     runtime.require('remote_ui');
     applyLocal(operation);

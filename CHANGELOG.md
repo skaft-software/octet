@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pi background contexts retain session reads without gaining foreground UI or
+  write authority. Coalesced chrome updates recheck ownership and cancellation
+  before native delivery; retained same-session contexts still survive turns.
+
 ## [0.10.3] - 2026-11-06
 
 ### Fixed
