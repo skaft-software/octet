@@ -56,9 +56,9 @@ and from a source checkout. npm is not a supported path for this release: see
 reason about it, and call tools in the same context — no "transcribe first, paste text back"
 round trip. Works with audio-capable models; audio is not universal across providers.
 
-**It's light.** Native Rust core: no runtime to boot before your agent starts. Medians from a
-matched six-agent run below: 9.5 s to finish and 38.3 MiB peak process-tree memory on a
-32-row ledger task.
+**It's light.** Native Rust core: no runtime to boot before your agent starts. Medians from five
+measured runs of one ledger task, [below](#benchmarks): 9.5 s to finish and 38.3 MiB peak
+process-tree memory.
 
 **It's yours to extend.** Extensions are separate processes speaking JSON-RPC 2.0. Python,
 TypeScript, Rust, C++, or no SDK at all — each in its own process, with OS-level permissions.
@@ -70,38 +70,19 @@ Pi's internals or its CLI.
 ## Benchmarks
 
 One ledger task, one clean VM, one account, GPT-6 Luna at low reasoning, five measured runs per
-metric after an excluded warmup. Timing and memory are separate passes. Native prompts and
-tools differ, so this compares whole agents, not identical instructions.
+metric after an excluded warmup. Timing and memory are separate passes.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/octet/readme/tape.jpg">
-    <img src="docs/assets/octet/readme/tape-light.jpg" alt="Time and memory by agent: median launch-to-exit time and peak sampled process-tree memory, lower is better" width="896">
-  </picture>
-</p>
+| Measured on the ledger task | octet, median of five runs |
+|---|---:|
+| Time to finish | 9.5 s |
+| Peak process-tree memory | 38.3 MiB |
 
-| Agent | Time to finish | Peak memory |
-|---|---:|---:|
-| **octet** | **9.5 s** | 38.3 MiB |
-| OpenCode 2.2.5 | 10.5 s | 426.0 MiB |
-| Pi 1.5.0 | 11.0 s | 144.8 MiB |
-| Codex 0.166.0 | 13.0 s | 272.6 MiB |
-| fx 0.0.16 | 13.5 s | **28.8 MiB** |
-| OMP 18.16.0 | 23.8 s | 388.4 MiB |
-
-<p align="center">
-  <img src="docs/assets/octet/readme/wall-clock.jpg" alt="Median wall-clock time to finish, seven-agent cohort" width="1000"><br>
-  <img src="docs/assets/octet/readme/rss.jpg" alt="Median peak sampled process-tree memory, seven-agent cohort" width="1000">
-</p>
-
-Two things worth stating plainly: **fx uses less memory than octet**, and five runs on one task
-is not a general speed or quality claim. The full protocol, every attempt, the erratum and the
-checksums are downloadable —
-[start here](https://skaft.org/octet/blog/introducing-octet/evidence/matched-rerun-20261105/README.md).
-
-There is also an independent harness that tests harness overhead across Pi-like agents,
-including octet: [Buffon](https://michaelkinsy.github.io/buffon/#/). It measures startup, CPU,
-memory and per-turn overhead — not coding quality.
+Five runs on one task are a measurement of this workload, not a general speed or quality claim.
+Reproduce it from the
+[evidence bundle](https://skaft.org/octet/blog/introducing-octet/evidence/matched-rerun-20261105/README.md),
+which carries the task, the binary identity, every attempt, the protocol, the erratum and the
+checksums. The runners that record these two metrics, and the reporting rules that apply to them,
+are in [Benchmarking octet](docs/benchmarks/README.md).
 
 ## Pi extensions
 

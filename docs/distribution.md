@@ -39,8 +39,8 @@ Current extension authoring and the six bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
-runtime. The minimal canonical process example and independent Aider adapter
-keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter targets its documented public API;
+runtime. The minimal canonical process example keeps version `0.1.0` with exact
+`=0.8.0` host pins. The Pi adapter targets its documented public API;
 individual coverage is recorded in the [API ledger](pi-extension-api.md). Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
 Installation/discovery are inert. Enabling the stock bridge automatically mirrors
 and runs enabled Pi factories with OS permissions; native credential disclosure

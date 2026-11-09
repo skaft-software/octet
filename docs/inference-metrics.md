@@ -2,9 +2,9 @@
 
 [Providers](providers.md) · [Telemetry](telemetry.md) · [Performance contract](design/performance.md)
 
-The displayed **output rate** (`N.N tok/s`) follows opencode's method: output
-tokens over the time the provider was actively serving each response. Server
-generation counters and a client decode-cadence estimate remain available as
+The displayed **output rate** (`N.N tok/s`) is output tokens over the time the
+provider was actively serving each response. Server generation counters and a
+client decode-cadence estimate remain available as
 separately labeled diagnostics in `/status` and telemetry; neither replaces the
 displayed rate. Deterministic fixtures establish parsing, units, scope and
 propagation, not live provider accuracy.

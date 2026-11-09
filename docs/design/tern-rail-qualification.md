@@ -7,7 +7,7 @@ The acceptance scope remains **all 37 existing octet primary-screen/native-
 scrollback surface families**, including permission popups and runtime extension
 contracts. This ledger does not reduce that scope to the changed components.
 Pre-approval audit wording is historical: RAIL was subsequently selected and
-implementation authorized. No new OMP-only backend workflows, provider campaign
+implementation authorized. No new reference-client-only backend workflows, provider campaign
 or performance campaign are implied.
 
 The [Tern contract](../tern.md) describes the current adapter. The shared
@@ -174,7 +174,7 @@ than inventing states:
 - **S12 — Slash/dynamic commands, skills/templates, @ files and all existing
   path forms/chaining/escaping. Preserved/fenced; unverified.**
   `tern_completion.rs`, `tern_input.rs`: source IDs, highlight versus activation
-  and draft fencing remain. No OMP-only URL/emoji/model-mention providers added.
+  and draft fencing remain. No reference-client-only URL/emoji/model-mention providers added.
 - **S13 — Bracketed/clipboard/large paste, dropped paths, image/audio admission,
   PDF reference and chip delete/undo/recall. Preserved; blocked/unverified.**
   `tui/composer/attachments.rs`, `tui/composer/composition.rs`, `tern_input.rs`: host paste
@@ -413,7 +413,7 @@ Current follow-up (partial evidence, not family-wide passes):
   client probes confirmed hello omission disables native selection edits, `edit`
   enables them, and `undo` separately enables native undo events. Earlier
   ordinary-typing journeys did not prove pointer-selection editing. The previous
-  OMP-derived schema omitted this required opt-in. Octet now advertises only
+  reference-client-derived schema omitted this required opt-in. Octet now advertises only
   `edit`; raw host undo remains binding-resolved. Hello/undo-history regressions
   failed before the fix and passed after. An initial actual-journey exact-text
   assertion failed because Tern's tree inserts a separator around the caret;

@@ -75,7 +75,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
   unsupported is refused loudly.
 - **Installed-Pi fallback (opt-in, experimental).** Same adapter and host
   boundary, but imports the shims lack or refuse resolve to the user's managed
-  Pi install (1.0.2 through 1.4.x). Selected with `--pi-runtime installed` or
+  Pi install (1.0.2 through 1.x). Selected with `--pi-runtime installed` or
   `"pi_runtime": "installed"` in `bridge.json`. See
   [pi-compatibility.md](pi-compatibility.md#installed-pi-fallback-experimental-opt-in)
   for what it gives up. Path A failures it can fix report

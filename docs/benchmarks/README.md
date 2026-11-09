@@ -19,7 +19,6 @@ These are historical Ygg artifacts, not octet 0.7.0 results:
 - [Reconciled failure report](failure-report-v0.6.2-2026-08-28.md)
 - [Complete token-efficiency audit](token-efficiency-v0.6.2-2026-08-28.md)
 - [Scoped runtime-footprint comparison](runtime-footprint-2026-08-29.md)
-- [Startup against fx 0.0.13](startup-fx-2026-10-08.md)
 
 The pinned [Harbor adapter](../../evaluation/harbor/README.md) reproduces historical
 Ygg 0.6.2 only. It is not an octet 0.7.0 evaluation adapter or campaign.
@@ -186,16 +185,15 @@ concurrency for every harness.
 
 ## Mock-provider agent loop
 
-`scripts/bench-agent-loop.py` compares agent overhead with the model taken out:
+`scripts/bench-agent-loop.py` measures agent overhead with the model taken out:
 every agent under test talks to one loopback OpenAI-compatible Chat Completions
 server that scripts the same turns for all of them, so no paid model is called
-and the work the model asks for is fixed. It ships adapters for octet, Pi and
-opencode:
+and the work the model asks for is fixed. Each harness the runner supports has
+its own `--<name> BINARY` flag; `--help` lists them.
 
 ```console
 python3 scripts/bench-agent-loop.py \
   --octet ./target/release/octet \
-  --pi /path/to/pi --opencode /path/to/opencode \
   --repetitions 5 --output ./artifacts/agent-loop.json
 ```
 
