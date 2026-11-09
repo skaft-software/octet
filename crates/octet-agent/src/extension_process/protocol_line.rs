@@ -627,7 +627,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             // next request, so an in-flight request is never mutated.
             methods::PROVIDERS_COMPLETE => {
                 require_declared(state.declared.providers, "provider catalogs")?;
-                api_v03::parse_provider_catalog_complete_params(params)
+                api_v04::parse_provider_catalog_complete_params(params)
                     .map_err(|error| format!("invalid provider catalog completion: {error}"))?;
                 let registry = provider_registry_for_request(state)
                     .map_err(|_| "provider registry is unavailable".to_owned())?;
@@ -664,7 +664,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
                         model_control::register_provider_proxy(state, params, false)
                     } else {
-                        api_v03::parse_provider_register_params(params)
+                        api_v04::parse_provider_register_params(params)
                             .map_err(|_| ProviderHostResponseError::Invalid)
                             .and_then(|request| {
                                 provider_registry_for_request(state)?
@@ -683,7 +683,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     (if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_4 {
                         model_control::register_provider_proxy(state, params, true)
                     } else {
-                        api_v03::parse_provider_update_params(params)
+                        api_v04::parse_provider_update_params(params)
                             .map_err(|_| ProviderHostResponseError::Invalid)
                             .and_then(|request| {
                                 provider_registry_for_request(state)?
@@ -698,7 +698,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 require_declared(state.declared.providers, "provider catalogs")?;
                 let id = parse_child_request_id(object, methods::PROVIDERS_UNREGISTER)?;
                 insert_child_request(state, id.clone(), None, None)?;
-                let result = api_v03::parse_provider_unregister_params(params)
+                let result = api_v04::parse_provider_unregister_params(params)
                     .map_err(|_| ProviderHostResponseError::Invalid)
                     .and_then(|request| {
                         provider_registry_for_request(state)?
@@ -717,7 +717,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 } else {
                     "authorize"
                 };
-                let result = api_v03::parse_provider_authorization_request(params)
+                let result = api_v04::parse_provider_authorization_request(params)
                     .map_err(|_| ProviderHostResponseError::Invalid)
                     .and_then(|request| {
                         if (method == methods::PROVIDER_AUTH_REVOKE
@@ -736,7 +736,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             }
             methods::PROVIDER_EVENT => {
                 require_declared(state.declared.providers, "provider streams")?;
-                let event = api_v03::parse_provider_stream_event(params)
+                let event = api_v04::parse_provider_stream_event(params)
                     .map_err(|_| "invalid API 0.3 provider stream event".to_owned())?;
                 dispatch_provider_stream_event(state, event)?;
             }

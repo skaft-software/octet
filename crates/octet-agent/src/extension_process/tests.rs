@@ -3771,15 +3771,15 @@ fn api_v02_initialize_projects_flag_values_and_api_v01_stays_unchanged() {
     assert_eq!(
         projected,
         vec![
-            api_v03::InitializeFlagValue {
+            api_v04::InitializeFlagValue {
                 name: "count".into(),
                 value: serde_json::json!(7),
             },
-            api_v03::InitializeFlagValue {
+            api_v04::InitializeFlagValue {
                 name: "enabled".into(),
                 value: serde_json::json!(true),
             },
-            api_v03::InitializeFlagValue {
+            api_v04::InitializeFlagValue {
                 name: "label".into(),
                 value: serde_json::json!("host-resolved"),
             },
@@ -3848,7 +3848,7 @@ fn api_v02_initialize_projects_flag_values_and_api_v01_stays_unchanged() {
         "an API 0.2 host with no flags stays wire-identical: {absent}"
     );
     let present = serde_json::to_value(InitializeRequest {
-        flag_values: Some(vec![api_v03::InitializeFlagValue {
+        flag_values: Some(vec![api_v04::InitializeFlagValue {
             name: "enabled".into(),
             value: serde_json::json!(true),
         }]),

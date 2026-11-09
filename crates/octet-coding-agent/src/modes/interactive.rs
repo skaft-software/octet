@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{FutureExt, Stream, StreamExt};
-use octet_agent::extension_api_v03::MAX_JSON_RPC_ID_BYTES;
+use octet_agent::extension_api_v04::MAX_JSON_RPC_ID_BYTES;
 #[cfg(windows)]
 use octet_agent::extension_process::WindowsProcessLaunch;
 #[cfg(unix)]

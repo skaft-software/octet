@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- The extension API 0.4 reference now documents its actual feature-negotiated
+  wire, provider/session data and service-specific errors instead of presenting
+  canonical API 0.3 models as the current contract. Public provider-registry Rust
+  types now come from the independently maintained `extension_api_v04` module;
+  the generated `extension_api_v03` surface remains live. Wire behavior and
+  version eligibility are unchanged.
+
 - Pi extension new/switch/fork session requests work with V2 delegation enabled.
   Workers park before replacement, outgoing child sessions remain recoverable,
   and the retained extension process receives the new session's delegation
