@@ -47,58 +47,60 @@ cd extensions/octet-computer-use
 PYTHONPATH='.' python3 -m unittest discover -s tests -t .
 ```
 
-## CI lanes on every pull request
+## CI tiers
 
-| Lane | Runner | What it proves |
+Every pull request runs the fast tier: `dependency-review`, `dependencies`,
+`quality`, and `test (ubuntu-24.04)`. A PR labeled `ci:full`, a merge-group
+candidate, a push to `main`, or a manual CI dispatch also runs the full tier.
+The dispatch-only `release-candidate` job retains its narrower trigger.
+
+| Lane | Tier / runner | What it proves |
 | --- | --- | --- |
-| `dependencies` | ubuntu-24.04 | `cargo audit` and `cargo deny` for the workspace |
-| `quality` | ubuntu-24.04 | fmt, clippy, doc tests, model-metadata gate, release tooling, packaging determinism |
-| `test (ubuntu-24.04)`, `test (macos-15)` | matrix | `cargo test --workspace --all-targets --all-features --profile ci-test`, then a `--no-default-features` check |
-| `windows (x86_64-pc-windows-gnu)` | windows-2025 | native Windows build, binary smoke, terminal frontend, ConPTY, renderer, extension launch, Python SDK and computer-use |
-| `first-party-extension-tests` | ubuntu-24.04 | the shared Python SDK, release-catalog adapters, and source-only extensions in `extensions/source-catalog.txt` |
-| `extension-api-v03` | ubuntu-24.04 | generated API 0.3 artifacts and language conformance |
-| `msrv` | ubuntu-24.04 | the workspace still checks on Rust 1.88 (`rust-version` in `Cargo.toml`) |
-| `smoke-install` | ubuntu-24.04 | a real `cargo install`, version/help/host hello, then a loopback coding/cancellation/recovery journey against those installed executables |
-| `dependency-review` | ubuntu-24.04 | no newly introduced vulnerable or disallowed dependency |
+| `dependency-review` | Fast / ubuntu-24.04; PR only | no newly introduced vulnerable or disallowed dependency |
+| `dependencies` | Fast / ubuntu-24.04 | `cargo audit` and `cargo deny` for the workspace |
+| `quality` | Fast / ubuntu-24.04 | fmt, clippy, doc tests, offline model-metadata tests, release tooling, packaging determinism |
+| `test (ubuntu-24.04)` | Fast / ubuntu-24.04 | workspace tests, then a `--no-default-features` check |
+| `test (macos-15)` | Full / macos-15 | the same workspace tests and check on macOS |
+| `windows (x86_64-pc-windows-gnu)` | Full / windows-2025 | native Windows build, binary smoke, terminal frontend, ConPTY, renderer, extension launch, Python SDK and computer-use |
+| `first-party-extension-tests` | Full / ubuntu-24.04 | the shared Python SDK, release-catalog adapters, and source-only extensions in `extensions/source-catalog.txt` |
+| `extension-api-v03` | Full / ubuntu-24.04 | generated API 0.3 artifacts and language conformance |
+| `msrv` | Full / ubuntu-24.04 | the workspace still checks on Rust 1.88 (`rust-version` in `Cargo.toml`) |
+| `smoke-install` | Full / ubuntu-24.04 | a real `cargo install`, version/help/host hello, then a loopback coding/cancellation/recovery journey against those installed executables |
 
-The required-check contract is stricter than this list of CI job definitions:
-branch protection additionally requires CodeQL and the named Ubuntu/macOS test
-matrix contexts. This checkout defines the `test` matrix in `ci.yml`, but contains
-no CodeQL workflow definition under `.github/workflows`; CodeQL must therefore be
-verified from the hosted required-check configuration and a successful run on
-the exact candidate SHA. Do not infer that deleting or renaming a job changes
-branch protection, and do not waive a missing required context.
+`ci-required` aggregates all jobs and is intended to be the single required CI
+status check. It permits only event-appropriate skips: full-tier jobs on a plain
+PR, `dependency-review` outside PRs, and `release-candidate` outside dispatch.
+A maintainer must configure hosted branch protection separately; workflow files
+alone do not change it.
 
 `quality` is the widest gate and the one most likely to fail for a reason that
 has nothing to do with your change. It runs, in order: the offline models.dev
-metadata tooling tests, the pre-release metadata freshness gate, shell and
-Python syntax checks on the release scripts, the extension bundle determinism
+metadata tooling tests, shell and Python syntax checks on the release scripts, the extension bundle determinism
 check (each bundle is built twice and compared byte for byte),
 `scripts/test-binary-installer.sh`, the container-context build,
 `python3 -m unittest discover -s scripts/tests`, fmt, clippy, workspace doc
 tests, and finally
 `cargo +1.90.0 package --workspace --exclude octet-coding-agent`.
 
-### The pre-release model-metadata gate
+### Advisory model-metadata freshness
 
-`quality` runs `scripts/check-release-model-metadata.py` on every pull request.
-It skips while the workspace version is unchanged, and starts comparing against
-the live models.dev snapshot the moment `Cargo.toml` moves to a new version — so
-it goes from silent to blocking exactly during a release bump.
+`quality` runs offline fixture and snapshot-consistency tests, not a live
+freshness check. `models-dev-freshness.yml` compares the checked-in projections
+against live models.dev daily and on manual dispatch; it is advisory and can
+fail when that service is stale or unavailable. It never rewrites the snapshots.
+The receipt records the reviewed raw source digest, so unrelated upstream
+changes alone do not invalidate a live projection comparison.
 
-Regenerate with the generator, never by hand:
+To refresh and review the names, prices, capabilities and receipt together:
 
 ```sh
 python3 scripts/refresh-models-dev-pricing.py
-python3 scripts/refresh-models-dev-pricing.py --check   # verify determinism
+python3 scripts/refresh-models-dev-pricing.py --check   # live comparison
 ```
 
-This lane depends on a third-party service, so it is the one CI check that can
-fail for reasons outside the repository. The checked-in receipt is a hash of the
-whole upstream `api.json`, while the three data files are projections of only
-the fields octet consumes; an upstream edit that changes nothing octet reads
-still invalidates the receipt. Treat a receipt-only failure as an upstream
-churn signal and re-run the generator, not as a defect in your change.
+For an offline comparison against a saved source, pass
+`--source path/to/api.json --check`; this also checks the source receipt's exact
+digest.
 
 ## Platform lanes that cannot be reproduced locally
 
@@ -121,14 +123,14 @@ These do not run on every push. Trigger them deliberately.
 
 | Workflow | Trigger | What it proves |
 | --- | --- | --- |
+| `models-dev-freshness.yml` | daily or manual | advisory live models.dev snapshot comparison |
 | `security.yml` | weekly, Mon 04:23 UTC, or manual | `cargo audit` and `cargo deny` for the workspace; a 90-second `session_record` fuzz run; an AddressSanitizer run of the `octet-agent` library; `cargo llvm-cov` coverage |
 | `provider-acceptance.yml` | manual, needs a candidate SHA | live provider behaviour against real endpoints |
 | `production-panic-audit.yml` | manual, needs a candidate SHA and confirmation | that the candidate adds no reachable production panic |
 
-Provider acceptance and the panic audit are the only lanes that talk to live
-services or drive real hardware. They are excluded from ordinary CI on purpose:
-they are slow, they need credentials, and they must never be a hidden
-prerequisite for a green build.
+Provider acceptance and the panic audit may require credentials or real
+hardware. They and the live models.dev freshness check are separate from the
+required CI workflow, not hidden prerequisites for a green build.
 
 ## Release lanes
 
@@ -201,8 +203,8 @@ Worth keeping in mind before reading too much into a green board:
   `chmod` checks do not qualify Windows privacy.
 - **The Windows lane is partial by design.** Most of the workspace suite has
   never run on Windows; it gates on the suites relevant to that platform.
-- **A green `quality` does not mean the model metadata is current forever.** It
-  means it matched the live snapshot at that moment.
+- **A green `quality` does not prove current model metadata.** Its checks are
+  offline; consult the separate advisory freshness workflow.
 - **Coverage is measured, not enforced.** `cargo llvm-cov` uploads a report; no
   threshold gates the build.
 - **Live provider behaviour is unverified** until provider acceptance is run
