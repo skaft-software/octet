@@ -100,6 +100,10 @@ pub(super) fn mark_focus_reporting_active() {
     FOCUS_REPORTING_ACTIVE.store(true, Ordering::SeqCst);
 }
 
+pub(super) fn keyboard_enhancement_active() -> bool {
+    KEYBOARD_ENHANCEMENT_ACTIVE.load(Ordering::SeqCst)
+}
+
 pub(super) fn mark_alt_keyboard_enhancement_active() {
     ALT_KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
 }

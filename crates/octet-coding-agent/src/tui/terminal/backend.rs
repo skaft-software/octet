@@ -719,6 +719,12 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         self.write(sequence);
         // Kitty maintains independent keyboard stacks for the two screens.
         // The primary-screen request cannot disambiguate keys on this screen.
+        // Mirror it only where that request succeeded (never on consoles such
+        // as Windows' where crossterm cannot push keyboard flags).
+        if !lifecycle::keyboard_enhancement_active() {
+            self.flush_pending();
+            return;
+        }
         let mut bytes = Vec::new();
         if queue!(
             bytes,
