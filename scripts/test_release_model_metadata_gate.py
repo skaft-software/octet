@@ -583,6 +583,8 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertNotIn("scripts/check-release-model-metadata.py", ci)
         self.assertNotIn("scripts/refresh-models-dev-pricing.py --check", ci)
         self.assertNotIn("MODEL_METADATA_GITHUB_TOKEN", ci)
+        self.assertNotIn("actions: read", quality)
+        self.assertNotIn("pull-requests: read", quality)
 
     def test_live_check_is_separate_scheduled_and_read_only(self) -> None:
         workflow = (SCRIPT.parent.parent / ".github/workflows/models-dev-freshness.yml").read_text()

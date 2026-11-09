@@ -71,7 +71,9 @@ The dispatch-only `release-candidate` job retains its narrower trigger.
 status check. It permits only event-appropriate skips: full-tier jobs on a plain
 PR, `dependency-review` outside PRs, and `release-candidate` outside dispatch.
 A maintainer must configure hosted branch protection separately; workflow files
-alone do not change it.
+alone do not change it. The separate `pr-scope` workflow reports missing issue
+references on PRs, but is not included in `ci-required`; with only that status
+required, its failure is visible to reviewers rather than merge-blocking.
 
 `quality` is the widest gate and the one most likely to fail for a reason that
 has nothing to do with your change. It runs, in order: the offline models.dev

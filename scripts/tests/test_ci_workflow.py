@@ -72,7 +72,11 @@ class CIWorkflowTests(unittest.TestCase):
         self.assertIn(f"        os: {MATRIX}\n", self.jobs["test"])
         self.assertNotRegex(self.jobs["test"], r"(?m)^    name:")
         self.assertIn("if: github.event_name == 'workflow_dispatch'", self.jobs["release-candidate"])
-        self.assertIn("    if: always()\n", self.jobs["ci-required"])
+        aggregator = self.jobs["ci-required"]
+        self.assertIn("    if: always()\n", aggregator)
+        self.assertIn("NEEDS_CONTEXT: ${{ toJSON(needs) }}", aggregator)
+        self.assertIn("CI_FULL_PR: ${{ github.event_name == 'pull_request' && "
+                      "contains(github.event.pull_request.labels.*.name, 'ci:full') }}", aggregator)
 
     def test_aggregator_needs_all_jobs_and_release_lane_names_survive(self):
         aggregator = self.jobs["ci-required"]
