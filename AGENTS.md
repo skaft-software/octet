@@ -19,9 +19,9 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
   the adapter.
 - Pi's behaviour is the specification for anything Pi-shaped. Read Pi's source,
   not its docs, and cite the file and line you matched in a code comment.
-- The extension API stays minimal: API 0.4, plus a 0.3 read adapter for one
-  release. Do not add API 0.1/0.2 support back, and do not add a protocol method
-  for one extension's convenience.
+- The extension API stays minimal: API 0.4 is the only supported wire. Do not
+  add API 0.1, 0.2 or 0.3 support back, and do not add a protocol method for one
+  extension's convenience.
 - Prefer one mechanism over adapters around adapters. A change that adds a
   layer must remove one or say why it can't.
 
@@ -83,8 +83,8 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
 - When product behaviour changes, update its tests in the same change.
 - Run tests with `HOME` and `TMPDIR` pointing outside the repository. A temp dir
   inside a git worktree and a real `~/.octet` both cause false failures.
-- Formatting uses CI's pinned toolchain: `cargo +1.88.0 fmt --all -- --check`.
-  Format only the files you changed (`rustfmt +1.88.0 --edition 2021 <files>`).
+- Formatting uses CI's pinned toolchain: `cargo +1.89.0 fmt --all -- --check`.
+  Format only the files you changed (`rustfmt +1.89.0 --edition 2021 <files>`).
 - The Node adapter suites need what CI sets up:
   `npm ci --prefix extensions/octet-pi-compat`, the `pi-reference` fixture link,
   and `cargo build -p octet-coding-agent --example native-editor-test-host
