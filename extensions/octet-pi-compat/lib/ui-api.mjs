@@ -95,7 +95,11 @@ export function chromeAPI(runtime, store) {
     if (operation.kind === 'tools_expanded') store.state.host.tools_expanded = operation.expanded;
   };
   const deliver = operation => {
-    if (runtime.stopping || !store.state.alive || store.state !== runtime.foreground || store.controller.signal.aborted) return;
+    // Re-check authority at delivery: the foreground may change while queued.
+    // Request cancellation is deliberately not a fence: Pi keeps ctx.ui usable
+    // after the capturing request is aborted, so a tool clearing its status in
+    // `finally` after Esc must still reach the host.
+    if (runtime.stopping || !store.state.alive || store.state !== runtime.foreground) return;
     const channel = chromeChannel(store.state);
     const version = channel.expandedVersion;
     const settleExpanded = () => {
@@ -131,7 +135,6 @@ export function chromeAPI(runtime, store) {
   };
   const queue = operation => {
     runtime.assertOwner(store);
-    store.controller.signal.throwIfAborted();
     if (headless()) return headlessReceipt(operation);
     runtime.require('remote_ui');
     applyLocal(operation);

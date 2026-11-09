@@ -251,15 +251,26 @@ test('all private hook/tool binding callers are session-scoped; only start/repla
   assert.equal(runtime.foreground.alive, false);
 });
 
-for (const revoked of ['foreground', 'cancelled']) test(`queued chrome cannot reach the native host after ${revoked} authority changes`, async t => {
+test('queued chrome cannot reach the native host after foreground authority changes', async t => {
   const { runtime, start } = runtimeFixture(t), calls = [];
   runtime.transport.request = async (...args) => { calls.push(args); return { tools_expanded: false }; };
   const context = createContext(runtime, start);
   context.ui.setTitle('queued while authorized');
-  if (revoked === 'foreground') runtime.foreground = { ...start.state, owner: foreign };
-  else start.controller.abort();
+  runtime.foreground = { ...start.state, owner: foreign };
   await new Promise(setImmediate);
   assert.deepEqual(calls, [], 'revoked chrome never crosses the native UI boundary');
+});
+
+// Pi keeps ctx.ui usable after the request that captured it is aborted, so a
+// tool clearing its status in `finally` after Esc must still reach the host.
+test('chrome from a cancelled request of the live foreground is still delivered', async t => {
+  const { runtime, start } = runtimeFixture(t), calls = [];
+  runtime.transport.request = async (...args) => { calls.push(args); return { tools_expanded: false }; };
+  const context = createContext(runtime, start);
+  start.controller.abort();
+  assert.doesNotThrow(() => context.ui.setTitle('cleared after abort'));
+  await new Promise(setImmediate);
+  assert.equal(calls.length > 0, true, 'cleanup chrome after cancellation reaches the host');
 });
 
 test('a first private hook never mints a foreground lease before session_start', async t => {
