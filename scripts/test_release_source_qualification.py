@@ -320,7 +320,12 @@ gh() {
         start = self.workflow.index('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then',
                                     self.workflow.index('      - name: Attach assets to canonical release'))
         end = self.workflow.index('          existing_digests=', start)
-        block = textwrap.dedent(self.workflow[start:end])
+        blocks = [textwrap.dedent(self.workflow[start:end])]
+        repair_steps = self.workflow.split('      - name: Record a source CI waiver in the release notes\n')[1:]
+        self.assertEqual(1, len(repair_steps))
+        for step in repair_steps:
+            self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.force_release == true", step.split('        run: |\n', 1)[0])
+            blocks.append(textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n      - name:', 1)[0]))
         stubs = r'''
 set -euo pipefail
 gh() {
@@ -334,20 +339,20 @@ gh() {
   fi
 }
 '''
-        with tempfile.TemporaryDirectory() as temporary:
-            body, edits = Path(temporary) / "body", Path(temporary) / "edits"
-            body.write_text("Existing notes\n")
-            env = {"PATH": os.defpath, "RUNNER_TEMP": temporary, "TEST_BODY": str(body),
-                   "TEST_EDITS": str(edits), "GITHUB_EVENT_NAME": "workflow_dispatch",
-                   "INPUT_FORCE_RELEASE": "true", "INPUT_FORCE_REASON": "CI incident #42",
-                   "GITHUB_ACTOR": "release-owner", "RELEASE_TAG": "v0.10.0"}
-            for _ in range(2):
-                result = subprocess.run(["bash", "-c", stubs + block], env=env,
-                                        capture_output=True, text=True)
-                self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual(body.read_text(), "Existing notes\n\n**Source CI qualification WAIVED: CI incident #42 by release-owner**\n")
-            self.assertEqual(edits.read_text().splitlines(), ["edit"])
-        self.assertEqual(2, self.workflow.count('name: Record a source CI waiver in the release notes'))
+        for name, block in zip(("binaries", "installer"), blocks, strict=True):
+            with self.subTest(mode=name), tempfile.TemporaryDirectory() as temporary:
+                body, edits = Path(temporary) / "body", Path(temporary) / "edits"
+                body.write_text("Existing notes\n")
+                env = {"PATH": os.defpath, "RUNNER_TEMP": temporary, "TEST_BODY": str(body),
+                       "TEST_EDITS": str(edits), "GITHUB_EVENT_NAME": "workflow_dispatch",
+                       "INPUT_FORCE_RELEASE": "true", "INPUT_FORCE_REASON": "CI incident #42",
+                       "GITHUB_ACTOR": "release-owner", "RELEASE_TAG": "v0.10.0"}
+                for _ in range(2):
+                    result = subprocess.run(["bash", "-c", stubs + block], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(body.read_text(), "**Source CI qualification WAIVED: CI incident #42 by release-owner**\n\nExisting notes\n")
+                self.assertEqual(edits.read_text().splitlines(), ["edit"])
 
     def test_override_does_not_change_build_or_signing_dependencies(self):
         self.assertIn("needs: [resolve, security]", self.workflow)

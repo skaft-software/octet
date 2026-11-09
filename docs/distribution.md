@@ -84,8 +84,9 @@ The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
 `force_release=true` on a manual dispatch, with a non-empty `force_reason`. It
 defaults to false and has no effect on tag-push runs. The job summary records the
-reason, actor and **WAIVED, not passed** status; the binary publish job also adds
-the waiver to the release notes. Main-ancestry and source/version checks,
+reason, actor and **WAIVED, not passed** status. The protected binary and
+installer publish jobs also put the waiver first in the release notes; npm-only
+dispatches record it in the summary. Main-ancestry and source/version checks,
 dependency audits, release build checks, protected publishing and Sigstore
 verification still apply.
 

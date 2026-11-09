@@ -803,8 +803,8 @@ jobs:
             waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
             gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
             if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
-              printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
-              gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+              { printf '%s\n\n' "$waiver"; cat "$RUNNER_TEMP/release-notes.md"; } > "$RUNNER_TEMP/waived-release-notes.md"
+              gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/waived-release-notes.md"
             fi
           fi
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
@@ -1065,21 +1065,6 @@ jobs:
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
           cosign-release: v3.1.3
-      - name: Record a source CI waiver in the release notes
-        if: github.event_name == 'workflow_dispatch' && inputs.force_release == true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
-          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
-        run: |
-          set -euo pipefail
-          waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
-          gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
-          if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
-            printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
-            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
-          fi
       - name: Install the pinned trusted-publishing npm CLI
         shell: bash
         run: |
@@ -1452,8 +1437,8 @@ jobs:
           waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
           gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
           if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
-            printf '\n%s\n' "$waiver" >> "$RUNNER_TEMP/release-notes.md"
-            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+            { printf '%s\n\n' "$waiver"; cat "$RUNNER_TEMP/release-notes.md"; } > "$RUNNER_TEMP/waived-release-notes.md"
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/waived-release-notes.md"
           fi
       - name: Generate version-pinned portable installer
         shell: bash

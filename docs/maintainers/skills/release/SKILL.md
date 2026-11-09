@@ -82,8 +82,9 @@ separate installer repair path.
 
 Only an authorized manual binary-workflow dispatch can set `force_release=true`;
 it must also supply a non-empty, single-line `force_reason`. The job summary
-records **Source CI qualification WAIVED: <reason> by <actor>**; when the binary
-publish job runs, the release notes also record it. This waives only the source
-CI gate, not main ancestry, version, audit, protected publishing or signing.
+records **Source CI qualification WAIVED: <reason> by <actor>**. The protected
+binary and installer publish jobs also put the waiver first in the release notes;
+npm-only dispatches record it in the summary. This waives only the source CI
+gate, not main ancestry, version, audit, protected publishing or signing.
 Inspect failed jobs before recovery and never replace immutable assets or
 silently relabel a waiver as a CI pass.
