@@ -11,67 +11,79 @@ tags:
 ---
 # Releasing octet
 
-Run repository commands from the repo root. This skill is a checklist over the
-existing release tooling; read each script or workflow **before** running it.
+Run repository commands from the repo root. Read the release workflows and
+scripts before running them. The workspace version in `Cargo.toml` is the source
+of truth; extension manifests also pin `requires_octet`.
 
-Versioning: `[workspace.package] version` in `Cargo.toml` is the single source of
-truth. `patch` = fixes and additions, `minor` = breaking changes.
-Extension manifests pin `requires_octet` separately
-(`extensions/*/extension.toml`).
+## 1. Open the version-bump PR
 
-## 1. Changelog and release notes
+Run the [`/cl`](../../prompts/cl.md) audit, update `CHANGELOG.md`, add
+`docs/releases/vX.Y.Z.md`, and bump the workspace and pinned extension versions.
+Review release notes, required checks and any release-specific limitations.
+For local candidate checks, read `scripts/package-octet-release.sh` first, package
+into an isolated output directory, and smoke-test the packaged binary's startup,
+version, help and model listing. A real provider prompt and the
+[interactive-testing skill](../interactive-testing/SKILL.md) are separate,
+explicitly authorized acceptance checks; startup alone is not a passing smoke test.
 
-- Run the [`/cl`](../../prompts/cl.md) audit so `CHANGELOG.md` covers every
-  user-visible commit since the last tag.
-- Add `docs/releases/vX.Y.Z.md` following the previous file in that directory.
-- Bump the workspace version and any pinned `requires_octet` values.
+## 2. Merge through the queue
 
-## 2. Package the candidate
+Merge the reviewed PR to `main` via the GitHub merge queue. Identify the actual
+main commit produced by the merge, not the PR head or merge-group test commit.
+The source for every release tag must be an ancestor of `origin/main`.
 
-Read and run the packaging scripts with an explicit target and an isolated output
-directory (never inside the repo root):
+## 3. Push one canonical tag
 
-```sh
-scripts/package-octet-release.sh TARGET /tmp/octet-release vX.Y.Z "$PWD"
-```
+Before tagging, confirm that `stable-release-publish` allows `v*` tags. Its
+currently observed custom policy allows `main`, `octet-binaries-v*` and
+`octet-serve-v*`, but not canonical tags; an authorized administrator must update
+that policy separately without removing the existing required reviewers.
 
-Supporting generators: `scripts/generate-octet-release-metadata.py`,
-`scripts/create-source-archive.py`, `scripts/package-octet-npm.sh`,
-`scripts/generate-homebrew-formula.py`.
+Create and push exactly one new `vX.Y.Z` tag pointing at that main commit. Never
+move or re-push an existing release tag. The tag version must match `Cargo.toml`
+and the checked-in release notes. The tag triggers both the binary and extension
+release workflows; no prior GitHub Release or second tooling tag is needed.
 
-## 3. Local smoke test
+## 4. Let the workflows qualify and publish
 
-From outside the checkout (for example `/tmp`), run the packaged binary and check
-startup, `--version`, `--help`, `--list-models`, and one real prompt with the
-intended default provider. Use the
-[interactive-testing skill](../interactive-testing/SKILL.md) for the TUI steps.
-Startup alone is not a passing smoke test.
+On a canonical tag push, the binary workflow waits up to 75 minutes for the
+latest exact-source `main` push CI run, then requires its successful conclusion
+and all required lanes. Repairs also accept exact-source merge-group and manual
+CI runs. A failed run or timeout stops publication; inspect the failure rather
+than treating it as qualified. After the existing protected publish approval,
+the workflow creates the GitHub Release from the checked-in notes and attaches
+signed binary assets.
+The extension workflow waits for that exact binary tag-push run to succeed before
+building and attaching the six official bundles. Its wait is bounded at 350
+minutes, including binary build and approval time. Signing, environment approval,
+and source/version checks remain mandatory.
 
-```sh
-cd /tmp && /tmp/octet-release/bin/octet --version
-```
-
-## 4. Publish
-
-- Read the `.github/workflows/release-octet.yml` in full first. It triggers on
-  `octet-binaries-v*` / `octet-installer-v*` tags (or `workflow_dispatch` with an
-  existing canonical stable tag) and resolves the canonical tag, version, and
-  source commit.
-- npm publication uses trusted publishing
-  ([docs/release/npm-trusted-publishing.md](../../../release/npm-trusted-publishing.md));
-  there is no local `npm publish` step.
-- Never move or re-push an existing release tag.
+npm and Homebrew remain separate, explicitly dispatched channels; a tag push
+alone does not publish them. Their existing handoffs and the installer-repair
+path still expect the legacy binary tooling tag and signer ref and cannot consume
+a release signed from the canonical tag without separate changes. See the
+[npm trusted-publishing contract](../../../release/npm-trusted-publishing.md) and
+[distribution guide](../../../distribution.md).
 
 ## 5. Verify
 
-- Confirm the release artifacts, checksums (`SHA256SUMS`), and the installer
-  resolve at the exact version. `scripts/test-installer-version.py`,
-  `scripts/test-packaged-docs.py`, and `scripts/test_homebrew_formula.sh` cover
-  parts of this.
-- Record the observed result. Do not describe an unrun check as qualified.
+Inspect both workflow results and the exact-version GitHub Release. Verify the
+native archives, installers, six extension bundles, checksums and signatures,
+and the published install/update smoke results. Record what was actually
+verified; do not describe an unrun check as qualified.
 
-## 6. Recover a failed release
+## Recovery and CI waiver
 
-Inspect the failed job before acting. Fix the cause, then re-run only the failed
-job. Do not re-run a version bump or re-tag; packaging and download steps are
-idempotent where the artifact already exists.
+Keep the canonical tag immutable. `octet-binaries-vX.Y.Z` and
+`octet-serve-vX.Y.Z` remain dedicated workflow-only repair tags: their tooling
+commit must descend from the source and change only release workflows. They do
+not replace the normal canonical-tag flow. `octet-installer-vX.Y.Z` remains the
+separate installer repair path.
+
+Only an authorized manual binary-workflow dispatch can set `force_release=true`;
+it must also supply a non-empty, single-line `force_reason`. The job summary
+records **Source CI qualification WAIVED: <reason> by <actor>**; when the binary
+publish job runs, the release notes also record it. This waives only the source
+CI gate, not main ancestry, version, audit, protected publishing or signing.
+Inspect failed jobs before recovery and never replace immutable assets or
+silently relabel a waiver as a CI pass.

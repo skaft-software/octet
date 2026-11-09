@@ -64,24 +64,37 @@ The release workflows don't publish every source package automatically:
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
-Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
-canonical release commit, or at a descendant that changes only release workflows.
-Its metadata generator requires that ref, and the protected environment must admit
-the tag without removing required reviewers.
+Normal native and extension publication starts with the single canonical
+`vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
+creates the GitHub Release from the checked-in notes, and publishes signed native
+assets; the extension workflow waits for that binary run before publishing its
+bundles. The protected environment must admit the canonical tag without removing
+required reviewers. Dedicated `octet-binaries-vX.Y.Z` and `octet-serve-vX.Y.Z`
+tooling tags remain available for workflow-only repairs. See the
+[release runbook](maintainers/skills/release/SKILL.md). The currently observed
+protected-environment policy does not yet allow `v*` tags; an authorized
+administrator must update it separately before the one-tag flow can publish.
+
+The existing npm, Homebrew and installer-repair handoffs still expect the legacy
+binary tooling tag and signer ref. They cannot consume a binary release signed
+from the canonical tag without separate changes; this workflow change does not
+alter those channels.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
-`force_release=true` on a manual dispatch. It defaults to false and has no effect
-on tag-push runs. The run records the actor, immutable source, tooling commit and
-**WAIVED, not passed** status. Source/version checks, dependency audits, release
-build checks, protected publishing and Sigstore verification still apply.
+`force_release=true` on a manual dispatch, with a non-empty `force_reason`. It
+defaults to false and has no effect on tag-push runs. The job summary records the
+reason, actor and **WAIVED, not passed** status; the binary publish job also adds
+the waiver to the release notes. Main-ancestry and source/version checks,
+dependency audits, release build checks, protected publishing and Sigstore
+verification still apply.
 
 For a workflow-only repair, keep the canonical tag unchanged, put the reviewed
 release workflow on its dedicated tooling tag, and dispatch that exact tag:
 
 ```sh
 gh workflow run release-octet.yml --ref octet-binaries-v0.10.3 \
-  -f release_tag=v0.10.3 -f force_release=true
+  -f release_tag=v0.10.3 -f force_release=true -f force_reason='explain the CI incident'
 ```
 
 This does not restart product CI or turn failed CI into a pass. Record the
