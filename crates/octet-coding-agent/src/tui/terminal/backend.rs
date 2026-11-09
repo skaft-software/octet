@@ -354,6 +354,7 @@ impl OctetTerminal<Stdout> {
     /// Request repeat/release kinds only while a remote component owns focus.
     /// The ordinary text-preserving profile is restored when the lease ends.
     pub(crate) fn set_remote_ui_keyboard_events(enabled: bool) -> Result<()> {
+        let _keyboard_mode = lifecycle::lock_keyboard_mode();
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         if enabled {
@@ -478,9 +479,8 @@ impl OctetTerminal<Stdout> {
         // CSI-u, and REPORT_ALTERNATE_KEYS supplies their layout-resolved
         // character (for example `a:A` and `1:!`) to crossterm. This keeps
         // Ctrl+Enter distinct without asking terminals to report every typed
-        // character as an ambiguous physical/base key.
-        // Unsupported terminals safely ignore this request; Alt+Enter remains
-        // the portable multiline fallback.
+        // character as an ambiguous physical/base key. Unsupported terminals
+        // ignore the request; Ctrl+J remains the multiline fallback.
         if execute!(
             out,
             event::PushKeyboardEnhancementFlags(lifecycle::keyboard_enhancement_flags())
@@ -712,6 +712,38 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         // Pi's TUI already moved to the line after the complete frame. Restore
         // terminal modes without adding a second blank line.
         lifecycle::restore_without_line();
+    }
+
+    fn enter_alternate_screen(&mut self, sequence: &str) {
+        let _keyboard_mode = lifecycle::lock_keyboard_mode();
+        self.write(sequence);
+        // Kitty maintains independent keyboard stacks for the two screens.
+        // The primary-screen request cannot disambiguate keys on this screen.
+        let mut bytes = Vec::new();
+        if queue!(
+            bytes,
+            event::PushKeyboardEnhancementFlags(lifecycle::keyboard_enhancement_flags())
+        )
+        .is_ok()
+        {
+            self.append_backend_bytes(&bytes);
+            self.flush_pending();
+            lifecycle::mark_alt_keyboard_enhancement_active();
+        }
+    }
+
+    fn leave_alternate_screen(&mut self, sequence: &str) {
+        let _keyboard_mode = lifecycle::lock_keyboard_mode();
+        let mut bytes = Vec::new();
+        if lifecycle::take_remote_keyboard_on_alt() {
+            let _ = queue!(bytes, event::PopKeyboardEnhancementFlags);
+        }
+        if lifecycle::take_alt_keyboard_enhancement_active() {
+            let _ = queue!(bytes, event::PopKeyboardEnhancementFlags);
+        }
+        self.append_backend_bytes(&bytes);
+        self.write(sequence);
+        self.flush_pending();
     }
 
     fn write(&mut self, data: &str) {

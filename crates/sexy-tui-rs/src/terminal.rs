@@ -209,6 +209,18 @@ pub trait Terminal {
     /// Write data to the terminal.
     fn write(&mut self, data: &str);
 
+    /// Write the sequence that enters the alternate screen. Backends may
+    /// atomically set up screen-local terminal modes around this write.
+    fn enter_alternate_screen(&mut self, sequence: &str) {
+        self.write(sequence);
+    }
+
+    /// Write the sequence that leaves the alternate screen and restores the
+    /// primary screen. Backends may restore screen-local modes around it.
+    fn leave_alternate_screen(&mut self, sequence: &str) {
+        self.write(sequence);
+    }
+
     /// Get current terminal width in columns.
     fn columns(&self) -> u16;
 
