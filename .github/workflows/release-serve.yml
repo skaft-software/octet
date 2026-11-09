@@ -197,7 +197,7 @@ jobs:
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
       - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
@@ -376,7 +376,7 @@ jobs:
           name: octet-executable-extension-bundles
           path: release-assets
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
         with:
           cosign-release: v3.1.3
       - name: Create checksums and keyless signatures
