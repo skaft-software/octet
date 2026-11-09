@@ -597,7 +597,6 @@ impl ExecutableExtensions {
             .map(|(name, reason)| startup_failure_notice(name, reason))
             .collect()
     }
-
 }
 
 fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {

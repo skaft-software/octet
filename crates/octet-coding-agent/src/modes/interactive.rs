@@ -1840,7 +1840,11 @@ where
 /// coordinated shutdown as the signal thread, and a delivered signal is already
 /// announced, so either way the work settles before the caller's shutdown path
 /// runs on a complete `App`.
-async fn pump_owned<F, T, S>(shell: &mut InteractiveShell, input: &mut S, work: F) -> anyhow::Result<T>
+async fn pump_owned<F, T, S>(
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    work: F,
+) -> anyhow::Result<T>
 where
     F: Future<Output = T>,
     S: Stream<Item = std::io::Result<Event>> + Unpin,

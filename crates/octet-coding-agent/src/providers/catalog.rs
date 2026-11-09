@@ -704,7 +704,9 @@ mod tests {
     fn model_id_registration_checks_exact_keys_not_resolvable_aliases() {
         let catalog = ModelCatalog::builtin().unwrap();
         assert!(has_model_id(&catalog, "gpt-4o-mini"));
-        assert!(catalog.resolve(&ModelId("openai/gpt-4o-mini".into())).is_ok());
+        assert!(catalog
+            .resolve(&ModelId("openai/gpt-4o-mini".into()))
+            .is_ok());
         assert!(!has_model_id(&catalog, "openai/gpt-4o-mini"));
     }
 

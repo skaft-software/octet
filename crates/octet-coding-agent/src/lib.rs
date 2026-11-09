@@ -207,8 +207,16 @@ async fn run() -> anyhow::Result<()> {
     // with the same argv it passes Pi. Say so once instead of failing silently
     // or pretending the flag changed something.
     for (flag, set, why) in [
-        ("--no-themes", cli.no_themes, "octet loads no theme unless --theme names one"),
-        ("--no-skills", cli.no_skills, "skills come only from --skill-dir and trusted workspace resources"),
+        (
+            "--no-themes",
+            cli.no_themes,
+            "octet loads no theme unless --theme names one",
+        ),
+        (
+            "--no-skills",
+            cli.no_skills,
+            "skills come only from --skill-dir and trusted workspace resources",
+        ),
     ] {
         if set {
             crate::output::stderr_line(format!(
