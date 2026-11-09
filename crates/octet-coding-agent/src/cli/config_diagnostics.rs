@@ -96,6 +96,7 @@ const CONFIG_KEYS: &[&str] = &[
     "reload_host",
     "telemetry",
     "enabled_extensions",
+    "disabled_extensions",
     "trusted_extensions",
     "system_prompt",
     "compaction",

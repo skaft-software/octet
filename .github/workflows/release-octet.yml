@@ -11,6 +11,11 @@ on:
         description: Existing canonical stable octet tag to package
         required: true
         type: string
+      force_release:
+        description: "Release even if source CI failed (manual override; signing still required)"
+        required: false
+        default: false
+        type: boolean
       require_provider_acceptance:
         description: Opt in to requiring approved live-provider acceptance (optional)
         required: false
@@ -52,6 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
           INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
           INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
         run: |
@@ -121,7 +127,8 @@ jobs:
                 exit 1
               fi
             else
-              if [[ "$GITHUB_EVENT_NAME" != push \
+              expected_workflow_tag="octet-$mode-$tag"
+              if [[ ( "$GITHUB_EVENT_NAME" != push && "$GITHUB_EVENT_NAME" != workflow_dispatch ) \
                 || "$GITHUB_REF_TYPE" != tag \
                 || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
                 echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
@@ -214,36 +221,50 @@ jobs:
           fi
 
           # Qualification must name the immutable source, not this workflow's
-          # tooling SHA or a PR merge ref. Never accept an older successful run
-          # after a newer failure, or an incomplete/skipped required lane.
-          ci_run=$(gh api --method GET \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f head_sha="$source_commit" -f per_page=100 \
-            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
-          if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
-            echo "no source-bound CI qualification run for $source_commit" >&2
-            exit 1
-          fi
-          ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
-            --jq '[.head_sha, .status, .conclusion] | @tsv')
-          if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
-            echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
-            exit 1
-          fi
-          ci_jobs=$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
-            --jq '.jobs[] | [.name, .conclusion] | @tsv')
-          for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
-            'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
-            extension-api-v03 msrv smoke-install; do
-            qualified=$(awk -F '\t' -v check="$check" \
-              '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
-            if [[ "$qualified" != yes ]]; then
-              echo "CI run $ci_run lacks a successful required lane: $check" >&2
+          # tooling SHA or a PR merge ref. Only an explicit manual override may
+          # waive this CI gate; source validation and signing remain mandatory.
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "${INPUT_FORCE_RELEASE:-false}" == true ]]; then
+            echo "::warning::force_release=true: source CI qualification waived for $source_commit by $GITHUB_ACTOR"
+            {
+              echo "## Manual CI override"
+              echo
+              echo "- Source CI qualification: **WAIVED, not passed** (force_release=true)"
+              echo "- Immutable source: \`$source_commit\`"
+              echo "- Release tooling: \`$workflow_commit\`"
+              echo "- Requested by: \`$GITHUB_ACTOR\`"
+              echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              echo "- Source checks, dependency audit, build checks, protected publishing and signatures remain required."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            ci_run=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$source_commit" -f per_page=100 \
+              --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
+            if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
+              echo "no source-bound CI qualification run for $source_commit" >&2
               exit 1
             fi
-          done
-          echo "qualified immutable source $source_commit with CI run $ci_run"
+            ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+              --jq '[.head_sha, .status, .conclusion] | @tsv')
+            if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
+              echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+              exit 1
+            fi
+            ci_jobs=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | [.name, .conclusion] | @tsv')
+            for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
+              'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
+              extension-api-v03 msrv smoke-install; do
+              qualified=$(awk -F '\t' -v check="$check" \
+                '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
+              if [[ "$qualified" != yes ]]; then
+                echo "CI run $ci_run lacks a successful required lane: $check" >&2
+                exit 1
+              fi
+            done
+            echo "qualified immutable source $source_commit with CI run $ci_run"
+          fi
 
           if [[ "$mode" != installer ]]; then
             if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then

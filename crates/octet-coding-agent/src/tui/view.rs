@@ -9207,6 +9207,36 @@ impl InteractiveShell {
         // history keeps its original cells and styles.
     }
 
+    /// Publish a theme the frontend resolved: startup, an extension resource
+    /// attach, a reload, or an explicit theme choice.
+    ///
+    /// A theme that would paint exactly like the live one is not published.
+    /// [`Self::set_theme`] bumps the theme epoch, which forces a complete
+    /// visible-grid repaint and, on the primary screen, another full history
+    /// materialization: for a long session that is the whole transcript
+    /// written again. Resource attach rounds resolved and installed the same
+    /// theme on every pass, so the first extension handshake of a startup
+    /// could replay the transcript once per round before the theme it was
+    /// waiting for had even arrived.
+    ///
+    /// Returns whether the live frame changed and therefore needs one render.
+    /// Callers publish once and repaint once; nothing here waits for a theme.
+    pub fn publish_theme(&mut self, theme: OctetTheme) -> bool {
+        let theme = theme.with_terminal_colors(self.state.borrow().theme.terminal_colors());
+        // Read the live identity under its own guard: publishing takes the state
+        // lock itself, and a guard held across it would deadlock the input path.
+        let unchanged = {
+            let state = self.state.borrow();
+            state.theme.paints_like(&theme)
+        };
+        if unchanged {
+            return false;
+        }
+        self.set_theme(theme);
+        crate::app::bootstrap::startup_phase("theme.published");
+        true
+    }
+
     /// Rebuild the visible transcript from the session's active branch.
     pub fn hydrate(&mut self, session: &Session) -> Result<()> {
         let entry_budget = hydration_entry_budget(self.state.borrow().size.1);

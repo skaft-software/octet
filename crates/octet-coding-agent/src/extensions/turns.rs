@@ -186,14 +186,11 @@ impl ExecutableExtensions {
             let mut served = Vec::new();
             let outcome = self
                 .await_prompt_work(
-                    tokio::time::timeout(
-                        PROMPT_RPC_DEADLINE,
-                        process.run_hook(
-                            ExtensionHook::BeforePrompt,
-                            serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
-                            "source":source, "streaming_behavior":streaming_behavior}),
-                            execution,
-                        ),
+                    process.run_hook(
+                        ExtensionHook::BeforePrompt,
+                        serde_json::json!({"phase":"input", "text":input.text, "images":input.images,
+                        "source":source, "streaming_behavior":streaming_behavior}),
+                        execution,
                     ),
                     &mut served,
                     frontend.as_deref_mut(),
@@ -201,16 +198,15 @@ impl ExecutableExtensions {
                 .await
                 .ok_or(PromptWaitCancelled)?;
             self.held_messages.append(&mut served);
-            // A failing or stalled input handler is reported and skipped, like
-            // Pi's emitInput. Only an explicit refusal still stops the input.
+            // Pi awaits its input handlers without a deadline, so a handler that
+            // waits on a host call the user answers still delivers its transform.
+            // A failing handler is reported and skipped, like Pi's emitInput.
+            // Only an explicit refusal still stops the input.
             let output = match outcome {
-                Ok(Ok(output)) => output,
-                Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
-                failed => {
-                    let detail = match failed {
-                        Ok(Err(error)) => format!("input hook failed: {error:#}"),
-                        _ => format!("input hook exceeded {PROMPT_RPC_DEADLINE:?}"),
-                    };
+                Ok(output) => output,
+                Err(error) if is_cancellation(&error) => return Err(error.into()),
+                Err(error) => {
+                    let detail = format!("input hook failed: {error:#}");
                     let mut notes = Vec::new();
                     self.degrade_prompt_extension(&extension_name, &detail, &mut notes);
                     self.held_messages.append(&mut notes);
@@ -757,8 +753,8 @@ impl ExecutableExtensions {
         }
     }
 
-    /// A prompt, input or before_agent_start step of one extension failed, timed
-    /// out or found its process gone. Pi reports such a handler failure and keeps
+    /// A prompt, input or before_agent_start step of one extension failed or
+    /// found its process gone. Pi reports such a handler failure and keeps
     /// going, so the prompt proceeds without this extension's contribution. The
     /// cause stays in the bounded diagnostics; the user sees one short notice per
     /// extension. Tool-call guards do not come through here: they stay fail-closed.
@@ -816,15 +812,31 @@ impl ExecutableExtensions {
         base_system: &str,
         prompt: String,
     ) -> anyhow::Result<ExtensionPromptComposition> {
-        self.compose_prompt_with_frontend(base_system, prompt, None)
+        self.compose_prompt_with_images(base_system, prompt, Vec::new())
+            .await
+    }
+
+    /// [`Self::compose_prompt`] for a run that carries attached media. Pi's
+    /// `before_agent_start` user event exposes the run's `images`, so a peer
+    /// that negotiated the before-prompt state payload must see them.
+    pub async fn compose_prompt_with_images(
+        &mut self,
+        base_system: &str,
+        prompt: String,
+        images: Vec<octet_ai::Media>,
+    ) -> anyhow::Result<ExtensionPromptComposition> {
+        self.compose_prompt_images_with_frontend(base_system, prompt, images, None)
             .await
     }
 
     /// [`Self::compose_prompt`] while `frontend` keeps serving the extensions.
-    pub(crate) async fn compose_prompt_with_frontend(
+    /// The attached media reach only a peer that negotiated the before-prompt
+    /// state payload; the legacy payload stays prompt-only.
+    pub(crate) async fn compose_prompt_images_with_frontend(
         &mut self,
         base_system: &str,
         prompt: String,
+        images: Vec<octet_ai::Media>,
         mut frontend: Option<&mut dyn PromptFrontend>,
     ) -> anyhow::Result<ExtensionPromptComposition> {
         let mut notifications = self.drain_events();
@@ -842,6 +854,10 @@ impl ExecutableExtensions {
         }
         let mut rejected_context = Vec::new();
 
+        // Pi's `before_agent_start` user event carries the run's attached
+        // images as `ImageContent[]`; a peer that negotiated the state payload
+        // receives them in the same canonical shape the input hook uses.
+        let attached_images = (!images.is_empty()).then_some(images.as_slice());
         // Process handles are shared; release the fleet borrow so the same
         // bounded event consumer can answer requests made by these hooks.
         for process in self.processes.clone() {
@@ -892,34 +908,35 @@ impl ExecutableExtensions {
                 .contains(&ExtensionHook::BeforePrompt)
             {
                 let outcome = self.await_prompt_work(
-                    tokio::time::timeout(
-                        PROMPT_RPC_DEADLINE,
-                        process.run_hook(
-                            ExtensionHook::BeforePrompt,
-                            if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
-                                serde_json::json!({"prompt": &prompt, "system_prompt": &effective_system})
-                            } else {
-                                before_prompt_hook_payload(&prompt)
-                            },
-                            execution.clone(),
-                        ),
+                    process.run_hook(
+                        ExtensionHook::BeforePrompt,
+                        if process.supports_feature(octet_agent::extension_process::EXTENSION_FEATURE_BEFORE_PROMPT_STATE_V1) {
+                            serde_json::json!({
+                                "prompt": &prompt,
+                                "system_prompt": &effective_system,
+                                "images": attached_images,
+                            })
+                        } else {
+                            before_prompt_hook_payload(&prompt)
+                        },
+                        execution.clone(),
                     ),
                     &mut notifications,
                     frontend.as_deref_mut(),
                 )
                 .await
                 .ok_or(PromptWaitCancelled)?;
-                // Pi's emitBeforeAgentStart reports a failing handler and the
-                // turn continues; a dead, stalled or malformed extension is
-                // skipped for this prompt instead of refusing it.
+                // Pi's emitBeforeAgentStart awaits its handlers without a
+                // deadline, so a handler waiting on a user-answered host call
+                // still returns its system replacement and custom messages. A
+                // failing or malformed handler is reported and the turn
+                // continues: a dead or broken extension is skipped for this
+                // prompt instead of refusing it.
                 let output = match outcome {
-                    Ok(Ok(output)) => output,
-                    Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
-                    failed => {
-                        let detail = match failed {
-                            Ok(Err(error)) => format!("before_prompt hook failed: {error:#}"),
-                            _ => format!("before_prompt hook exceeded {PROMPT_RPC_DEADLINE:?}"),
-                        };
+                    Ok(output) => output,
+                    Err(error) if is_cancellation(&error) => return Err(error.into()),
+                    Err(error) => {
+                        let detail = format!("before_prompt hook failed: {error:#}");
                         self.degrade_prompt_extension(&extension_name, &detail, &mut notifications);
                         continue;
                     }
@@ -978,23 +995,19 @@ impl ExecutableExtensions {
             if process.contributions().context {
                 let outcome = self
                     .await_prompt_work(
-                        tokio::time::timeout(
-                            PROMPT_RPC_DEADLINE,
-                            process.collect_context(Some(prompt.clone()), execution),
-                        ),
+                        process.collect_context(Some(prompt.clone()), execution),
                         &mut notifications,
                         frontend.as_deref_mut(),
                     )
                     .await
                     .ok_or(PromptWaitCancelled)?;
+                // Pi's emitContext awaits its handlers without a deadline, so a
+                // slow, user-bound collector still contributes its context.
                 let collected = match outcome {
-                    Ok(Ok(collected)) => collected,
-                    Ok(Err(error)) if is_cancellation(&error) => return Err(error.into()),
-                    failed => {
-                        let detail = match failed {
-                            Ok(Err(error)) => format!("context collection failed: {error:#}"),
-                            _ => format!("context collection exceeded {PROMPT_RPC_DEADLINE:?}"),
-                        };
+                    Ok(collected) => collected,
+                    Err(error) if is_cancellation(&error) => return Err(error.into()),
+                    Err(error) => {
+                        let detail = format!("context collection failed: {error:#}");
                         self.degrade_prompt_extension(&extension_name, &detail, &mut notifications);
                         continue;
                     }

@@ -43,7 +43,9 @@ test('optional SessionManager absence preserves real getter validation and retir
   const manager = createContext(runtime, store).sessionManager;
   assert.equal(typeof manager.getEntryCount, 'undefined');
   assert.equal(typeof manager.futureOptionalMethod, 'undefined');
-  assert.throws(() => manager.getEntries(), /session_entries snapshot not supplied/);
+  // No publication yet is Pi's own empty session, not a compatibility refusal.
+  assert.deepEqual(manager.getEntries(), []);
+  assert.deepEqual(manager.getBranch(), []);
   store.state.host.session_entries = [];
   store.state.host.session_branch = [];
   assert.deepEqual(manager.getEntries(), []);

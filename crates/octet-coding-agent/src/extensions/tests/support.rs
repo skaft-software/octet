@@ -58,6 +58,7 @@ pub(in crate::extensions) fn executable_extension_config(
         skill_paths: vec![],
         extension_paths: vec![extension_root.to_owned()],
         enabled_extensions: vec![name.to_owned()],
+        disabled_extensions: vec![],
         extension_activation_overridden: false,
         trusted_extensions: vec![],
         invocation_trusted_extensions: vec![name.to_owned()],

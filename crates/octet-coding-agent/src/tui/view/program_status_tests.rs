@@ -10,7 +10,7 @@ fn host_runs_are_working_until_authoritative_success_failure_or_cancellation() {
         (FinishReason::Completed, ProgramStatus::Done),
         (
             FinishReason::Failed(octet_agent::AgentError::ProviderContextPreparation(
-                "private failure details",
+                "private failure details".to_owned(),
             )),
             ProgramStatus::Error,
         ),

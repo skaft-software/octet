@@ -41,9 +41,76 @@ pub(super) fn provider_request_client(
 }
 
 fn refused(reason: &'static str) -> AgentError {
+    AgentError::ProviderContextPreparation(reason.to_owned())
+}
+
+fn refused_owned(reason: String) -> AgentError {
     AgentError::ProviderContextPreparation(reason)
 }
 
+/// Model-visible tool names are extension/API vocabulary, but bound them so a
+/// hostile manifest cannot turn a refusal into a wall of text.
+fn bounded_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_graphic())
+        .take(64)
+        .collect()
+}
+
+fn kib(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Counts serialized bytes without retaining the encoded body.
+#[derive(Default)]
+struct ByteCount(usize);
+impl Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Bounded, redaction-safe description of the request shape: counts, byte
+/// sizes and the largest tool schemas. Never message text, arguments, session
+/// IDs or paths, so this can be shown to the user as-is.
+fn request_descriptor(request: &Request) -> String {
+    let mut tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            let bytes = serde_json::to_string(tool).map_or(0, |text| text.len());
+            (bounded_name(&tool.name), bytes)
+        })
+        .collect::<Vec<_>>();
+    tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let schema_bytes = tools.iter().map(|(_, bytes)| *bytes).sum::<usize>();
+    let largest = tools
+        .iter()
+        .take(3)
+        .map(|(name, bytes)| format!("{name} {}", kib(*bytes)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut counter = ByteCount::default();
+    let request_bytes = serde_json::to_writer(&mut counter, request).map_or(0, |()| counter.0);
+    format!(
+        "{} messages, {} tools, {} tool schema (largest: {}), request {}",
+        request.messages.len(),
+        request.tools.len(),
+        kib(schema_bytes),
+        if largest.is_empty() { "none".to_owned() } else { largest },
+        kib(request_bytes),
+    )
+}
+
+/// Stops serializing as soon as the context ceiling is crossed.
 struct BoundedRequestSize(usize);
 impl Write for BoundedRequestSize {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -57,6 +124,7 @@ impl Write for BoundedRequestSize {
         Ok(())
     }
 }
+
 fn validate_size(request: &Request) -> Result<(), AgentError> {
     serde_json::to_writer(BoundedRequestSize(0), request)
         .map_err(|_| refused("request exceeds the context byte limit"))
@@ -213,6 +281,26 @@ fn note_context_failure(
 }
 
 pub(super) async fn project_provider_context(
+    request: Request,
+    hooks: &[Arc<dyn ProviderContextHook>],
+    context: &ProviderContextProjectionContext,
+    model: &Model,
+    abort: &AbortFlag,
+    session: &mut Session,
+    notices: &mut Vec<String>,
+) -> Result<Request, AgentError> {
+    // Every refusal names the shape that caused it: an unactionable "hook
+    // refused preparation" cost a whole run and could not be diagnosed.
+    let descriptor = request_descriptor(&request);
+    match project_context_hooks(request, hooks, context, model, abort, session, notices).await {
+        Err(AgentError::ProviderContextPreparation(reason)) => {
+            Err(refused_owned(format!("{reason}; request {descriptor}")))
+        }
+        other => other,
+    }
+}
+
+async fn project_context_hooks(
     mut request: Request,
     hooks: &[Arc<dyn ProviderContextHook>],
     context: &ProviderContextProjectionContext,
@@ -314,8 +402,10 @@ pub(super) async fn project_provider_context(
             }
             Ok(projection) => projection,
             Err(ProviderContextHookError::Cancelled) => return Err(AgentError::Cancelled),
+            // Never fall back after a host-authority or native validation
+            // refusal, whatever the hook's isolation policy says.
             Err(ProviderContextHookError::Refused) => {
-                return Err(refused("hook refused preparation"))
+                return Err(refused("host authority refused preparation"))
             }
             Err(ProviderContextHookError::Failed(_)) if recoverable => {
                 note_context_failure(hook.as_ref(), session, notices);
@@ -323,6 +413,11 @@ pub(super) async fn project_provider_context(
             }
             Err(ProviderContextHookError::Failed(_)) => return Err(refused("hook failed")),
         };
+        // The request that reached this hook. If the hook's projection produces
+        // something the provider cannot represent, that projection is the
+        // suspect — not the session — so it can be dropped and the run continues
+        // on the validated request, exactly like any other handler failure.
+        let accepted_before_hook = request.clone();
         if let Some(projection) = projection {
             request.messages = projection.messages;
             request.system = projection.system;
@@ -334,7 +429,10 @@ pub(super) async fn project_provider_context(
                         .iter()
                         .find(|original| original.name == tool.name)
                     else {
-                        return Err(refused("loadout introduced an unregistered tool"));
+                        return Err(refused_owned(format!(
+                        "loadout introduced unregistered tool {}",
+                        bounded_name(&tool.name)
+                    )));
                     };
                     let mut unchanged = tool.clone();
                     unchanged.description = original.description.clone();
@@ -342,7 +440,10 @@ pub(super) async fn project_provider_context(
                         || serde_json::to_value(&unchanged).expect("canonical tool serializes")
                             != serde_json::to_value(original).expect("canonical tool serializes")
                     {
-                        return Err(refused("loadout changed tool authority"));
+                        return Err(refused_owned(format!(
+                        "loadout changed the authority of tool {}",
+                        bounded_name(&tool.name)
+                    )));
                     }
                 }
                 request.tools = tools;
@@ -366,8 +467,65 @@ pub(super) async fn project_provider_context(
             }
         }
         validate_identities(&canonical, &request, model)?;
-        octet_ai::validate_provider_request(model, &request)
-            .map_err(|_| refused("invalid canonical provider context"))?;
+        // Name the failing validation. The alternative — a bare "invalid
+        // canonical provider context" — leaves an operator with a 116-tool
+        // request and no way to tell which tool or field is unacceptable.
+        if let Some(path) = std::env::var_os("OCTET_CONTEXT_DUMP") {
+            // Operator-supplied diagnostic: one line per preparation, so a
+            // refusal can be traced to the exact fleet and validator reason.
+            let mut tools = request
+                .tools
+                .iter()
+                .map(|t| (t.name.clone(), serde_json::to_string(t).map_or(0, |s| s.len())))
+                .collect::<Vec<_>>();
+            tools.sort_by(|a, b| b.1.cmp(&a.1));
+            let record = serde_json::json!({
+                "messages": request.messages.len(),
+                "tools": request.tools.len(),
+                "schema_bytes": tools.iter().map(|(_, n)| n).sum::<usize>(),
+                "largest": tools.iter().take(5).map(|(n, s)| format!("{n}={s}")).collect::<Vec<_>>(),
+                "validation": octet_ai::validate_provider_request(model, &request)
+                    .err()
+                    .map(|e| e.to_string()),
+            });
+            use std::io::Write as _;
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(file, "{record}");
+            }
+        }
+        // A projection the provider cannot represent is a handler fault, not a
+        // reason to lose the session: Pi isolates a failing context handler, and
+        // a 116-tool Pi fleet must never be able to end a run. Fall back only to
+        // the request that reached this hook, and only when it still validates,
+        // so identity, loadout and host-authority checks above stay fatal.
+        if let Err(error) = octet_ai::validate_provider_request(model, &request) {
+            let detail: String = error.to_string().chars().take(240).collect();
+            if octet_ai::validate_provider_request(model, &accepted_before_hook).is_ok() {
+                request = accepted_before_hook;
+                // One precise notice beats the generic hook-failure line plus a
+                // detail line. Deduplicate on the hook's own identity, the same
+                // key the caller prunes to live hooks, so the notice survives
+                // pruning and is reported once per session and extension.
+                let notice_id = hook.failure_notice_id().map(str::to_owned);
+                let already_noticed = notice_id
+                    .as_ref()
+                    .is_some_and(|id| session.context_failure_notices.contains(id));
+                if !already_noticed {
+                    if let Some(id) = notice_id {
+                        if session.context_failure_notices.len() < MAX_CONTEXT_FAILURE_NOTICES {
+                            session.context_failure_notices.insert(id);
+                        }
+                    }
+                    notices.push(format!(
+                        "Extension context projection was invalid and was skipped: {detail}"
+                    ));
+                }
+                continue;
+            }
+            return Err(refused_owned(format!(
+                "invalid canonical provider context: {detail}"
+            )));
+        }
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }

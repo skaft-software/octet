@@ -18,7 +18,9 @@ test('before_agent_start shares normalized options and lazily renders section mu
   let options;
   const f = promptFixture([
     (event, ctx) => {
-      for (const key of ['images', 'prompt', 'systemPrompt', 'systemPromptOptions', 'type']) assert.ok(Object.hasOwn(event, key));
+      for (const key of ['prompt', 'systemPrompt', 'systemPromptOptions', 'type']) assert.ok(Object.hasOwn(event, key));
+      // Pi omits the optional `images` member for a run that attached none.
+      assert.equal(Object.hasOwn(event, 'images'), false);
       options = event.systemPromptOptions;
       assert.deepEqual(options.skills, [{ name: 'api-engineer', description: 'APIs', filePath: '/skills/api-engineer/SKILL.md', baseDir: '/skills/api-engineer', sourceInfo: { source: 'local' } }]);
       assert.deepEqual(options.sections, {});

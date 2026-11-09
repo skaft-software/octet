@@ -10,8 +10,8 @@ export * from './pi-1.0.2/ai/models.mjs';
 export * from './pi-1.0.2/ai/retry.mjs';
 export * from './pi-1.0.2/ai/overflow.mjs';
 export * from './pi-1.0.2/ai/diagnostics.mjs';
-export * from './pi-1.0.2/ai/validation.mjs';
-import { localFunction, localClass, refused } from './local-pi.mjs';
+import * as localValidation from './pi-1.5.0/ai/validation.mjs';
+import { helper, helperClass, refused } from './local-pi.mjs';
 // Pi 1.0.2 packages/ai/src/utils/typebox-helpers.ts, verbatim in behaviour.
 export const StringEnum = (values, options) => Type.Unsafe({
   type: 'string', enum: values,
@@ -28,40 +28,47 @@ export const streamSimple = stream;
 // Explicit provider streams an extension calls for its own provider run the
 // user's installed Pi implementation unchanged (Wine-style): the request a
 // Pi package builds is the request Pi builds, with the extension's own key.
-export const streamAnthropic = localFunction('ai', 'legacy-api-aliases.js', 'streamAnthropic');
-export const streamSimpleAnthropic = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleAnthropic');
-export const streamAzureOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamAzureOpenAIResponses');
-export const streamSimpleAzureOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleAzureOpenAIResponses');
-export const streamGoogle = localFunction('ai', 'legacy-api-aliases.js', 'streamGoogle');
-export const streamSimpleGoogle = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleGoogle');
-export const streamGoogleVertex = localFunction('ai', 'legacy-api-aliases.js', 'streamGoogleVertex');
-export const streamSimpleGoogleVertex = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleGoogleVertex');
-export const streamMistral = localFunction('ai', 'legacy-api-aliases.js', 'streamMistral');
-export const streamSimpleMistral = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleMistral');
-export const streamOpenAICodexResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAICodexResponses');
-export const streamSimpleOpenAICodexResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAICodexResponses');
-export const streamOpenAICompletions = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAICompletions');
-export const streamSimpleOpenAICompletions = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAICompletions');
-export const streamOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamOpenAIResponses');
-export const streamSimpleOpenAIResponses = localFunction('ai', 'legacy-api-aliases.js', 'streamSimpleOpenAIResponses');
+export const streamAnthropic = helper('ai', 'streamAnthropic');
+export const streamSimpleAnthropic = helper('ai', 'streamSimpleAnthropic');
+export const streamAzureOpenAIResponses = helper('ai', 'streamAzureOpenAIResponses');
+export const streamSimpleAzureOpenAIResponses = helper('ai', 'streamSimpleAzureOpenAIResponses');
+export const streamGoogle = helper('ai', 'streamGoogle');
+export const streamSimpleGoogle = helper('ai', 'streamSimpleGoogle');
+export const streamGoogleVertex = helper('ai', 'streamGoogleVertex');
+export const streamSimpleGoogleVertex = helper('ai', 'streamSimpleGoogleVertex');
+export const streamMistral = helper('ai', 'streamMistral');
+export const streamSimpleMistral = helper('ai', 'streamSimpleMistral');
+export const streamOpenAICodexResponses = helper('ai', 'streamOpenAICodexResponses');
+export const streamSimpleOpenAICodexResponses = helper('ai', 'streamSimpleOpenAICodexResponses');
+export const streamOpenAICompletions = helper('ai', 'streamOpenAICompletions');
+export const streamSimpleOpenAICompletions = helper('ai', 'streamSimpleOpenAICompletions');
+export const streamOpenAIResponses = helper('ai', 'streamOpenAIResponses');
+export const streamSimpleOpenAIResponses = helper('ai', 'streamSimpleOpenAIResponses');
 
 export { anthropicMessagesApi } from '../lib/native-provider.mjs';
-export const parseJsonWithRepair = localFunction('ai', 'utils/json-parse.js', 'parseJsonWithRepair');
-export const parseStreamingJson = localFunction('ai', 'utils/json-parse.js', 'parseStreamingJson');
-export const repairJson = localFunction('ai', 'utils/json-parse.js', 'repairJson');
-export const reduceAssistantMessageFrames = localFunction('ai', 'utils/assistant-message-frame.js', 'reduceAssistantMessageFrames');
-export const AssistantMessageFrameEncoder = localClass('ai', 'utils/assistant-message-frame.js', 'AssistantMessageFrameEncoder');
-export const createFauxCore = localFunction('ai', 'providers/faux.js', 'createFauxCore');
-export const fauxProvider = localFunction('ai', 'providers/faux.js', 'fauxProvider');
-export const fauxAssistantMessage = localFunction('ai', 'providers/faux.js', 'fauxAssistantMessage');
-export const fauxText = localFunction('ai', 'providers/faux.js', 'fauxText');
-export const fauxThinking = localFunction('ai', 'providers/faux.js', 'fauxThinking');
-export const fauxToolCall = localFunction('ai', 'providers/faux.js', 'fauxToolCall');
-export const cleanupSessionResources = localFunction('ai', 'session-resources.js', 'cleanupSessionResources');
-export const registerSessionResourceCleanup = localFunction('ai', 'session-resources.js', 'registerSessionResourceCleanup');
-export const InMemoryModelsStore = localClass('ai', 'models-store.js', 'InMemoryModelsStore');
-export const InMemoryCredentialStore = localClass('ai', 'auth/credential-store.js', 'InMemoryCredentialStore');
-export const ModelsError = localClass('ai', 'utils/models-error.js', 'ModelsError');
+// Tool-call argument parsing and validation moved with Pi 1.5 (pi-schema
+// `parse()`, `argumentsError` short-circuit, dotted error paths). The manifest
+// routes both to the installed release when one answers, so a 1.5 setup validates
+// exactly as Pi 1.5 does; the local port is the emulated-path fallback.
+export const validateToolArguments = helper('ai', 'validateToolArguments', localValidation.validateToolArguments);
+export const validateToolCall = helper('ai', 'validateToolCall', localValidation.validateToolCall);
+export const parseToolCallArguments = helper('ai', 'parseToolCallArguments');
+export const parseJsonWithRepair = helper('ai', 'parseJsonWithRepair');
+export const parseStreamingJson = helper('ai', 'parseStreamingJson');
+export const repairJson = helper('ai', 'repairJson');
+export const reduceAssistantMessageFrames = helper('ai', 'reduceAssistantMessageFrames');
+export const AssistantMessageFrameEncoder = helperClass('ai', 'AssistantMessageFrameEncoder');
+export const createFauxCore = helper('ai', 'createFauxCore');
+export const fauxProvider = helper('ai', 'fauxProvider');
+export const fauxAssistantMessage = helper('ai', 'fauxAssistantMessage');
+export const fauxText = helper('ai', 'fauxText');
+export const fauxThinking = helper('ai', 'fauxThinking');
+export const fauxToolCall = helper('ai', 'fauxToolCall');
+export const cleanupSessionResources = helper('ai', 'cleanupSessionResources');
+export const registerSessionResourceCleanup = helper('ai', 'registerSessionResourceCleanup');
+export const InMemoryModelsStore = helperClass('ai', 'InMemoryModelsStore');
+export const InMemoryCredentialStore = helperClass('ai', 'InMemoryCredentialStore');
+export const ModelsError = helperClass('ai', 'ModelsError');
 export const getImageModel = (provider, id) => inventory.IMAGE_MODELS[provider]?.[id];
 export const getImageModels = provider => Object.values(inventory.IMAGE_MODELS[provider] ?? {});
 export const getImageProviders = () => Object.keys(inventory.IMAGE_MODELS).filter(provider => getImageModels(provider).length);
@@ -78,12 +85,12 @@ export const bedrockConverseStreamApi = refused('pi-ai.bedrockConverseStreamApi'
 export const createModels = refused('pi-ai.createModels');
 export const createProvider = refused('pi-ai.createProvider');
 export const defaultProviderAuthContext = refused('pi-ai.defaultProviderAuthContext');
-export const findEnvKeys = localFunction('ai', 'env-api-keys.js', 'findEnvKeys');
+export const findEnvKeys = helper('ai', 'findEnvKeys');
 export const generateImages = refused('pi-ai.generateImages');
 export const generateImagesOpenRouter = refused('pi-ai.generateImagesOpenRouter');
 export const getApiProvider = refused('pi-ai.getApiProvider');
 export const getApiProviders = refused('pi-ai.getApiProviders');
-export const getEnvApiKey = localFunction('ai', 'env-api-keys.js', 'getEnvApiKey');
+export const getEnvApiKey = helper('ai', 'getEnvApiKey');
 export const getImagesApiProvider = refused('pi-ai.getImagesApiProvider');
 export const googleGenerativeAIApi = refused('pi-ai.googleGenerativeAIApi');
 export const googleVertexApi = refused('pi-ai.googleVertexApi');

@@ -451,6 +451,13 @@ pub struct Cli {
         num_args = 1..
     )]
     pub enable_extensions: Vec<String>,
+    /// Ignore every enabled extension for this invocation, like Pi's
+    /// `--no-extensions` (`-ne`). The saved `enabled_extensions` list, project
+    /// layers and Pi codemode activation are all ignored; nothing is written to
+    /// config. Combining it with `--enable-extension` is refused rather than
+    /// silently picking a winner.
+    #[arg(long = "no-extensions", conflicts_with = "enable_extensions")]
+    pub no_extensions: bool,
     /// Explicit invocation-only trust (comma-separated); full access already
     /// trusts selected extensions. Does not enable them; grants host process
     /// authority for the selected source even under safe mode.
@@ -505,6 +512,19 @@ pub struct Cli {
     /// Disable all command execution (process execution is shell-equivalent authority).
     #[arg(long)]
     pub no_shell: bool,
+    /// Accepted from Pi's CLI surface and does nothing here: octet selects no
+    /// theme at all unless `--theme` names one, so there is no theme to disable.
+    ///
+    /// ACP bridges such as pi-acp spawn the agent with Pi's whole flag surface.
+    /// A surface-reducing flag that octet cannot fail on must not be a fatal
+    /// spawn error, because the editor only reports "agent failed to start".
+    #[arg(long)]
+    pub no_themes: bool,
+    /// Accepted from Pi's CLI surface and does nothing here: skills are only
+    /// loaded from explicit `--skill-dir` paths and workspace resources, and
+    /// `--no-tools` already removes the skill tools.
+    #[arg(long)]
+    pub no_skills: bool,
     /// Explicitly enable command execution (overrides a disabling user setting).
     #[arg(long)]
     pub allow_shell: bool,
@@ -604,6 +624,10 @@ struct ConfigLayer {
     reload_host: Option<bool>,
     telemetry: Option<PathBuf>,
     enabled_extensions: Option<Vec<String>>,
+    /// User-level explicit off list. Applied after every activation source,
+    /// including the mirrored Pi `defaultTools` preference, so the
+    /// `/extensions` toggle survives the next launch.
+    disabled_extensions: Option<Vec<String>>,
     trusted_extensions: Option<Vec<String>>,
     system_prompt: Option<String>,
     compaction: Option<CompactionLayer>,
@@ -658,6 +682,7 @@ impl ConfigLayer {
         override_some!(reload_host);
         override_some!(telemetry);
         override_some!(enabled_extensions);
+        override_some!(disabled_extensions);
         override_some!(trusted_extensions);
         override_some!(system_prompt);
         match (self.compaction.as_mut(), newer.compaction) {
@@ -776,6 +801,9 @@ impl ConfigLayer {
         // interactive cycling scope is likewise a user-level preference.
         let trusted_extensions = self.trusted_extensions.clone();
         project.trusted_extensions = None;
+        // The explicit off list is a user-config decision; a project layer may
+        // neither silence an extension nor resurrect one the user switched off.
+        project.disabled_extensions = None;
         let scoped_models = self.models.clone();
         project.models = None;
         project.tui_mode = None;
@@ -789,7 +817,7 @@ impl ConfigLayer {
 }
 
 const PI_SETTINGS_BYTES: usize = 64 * 1024;
-const CODEMODE_EXTENSION: &str = "octet-codemode";
+pub(crate) const CODEMODE_EXTENSION: &str = "octet-codemode";
 
 fn pi_agent_dir() -> Option<PathBuf> {
     for name in ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"] {
@@ -875,6 +903,46 @@ pub(crate) fn apply_pi_codemode_settings(
     );
 }
 
+static PI_CODEMODE_MIRRORED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this launch mirrored Pi's own codemode preference into activation.
+/// The `/extensions` menu stays authoritative either way: the mirrored entry is
+/// an ordinary enable that the user's explicit off list outranks.
+pub(crate) fn pi_codemode_mirrored() -> bool {
+    PI_CODEMODE_MIRRORED.load(Ordering::Relaxed)
+}
+
+/// Apply one interactive toggle to the effective activation list.
+///
+/// The persisted user list is not the effective list: other sources (a project
+/// layer, `--enable-extension`, the mirrored Pi preference) contribute names the
+/// saved file never mentions, and a saved name may be switched off through
+/// `disabled_extensions`. Rewriting the whole list from the saved file would
+/// silently change unrelated extensions, so only `name` moves here.
+pub(crate) fn apply_extension_toggle(config: &mut Config, name: &str, enabled: bool) {
+    config.enabled_extensions.retain(|active| active != name);
+    if enabled {
+        config.enabled_extensions.push(name.to_owned());
+    }
+    config.disabled_extensions.retain(|disabled| disabled != name);
+    if !enabled {
+        config.disabled_extensions.push(name.to_owned());
+    }
+}
+
+/// Apply the activation decisions the user makes directly in octet, after every
+/// other source. `--no-extensions` is authoritative for one invocation, and the
+/// saved off list outranks project, environment, CLI and mirrored Pi activation
+/// so a disabled extension stays disabled on the next launch.
+pub(crate) fn apply_native_extension_activation(config: &mut Config, no_extensions: bool) {
+    if no_extensions {
+        config.enabled_extensions.clear();
+    }
+    config
+        .enabled_extensions
+        .retain(|name| !config.disabled_extensions.iter().any(|off| off == name));
+}
+
 fn apply_pi_codemode_values(
     config: &mut Config,
     global: Option<serde_json::Value>,
@@ -883,6 +951,7 @@ fn apply_pi_codemode_values(
     explicit_flags: &BTreeSet<(String, String)>,
     resolver: &ResourceResolver,
 ) {
+    PI_CODEMODE_MIRRORED.store(false, Ordering::Relaxed);
     let project = project.filter(|_| project_trusted);
     let active = pi_default_tools(global.as_ref(), project.as_ref())
         .iter()
@@ -914,8 +983,7 @@ fn apply_pi_codemode_values(
         return;
     }
     config.enabled_extensions = candidate.enabled_extensions;
-    // Pi preferences, not saved native activation, now participate in next launch.
-    config.extension_activation_overridden = true;
+    PI_CODEMODE_MIRRORED.store(true, Ordering::Relaxed);
 
     let mut mode = None;
     let mut inline_budget = None;
@@ -1274,12 +1342,40 @@ fn persist_extension_enabled_to_path(
             names.insert(normalize_extension_name(value)?);
         }
     }
+    // The off list is what makes a menu Disable durable: absence from
+    // `enabled_extensions` alone cannot outrank project, CLI or mirrored Pi
+    // activation, and the next launch would silently enable it again.
+    let mut disabled = std::collections::BTreeSet::new();
+    if let Some(item) = document.get("disabled_extensions") {
+        let values = item.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot update config {}: disabled_extensions must be an array of names",
+                path.display()
+            )
+        })?;
+        for value in values {
+            let value = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot update config {}: disabled_extensions must contain only strings",
+                    path.display()
+                )
+            })?;
+            disabled.insert(normalize_extension_name(value)?);
+        }
+    }
     let changed = if enabled {
-        names.insert(name)
+        let enabled_changed = names.insert(name.clone());
+        enabled_changed | disabled.remove(&name)
     } else {
-        names.remove(&name)
+        let enabled_changed = names.remove(&name);
+        enabled_changed | disabled.insert(name)
     };
-    if !changed && document.contains_key("enabled_extensions") {
+    // Skipping the write must not drop a decision the file cannot express yet:
+    // a mirrored extension is missing from `enabled_extensions`, so its off
+    // entry is new even though no saved name changed.
+    let persisted = document.contains_key("enabled_extensions")
+        && document.contains_key("disabled_extensions") == !disabled.is_empty();
+    if !changed && persisted {
         return Ok(names.into_iter().collect());
     }
 
@@ -1288,6 +1384,15 @@ fn persist_extension_enabled_to_path(
         values.push(name.as_str());
     }
     document["enabled_extensions"] = toml_edit::value(values);
+    if disabled.is_empty() {
+        document.remove("disabled_extensions");
+    } else {
+        let mut values = toml_edit::Array::new();
+        for name in &disabled {
+            values.push(name.as_str());
+        }
+        document["disabled_extensions"] = toml_edit::value(values);
+    }
     write_config_atomically(path, &document.to_string(), original.as_deref())?;
     Ok(names.into_iter().collect())
 }
@@ -1766,6 +1871,8 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         reload_max_files: None,
         reload_host: None,
         enabled_extensions: env_value("OCTET_EXTENSIONS").map(split_names),
+        // The explicit off list is a persisted user decision, never environment.
+        disabled_extensions: None,
         trusted_extensions: env_value("OCTET_TRUSTED_EXTENSIONS").map(split_names),
         system_prompt: env_value("OCTET_SYSTEM_PROMPT"),
         compaction: (compaction_mode.is_some()
@@ -1820,13 +1927,14 @@ fn build_config_with_global_path_and_diagnostics(
 ) -> anyhow::Result<Config> {
     let invocation_cwd = cwd.canonicalize()?;
     let workspace = config::resolve_workspace(cli.workspace.as_deref(), &invocation_cwd)?;
-    if !invocation_cwd.starts_with(&workspace) {
-        anyhow::bail!(
-            "invocation directory {} is outside workspace {}",
-            invocation_cwd.display(),
-            workspace.display()
-        );
-    }
+    // An explicitly selected workspace is also the base for relative paths
+    // when the shell was launched elsewhere. Never scan the outside directory
+    // as project context or grant trust merely because it was selected.
+    let invocation_cwd = if cli.workspace.is_some() && !invocation_cwd.starts_with(&workspace) {
+        workspace.clone()
+    } else {
+        invocation_cwd
+    };
 
     // An explicit --extension-dir that does not exist almost always means a setup
     // step did not complete (for example a Pi mirror that was previewed but never
@@ -2245,6 +2353,7 @@ fn build_config_with_global_path_and_diagnostics(
     let mut enabled_extensions = values.enabled_extensions.unwrap_or_default();
     enabled_extensions.extend(cli.enable_extensions);
     let enabled_extensions = normalize_extension_names(enabled_extensions)?;
+    let disabled_extensions = normalize_extension_names(values.disabled_extensions.unwrap_or_default())?;
     let trusted_extensions =
         normalize_extension_trust_grants(values.trusted_extensions.unwrap_or_default())?;
     let invocation_trusted_extensions = normalize_extension_names(cli.trust_extensions)?;
@@ -2301,6 +2410,7 @@ fn build_config_with_global_path_and_diagnostics(
         skill_paths: cli.skill_dirs,
         extension_paths: cli.extension_dirs,
         enabled_extensions,
+        disabled_extensions,
         extension_activation_overridden,
         trusted_extensions,
         invocation_trusted_extensions,

@@ -158,7 +158,7 @@ pub(super) fn tool_value_indent(label: &str) -> String {
 
 /// Bound tool input only after sanitization and width-dependent wrapping.
 /// The retained display value and semantic copy remain complete for Ctrl+O.
-const COMPACT_TOOL_INPUT_ROWS: usize = 6;
+const COMPACT_TOOL_INPUT_ROWS: usize = 12;
 
 pub(super) fn tool_input_preview(
     mut rows: Vec<String>,

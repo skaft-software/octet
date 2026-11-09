@@ -344,6 +344,16 @@ pub const MAX_EXTENSION_TERMINAL_GRANT_ID_BYTES: usize = 128;
 /// A declared session hook is a bounded lifecycle finalizer, never a request-path interceptor.
 pub(super) const SESSION_HOOK_DEADLINE: Duration = Duration::from_millis(250);
 
+/// Transport deadline for a prompt phase Pi awaits directly.
+///
+/// Pi runs `input`, `before_agent_start` and context collection until the handler
+/// settles, so Octet must not answer for the extension while it is still working.
+/// This is not an unbounded wait: cancellation, owner/generation fences, process
+/// supervision and a dead-process error still end it. The value only has to be
+/// far beyond any legitimate handler wait so the transport never substitutes for
+/// Pi's own semantics.
+pub(super) const PROMPT_HOOK_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Maximum UTF-8 prompt bytes admitted by an API `0.2` input request.
 pub const MAX_EXTENSION_INPUT_PROMPT_BYTES: usize = 16 * 1024;
 

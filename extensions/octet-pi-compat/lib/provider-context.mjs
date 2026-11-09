@@ -99,11 +99,20 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
         }
         if (kind === 'Reasoning') {
           record(value, ['text', 'state'], 'canonical reasoning');
+          // A read-only observer (a Pi tool-call guard, a status extension) needs
+          // the visible reasoning, never the provider's opaque continuation. When
+          // history contains a message produced by a different model or protocol,
+          // that continuation cannot be represented losslessly — dropping the
+          // signature keeps the observation working. Replay and projection stay
+          // strict: they must never alter provider continuation state.
+          const observedOnly = observation && !replay;
+          const observedThinking = () => ({ type: 'thinking', thinking: value.text === null ? '' : text(value.text) });
           // Context projection may retain native state through unchanged provenance;
           // ordinary Pi-to-native conversion cannot invent opaque continuations.
           const observedState = (observation || replay) && value.state != null ? variant(record(value.state, ['protocol', 'model', 'kind'], 'context opaque reasoning').kind, 'reasoning state kind') : null;
           if ((observation || replay) && observedState?.[0] === 'OpenAiReasoning') {
             if (replay && (body.protocol !== 'open_ai_responses' || value.state.protocol !== body.protocol || value.state.model !== body.model)) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            if (observedOnly && (body.protocol !== 'open_ai_responses' || value.state.protocol !== body.protocol || value.state.model !== body.model)) return observedThinking();
             // Read-only observation: Pi 1.0.2's Responses provider keeps the
             // summary text (or "") and stores the reasoning item as signature.
             // Native optional IDs stay absent, never invented or coerced to text.
@@ -113,21 +122,33 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
               thinkingSignature: JSON.stringify({ type: 'reasoning', ...(item.item_id == null ? {} : { id: text(item.item_id) }), ...(item.encrypted_content == null ? {} : { encrypted_content: text(item.encrypted_content) }), summary }) };
           }
           if ((observation || replay) && observedState?.[0] === 'AnthropicRedacted' && body.protocol === 'anthropic_messages') {
-            if (value.state.protocol !== body.protocol || value.state.model !== body.model) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            if (value.state.protocol !== body.protocol || value.state.model !== body.model) {
+              if (observedOnly) return observedThinking();
+              unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            }
             const item = record(observedState[1], ['data'], 'Anthropic redacted reasoning state');
             // Pi 1.0.2 displays this marker, with opaque data kept as a redacted
             // signature, not ordinary signed thinking. Only unchanged native
             // context provenance authorizes its replay.
             return { type: 'thinking', thinking: '[Reasoning redacted]', thinkingSignature: text(item.data), redacted: true };
           }
-          if (value.text === null) unsupported('context absent reasoning text', 'cannot replace absent text with an invented empty string');
+          if (value.text === null) {
+            if (observedOnly) return observedThinking();
+            unsupported('context absent reasoning text', 'cannot replace absent text with an invented empty string');
+          }
           const thinking = { type: 'thinking', thinking: text(value.text) };
           if (value.state != null) {
             const state = record(value.state, ['protocol', 'model', 'kind'], 'context opaque reasoning');
             if (!['anthropic_messages', 'bedrock_converse'].includes(body.protocol)
-                || state.protocol !== body.protocol || state.model !== body.model) unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+                || state.protocol !== body.protocol || state.model !== body.model) {
+              if (observedOnly) return observedThinking();
+              unsupported('context opaque reasoning continuation', 'signature producer must match the assistant');
+            }
             const [kind, signature] = variant(state.kind, 'reasoning state kind');
-            if (kind !== 'AnthropicSignature') unsupported('context opaque reasoning continuation', 'no lossless Pi signature binding for this state');
+            if (kind !== 'AnthropicSignature') {
+              if (observedOnly) return observedThinking();
+              unsupported('context opaque reasoning continuation', 'no lossless Pi signature binding for this state');
+            }
             record(signature, ['signature'], 'reasoning signature');
             thinking.thinkingSignature = text(signature.signature);
           }

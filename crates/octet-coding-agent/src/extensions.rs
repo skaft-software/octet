@@ -170,7 +170,6 @@ const MAX_PENDING_CONTEXT_ITEMS: usize = 256;
 const MAX_DIAGNOSTIC_ENTRY_BYTES: usize = 8 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 256 * 1024;
 const MAX_DIAGNOSTIC_ENTRIES: usize = 256;
-const PROMPT_RPC_DEADLINE: Duration = Duration::from_secs(5);
 /// How long a prompt waits for an extension still starting its session before
 /// continuing without it: long enough for a slow factory, short enough that a
 /// stalled one never holds the prompt.
@@ -598,6 +597,7 @@ impl ExecutableExtensions {
             .map(|(name, reason)| startup_failure_notice(name, reason))
             .collect()
     }
+
 }
 
 fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {

@@ -381,9 +381,16 @@ test('Anthropic redacted observations match Pi without becoming replayable signe
   for (const messages of [observed, structuredClone(observed)]) assert.throws(() => piToCanonical(messages), {
     code: -32601, message: /^unsupported_feature Pi thinking part.redacted:/,
   });
+  // A read-only observer keeps the visible reasoning and drops the opaque
+  // continuation it cannot represent (a Pi tool-call guard must not fail closed
+  // on historical messages from another model). Replay stays strict.
   for (const patch of [{ protocol: 'open_ai_responses' }, { model: 'foreign-model' }]) {
     const foreign = structuredClone(native); Object.assign(foreign[0].Assistant.content[0].Reasoning.state, patch);
-    assert.throws(() => canonicalToPi(foreign, new Map(), { observation: true }), { code: -32601, message: /signature producer must match/ });
+    const observedForeign = canonicalToPi(foreign, new Map(), { observation: true });
+    const thinking = observedForeign[0].content.find(part => part.type === 'thinking');
+    assert.ok(thinking, JSON.stringify(observedForeign));
+    assert.equal(thinking.thinkingSignature, undefined, 'observation must not carry a foreign signature');
+    assert.throws(() => canonicalToPi(foreign, new Map(), { replay: true }), { code: -32601, message: /signature producer must match/ });
   }
   const malformed = structuredClone(native); malformed[0].Assistant.content[0].Reasoning.state.kind.AnthropicRedacted.data = null;
   assert.throws(() => canonicalToPi(malformed, new Map(), { observation: true }), { code: -32602, message: /context text must be UTF-8 text/ });

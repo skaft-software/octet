@@ -1,3 +1,23 @@
+// Pi 1.5.0 tool-argument validation, adapted from
+// packages/ai/src/utils/validation.ts (reference v1.5.0, 9c9ce8547).
+//
+// Pi 1.5 replaced TypeBox's validator with pi-schema:
+//   - a tool call carrying `argumentsError` fails before any schema work, with
+//     `Invalid arguments for tool "<name>": <argumentsError>`;
+//   - arguments are cloned, coerced (`parse()`, coerce: true) and then checked,
+//     so a valid call never surfaces an error for a value coerce handles;
+//   - failures list pi-schema's messages (`- edits.0.oldText: missing`,
+//     `- limit: expected number, got string`) with dotted JSON-pointer paths.
+//
+// This port keeps the same observable contract on the emulated path, where no
+// installed Pi answers. Where a supported installed Pi is present the shim
+// prefers Pi's own dist/utils/validation.js instead (see shims/ai.mjs and the
+// manifest classification), so the schema engine itself is Pi's. The two
+// documented differences from pi-schema are deliberate and invisible to valid
+// arguments: TypeBox-only features (Refine, Codec, BigInt/Undefined/Void,
+// Format.Set) do not apply to a plain JSON Schema tool, and a keyword this
+// mapping does not name falls back to TypeBox's own message text.
+
 import { Compile } from "typebox/compile";
 import { Value } from "typebox/value";
 const validatorCache = new WeakMap();
@@ -244,17 +264,98 @@ function getValidator(schema) {
     validatorCache.set(key, validator);
     return validator;
 }
-function formatValidationPath(error) {
-    if (error.keyword === "required") {
-        const requiredProperties = error.params.requiredProperties;
-        const requiredProperty = requiredProperties?.[0];
-        if (requiredProperty) {
-            const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-            return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
-        }
+const LISTED_VALUES = 4;
+const listValues = values => {
+    if (values.length <= LISTED_VALUES) {
+        return JSON.stringify(values);
     }
-    const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-    return path || "root";
+    return `${JSON.stringify(values.slice(0, LISTED_VALUES)).slice(0, -1)}, ... and ${values.length - LISTED_VALUES} more]`;
+};
+// pi-schema explain.ts typeName().
+function typeName(value) {
+    if (value === null) {
+        return "null";
+    }
+    if (Array.isArray(value)) {
+        return "array";
+    }
+    if (value instanceof Uint8Array) {
+        return "bytes";
+    }
+    if (typeof value === "number" && Number.isInteger(value)) {
+        return "integer";
+    }
+    return typeof value;
+}
+function valueAtPointer(root, pointer) {
+    if (!pointer) {
+        return root;
+    }
+    let value = root;
+    for (const raw of pointer.split("/").slice(1)) {
+        const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+        if (value === null || typeof value !== "object") {
+            return undefined;
+        }
+        value = value[key];
+    }
+    return value;
+}
+// A pi-schema error path (a JSON Pointer) as the dotted path the model sees:
+// `/edits/0/oldText` -> `edits.0.oldText`.
+function formatValidationPath(pointer) {
+    if (!pointer) {
+        return "root";
+    }
+    return pointer
+        .slice(1)
+        .split("/")
+        .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"))
+        .join(".");
+}
+// pi-schema explain.ts messages, so a failure reads the way Pi 1.5 reports it.
+function piSchemaErrors(error, args) {
+    switch (error.keyword) {
+        case "required": {
+            const properties = error.params.requiredProperties ?? [];
+            return { path: `${error.instancePath}/${properties[0] ?? ""}`, message: "missing" };
+        }
+        case "type": {
+            const expected = error.params.type;
+            const types = Array.isArray(expected) ? expected.join(" or ") : String(expected);
+            return { path: error.instancePath, message: `expected ${types}, got ${typeName(valueAtPointer(args, error.instancePath))}` };
+        }
+        case "enum":
+            return { path: error.instancePath, message: `expected one of ${listValues(error.params.allowedValues ?? [])}` };
+        case "const":
+            return { path: error.instancePath, message: `expected ${JSON.stringify(error.params.allowedValue)}` };
+        case "additionalProperties":
+            return (error.params.additionalProperties ?? []).map((key) => ({ path: `${error.instancePath}/${key}`, message: "unknown field" }));
+        case "minLength":
+            return { path: error.instancePath, message: `expected at least ${error.params.limit} characters` };
+        case "maxLength":
+            return { path: error.instancePath, message: `expected at most ${error.params.limit} characters` };
+        case "pattern":
+            return { path: error.instancePath, message: `expected to match ${error.params.pattern}` };
+        case "format":
+            return { path: error.instancePath, message: `expected format ${error.params.format}` };
+        case "minimum":
+            return { path: error.instancePath, message: `expected >= ${error.params.limit}` };
+        case "maximum":
+            return { path: error.instancePath, message: `expected <= ${error.params.limit}` };
+        case "multipleOf":
+            return { path: error.instancePath, message: `expected a multiple of ${error.params.multipleOf}` };
+        case "minItems":
+            return { path: error.instancePath, message: `expected at least ${error.params.limit} items` };
+        case "maxItems":
+            return { path: error.instancePath, message: `expected at most ${error.params.limit} items` };
+        case "minProperties":
+            return { path: error.instancePath, message: `expected at least ${error.params.limit} properties` };
+        case "maxProperties":
+            return { path: error.instancePath, message: `expected at most ${error.params.limit} properties` };
+        default:
+            return { path: error.instancePath, message: error.message };
+    }
 }
 
 export function validateToolCall(tools, toolCall) {
@@ -266,6 +367,9 @@ export function validateToolCall(tools, toolCall) {
 }
 
 export function validateToolArguments(tool, toolCall) {
+    if (toolCall.argumentsError) {
+        throw new Error(`Invalid arguments for tool "${toolCall.name}": ${toolCall.argumentsError}`);
+    }
     const args = structuredClone(toolCall.arguments);
     normalizeOptionalNulls(args, tool.parameters);
     Value.Convert(tool.parameters, args);
@@ -289,7 +393,10 @@ export function validateToolArguments(tool, toolCall) {
     }
     const errors = validator
         .Errors(args)
-        .map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
+        // pi-schema reports a rejected additional property once ("unknown
+        // field"); TypeBox also reports the false subschema it came from.
+        .filter((error) => !(error.keyword === "boolean" && error.schemaPath.endsWith("/additionalProperties")))
+        .flatMap((error) => [].concat(piSchemaErrors(error, args)).map(({ path, message }) => `  - ${formatValidationPath(path)}: ${message}`))
         .join("\n") || "Unknown validation error";
     const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
     throw new Error(errorMessage);

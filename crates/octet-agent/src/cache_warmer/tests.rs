@@ -22,6 +22,7 @@ fn model() -> Model {
         cache_write_5m: TokenRate(3_750_000),
         cache_write_1h: Some(TokenRate(6_000_000)),
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     });
     spec.cache.prompt_cache.short = Some(300);

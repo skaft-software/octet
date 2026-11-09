@@ -1,16 +1,17 @@
 // Pi 1.0.2 context facts and raw-input transforms. Rust supplies native facts;
 // Pi's no-project-resources trust signal does not change native resource admission.
 // Extension request cancellation is not a substitute for aborting the agent.
-import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { createContext } from './api.mjs';
-import { canonicalToPi, cancellable, piToCanonical } from './provider-context.mjs';
+import { cancellable } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
+import { inputImages, visibleImages } from './image-content.mjs';
 import { readPiSettings } from './pi-setup.mjs';
 import { retainPiProjectTrust } from './project-trust.mjs';
 
 function fact(runtime, store, key, api) {
   runtime.assertSessionOwner(store);
-  if (!Object.hasOwn(store.state.host, key)) unsupported(api, `authoritative ${key} snapshot required`);
+  if (!Object.hasOwn(store.state.host, key)) unsupportedAPI(api, `authoritative ${key} snapshot required`);
   return store.state.host[key];
 }
 export function contextFacts(runtime, store) {
@@ -61,19 +62,6 @@ export function getSettings(runtime, store) {
   // count only under the host's trust decision, never a Pi trust file.
   const { settings } = readPiSettings({ agentDir: runtime.config.pi_agent_dir, cwd: store.state.workspace, projectTrusted: store.state.host.project_trusted === true });
   return plainJSON(settings, 'settings', 524288);
-}
-
-function inputImages(images) {
-  if (images === undefined) return undefined;
-  if (!Array.isArray(images) || images.length > 256) invalid('input images');
-  const parts = piToCanonical([{ role: 'user', content: images }])[0].User.content;
-  if (parts.some(part => !part.Media)) invalid('input images must contain images only');
-  return parts.map(part => part.Media);
-}
-function visibleImages(media) {
-  if (media === undefined || media === null) return undefined;
-  if (!Array.isArray(media) || media.length > 256) invalid('native input images');
-  return canonicalToPi([{ User: { content: media.map(Media => ({ Media })) } }])[0].content;
 }
 
 // An independent early phase of before_prompt. Never invokes before_agent_start;

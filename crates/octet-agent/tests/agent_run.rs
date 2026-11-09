@@ -2492,6 +2492,7 @@ async fn hard_cost_ceiling_without_enforceable_input_bound_refuses_before_dispat
         cache_write_5m: TokenRate(1_000_000),
         cache_write_1h: Some(TokenRate(1_000_000)),
         reasoning: Some(TokenRate(1_000_000)),
+        windows: Default::default(),
         tiers: vec![],
     });
     model.spec = Arc::new(spec);
@@ -2740,6 +2741,7 @@ async fn repeated_context_rejection_advances_compaction_without_spending_turns()
         cache_write_5m: TokenRate(1_000_000),
         cache_write_1h: Some(TokenRate(1_000_000)),
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     });
     let mut agent = Agent::new(AgentConfig {
@@ -8236,6 +8238,7 @@ fn recovery_codex_model(uri: &str) -> Model {
         cache_write_5m: TokenRate(1),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     });
     Arc::make_mut(&mut model.endpoint).runtime.responses_profile =

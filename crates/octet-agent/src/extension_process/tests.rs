@@ -2,6 +2,51 @@ use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+#[test]
+fn session_hook_start_retains_only_safe_failure_metadata_after_attempt_finishes() {
+    let private = "private exception /secret/path token=do-not-publish\u{001b}[31m";
+    let outcome = Arc::new(SessionHookStartOutcome::default());
+    let attempt = SessionHookStartAttempt(outcome.clone());
+    attempt.finish(&Err(ExtensionRuntimeError::Remote {
+        code: -32602,
+        message: private.into(),
+        data: Some(serde_json::json!({"private": private})),
+    }));
+    assert!(!outcome.succeeded());
+    assert_eq!(outcome.failure(), None, "an active wait is not settled");
+    drop(attempt);
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.failure().as_deref(),
+        Some("remote_error, code=-32602")
+    );
+    for error in [
+        ExtensionRuntimeError::Protocol(private.into()),
+        ExtensionRuntimeError::Closed(private.into()),
+        ExtensionRuntimeError::Cancelled {
+            method: "hook/run".into(),
+            reason: private.into(),
+        },
+    ] {
+        let summary = session_hook_failure_summary(&error);
+        assert!(!summary.contains(private));
+        assert!(!summary.contains("do-not-publish"));
+    }
+    let abandoned = Arc::new(SessionHookStartOutcome::default());
+    drop(SessionHookStartAttempt(abandoned.clone()));
+    assert!(
+        !abandoned.succeeded(),
+        "dropping a wait cannot imply success"
+    );
+    assert_eq!(abandoned.failure(), None, "no invented failure result");
+    let successful = Arc::new(SessionHookStartOutcome::default());
+    let attempt = SessionHookStartAttempt(successful.clone());
+    attempt.finish(&Ok(()));
+    drop(attempt);
+    assert!(successful.succeeded());
+    assert_eq!(successful.failure(), None);
+}
+
 #[path = "agent_sessions/tests.rs"]
 mod agent_sessions;
 #[path = "builtin_override_tests.rs"]
