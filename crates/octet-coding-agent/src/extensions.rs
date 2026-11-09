@@ -188,6 +188,10 @@ const MAX_LIVE_REGISTRATION_NOTICES: usize = 8;
 /// Total per-extension deadline for the typed post-mutation hook. A timeout
 /// drops only that extension's rescan request after the host mutation settled.
 const POST_MUTATION_RPC_DEADLINE: Duration = Duration::from_millis(250);
+/// Post-reload notifications go to processes that were just started; their
+/// first reply can miss the warm-process deadline on a loaded machine, which
+/// silently dropped the reload's rescan. Still bounded.
+const POST_RELOAD_MUTATION_RPC_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_SEEN_POST_MUTATION_IDS: usize = 256;
 const MAX_PENDING_POST_MUTATION_RESCANS: usize = 256;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);

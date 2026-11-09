@@ -1708,7 +1708,9 @@ impl ExecutableExtensions {
         self.await_reloaded_provider_registrations(&reloaded).await;
         self.complete_provider_reload(Some(&reloaded));
         for mutation in completed_mutations {
-            let rescans = self.notify_post_mutation(mutation).await;
+            let rescans = self
+                .notify_post_mutation_within(mutation, POST_RELOAD_MUTATION_RPC_DEADLINE)
+                .await;
             output.details.extend(rescans.into_iter().map(|request| {
                 format!(
                     "extension {:?} requested bounded rescan of {} resource(s)",
