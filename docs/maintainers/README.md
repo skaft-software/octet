@@ -5,10 +5,9 @@ for octet: prompt templates, `release`, `add-provider`, and
 `interactive-testing` skills, and agent conventions in
 [`conventions.md`](conventions.md).
 
-[`conventions.md`](conventions.md) is the tracked mirror of the repository-root
-agent conventions. The working `AGENTS.md` at the root stays local-only
-(`.gitignore` excludes it with the other agent-instruction and runtime-state
-files), so the mirror is what a fresh clone reads. Update both together.
+[AGENTS.md](../../AGENTS.md) is the tracked source of repository agent
+conventions, available in every clone and worktree. `CLAUDE.md` imports it;
+[`conventions.md`](conventions.md) points to it rather than duplicating the rules.
 
 `.octet/` is gitignored (it is local agent state), so these files are the source
 of truth. Activate a copy for your checkout:
