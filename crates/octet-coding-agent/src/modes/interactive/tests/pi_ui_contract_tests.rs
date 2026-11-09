@@ -408,6 +408,18 @@ export default function(pi) {
     shell.set_size(80, 24);
     let run = shell.begin_run("offline-test");
     command(&mut app, &mut shell, "chrome").await.unwrap();
+    // Chrome setters are coalesced and delivered after the command settles,
+    // as Pi's local setters are; wait for that delivery rather than racing it.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while shell.extension_window_title() != "NATIVE-PI-TITLE" {
+            for message in app.executable_extensions.drain_events_for_shell(&mut shell) {
+                shell.notice(message);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal title delivery");
     assert_eq!(shell.extension_window_title(), "NATIVE-PI-TITLE");
     let visible = rendered(&mut shell).await;
     assert_eq!(
