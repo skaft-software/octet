@@ -585,11 +585,12 @@ and correctness markers; their current deadline assertions are not latency
 distributions. Respect synchronized-output frame boundaries and distinguish
 application-handled input from terminal line-discipline echo.
 
-Octet/Pi can replay Chat Completions SSE; Codex needs Responses SSE. A fair
-cross-protocol fixture preserves semantic bytes, fragment boundaries, and
-schedule, not identical wire bytes. Qualify OpenCode's selected SDK/base URL and
-Claude's Anthropic Messages/onboarding/auxiliary-request behavior before adding
-their results. Package strings alone do not verify a working configuration.
+The replay fixture speaks Chat Completions SSE or Responses SSE, whichever the
+client under test requires. A fair cross-protocol fixture preserves semantic
+bytes, fragment boundaries, and
+schedule, not identical wire bytes. Qualify another client's selected SDK/base
+URL and its Anthropic Messages/onboarding/auxiliary-request behavior before
+adding its results. Package strings alone do not verify a working configuration.
 Unexpected discovery/title/compaction/retry requests must be classified, never
 silently consume the next answer fixture. Inject load by elapsed time, not UI
 acknowledgments, so slow consumers are not accidentally given less work. Record

@@ -1,10 +1,10 @@
 # Distribution channels
 
-The [version-pinned v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+The [version-pinned v0.10.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
 records actual channel availability, immutable assets, signatures and source
-qualification. The [release notes](releases/v0.10.0.md) describe octet's first
-Pi-compatible launch. Native binaries and the six optional extension bundles
-are separate downloads; installation never enables an extension.
+qualification. The [0.10.0 release notes](releases/v0.10.0.md) describe octet's
+first Pi-compatible launch. Native binaries and the six optional extension
+bundles are separate downloads; installation never enables an extension.
 
 The planned npm channel is `@skaft/octet@0.10.3` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
@@ -39,8 +39,8 @@ Current extension authoring and the six bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
-runtime. The minimal canonical process example and independent Aider adapter
-keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter targets its documented public API;
+runtime. The minimal canonical process example keeps version `0.1.0` with exact
+`=0.8.0` host pins. The Pi adapter targets its documented public API;
 individual coverage is recorded in the [API ledger](pi-extension-api.md). Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
 Installation/discovery are inert. Enabling the stock bridge automatically mirrors
 and runs enabled Pi factories with OS permissions; native credential disclosure
@@ -100,16 +100,14 @@ aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.10.3 is not published to npm.** Only
-after verified publication, pin the version to reproduce one exact release:
-
-```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.3
-```
-
-`npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
-installation of an exact version. Published versions are immutable,
-so a pinned install can't be silently replaced.
+and registry provenance verification. **0.10.3 is not published to npm.** No
+0.10.x package exists yet, so this page gives no npm install command: use the
+version-pinned native release that [installation](installation.md) describes.
+Only after verified publication does the pinned `@skaft/octet@0.10.3` reproduce
+exactly one release; the `latest` dist-tag would track whichever version npm
+publishes as current, which is not an installation of an exact version.
+Published versions are immutable, so a pinned install can't be silently
+replaced.
 
 ## Unsigned dogfood candidates
 
