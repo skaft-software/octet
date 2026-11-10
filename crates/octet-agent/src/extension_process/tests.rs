@@ -5339,7 +5339,10 @@ pub(crate) async fn settle_session_hook_after_delivery(
     session_id: &str,
     outcome: ExtensionLifecycleOutcome,
 ) {
-    match process.settle_session_hook_binding(session_id, outcome).await {
+    match process
+        .settle_session_hook_binding(session_id, outcome)
+        .await
+    {
         Ok(()) => {}
         Err(ExtensionRuntimeError::Timeout { method }) if method == methods::HOOK_RUN => {}
         Err(error) => panic!("session settlement failed: {error}"),

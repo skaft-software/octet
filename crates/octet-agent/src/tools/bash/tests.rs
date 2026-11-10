@@ -944,8 +944,12 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
         error.message.contains("output drain abandoned") || error.message.contains("timeout"),
         "{error}"
     );
+    // The escaped holder sleeps 30 s; a defeated deadline would take that long.
+    // The product budget is the 100 ms limit plus a 500 ms drain, so this bound
+    // only has to separate "bounded" from "waited for the holder" even when
+    // spawning python3 is slow on a loaded machine.
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(15),
         "escaped pipe holder defeated the deadline"
     );
 }
