@@ -8,6 +8,55 @@ use octet_ai::{
 use tempfile::TempDir;
 
 #[test]
+fn hook_failure_keeps_host_refusals_fatal_and_handler_errors_recoverable() {
+    for code in [-32002, -32601, -32602, -32000, -32800] {
+        let error = hook_failure(ExtensionRuntimeError::Remote {
+            code,
+            message: "secret-bearing remote detail".into(),
+            data: Some(serde_json::json!({"session":"private"})),
+        });
+        match code {
+            -32002 => assert!(matches!(error, ProviderContextHookError::Refused)),
+            -32800 => assert!(matches!(error, ProviderContextHookError::Cancelled)),
+            _ => assert!(matches!(error, ProviderContextHookError::Failed(reason)
+                if reason == "process context hook failed")),
+        }
+    }
+    for error in [
+        ExtensionRuntimeError::Timeout {
+            method: "hook/run".into(),
+        },
+        ExtensionRuntimeError::Closed("private transport detail".into()),
+    ] {
+        assert!(
+            matches!(hook_failure(error), ProviderContextHookError::Failed(reason)
+            if !reason.contains("private"))
+        );
+    }
+    assert!(matches!(
+        hook_failure(ExtensionRuntimeError::Cancelled {
+            method: "hook/run".into(),
+            reason: "private cancellation detail".into(),
+        }),
+        ProviderContextHookError::Cancelled
+    ));
+}
+
+#[test]
+fn hook_failure_refuses_native_protocol_and_unrecognized_native_errors() {
+    for error in [
+        ExtensionRuntimeError::Protocol("private session-lease authority failure".into()),
+        ExtensionRuntimeError::MessageTooLarge { limit: 1 },
+        ExtensionRuntimeError::Untrusted("private extension".into()),
+    ] {
+        assert!(
+            matches!(hook_failure(error), ProviderContextHookError::Refused),
+            "an unrecognized native error must be Refused, never a skippable Failed"
+        );
+    }
+}
+
+#[test]
 fn activation_refusal_mapping_is_finite_and_redacts_native_error_payloads() {
     assert_eq!(
         binding_activation_refusal(ExtensionRuntimeError::Protocol(
@@ -127,7 +176,7 @@ async fn activation_refusal_categories_reach_agent_and_persistence_without_hook_
         };
         let error = agent.complete("canonical task").await.unwrap_err();
         assert!(
-            matches!(error, crate::AgentError::ProviderContextPreparation(reason) if reason == expected)
+            matches!(&error, crate::AgentError::ProviderContextPreparation(reason) if reason.starts_with(expected))
         );
         assert!(captures.lock().unwrap().is_empty());
         let persisted = std::fs::read_to_string(agent.session().path()).unwrap();
@@ -414,13 +463,21 @@ while True:
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
-async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses_bad_projection_or_cap(
-) {
-    for case in ["valid", "invalid", "finite", "cancel", "failure", "refusal"] {
+async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolates_bad_projection() {
+    for case in [
+        "valid",
+        "invalid",
+        "finite",
+        "cancel",
+        "failure",
+        "refusal",
+        "host_refusal",
+    ] {
         let temp = TempDir::new().unwrap();
         let remote_error = match case {
             "failure" => -32000,
             "refusal" => -32602,
+            "host_refusal" => -32002,
             _ => 0,
         };
         let process = process(&temp, case == "invalid", case == "cancel", remote_error).await;
@@ -455,24 +512,66 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
         if case == "finite" {
             agent.set_max_session_cost_microdollars(Some(1_000_000));
         }
-        let result =
-            tokio::time::timeout(Duration::from_secs(10), agent.complete("canonical task"))
-                .await
-                .unwrap();
+        let mut warnings = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            if case != "failure" {
+                return agent
+                    .complete("canonical task")
+                    .await
+                    .map(|output| (output.text, output.reason));
+            }
+            let mut run = agent.prompt("canonical task").await?;
+            let mut answer = String::new();
+            let mut finished = None;
+            while let Some(event) = run.next().await {
+                match event {
+                    crate::AgentEvent::ExtensionObservationWarning { message } => {
+                        assert!(finished.is_none(), "warning must precede completion");
+                        warnings.push(message);
+                    }
+                    crate::AgentEvent::OutputDelta {
+                        channel: crate::OutputChannel::Text,
+                        text,
+                    } => answer.push_str(&text),
+                    crate::AgentEvent::RunFinished { reason, .. } => finished = Some(reason),
+                    _ => {}
+                }
+            }
+            match finished.expect("run must finish") {
+                crate::FinishReason::Failed(error) => Err(error),
+                reason => Ok((answer, reason)),
+            }
+        })
+        .await
+        .unwrap();
         match case {
-            "valid" => assert_eq!(result.unwrap().text, "answer"),
-            "failure" => assert_eq!(result.unwrap().text, "answer"),
-            "invalid" | "refusal" => assert!(matches!(
-                result,
-                Err(crate::AgentError::ProviderContextPreparation(_))
-            )),
-            "cancel" => assert!(
-                matches!(result, Ok(output) if matches!(output.reason, crate::FinishReason::Aborted))
+            // Pi isolates handler failure: a malformed projection or a validation
+            // refusal skips that extension's changes and keeps the request.
+            "valid" | "failure" | "invalid" | "refusal" => {
+                let (answer, reason) = result.unwrap();
+                assert_eq!(answer, "answer");
+                assert!(matches!(reason, crate::FinishReason::Completed));
+            }
+            "cancel" => assert!(matches!(result, Ok((_, crate::FinishReason::Aborted)))),
+            "host_refusal" => assert!(
+                matches!(
+                    &result,
+                    Err(crate::AgentError::ProviderContextPreparation(reason))
+                        if reason.starts_with("host authority refused preparation; request ")
+                            && !reason.contains("secret-bearing remote detail")
+                ),
+                "host refusal must stop preparation, got {result:?}"
             ),
             _ => assert!(matches!(
                 result,
                 Err(crate::AgentError::InputLimitUnavailable)
             )),
+        }
+        if case == "failure" {
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("context hook failed"));
+            assert!(warnings[0].contains("changes were skipped"));
+            assert!(!warnings[0].contains("secret-bearing remote detail"));
         }
         assert_eq!(
             std::fs::read_to_string(temp.path().join("hook-calls")).unwrap(),
@@ -480,7 +579,7 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
         );
         assert_eq!(
             captures.lock().unwrap().len(),
-            usize::from(matches!(case, "valid" | "failure"))
+            usize::from(matches!(case, "valid" | "failure" | "invalid" | "refusal"))
         );
         if case == "valid" {
             let request = &captures.lock().unwrap()[0];
@@ -491,17 +590,17 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_refuses
             assert!(!serde_json::to_string(&request.messages)
                 .unwrap()
                 .contains("private"));
-        } else if case == "failure" {
+        } else if matches!(case, "failure" | "invalid" | "refusal") {
             let request = &captures.lock().unwrap()[0];
             assert_eq!(request.system.as_deref(), Some("canonical system"));
             let messages = serde_json::to_string(&request.messages).unwrap();
             assert!(messages.contains("canonical task"));
             assert!(!messages.contains("effective leaf context"));
         }
-        if matches!(case, "cancel" | "invalid" | "refusal") {
+        if case == "cancel" {
             assert!(
                 captures.lock().unwrap().is_empty(),
-                "cancelled/refused hook must not dispatch provider"
+                "cancelled hook must not dispatch provider"
             );
             assert!(process.shutdown().await);
             continue;
@@ -681,9 +780,8 @@ async fn append_activation_repro_large_history_fails_before_hook_and_provider_wi
         .unwrap();
     assert!(matches!(
         result,
-        Err(crate::AgentError::ProviderContextPreparation(
-            "session_snapshot_too_large"
-        ))
+        Err(crate::AgentError::ProviderContextPreparation(reason))
+            if reason.starts_with("session_snapshot_too_large")
     ));
     assert!(captures.lock().unwrap().is_empty(), "no inference occurred");
     assert!(
@@ -817,9 +915,8 @@ async fn append_activation_repro_scoped_child_conflicts_with_parent_even_without
         .unwrap();
     assert!(matches!(
         result,
-        Err(crate::AgentError::ProviderContextPreparation(
-            "session_append_lease_busy"
-        ))
+        Err(crate::AgentError::ProviderContextPreparation(reason))
+            if reason.starts_with("session_append_lease_busy")
     ));
     assert!(captures.lock().unwrap().is_empty());
     assert!(!temp.path().join("hook-calls").exists());

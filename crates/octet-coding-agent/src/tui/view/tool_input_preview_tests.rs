@@ -67,39 +67,44 @@ fn tool_input_preview_long_single_line_is_not_cut_after_72_characters() {
 }
 
 #[test]
-fn tool_input_preview_multiline_uses_six_rows_in_active_success_and_failure_views() {
-    let six = "printf one\n\n    printf three\nprintf four\nprintf five\nprintf six";
-    let eight = format!("{six}\nprintf seventh\nprintf eighth");
+fn tool_input_preview_multiline_uses_twelve_rows_in_active_success_and_failure_views() {
+    let input = (1..=14)
+        .map(|n| match n {
+            2 => String::new(),
+            3 => "    printf row03".to_owned(),
+            _ => format!("printf row{n:02}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let twelve = input.lines().take(12).collect::<Vec<_>>().join("\n");
     for name in ["bash", "powershell", "remote_shell"] {
-        for input in [six, &eight] {
+        for text in [&twelve, &input] {
             for (finished, failed) in [(false, false), (true, false), (true, true)] {
-                let block = block(name, input, finished, failed);
+                let block = block(name, text, finished, failed);
                 let theme = test_theme();
                 let collapsed = render(&block, &theme, 120, false);
                 let expanded = render(&block, &theme, 120, true);
-                assert_eq!(&collapsed[..6], &expanded[..6], "{name}");
+                assert_eq!(&collapsed[..12], &expanded[..12], "{name}");
                 assert!(collapsed[1].trim().is_empty() || collapsed[1].contains('│'));
-                assert!(collapsed[2].contains("    printf three"));
-                assert!(collapsed[5].contains("printf six"));
-                if input == six {
+                assert!(collapsed[2].contains("    printf row03"));
+                if text == &twelve {
                     assert_eq!(collapsed, expanded);
-                    assert!(!collapsed.join("\n").contains("Ctrl+O"));
                 } else {
                     let kind = if name == "remote_shell" {
                         "input"
                     } else {
                         "command"
                     };
-                    assert!(collapsed[6].contains(&format!("2 {kind} rows hidden")));
-                    assert!(collapsed[6].contains("Ctrl+O"));
-                    assert!(!collapsed.join("\n").contains("seventh"));
-                    assert!(expanded[6].contains("printf seventh"));
-                    assert!(expanded[7].contains("printf eighth"));
+                    assert!(collapsed[12].contains(&format!("2 {kind} rows hidden")));
+                    assert!(collapsed[12].contains("Ctrl+O"));
+                    assert!(!collapsed.join("\n").contains("row13"));
+                    assert!(expanded[12].contains("row13"));
+                    assert!(expanded[13].contains("row14"));
                 }
                 if failed {
                     assert!(collapsed.join("\n").contains("permission denied"));
                 }
-                assert!(block_copy_text(&block).contains(input));
+                assert!(block_copy_text(&block).contains(text));
                 assert!(!block_copy_text(&block).contains("private-"));
                 assert!(!block_copy_text(&block).contains("Ctrl+O"));
                 assert_eq!(collapsed, render(&block, &theme, 120, false));
@@ -110,7 +115,7 @@ fn tool_input_preview_multiline_uses_six_rows_in_active_success_and_failure_view
 
 #[test]
 fn tool_input_preview_counts_wrapped_unicode_rows_and_reflows_without_splitting_graphemes() {
-    let input = "界e\u{301}👩‍💻".repeat(200);
+    let input = "界e\u{301}👩‍💻".repeat(400);
     for color in [
         ColorDepth::None,
         ColorDepth::Ansi16,
@@ -124,14 +129,14 @@ fn tool_input_preview_counts_wrapped_unicode_rows_and_reflows_without_splitting_
                 let collapsed = render(&block, &theme, width, false);
                 let expanded = render(&block, &theme, width, true);
                 let full_rows = expanded.iter().filter(|row| row.contains('界')).count();
-                assert!(full_rows > 6, "fixture must exceed six visible rows");
-                assert_eq!(collapsed[..6], expanded[..6]);
-                assert!(collapsed[6].contains("Ctrl+O"));
-                let hidden = full_rows - 6;
+                assert!(full_rows > 12, "fixture must exceed twelve visible rows");
+                assert_eq!(collapsed[..12], expanded[..12]);
+                assert!(collapsed[12].contains("Ctrl+O"));
+                let hidden = full_rows - 12;
                 assert!(
-                    collapsed[6].contains(&hidden.to_string()),
+                    collapsed[12].contains(&hidden.to_string()),
                     "{:?}",
-                    collapsed[6]
+                    collapsed[12]
                 );
                 for row in &expanded {
                     let first = row.trim_start_matches([' ', '│']);
@@ -147,17 +152,17 @@ fn tool_input_preview_counts_wrapped_unicode_rows_and_reflows_without_splitting_
 #[test]
 fn tool_input_preview_quiet_themes_do_not_clip_inputs_back_to_one_line() {
     let theme = test_theme_from_source("[tokens]\nquiet_tool_summaries = true\n");
-    let input = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth\nprintf sixth\nprintf seventh";
+    let input = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth\nprintf sixth\nprintf seventh\nprintf eighth\nprintf ninth\nprintf tenth\nprintf eleventh\nprintf twelfth\nprintf thirteenth";
     for name in ["bash", "powershell", "remote_shell"] {
         let block = block(name, input, false, false);
         let collapsed = render(&block, &theme, 120, false);
         assert!(collapsed[5].contains("printf sixth"));
-        assert!(collapsed[6].contains("1 "));
-        assert!(collapsed[6].contains("Ctrl+O"));
-        assert!(!collapsed.join("\n").contains("printf seventh"));
+        assert!(collapsed[12].contains("1 "));
+        assert!(collapsed[12].contains("Ctrl+O"));
+        assert!(!collapsed.join("\n").contains("printf thirteenth"));
         assert!(render(&block, &theme, 120, true)
             .join("\n")
-            .contains("printf seventh"));
+            .contains("printf thirteenth"));
     }
 }
 
@@ -189,7 +194,8 @@ fn tool_input_preview_global_disclosure_reveals_and_recovers_live_and_completed_
     use octet_agent::{AgentEvent, ToolOutput};
     use std::time::Duration;
 
-    let input = "one\ntwo\nthree\nfour\nfive\nsix\nLAST_COMMAND";
+    let input =
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nLAST_COMMAND";
     for name in ["bash", "powershell", "remote_shell"] {
         let mut shell = InteractiveShell::test_shell();
         let id = ToolCallId("live-input".into());

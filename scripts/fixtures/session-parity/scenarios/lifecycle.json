@@ -1,0 +1,40 @@
+{
+  "name": "lifecycle",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "new",
+      "slot": "original"
+    },
+    {
+      "op": "message",
+      "as": "new-u",
+      "message": {
+        "role": "user",
+        "content": "new-u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "switch",
+      "slot": "original"
+    },
+    {
+      "op": "context"
+    },
+    {
+      "op": "recent"
+    },
+    {
+      "op": "probe"
+    }
+  ]
+}

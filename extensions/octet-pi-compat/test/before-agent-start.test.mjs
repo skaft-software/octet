@@ -38,3 +38,22 @@ test('a before_agent_start handler failing with a Node error code is isolated, a
   assert.equal(composed.result.system_prompt, 'real base\nlater handler ran');
   await peer.close();
 });
+// Pi's BeforeAgentStartUserEvent.images is the run's ImageContent[] and the
+// member is absent, not undefined-valued, when the run attached nothing.
+const imagePayload = (prompt, images) => ({ prompt, system_prompt: 'real base', ...(images === undefined ? {} : { images }) });
+const nativeImage = { Image: { source: { Inline: 'eA==' }, media_type: 'image/png', detail: null } };
+test('before_agent_start user event carries the run images and omits them for text only', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/before-agent-start-images.ts')]); await peer.init(['before_prompt_state_v1']);
+  const withImages = (await peer.request('hook/run', { hook: 'before_prompt', payload: imagePayload('image', [nativeImage]), context: peer.context() }).response).result;
+  assert.deepEqual(JSON.parse(withImages.system_prompt), { prompt: 'image', hasImages: true, images: [{ type: 'image', data: 'eA==', mimeType: 'image/png' }] });
+  const textOnly = (await peer.request('hook/run', { hook: 'before_prompt', payload: imagePayload('text'), context: peer.context() }).response).result;
+  assert.deepEqual(JSON.parse(textOnly.system_prompt), { prompt: 'text', hasImages: false });
+  await peer.close();
+});
+test('before_agent_start refuses run images the Pi ImageContent shape cannot represent', async t => {
+  const peer = launch(t, [join(root, 'test/fixtures/before-agent-start-images.ts')]); await peer.init(['before_prompt_state_v1']);
+  const urlImage = { Image: { source: { Url: 'https://example.test/a.png' }, media_type: 'image/png', detail: null } };
+  const refused = (await peer.request('hook/run', { hook: 'before_prompt', payload: imagePayload('image', [urlImage]), context: peer.context() }).response).error;
+  assert.equal(refused.code, -32601, JSON.stringify(refused));
+  await peer.close();
+});

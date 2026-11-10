@@ -7882,7 +7882,8 @@ impl InteractiveShell {
             return OverlayInputResult::Legacy;
         }
         // Dismissal (including close keys) never parses a report. Navigation
-        // consumes renderer-owned wrapping counts once a frame was emitted.
+        // consumes renderer-owned wrapping counts, even if the visible frame's
+        // terminal write has not yet published its completed-write receipt.
         let navigation = matches!(event, crossterm::event::Event::Key(key)
             if crate::tui::keymap::accepts_key_event(key) && key.modifiers.is_empty()
                 && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
@@ -7894,11 +7895,19 @@ impl InteractiveShell {
             return OverlayInputResult::Closed;
         }
         let (maximum, page_rows) = if state.render_threaded {
-            let Some(receipt) = state
-                .painted_report
-                .as_ref()
+            let receipt = self
+                .state
+                .prepared_geometry()
+                .and_then(|geometry| geometry.report.clone())
                 .filter(|receipt| receipt.is_current(&state))
-            else {
+                .or_else(|| {
+                    state
+                        .painted_report
+                        .as_ref()
+                        .filter(|receipt| receipt.is_current(&state))
+                        .cloned()
+                });
+            let Some(receipt) = receipt else {
                 return OverlayInputResult::Consumed;
             };
             (receipt.maximum, receipt.page_rows)
@@ -8493,11 +8502,21 @@ impl InteractiveShell {
             base_page_step
         };
         let panel_receipt = if state.render_threaded {
-            state
-                .painted_panel
-                .as_ref()
-                .filter(|receipt| receipt.is_current(&state))
-                .cloned()
+            let prepared = if matches!(state.panel, Some(Panel::ReadOnlyDocument { .. })) {
+                self.state
+                    .prepared_geometry()
+                    .and_then(|geometry| geometry.panel.clone())
+                    .filter(|receipt| receipt.is_current(&state))
+            } else {
+                None
+            };
+            prepared.or_else(|| {
+                state
+                    .painted_panel
+                    .as_ref()
+                    .filter(|receipt| receipt.is_current(&state))
+                    .cloned()
+            })
         } else if matches!(
             state.panel.as_ref(),
             Some(
@@ -8509,12 +8528,17 @@ impl InteractiveShell {
             )
         ) {
             // Deterministic inline fixtures retain their explicit layout owner;
-            // production input consumes only a completed renderer receipt.
+            // production input never performs document layout here.
             let rendered = shell_chrome(&state, size.0, Instant::now()).panel;
             renderer_geometry::PanelRenderReceipt::capture(&state, &rendered)
         } else {
             None
         };
+        if let Some(receipt) = &panel_receipt {
+            // Resolve refreshed-document anchoring before navigation. A later
+            // write receipt must not restore the pre-key reading position.
+            receipt.apply_document_anchor(&mut state);
+        }
         let confirmation_render = panel_receipt
             .as_ref()
             .and_then(|receipt| receipt.confirmation.clone());
@@ -8965,8 +8989,7 @@ impl InteractiveShell {
                 scroll_from_bottom, ..
             } => {
                 use crossterm::event::{Event, KeyCode};
-                // Missing/stale frame: wait for renderer geometry without
-                // moving the reading position or wrapping on the input owner.
+                // Missing/stale layout: never wrap on the input owner.
                 let (viewport_rows, visual_rows) = document_metrics?;
                 let document_page_step = viewport_rows;
                 let maximum = visual_rows.saturating_sub(viewport_rows);
@@ -9214,6 +9237,36 @@ impl InteractiveShell {
         // history keeps its original cells and styles.
     }
 
+    /// Publish a theme the frontend resolved: startup, an extension resource
+    /// attach, a reload, or an explicit theme choice.
+    ///
+    /// A theme that would paint exactly like the live one is not published.
+    /// [`Self::set_theme`] bumps the theme epoch, which forces a complete
+    /// visible-grid repaint and, on the primary screen, another full history
+    /// materialization: for a long session that is the whole transcript
+    /// written again. Resource attach rounds resolved and installed the same
+    /// theme on every pass, so the first extension handshake of a startup
+    /// could replay the transcript once per round before the theme it was
+    /// waiting for had even arrived.
+    ///
+    /// Returns whether the live frame changed and therefore needs one render.
+    /// Callers publish once and repaint once; nothing here waits for a theme.
+    pub fn publish_theme(&mut self, theme: OctetTheme) -> bool {
+        let theme = theme.with_terminal_colors(self.state.borrow().theme.terminal_colors());
+        // Read the live identity under its own guard: publishing takes the state
+        // lock itself, and a guard held across it would deadlock the input path.
+        let unchanged = {
+            let state = self.state.borrow();
+            state.theme.paints_like(&theme)
+        };
+        if unchanged {
+            return false;
+        }
+        self.set_theme(theme);
+        crate::app::bootstrap::startup_phase("theme.published");
+        true
+    }
+
     /// Rebuild the visible transcript from the session's active branch.
     pub fn hydrate(&mut self, session: &Session) -> Result<()> {
         let entry_budget = hydration_entry_budget(self.state.borrow().size.1);
@@ -9358,6 +9411,23 @@ impl InteractiveShell {
         // hydrated conversation, even if its model and effort are unchanged.
         self.cancel_thinking_submission("session view changed");
         Ok(())
+    }
+
+    /// A handle to the shell's subagent roster label that stays usable while
+    /// another borrow of the shell is live (the idle prompt owns `&mut self`).
+    #[cfg(test)]
+    pub(crate) fn subagent_label_probe(&self) -> impl Fn() -> Option<String> {
+        let state = self.state.clone();
+        move || {
+            state
+                .borrow()
+                .transcript
+                .iter()
+                .find_map(|block| match block {
+                    TranscriptBlock::Subagents(summary) => Some(summary.label()),
+                    _ => None,
+                })
+        }
     }
 
     /// Human-readable state used by headless unit tests and regression checks.

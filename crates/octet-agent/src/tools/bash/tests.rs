@@ -922,16 +922,36 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
         execution_scope: "bash-escaped-pipe-test",
         resource_owner: "bash-escaped-pipe-test",
     };
-    let started = std::time::Instant::now();
-    let error = BashTool
-            .execute(
-                json!({"command": "python3 -c 'import os,time; os.setsid(); open(\"escaped.pid\", \"w\").write(str(os.getpid())); time.sleep(30)' & sleep 30"}),
-                &ctx,
-            )
-            .await
-            .unwrap_err();
+    // The holder's interpreter start-up is what load slows, and the product
+    // deadline (100 ms limit + 500 ms drain) does not depend on it. The holder
+    // writes its pid file only after `setsid`, immediately before it sleeps
+    // holding the capture pipes, so the pid file is the marker that it owns the
+    // pipe. The bound is measured from that marker; if the call already
+    // returned before the holder started there was nothing to drain and
+    // nothing to measure.
+    let pid_file = f.workspace.join("escaped.pid");
+    let called = std::time::Instant::now();
+    let execute = BashTool.execute(
+        json!({"command": "python3 -c 'import os,time; os.setsid(); open(\"escaped.pid\", \"w\").write(str(os.getpid())); time.sleep(30)' & sleep 30"}),
+        &ctx,
+    );
+    tokio::pin!(execute);
+    let mut holder_started = None;
+    let error = loop {
+        tokio::select! {
+            result = &mut execute => break result.unwrap_err(),
+            () = tokio::time::sleep(Duration::from_millis(2)), if holder_started.is_none() => {
+                if std::fs::read_to_string(&pid_file)
+                    .is_ok_and(|pid| pid.parse::<i32>().is_ok())
+                {
+                    holder_started = Some(std::time::Instant::now());
+                }
+            }
+        }
+    };
+    let finished = std::time::Instant::now();
 
-    if let Ok(pid) = std::fs::read_to_string(f.workspace.join("escaped.pid")) {
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid.parse::<i32>() {
             unsafe {
                 let _ = libc::kill(pid, libc::SIGKILL);
@@ -944,9 +964,17 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
         error.message.contains("output drain abandoned") || error.message.contains("timeout"),
         "{error}"
     );
+    if let Some(holder_started) = holder_started {
+        assert!(
+            finished.duration_since(holder_started) < Duration::from_secs(2),
+            "escaped pipe holder defeated the deadline"
+        );
+    }
+    // Whether or not the holder started before the deadline, the call must
+    // never wait for its 30 s sleep.
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "escaped pipe holder defeated the deadline"
+        finished.duration_since(called) < Duration::from_secs(20),
+        "the call waited for the escaped pipe holder"
     );
 }
 

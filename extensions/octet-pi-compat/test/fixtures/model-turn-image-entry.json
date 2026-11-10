@@ -10,7 +10,8 @@
               "Text": "frame rendered"
             }
           ],
-          "is_error": false
+          "is_error": false,
+          "tool_name": "frame"
         }
       },
       {

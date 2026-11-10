@@ -2965,6 +2965,7 @@ fn current_direct_model_pricing(provider: &str, id: &str) -> Option<Pricing> {
             cache_write_5m: TokenRate(5_000_000),
             cache_write_1h: Some(TokenRate(8_000_000)),
             reasoning: None,
+            windows: Default::default(),
             tiers: vec![],
         }),
         ("xai", "grok-4.7") => Some(Pricing {
@@ -2976,6 +2977,7 @@ fn current_direct_model_pricing(provider: &str, id: &str) -> Option<Pricing> {
             cache_write_5m: TokenRate(2_000_000),
             cache_write_1h: None,
             reasoning: None,
+            windows: Default::default(),
             tiers: vec![PricingTier {
                 min_input_tokens: 200_000,
                 input: Some(TokenRate(4_000_000)),
@@ -3632,6 +3634,7 @@ fn openrouter_pricing(entry: &serde_json::Value) -> Option<Pricing> {
         cache_write_5m: cache_write,
         cache_write_1h: None,
         reasoning,
+        windows: Default::default(),
         tiers,
     })
 }
@@ -5311,6 +5314,7 @@ fn custom_model_pricing(model: &crate::auth::custom::CustomModel) -> Pricing {
         cache_write_5m: TokenRate(rates.cache_write_5m),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: Vec::new(),
     }
 }
@@ -7987,9 +7991,13 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// `session.marker`, `catalog.client`, `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
 /// `app.build`, `app.config.persisted`, `app.goal.open`, `app.complete`,
-/// `history.hydrate`, `frame.ready`. `process.enter` starts after
+/// `history.hydrate`, `frame.ready`, `theme.published`. `process.enter` starts after
 /// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
 /// be measured outside the process on a PTY, not inferred from this trace.
+/// `theme.published` marks the one publication that changed the painted theme:
+/// the interval from `frame.ready` to it is the window in which the composer
+/// still shows the compiled fallback, and it is bounded by extension attach
+/// work, never by anything the input path waits for.
 /// `codex.credentials` and `codex.inventory` separate credential refresh from
 /// the inventory request inside one selected-route wait, and
 /// `catalog.selected` bounds the selected-route inventory wait itself (the
@@ -8281,6 +8289,17 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
                             .unwrap_or_else(|| baseline.clone()),
                     );
                 }
+            }
+        }
+        // Pi treats the model of the last assistant message on the branch as
+        // the selected model when no later model_change exists
+        // (pi-session-1-5-0/dist/core/session-manager.js:147-160).
+        // Only a catalog route id (`provider/model`) is adopted: assistant
+        // messages imported before route ids were stored carry a bare model
+        // name that would not resolve, and must not override the default.
+        if let EntryValue::Message(octet_ai::Message::Assistant(assistant)) = &entry.value {
+            if persisted.model.is_none() && assistant.model.0.contains('/') {
+                persisted.model = Some(assistant.model.clone());
             }
         }
         if let EntryValue::Config {
@@ -9207,17 +9226,13 @@ fn build_app_with_consumer(
         .with_context(|| "configured compaction model could not be resolved")?;
     validate_compaction_route(config.compaction.mode, &model, compact_model.as_ref())?;
     validate_native_compaction_replay(config.compaction.mode, &session, &model)?;
-    // A deferred boot decides delegation readiness from discovery: the same
-    // first-party subagents extension is starting, and its process binds at
-    // attach just as a python activation already does.
+    // Both first-party child-session owners need a runtime before attach, but
+    // only subagents provides the observation surface required for Ultra.
     let service_pending = executable_extensions.pending_agent_session_service();
     let service_available = executable_extensions.has_agent_session_service();
-    let subagents_available = if service_pending {
-        true
-    } else {
-        service_available
-            && subagents_surface_available(&executable_extensions, &definitions, &model)
-    };
+    let subagents_available = executable_extensions.pending_subagents_service()
+        || (service_available
+            && subagents_surface_available(&executable_extensions, &definitions, &model));
     let (reasoning, reasoning_mode, migration_diagnostic) =
         normalize_reasoning_selection_for_model_with_subagents(
             &requested_reasoning,

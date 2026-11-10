@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runtime } from '../lib/runtime.mjs';
 import { excludedIssue, formatIssues, loadIssue } from '../lib/issues.mjs';
+import { PI_SUPPORTED_RANGE } from '../lib/pi-modules.mjs';
 import { rpcError, strict } from '../lib/errors.mjs';
 import { launch, owner, root } from './helper.mjs';
 
@@ -67,7 +68,7 @@ test('startup groups skipped factories and inert renderers into one actionable E
     assert.doesNotMatch(message, /unsupported_feature|invalid_request|ENOENT|Next:/);
     for (const entry of entries) assert.ok(!message.includes(entry), 'a notice names no path');
   }
-  for (const entry of entries) assert.match(peer.stderr(), new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'the log keeps the path');
+  for (const entry of entries) await peer.waitStderr(new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))); // the log keeps the path
   assert.doesNotMatch(peer.stderr(), new RegExp(secret + '|inert renderer ran'));
   assert.equal(peer.seen.filter(frame => frame.method === 'notification').length, 2);
   await peer.close();
@@ -140,7 +141,7 @@ test('unsupported callback fields have a plain reason without echoing a private 
   runtime.events.set('agent_end', [{ factory: 0, handler: event => event[secret] }]);
   await runtime.runEvent('agent_end', strict({ type: 'agent_end' }, 'agent_end event'), store);
   assert.equal(frames.length, 1); assert.ok(issueNotice(frames[0]));
-  assert.match(frames[0].params.message, /agent_end hook uses an event field octet does not support and was skipped/);
+  assert.match(frames[0].params.message, /agent_end hook called an API octet does not support, so the hook was skipped/);
   assert.doesNotMatch(JSON.stringify([frames, diagnostics]), new RegExp(secret + '|unsupported_feature'));
 });
 
@@ -220,4 +221,12 @@ test('a factory code is named; its message and any other text stay redacted', ()
   assert.equal(loadIssue({ entry: '/x/a.ts', error: 'pkg_missing_peer: needs foo' }).reason,
     'skipped: failed while loading ("pkg_missing_peer")');
   assert.match(loadIssue({ entry: '/x/a.ts', error: 'boom' }).reason, /(?:left out: could not be loaded|skipped: failed while loading)$/);
+});
+
+// The missing-install action states the range the shipped manifests compute, so
+// adding a Pi release cannot leave the notice naming an older supported range.
+test('the unsupported-install action states the computed Pi range', () => {
+  const issue = loadIssue({ entry: '/x/a.ts', code: -32031, error: 'installed Pi 2.0.0 is outside the supported range' });
+  assert.equal(issue.reason, 'skipped: needs a Pi install that is missing or unsupported');
+  assert.equal(issue.next, `Install Pi ${PI_SUPPORTED_RANGE}, or disable.`);
 });

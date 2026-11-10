@@ -118,7 +118,7 @@ soft threshold if the hard context budget still fits, otherwise octet reports
 the context limit without dispatching an oversized request. This bounds repeated
 summary pauses; compaction itself still waits for the summary provider.
 
-An empty, whitespace-only or over-128KiB handoff (including the
+An empty, whitespace-only or over-2MiB handoff (including the
 host-derived file footer) fails closed before a checkpoint is written, and octet
 never truncates a summary or file evidence. Resume rebuilds context from the
 selected parent chain and its compaction boundary. The compact footer shows the
@@ -145,10 +145,12 @@ design](design/octet-agent.md#sessions).
   from the previous route. `native-responses` mode still needs complete
   same-route replay, and refuses such a switch until a valid local replay
   boundary exists.
-- Rust embedders may call `Agent::set_tool_schema_budget_bytes`. The default is
-  128KiB of exact serialized provider-visible tool-definition JSON. A non-empty
-  schema set over the limit is refused before provider I/O, rather than having
-  tools omitted or rewritten. A zero budget permits only an empty tool set.
+- Tool definitions have no separate byte quota by default; the complete request,
+  including every provider-visible definition, must fit the model context budget.
+  Rust embedders may opt into an exact serialized JSON quota with
+  `Agent::set_tool_schema_budget_bytes`. A non-empty set over an explicit quota
+  is refused before provider I/O, never omitted or rewritten. A zero quota permits
+  only an empty tool set. Delegated agents inherit the parent's policy.
 - The local [octet-snap-compact
   extension](../extensions/octet-snap-compact/README.md) can replace the
   parent-model summary call with deterministic PNG frames, when you enable it

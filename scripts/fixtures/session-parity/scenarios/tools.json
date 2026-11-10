@@ -1,0 +1,98 @@
+{
+  "name": "tools",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "call",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call2",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "call",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "t"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t2",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "call2",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "t2"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t2"
+        },
+        "timestamp": 0
+      }
+    }
+  ]
+}

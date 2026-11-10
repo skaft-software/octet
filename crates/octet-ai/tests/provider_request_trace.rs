@@ -90,6 +90,7 @@ fn screenshot_turns(count: usize) -> Vec<Message> {
                 ],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }));
     }

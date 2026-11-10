@@ -535,6 +535,39 @@ async fn actual_app_rejects_generation_and_owner_retirement_after_loader_complet
     process.shutdown().await;
 }
 
+/// An extension-initiated session replacement swaps the resource binding while the resource phase
+/// is still running. The withdrawal baseline then loads against a binding that is gone; that must
+/// withdraw nothing and leave discovery pending for the settled binding, never end the application
+/// ("Error: stale resource candidate" used to terminate octet and with it every extension command).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_baseline_for_a_replaced_binding_is_dropped_and_discovery_stays_pending() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, process, _) = fixture(&root).await;
+    let work = app
+        .prepare_resource_withdrawal(
+            crate::tui::theme::TerminalBackground::Dark,
+            anyhow::anyhow!("resource generation changed while session_start settled"),
+        )
+        .unwrap();
+    let (baseline, lease) = work.await.unwrap();
+    let system = app.system.clone();
+    let paths = app.config.prompt_paths.clone();
+    // The binding moves while the baseline loads, as a session replacement does.
+    process.reload().await.unwrap();
+    assert!(
+        app.publish_withdrawal(baseline, lease).unwrap().is_none(),
+        "a stale baseline publishes nothing and is not an error"
+    );
+    assert_eq!(app.system, system);
+    assert_eq!(app.config.prompt_paths, paths);
+    assert!(
+        app.resource_paths_pending(),
+        "the next idle pass must still discover for the new binding"
+    );
+    process.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_catalog_suffix_refuses_actual_app_publication_without_partial_mutation() {
     let temp = tempfile::tempdir().unwrap();

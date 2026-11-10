@@ -2,13 +2,15 @@
 
 #![cfg(unix)]
 
+mod pty_teardown;
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -21,6 +23,11 @@ const COLUMNS: u16 = 96;
 const ROWS: u16 = 18;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Hang bound for the fixture's interpreter to start running its script. It is
+/// a separate stage from the 5 s protocol budget: how long a cold `python3`
+/// takes to launch (a macOS /usr/bin stub, a cold disk cache) is not octet
+/// behaviour, and it is observed through a real marker, not a completion poll.
+const INTERPRETER_START_TIMEOUT: Duration = Duration::from_secs(30);
 // Match the disambiguated keyboard mode requested by the real terminal. A bare
 // Escape followed quickly by Ctrl-D can instead arrive as one Alt+Ctrl-D key.
 const PICKER_ESCAPE: &[u8] = b"\x1b[27u";
@@ -106,6 +113,10 @@ struct PtyOctet {
 }
 
 impl PtyOctet {
+    fn workspace(&self) -> PathBuf {
+        self._root.path().join("workspace")
+    }
+
     fn spawn(binary: &Path) -> Self {
         Self::spawn_with_provider(binary, "http://127.0.0.1:9/v1/")
     }
@@ -212,10 +223,11 @@ impl PtyOctet {
                 break status;
             }
             if Instant::now() >= deadline {
-                unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                pty_teardown::kill_and_reap(
+                    &mut self.child,
+                    &mut self.pty.master,
+                    SHUTDOWN_TIMEOUT,
+                );
                 panic!(
                     "octet did not stop after Ctrl-D; transcript: {}",
                     visible_bytes(&self.pty.output)
@@ -234,10 +246,7 @@ impl PtyOctet {
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.pty.master, SHUTDOWN_TIMEOUT);
         }
     }
 }
@@ -306,7 +315,7 @@ impl StreamApi {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .expect("fixture write timeout");
-                let Some(headers) = read_request(&mut socket) else {
+                let Some(headers) = read_request(&mut socket, &worker_stop) else {
                     continue;
                 };
                 assert!(
@@ -390,7 +399,8 @@ impl Drop for StreamApi {
 }
 
 /// Read one request's headers, draining its body so the client is not blocked.
-fn read_request(socket: &mut std::net::TcpStream) -> Option<String> {
+/// Gives up once `stop` is set so fixture teardown can always join the worker.
+fn read_request(socket: &mut std::net::TcpStream, stop: &AtomicBool) -> Option<String> {
     let mut request = Vec::new();
     let header_end = loop {
         let mut bytes = [0u8; 1024];
@@ -403,7 +413,10 @@ fn read_request(socket: &mut std::net::TcpStream) -> Option<String> {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                continue
+                if stop.load(Ordering::SeqCst) {
+                    return None;
+                }
+                continue;
             }
             Err(error) => panic!("read loopback request: {error}"),
         };
@@ -468,6 +481,11 @@ shortcuts = [{ name = "fixture-toggle", key = "ctrl+f6", description = "Fixture 
             r#"#!/usr/bin/env python3
 import sys
 sys.path.insert(0, {sdk:?})
+import os
+# Readiness marker: proves the interpreter reached this script. The host
+# handshake is then observed separately and only starts counting from here.
+with open(os.path.join(os.environ["OCTET_WORKSPACE"], ".shortcut-fixture-started"), "w") as marker:
+    marker.write(sys.version + "\n")
 from octet_extension import Extension
 ext = Extension(api_version="0.4")
 count = 0
@@ -499,9 +517,26 @@ fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
         true,
     );
     octet.pty.wait_for(b"custom/probe");
-    // Extension startup is asynchronous. Refresh the partial command until
-    // its completion appears; do not race a command against initialization.
+    // Stage 1: the extension subprocess is launched asynchronously and its
+    // interpreter may be slow to start. Wait for the fixture's own marker so
+    // the protocol budget below only covers the handshake.
+    let marker = octet.workspace().join(".shortcut-fixture-started");
     octet.pty.write_input(b"/fixt");
+    let launch_deadline = Instant::now() + INTERPRETER_START_TIMEOUT;
+    while !marker.exists() {
+        octet.pty.read_available();
+        assert!(
+            Instant::now() < launch_deadline,
+            "fixture interpreter never started its script within {INTERPRETER_START_TIMEOUT:?} \
+             (is `python3` on PATH=/usr/bin:/bin working?); transcript: {}",
+            visible_bytes(&octet.pty.output)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Stage 2: the partial `/fixt` was typed before the extension registered
+    // anything and gets no further input. The host must refresh the open
+    // completion menu itself once the command exists (regression: it used to
+    // repaint only on the next keystroke).
     let deadline = Instant::now() + TIMEOUT;
     loop {
         octet.pty.read_available();
@@ -510,11 +545,10 @@ fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
         }
         assert!(
             Instant::now() < deadline,
-            "fixture never became ready: {}",
+            "fixture script started but its command never registered within {TIMEOUT:?}: {}",
             visible_bytes(&octet.pty.output)
         );
         thread::sleep(Duration::from_millis(100));
-        octet.pty.write_input(b"\x7ft");
     }
     octet.pty.write_input(b"ure-prime\r");
     octet.pty.wait_for(b"FIXTURE_PRIME_READY");

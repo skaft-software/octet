@@ -344,6 +344,7 @@ async fn interleaved_native_calls_round_trip_as_entries_with_exact_ids() {
                 content: vec![ToolResultPart::Text("found".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })
         })
         .collect();
@@ -834,6 +835,7 @@ async fn unsupported_request_media_and_reasoning_are_explicit_not_replay_placeho
                     ],
                     is_error: true,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             }));
         }

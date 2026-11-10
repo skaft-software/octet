@@ -170,15 +170,27 @@ where
         Err(error) => {
             let baseline = app.prepare_resource_withdrawal(shell.theme().background(), error)?;
             let (baseline, lease) = pump(shell, input, app, baseline).await?;
-            app.apply_extension_resource_paths(baseline, lease)?
+            match app.publish_withdrawal(baseline, lease)? {
+                Some(published) => published,
+                // The binding moved under the withdrawal (extension session replacement):
+                // the next idle pass publishes for the settled binding.
+                None => return Ok(Vec::new()),
+            }
         }
     };
-    shell.set_theme(theme);
+    // Publish once, then repaint once. A round that resolves the same theme an
+    // earlier round already installed keeps the live frame instead of forcing
+    // another complete replay of the transcript while startup is still in
+    // flight; `theme.published` marks the one round that changed it.
+    let repainted = shell.publish_theme(theme);
     shell.set_runtime_config(app.config.clone());
     shell.set_session_keybindings(&app.user_keybindings);
     app.executable_extensions
         .refresh_frontend_keybindings(shell);
     update_status(shell, app);
+    if repainted {
+        shell.render();
+    }
     Ok(diagnostics)
 }
 

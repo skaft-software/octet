@@ -1562,6 +1562,34 @@ async fn detaching_workers_waits_for_every_live_task_to_park() {
     );
     assert_eq!(binding.detach_workers(Duration::from_millis(50)).await, 1);
     assert!(manager.state.lock().unwrap().records[&stuck.id].live_task);
+    let original = directory.path().join("replacement-refused.jsonl");
+    let mut root = Agent::new(AgentConfig {
+        client: manager.template.client.clone(),
+        model: manager.template.model(),
+        session: Session::create(&original).unwrap(),
+        system: "test".into(),
+        sandbox: manager.template.sandbox.clone(),
+        effect_broker: manager.template.effect_broker.clone(),
+        extensions: manager.template.extensions.clone(),
+        max_turns: Some(4),
+        reasoning: manager.template.reasoning.read().unwrap().clone(),
+        reasoning_mode: manager.template.reasoning_mode,
+        cache_retention: manager.template.cache_retention,
+        session_id: None,
+    })
+    .unwrap();
+    root.set_delegation_binding(binding).unwrap();
+    let bytes = std::fs::read(&original).unwrap();
+    let replacement = Session::create(directory.path().join("replacement.jsonl")).unwrap();
+    let reason = root
+        .replace_session_at_idle(replacement)
+        .unwrap_err()
+        .to_string();
+    assert!(reason.contains("workers still running"), "{reason}");
+    assert!(reason.contains("stop them, then retry"), "{reason}");
+    assert_eq!(root.session().path(), original);
+    assert_eq!(std::fs::read(&original).unwrap(), bytes);
+    assert_eq!(root.active_delegated_worker_count(), 1);
 }
 
 /// A durable record reconstructed from the roster: detached, with its
@@ -5074,6 +5102,7 @@ async fn reattached_delivered_task_settles_and_explicit_follow_up_never_replays_
                             content: vec![octet_ai::ToolResultPart::Text("written".into())],
                             is_error: false,
                             added_tool_names: None,
+                            tool_name: None,
                         })],
                     },
                 )))
@@ -6354,6 +6383,59 @@ fn root_outage_limit_updates_bound_child_template() {
             )
             .unwrap();
         assert_eq!(child.max_network_wait(), limit);
+    }
+}
+
+#[test]
+fn root_tool_schema_quota_updates_bound_child_template() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let mut root = Agent::new(AgentConfig {
+        client: manager.template.client.clone(),
+        model: manager.template.model(),
+        session: Session::create(directory.path().join("root-schema.jsonl")).unwrap(),
+        system: "test".into(),
+        sandbox: manager.template.sandbox.clone(),
+        effect_broker: manager.template.effect_broker.clone(),
+        extensions: manager.template.extensions.clone(),
+        max_turns: Some(4),
+        reasoning: manager.template.reasoning.read().unwrap().clone(),
+        reasoning_mode: manager.template.reasoning_mode,
+        cache_retention: manager.template.cache_retention,
+        session_id: None,
+    })
+    .unwrap();
+    root.set_delegation_binding(manager.root_binding()).unwrap();
+    for (index, quota) in [None, Some(131_072), Some(161_125), Some(0)]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(quota) = quota {
+            root.set_tool_schema_budget_bytes(quota);
+        }
+        assert_eq!(root.tool_schema_budget_bytes(), quota);
+        assert_eq!(
+            manager
+                .template
+                .runtime
+                .read()
+                .unwrap()
+                .tool_schema_budget_bytes,
+            quota
+        );
+        let child = manager
+            .build_child_agent(
+                Session::create(directory.path().join(format!("schema-child-{index}.jsonl")))
+                    .unwrap(),
+                &AgentIdentity {
+                    id: format!("schema-child-{index}"),
+                    path: format!("/root/schema-child-{index}"),
+                    depth: 1,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(child.tool_schema_budget_bytes(), quota);
     }
 }
 

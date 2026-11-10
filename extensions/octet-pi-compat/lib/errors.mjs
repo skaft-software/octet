@@ -1,6 +1,22 @@
 export const rpcError = (code, message) => Object.assign(new Error(message), { code });
+// An API name this bridge (or the host) owns: a host method, a negotiated
+// feature, or a Pi context member an extension called. It is fixed vocabulary
+// from adapter/native source, so a user-visible notice may name it.
+const API_NAME = /^[A-Za-z_$][A-Za-z0-9_$.:/-]{0,95}$/;
+export function namedAPI(error, name) {
+  if (error && typeof error === 'object' && error.api === undefined && typeof name === 'string' && API_NAME.test(name)) error.api = name;
+  return error;
+}
+// The API name a -32601 refusal is about, when the refusal names one. Read the
+// tagged member, never the message text: a message can quote extension data.
+export const refusedAPI = error => error?.code === -32601 && typeof error?.api === 'string' && API_NAME.test(error.api) ? error.api : undefined;
 export function unsupported(name, reason = 'no corresponding negotiated octet contract') {
   throw rpcError(-32601, `unsupported_feature ${name}: ${reason}`);
+}
+// A refusal about a member this bridge or the host names itself, so the
+// diagnostic can say which one (`unsupported_feature <name>: <reason>`).
+export function unsupportedAPI(name, reason = 'no corresponding negotiated octet contract') {
+  throw namedAPI(rpcError(-32601, `unsupported_feature ${name}: ${reason}`), name);
 }
 export function invalid(message) { throw rpcError(-32602, `invalid_request ${message}`); }
 export function bounded(text, name, max, { controls = false } = {}) {
@@ -31,6 +47,7 @@ export function facade(object, label, symbols) {
     set(target, key, value, receiver) {
       if (typeof key === 'symbol' && symbols && !Reflect.has(target, key)) { symbols.set(key, value); return true; }
       if (Reflect.has(target, key) || typeof key === 'symbol') return Reflect.set(target, key, value, receiver);
+      // The key is the extension's own: it stays out of the notice.
       return unsupported(`${label}.${String(key)}`, 'the facade has no such member to assign');
     },
     deleteProperty(target, key) {
@@ -48,6 +65,8 @@ export function facade(object, label, symbols) {
 // reading it must fail explicitly instead of looking like a real Pi value.
 // When facts is supplied, only members of the Pi shape are such facts; other
 // absent properties are ordinary JavaScript probes and read as undefined.
+// The probed key is extension/data vocabulary, so this refusal never names it
+// outside the process log (see namedAPI).
 export function strict(object, label, facts) {
   return new Proxy(object, { get(target, key, receiver) {
     if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);

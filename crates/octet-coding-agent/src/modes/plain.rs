@@ -204,6 +204,23 @@ async fn run_prompt(
             return Ok(PromptExit::Finished(HostRunOutcome::Completed));
         }
     }
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    app.executable_extensions
+        .refresh_native_credential_catalog(&app.catalog);
+    let Some(input) = app
+        .executable_extensions
+        .process_input(prompt, None, "interactive", None)
+        .await?
+    else {
+        return Ok(PromptExit::Finished(HostRunOutcome::Completed));
+    };
+    let prompt = input.text;
+    let media = input.images.unwrap_or_default();
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
             if app.config.debug_prompt {
@@ -258,16 +275,6 @@ async fn run_prompt(
         }
     }
 
-    app.executable_extensions.refresh_host_state(
-        app.agent.session(),
-        &app.model,
-        &app.reasoning,
-        &app.sessions,
-    );
-    // Non-interactive modes serve the same extension requests: publish the
-    // catalog an approved provider-credential request resolves against.
-    app.executable_extensions
-        .refresh_native_credential_catalog(&app.catalog);
     let composition = app
         .executable_extensions
         .compose_prompt(&app.system, prompt.clone())
@@ -281,7 +288,9 @@ async fn run_prompt(
         )?;
     }
     let prior_cache_misses = crate::commands::cache_miss_count(app);
-    let mut composed_input = octet_agent::UserInput::from(composition.prompt);
+    let mut parts = vec![octet_agent::InputPart::Text(composition.prompt)];
+    parts.extend(media.into_iter().map(octet_agent::InputPart::Media));
+    let mut composed_input = octet_agent::UserInput::from(parts);
     composed_input.custom_messages = composition.custom_messages;
     let submission = match app.prepare_submission(composed_input) {
         Ok((submission, diagnostics)) => {

@@ -12,12 +12,20 @@ const MAX_REASONS_SHOWN: usize = 2;
 
 /// Text for a failed reload, or `None` when there were no problems.
 ///
-/// Reasons are trimmed, flattened to one line, stripped of a leading
-/// `warning:`/`error:` label (the dot already says it), de-duplicated in order,
+/// Informational discovery diagnostics are not failures. Other reasons are
+/// trimmed, flattened to one line, stripped of a leading `warning:`/`error:`
+/// label (the dot already says it), de-duplicated in order,
 /// and capped; anything beyond the cap is summarised as `(+N more)`.
 pub(crate) fn reload_failure_text(problems: &[String]) -> Option<String> {
     let mut reasons: Vec<String> = Vec::new();
     for problem in problems {
+        if problem
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("info:")
+        {
+            continue;
+        }
         let reason = tidy(problem);
         if !reason.is_empty() && !reasons.contains(&reason) {
             reasons.push(reason);
@@ -68,6 +76,20 @@ mod tests {
     fn no_problems_is_a_success() {
         assert_eq!(text(&[]), None);
         assert_eq!(text(&["", "   \n "]), None);
+    }
+
+    #[test]
+    fn informational_trust_skips_do_not_become_reload_failures_or_hide_real_errors() {
+        let ignored = "info: /workspace/.octet/themes: ignored project resources because the workspace is not trusted";
+        assert_eq!(text(&[ignored]), None);
+        assert_eq!(
+            text(&[ignored, "warning: resource discovery failed"]).as_deref(),
+            Some("reload failed: resource discovery failed")
+        );
+        assert_eq!(
+            text(&["warning: rejected resource path: untrusted workspace resource has no explicit path grant"]).as_deref(),
+            Some("reload failed: rejected resource path: untrusted workspace resource has no explicit path grant")
+        );
     }
 
     #[test]

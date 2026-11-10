@@ -1537,7 +1537,10 @@ impl std::fmt::Debug for Session {
 }
 
 pub(crate) use context::branch_summary_message;
-pub use context::{ActiveSkillState, MODEL_VISIBLE_TOOL_IMAGE_LIMIT, TOOL_IMAGE_PLACEHOLDER};
+pub use context::{
+    compaction_summary_text, ActiveSkillState, MODEL_VISIBLE_TOOL_IMAGE_LIMIT,
+    TOOL_IMAGE_PLACEHOLDER,
+};
 // Only Windows session creation maps secure-file errors in `store`.
 #[cfg(windows)]
 use journal::partial_journal_file_error;

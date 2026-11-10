@@ -600,6 +600,9 @@ enum SummaryEntryValue {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    /// Pi's `branch_summary` is an ordinary record on the active branch; the
+    /// catalog only needs it to parse, not its text.
+    BranchSummary {},
     ResponsesSteering {},
     PromptTemplateSelected {},
     SkillActivated {},
@@ -711,6 +714,16 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
                 reasoning = Some(crate::app::reasoning_label(
                     update.as_ref().map_or(baseline, |update| &update.reasoning),
                 ));
+            }
+        }
+        // Pi: the last assistant message's model is the selected model when no
+        // later model_change exists
+        // (pi-session-1-5-0/dist/core/session-manager.js:147-160).
+        // Route ids only, as in `persisted_session_config`: legacy imports
+        // carry bare model names.
+        if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
+            if model.is_none() && assistant.model.0.contains('/') {
+                model = Some(assistant.model.0.clone());
             }
         }
         if let EntryValue::Config {
@@ -1011,7 +1024,23 @@ fn confine_delegated_session_path(
 }
 
 fn sanitize_session_name(name: &str) -> anyhow::Result<Option<String>> {
-    let name = name.trim();
+    // Pi replaces each run of line breaks with one space, then trims, and an
+    // empty result clears the name
+    // (pi-session-1-5-0/dist/core/session-manager.js:926-936,939-947).
+    let mut flattened = String::with_capacity(name.len());
+    let mut in_break = false;
+    for character in name.chars() {
+        if matches!(character, '\r' | '\n') {
+            if !in_break {
+                flattened.push(' ');
+            }
+            in_break = true;
+        } else {
+            in_break = false;
+            flattened.push(character);
+        }
+    }
+    let name = flattened.trim();
     if name.is_empty() {
         return Ok(None);
     }
@@ -1281,11 +1310,17 @@ fn summarize_session_with_usage(
                                 None,
                             )
                         }
+                        // Same rule as `active_branch_catalog_config`
+                        // (session-manager.js:147-160).
                         SummaryEntryValue::Message(SummaryMessage::Assistant(message)) => (
                             SummaryEntryKind::Assistant,
                             None,
-                            Some((message.model, message.protocol)),
-                            None,
+                            Some((message.model.clone(), message.protocol)),
+                            message
+                                .model
+                                .0
+                                .contains('/')
+                                .then(|| message.model.0.clone()),
                             None,
                         ),
                         SummaryEntryValue::Compaction { first_kept } => {
@@ -1367,7 +1402,8 @@ fn summarize_session_with_usage(
                         SummaryEntryValue::Config { model, reasoning } => {
                             (SummaryEntryKind::Other, None, None, model, reasoning)
                         }
-                        SummaryEntryValue::ResponsesSteering {}
+                        SummaryEntryValue::BranchSummary {}
+                        | SummaryEntryValue::ResponsesSteering {}
                         | SummaryEntryValue::PromptTemplateSelected {}
                         | SummaryEntryValue::SkillActivated {}
                         | SummaryEntryValue::SkillResourceRead {}

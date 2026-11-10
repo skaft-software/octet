@@ -14,7 +14,7 @@ async function fixture(t, body = '', make = factory) {
   const path = join(dir, 'editor.ts');
   await writeFile(path, `import { CustomEditor } from '@earendil-works/pi-coding-agent';
 export default pi => {
-  const factory = ${make};
+  const factory = (...args) => { console.error('editor factory invoked'); return (${make})(...args); };
   pi.on('session_start', (_,ctx) => { ctx.ui.setEditorComponent(factory); });
   ${body}
 };`);
@@ -98,8 +98,17 @@ for (const replace of [false, true]) for (const reject of [false, true]) test(`$
     await peer.wait(f => frame('seedul')(f) && f.params.surface_id === next.params.surface_id);
   }
   const response = await restore.response;
-  if (reject) assert.match(response.error?.message, /checkpoint refused/);
-  else assert.ok(response.result, JSON.stringify(response));
+  assert.ok(response.result, JSON.stringify(response));
+  if (reject) {
+    // Pi's setter is void: scripts/fixtures/pi-reference/node_modules/@earendil-works/
+    // pi-coding-agent/dist/modes/interactive/interactive-mode.js:2051,2200-2208.
+    // A successful command is not a receipt for a refused editor checkpoint.
+    await peer.waitStderr(/checkpoint refused/);
+    await peer.wait(f => f.method === 'notification' && /checkpoint refused/.test(f.params.message));
+    assert.equal(peer.seen.filter(f => f.method === 'composer/set').length, 1, 'no later draft write after refusal');
+    assert.equal(peer.seen.filter(f => f.method === 'ui/open').length, 1, 'no replacement admitted after refusal');
+    assert.equal(peer.seen.some(frame('seedu')), false, 'no frame may claim the refused checkpoint');
+  }
   await peer.close();
 });
 
@@ -107,9 +116,12 @@ test('old hosts without editor_mount_id refuse explicitly and close the unusable
   const peer = launch(t, [await fixture(t)], { editorFence: false });
   await peer.init();
   const response = await peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
-  assert.match(response.error?.message, /unsupported_feature editor checkpoint.*editor_mount_id/);
+  assert.ok(response.result, JSON.stringify(response));
+  await peer.waitStderr(/unsupported_feature editor checkpoint.*editor_mount_id/);
+  await peer.wait(f => f.method === 'notification' && /editor_mount_id/.test(f.params.message));
   await peer.wait(f => f.method === 'ui/close');
-  assert.equal(peer.seen.some(f => f.method === 'ui/frame'), false);
+  assert.equal(peer.seen.some(f => ['ui/frame', 'composer/get', 'composer/set'].includes(f.method)), false);
+  assert.doesNotMatch(peer.stderr(), /editor factory invoked/);
   await peer.close();
 });
 

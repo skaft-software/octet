@@ -389,13 +389,13 @@ mod tests {
         let renderer = theme.rich_renderer();
         let collapsed = render_bash_row(command, action, &renderer, theme, width, false);
         let expanded = render_bash_row(command, action, &renderer, theme, width, true);
-        if expanded.len() <= 6 {
+        if expanded.len() <= 12 {
             assert_eq!(collapsed, expanded, "short commands must remain complete");
         } else {
-            assert_eq!(collapsed.len(), 7, "six command rows plus one hint");
-            assert_eq!(collapsed[..6], expanded[..6]);
-            let hint = strip_terminal_sequences(&collapsed[6]);
-            assert!(hint.contains(&format!("{}", expanded.len() - 6)), "{hint}");
+            assert_eq!(collapsed.len(), 13, "twelve command rows plus one hint");
+            assert_eq!(collapsed[..12], expanded[..12]);
+            let hint = strip_terminal_sequences(&collapsed[12]);
+            assert!(hint.contains(&format!("{}", expanded.len() - 12)), "{hint}");
             assert!(hint.contains("Ctrl+O"), "{hint}");
         }
         for rows in [&collapsed, &expanded] {
@@ -464,12 +464,12 @@ mod tests {
         assert!(collapsed.join("\n").contains("fourth"));
         let (multiline, _) = assert_input_window("one\ntwo\nthree\nfour", "Bash", &theme, 100);
         assert_eq!(multiline.len(), 4);
-        let longer = format!("{command}\nprintf seventh\nprintf eighth");
+        let longer = format!("{command}\nprintf seventh\nprintf eighth\nprintf ninth\nprintf tenth\nprintf eleventh\nprintf twelfth\nprintf thirteenth\nprintf fourteenth");
         let (collapsed, expanded) = assert_input_window(&longer, "Bash", &theme, 100);
-        assert_eq!(expanded.len(), 8);
-        assert!(collapsed[6].contains("2 command rows hidden"));
-        assert!(!collapsed.join("\n").contains("seventh"));
-        assert!(expanded.join("\n").contains("eighth"));
+        assert_eq!(expanded.len(), 14);
+        assert!(collapsed[12].contains("2 command rows hidden"));
+        assert!(!collapsed.join("\n").contains("thirteenth"));
+        assert!(expanded.join("\n").contains("fourteenth"));
     }
 
     #[test]
@@ -498,8 +498,8 @@ mod tests {
             );
             assert_eq!(
                 collapsed.len(),
-                if expanded.len() > 6 {
-                    7
+                if expanded.len() > 12 {
+                    13
                 } else {
                     expanded.len()
                 }
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn bash_input_window_leaves_arguments_and_output_tail_independent() {
         let theme = test_theme();
-        let command = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth\nprintf sixth\nprintf seventh\nprintf eighth";
+        let command = "printf first\nprintf second\nprintf third\nprintf fourth\nprintf fifth\nprintf sixth\nprintf seventh\nprintf eighth\nprintf ninth\nprintf tenth\nprintf eleventh\nprintf twelfth\nprintf thirteenth\nprintf fourteenth";
         let output =
             "exit=0 duration=0.2s\nstdout: 8 lines\n1\n2\n3\n4\n5\n6\n7\n8\ncomplete_stdout=true";
         let panel = panel(command, output);
@@ -576,7 +576,7 @@ mod tests {
                 100,
                 expanded,
             );
-            assert_eq!(input.len(), if expanded { 8 } else { 7 });
+            assert_eq!(input.len(), if expanded { 14 } else { 13 });
             let tail = render_compact_bash_output(&panel, &theme, 100, false, "");
             assert_eq!(tail.len(), COMPACT_EXEC_OUTPUT_ROWS);
             let plain = plain_rows(&tail);

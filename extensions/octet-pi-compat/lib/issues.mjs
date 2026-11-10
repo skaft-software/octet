@@ -1,6 +1,8 @@
 import { basename, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { humanizeExtensionName, packageDisplayName } from './api.mjs';
+import { refusedAPI } from './errors.mjs';
+import { PI_SUPPORTED_RANGE } from './pi-modules.mjs';
 
 // Extension problems reach the chat as at most one short notice per severity:
 // the extension's name (never its path), what happened, and the one thing to
@@ -59,7 +61,9 @@ export function loadIssue(failure) {
     next = 'Disable, or run configure.mjs --reviewed --from-pi again.';
   } else if (code === -32031) {
     reason = 'skipped: needs a Pi install that is missing or unsupported';
-    next = 'Install Pi 1.0.2 to 1.4.x, or disable.';
+    // The action states the range the shipped manifests compute, so adding a
+    // Pi release cannot leave this notice naming an older one.
+    next = `Install Pi ${PI_SUPPORTED_RANGE}, or disable.`;
   } else if (error.startsWith('invalid_request duplicate registration ')) {
     reason = 'skipped: conflicts with another extension';
     next = 'Disable one of the two, then restart octet.';
@@ -207,10 +211,19 @@ export class ExtensionIssues {
   callback(event, factory, error, state) {
     const path = this.runtime.config.extensions[factory];
     if (!this.contextIssue(event, path, state)) return;
-    const reason = error?.code === -32601
-      ? `${display(event, 128)} hook uses an event field octet does not support and was skipped`
-      : `${display(event, 128)} hook failed and was skipped`;
-    this.publish([{ path, level: 'warning', reason, next: 'Update or disable if this keeps happening.' }]);
+    // A -32601 refusal can be about an API member this bridge or the host owns
+    // (a host method, a Pi context member the hook called). Say which one: the
+    // hook event alone does not tell a user what to update. A refusal about a
+    // member the extension merely probed is not tagged, and its name stays in
+    // the log (see lib/errors.mjs namedAPI).
+    const api = refusedAPI(error), hook = display(event, 128);
+    const reason = api
+      ? `${hook} hook needs ${display(api, 96)}, which octet does not provide, so the hook was skipped`
+      : error?.code === -32601
+        ? `${hook} hook called an API octet does not support, so the hook was skipped`
+        : `${hook} hook failed and was skipped`;
+    const next = error?.code === -32601 ? 'Update octet or the extension, or disable.' : 'Update or disable if this keeps happening.';
+    this.publish([{ path, level: 'warning', reason, next }]);
   }
   // A failure with no extension to name. One line, once per distinct message;
   // the full text is in the log.

@@ -168,6 +168,8 @@ function statusContext() {
   runtime.features.add('remote_ui');
   const store = { id: 1, factory: 'status-test', method: 'command/execute', controller: new AbortController(), pending: new Set(), errors: [], live: true };
   runtime.bind({ context: { workspace: '/workspace', resource_owner: owner, host: { has_ui: false } } }, store, { foreground: true });
+  // Mirror a live request; presentation joins only a still-active parent.
+  runtime.active.set(store.id, store);
   const effects = [];
   runtime.ui.mount = async () => { effects.push('mount'); };
   runtime.ui.clearSlot = async () => { effects.push('clear'); };

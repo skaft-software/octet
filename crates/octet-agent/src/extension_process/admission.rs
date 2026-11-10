@@ -1137,7 +1137,7 @@ pub fn validate_extension_flag_value(
             ))),
         },
         ExtensionFlagType::Integer => match value.as_i64() {
-            Some(value) if value.unsigned_abs() <= api_v03::MAX_PORTABLE_JSON_INTEGER as u64 => {
+            Some(value) if value.unsigned_abs() <= api_v04::MAX_PORTABLE_JSON_INTEGER as u64 => {
                 Ok(())
             }
             Some(_) => Err(ExtensionRuntimeError::InvalidManifest(format!(
@@ -1232,7 +1232,7 @@ pub(super) fn resolve_extension_flag_values(
 pub(super) fn projected_initialize_flag_values(
     api_version: &str,
     flag_values: &BTreeMap<String, serde_json::Value>,
-) -> Result<Option<Vec<api_v03::InitializeFlagValue>>, ExtensionRuntimeError> {
+) -> Result<Option<Vec<api_v04::InitializeFlagValue>>, ExtensionRuntimeError> {
     if !uses_api_0_2_capabilities(api_version) {
         return Ok(None);
     }
@@ -1262,7 +1262,7 @@ pub(super) fn projected_initialize_flag_values(
             }
             serde_json::Value::Number(number)
                 if number.as_i64().is_some_and(|value| {
-                    value.unsigned_abs() <= api_v03::MAX_PORTABLE_JSON_INTEGER as u64
+                    value.unsigned_abs() <= api_v04::MAX_PORTABLE_JSON_INTEGER as u64
                 }) => {}
             _ => {
                 return Err(ExtensionRuntimeError::Protocol(format!(
@@ -1270,7 +1270,7 @@ pub(super) fn projected_initialize_flag_values(
                 )));
             }
         }
-        projected.push(api_v03::InitializeFlagValue {
+        projected.push(api_v04::InitializeFlagValue {
             name: name.clone(),
             value: value.clone(),
         });

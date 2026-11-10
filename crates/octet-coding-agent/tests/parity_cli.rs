@@ -1039,7 +1039,14 @@ fn sparse_provider_inventory_inherits_documented_image_input_for_the_real_cli() 
     );
     let pro_row = listing
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro"))
+        .find(|line| {
+            let mut columns = line.split_whitespace();
+            columns.next() == Some("deepseek")
+                && matches!(
+                    columns.next(),
+                    Some("deepseek-v4-pro" | "deepseek/deepseek-v4-pro")
+                )
+        })
         .unwrap_or_else(|| panic!("missing text-only row: {listing}"));
     assert_eq!(
         pro_row.split_whitespace().last(),
@@ -1539,7 +1546,7 @@ fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_o
         content: vec![UserPart::ToolResult(ToolResult {
             tool_call_id: call_id,
             content: vec![ToolResultPart::Text(format!("Authorization: Bearer {}", secrets[4]))],
-            is_error: false, added_tool_names: None,
+            is_error: false, added_tool_names: None, tool_name: None,
         })],
     })), Some(EntryMetadata {
         extension_metadata: std::collections::BTreeMap::from([("fixture.export".into(), ExtensionEntryMetadata {

@@ -86,6 +86,96 @@ impl ProviderContextHook for Rewrite {
         }))
     }
 }
+/// A recoverable hook whose projection the provider cannot represent: the
+/// messages carry inline audio, which the fixture model cannot accept. The tool
+/// set is untouched, so the authority/loadout checks pass and only the provider
+/// validator refuses. A 116-tool Pi fleet must not be able to end the session
+/// with this, so the projection is dropped and the run continues.
+struct InvalidProjection {
+    failure_notice_id: &'static str,
+}
+#[async_trait::async_trait]
+impl ProviderContextHook for InvalidProjection {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn failure_notice_id(&self) -> Option<&str> {
+        Some(self.failure_notice_id)
+    }
+    async fn project_context(
+        &self,
+        _request: &Request,
+        _context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        let audio = Message::User(UserMessage {
+            content: vec![UserPart::Media(Media::audio_bytes(
+                bytes::Bytes::from("not-a-real-wav"),
+                octet_ai::AudioFormat::Wav,
+            ))],
+        });
+        Ok(Some(ProviderContextProjection {
+            system: None,
+            tools: None,
+            messages: vec![audio],
+        }))
+    }
+}
+
+/// A projection that produces an unrepresentable request must not kill the run
+/// (the 116-tool Pi-fleet failure), and the notice must name the validator
+/// reason once. Authority/identity refusals stay fatal and have their own tests.
+#[tokio::test]
+async fn invalid_projection_is_skipped_with_the_validator_reason() {
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(InvalidProjection {
+        failure_notice_id: "pi-bridge",
+    })];
+    let mut notices = Vec::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("invalid-projection.jsonl")).unwrap();
+    let mut context = identity();
+    context.session_id = "invalid-projection".into();
+    let canonical = request();
+    let result = super::project_provider_context(
+        canonical.clone(),
+        &hooks,
+        &context,
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .expect("an invalid projection must not end the run");
+    let messages = serialize_conversation(&result.messages);
+    assert!(messages.contains("canonical user"), "{messages}");
+    assert!(
+        !messages.contains("audio"),
+        "unrepresentable media reached the provider: {messages}"
+    );
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].contains("context projection was invalid and was skipped"),
+        "{}",
+        notices[0]
+    );
+    let mut more = Vec::new();
+    super::project_provider_context(
+        canonical,
+        &hooks,
+        &context,
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut more,
+    )
+    .await
+    .expect("second preparation also survives");
+    assert!(
+        more.is_empty(),
+        "notice reported once per session: {more:?}"
+    );
+}
+
 struct Capture(Arc<Mutex<Vec<Request>>>);
 #[async_trait::async_trait]
 impl octet_ai::HostStreamTransport for Capture {
@@ -912,6 +1002,7 @@ fn tool_history() -> Request {
                 content: vec![ToolResultPart::Text("original".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }),
     ];

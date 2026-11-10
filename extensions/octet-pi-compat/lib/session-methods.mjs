@@ -1,6 +1,6 @@
 // Command-context replacements keep the command RPC live, not its old Session.
 import { dirname } from 'node:path';
-import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported } from './errors.mjs';
+import { bounded, fields, invalid, ownerKey, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { entryPayload, replacementStore } from './session-leaf.mjs';
 import { sessionEntryCopies, sessionEntryCopy } from './session-mirror.mjs';
 import { cancellable, piToCanonical } from './provider-context.mjs';
@@ -9,7 +9,7 @@ import { customMessage } from './custom-messages.mjs';
 // Creation identity/provenance comes from the durable native header. Historical
 // files without a header return undefined rather than fabricated timestamps.
 export function sessionHeader(host) {
-  if (host.session_entries === null || host.session_branch === null) unsupported('ctx.sessionManager.getHeader', 'native session view unavailable');
+  if (host.session_entries === null || host.session_branch === null) unsupportedAPI('ctx.sessionManager.getHeader', 'native session view unavailable');
   const header = host.session_header;
   if (header == null) return undefined;
   bounded(header.id, 'session header id', 256); bounded(header.cwd, 'session header cwd', 4096);
@@ -126,7 +126,7 @@ async function lease(runtime, store, snapshot) {
 
 export function sessionMethods(runtime, store, createContext) {
   const command = name => {
-    if (store.method !== 'command/execute') unsupported(`ctx.${name}`, 'command context only');
+    if (store.method !== 'command/execute') unsupportedAPI(`ctx.${name}`, 'command context only');
     runtime.assertOwner(store);
   };
   const replace = async (name, method, params, withSession, setup) => {

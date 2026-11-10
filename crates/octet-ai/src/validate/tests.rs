@@ -69,6 +69,7 @@ fn test_orphan_tool_result() {
                 content: vec![],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })],
         ..base_request()

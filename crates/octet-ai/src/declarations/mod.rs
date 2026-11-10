@@ -532,6 +532,7 @@ impl AnthropicFallbackCost {
             // remains unpriced (checked by the Anthropic stream decoder).
             cache_write_1h: None,
             reasoning: None,
+            windows: Default::default(),
             tiers: vec![],
         })
     }

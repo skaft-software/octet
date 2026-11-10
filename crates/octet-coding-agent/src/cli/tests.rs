@@ -50,6 +50,7 @@ fn base() -> Cli {
         skill_dirs: vec![],
         extension_dirs: vec![],
         enable_extensions: vec![],
+        no_extensions: false,
         trust_extensions: vec![],
         experimental_streamable_http_mcp: false,
         workspace_trusted: false,
@@ -59,6 +60,8 @@ fn base() -> Cli {
         powershell: false,
         exclude_tools: vec![],
         no_tools: false,
+        no_themes: false,
+        no_skills: false,
         no_edit: false,
         no_write: false,
         no_process: false,
@@ -176,8 +179,10 @@ mod pi_codemode_tests {
             assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
             assert!(config.invocation_trusted_extensions.is_empty());
             assert_eq!(config.effect_policy, EffectPolicy::Controlled);
-            assert!(config.extension_activation_overridden);
-            assert!(!extension_activation_menu_authoritative(&config).unwrap());
+            // A mirrored Pi preference is an ordinary enable, not a pinned
+            // activation layer: the menu stays authoritative for codemode too.
+            assert!(!config.extension_activation_overridden);
+            assert!(extension_activation_menu_authoritative(&config).unwrap());
         }
     }
 
@@ -205,13 +210,17 @@ mod pi_codemode_tests {
         let fixture = Fixture::new();
         let manifest = fixture.bundle(&fixture.global.join("extensions"));
         let valid = std::fs::read_to_string(&manifest).unwrap();
+        // Derive the pin from the shipped manifest: a hardcoded version silently
+        // turned this case into a valid manifest after the last release bump.
+        let pinned = format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION"));
+        assert!(
+            valid.contains(&pinned),
+            "bundle pin must match this release"
+        );
         for invalid in [
             "not a TOML manifest".to_owned(),
             valid.replace("name = \"octet-codemode\"", "name = \"different-name\""),
-            valid.replace(
-                "requires_octet = \"=0.10.0\"",
-                "requires_octet = \"=999.0.0\"",
-            ),
+            valid.replace(&pinned, "requires_octet = \"=999.0.0\""),
             valid.replace("api_version = \"0.4\"", "api_version = \"9.9\""),
         ] {
             std::fs::write(&manifest, invalid).unwrap();
@@ -548,7 +557,9 @@ mod pi_codemode_tests {
                 3000
             );
             assert_eq!(config.trusted_extensions, vec![CODEMODE_EXTENSION]);
-            assert!(config.extension_activation_overridden);
+            // The mirror is an ordinary enable. The menu stays authoritative and a
+            // saved off entry outranks it, so this must not read as a pinned layer.
+            assert!(!config.extension_activation_overridden);
             assert_eq!(
                 std::fs::read(&config_path).unwrap(),
                 before,
@@ -604,6 +615,9 @@ mod pi_codemode_tests {
             "trusted_extensions = ['octet-codemode']\n",
         )
         .unwrap();
+        // The child clears its environment and must not discover an unrelated
+        // repository above TMPDIR as its workspace.
+        std::fs::create_dir(fixture.workspace.join(".git")).unwrap();
         let home = fixture.global.parent().unwrap();
         let pi = home.join(".pi/agent");
         std::fs::create_dir_all(&pi).unwrap();
@@ -822,6 +836,36 @@ fn extension_flags_parse_types_defaults_inverses_and_help() {
     assert!(help.contains("--fixture-count <INTEGER>"));
 }
 
+// Pi's `examples/extensions/preset.ts` registers `--preset`. `octet setup` has an
+// option of that name, but subcommand options are parsed only after the subcommand
+// token, so they must not occupy the top-level extension flag namespace.
+#[test]
+fn extension_flag_may_reuse_a_subcommand_option_name() {
+    let declaration = || {
+        vec![(
+            "preset".to_owned(),
+            extension_flag("preset", ExtensionFlagType::String, serde_json::json!("")),
+        )]
+    };
+    let registered = register_extension_flags(declaration()).expect("--preset registers");
+    let matches = extension_flag_command(&registered)
+        .try_get_matches_from(["octet", "--preset", "fast"])
+        .expect("parse extension --preset");
+    assert_eq!(
+        resolve_extension_flag_values(&matches, &registered).expect("resolve")["preset"]["preset"],
+        serde_json::json!("fast")
+    );
+    let (cli, values, explicit) = extension_flags::parse_declared_extension_flags(
+        ["octet", "setup", "--preset", "lm-studio"]
+            .map(OsString::from)
+            .to_vec(),
+        declaration(),
+    )
+    .expect("setup keeps its own --preset");
+    assert!(matches!(cli.command, Some(TopLevelCommand::Setup { .. })));
+    assert!(values.is_empty() && explicit.is_empty());
+}
+
 #[test]
 fn extension_flags_reject_static_and_cross_extension_collisions() {
     for reserved in [
@@ -985,6 +1029,23 @@ fn colour_policy_resolves_from_cli() {
     cli.color = Some("never".into());
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert_eq!(config.color, ColorMode::Never);
+}
+
+#[test]
+fn explicit_workspace_outside_cwd_becomes_relative_path_base_without_trust() {
+    let outside = cwd();
+    let workspace = cwd();
+    std::fs::create_dir(workspace.path().join("exts")).unwrap();
+    let mut cli = base();
+    cli.workspace = Some(workspace.path().into());
+    cli.extension_dirs = vec!["exts".into()];
+    cli.telemetry = Some("trace.jsonl".into());
+    let config = config_with_empty_global(cli, outside.path()).unwrap();
+    let root = workspace.path().canonicalize().unwrap();
+    assert_eq!(config.workspace, root);
+    assert_eq!(config.invocation_cwd, root);
+    assert_eq!(config.telemetry, Some(root.join("trace.jsonl")));
+    assert!(!config.workspace_trusted);
 }
 
 #[test]
@@ -1488,6 +1549,137 @@ fn environment_effect_policy_layer_overrides_config() {
         policy_value_source(true, values.effect_policy.is_some()),
         PolicyValueSource::Environment
     );
+}
+
+#[test]
+fn an_extension_toggle_leaves_every_other_activation_source_alone() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    let mut config = config_with_empty_global(cli, directory.path()).unwrap();
+    // codemode is active only because the mirrored Pi preference contributed it;
+    // web-search is active from the saved user list.
+    config.enabled_extensions = vec![CODEMODE_EXTENSION.into(), "octet-web-search".into()];
+
+    apply_extension_toggle(&mut config, "octet-web-search", false);
+    assert_eq!(
+        config.enabled_extensions,
+        vec![CODEMODE_EXTENSION],
+        "an unrelated toggle must not drop the mirrored activation"
+    );
+    assert_eq!(
+        config.disabled_extensions,
+        vec!["octet-web-search".to_owned()]
+    );
+
+    apply_extension_toggle(&mut config, "octet-web-search", true);
+    assert_eq!(
+        config.enabled_extensions,
+        vec![CODEMODE_EXTENSION, "octet-web-search"]
+    );
+    assert!(config.disabled_extensions.is_empty());
+
+    // A name that is both disabled and present in a stale saved list stays off
+    // until the user re-enables it explicitly.
+    config.enabled_extensions.push("octet-mcp".into());
+    config.disabled_extensions.push("octet-mcp".into());
+    apply_extension_toggle(&mut config, CODEMODE_EXTENSION, false);
+    let mut effective = config.enabled_extensions.clone();
+    apply_native_extension_activation(&mut config, false);
+    effective.retain(|name| !config.disabled_extensions.contains(name));
+    assert_eq!(config.enabled_extensions, effective);
+    assert!(!config.enabled_extensions.iter().any(|n| n == "octet-mcp"));
+}
+
+#[test]
+fn native_activation_outranks_saved_and_mirrored_enables() {
+    let directory = cwd();
+    let mut cli = base();
+    cli.workspace = Some(directory.path().into());
+    let mut config = config_with_empty_global(cli, directory.path()).unwrap();
+    config.enabled_extensions = vec![CODEMODE_EXTENSION.into(), "octet-web-search".into()];
+    config.disabled_extensions = vec![CODEMODE_EXTENSION.into()];
+
+    apply_native_extension_activation(&mut config, false);
+    assert_eq!(config.enabled_extensions, vec!["octet-web-search"]);
+
+    apply_native_extension_activation(&mut config, true);
+    assert!(config.enabled_extensions.is_empty());
+}
+
+#[test]
+fn disabling_records_a_saved_off_entry_and_enabling_clears_it() {
+    let directory = cwd();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "enabled_extensions = [\"octet-web-search\"]\n").unwrap();
+
+    // The mirrored case: the name is not in the saved list at all, so absence
+    // alone cannot express "off". The write still has to record it.
+    persist_extension_enabled_to_path(CODEMODE_EXTENSION, false, &path).unwrap();
+    let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
+    assert_eq!(
+        saved.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        saved.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
+
+    persist_extension_enabled_to_path(CODEMODE_EXTENSION, true, &path).unwrap();
+    let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
+    assert_eq!(saved.disabled_extensions, None);
+    let mut enabled = saved.enabled_extensions.unwrap();
+    enabled.sort();
+    assert_eq!(
+        enabled,
+        vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]
+    );
+}
+
+#[test]
+fn a_project_layer_cannot_silence_an_extension() {
+    let mut layer = ConfigLayer {
+        disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
+        ..ConfigLayer::default()
+    };
+    layer.merge_project(ConfigLayer {
+        enabled_extensions: Some(vec!["octet-web-search".into()]),
+        disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
+        ..ConfigLayer::default()
+    });
+    assert_eq!(
+        layer.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        layer.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
+}
+
+#[test]
+fn pi_surface_reducing_flags_are_accepted_and_semantic_ones_still_refused() {
+    // pi-acp always spawns `<agent> --mode rpc --no-themes`; refusing the flag
+    // is a fatal spawn error in every ACP client, so accept the surface-reducing
+    // ones as documented no-ops.
+    for flags in [
+        vec!["octet", "--no-themes"],
+        vec!["octet", "--no-skills"],
+        vec!["octet", "--no-themes", "--no-skills"],
+    ] {
+        let cli = Cli::try_parse_from(&flags).expect("surface-reducing Pi flags parse");
+        assert_eq!(cli.no_themes, flags.contains(&"--no-themes"), "{flags:?}");
+        assert_eq!(cli.no_skills, flags.contains(&"--no-skills"), "{flags:?}");
+    }
+    // Flags that would change semantics octet cannot honor stay refused rather
+    // than silently dropping MCP servers or extra workspace roots.
+    for flag in ["--mcp-config", "--append-system-prompt", "--no-such-flag"] {
+        assert!(
+            Cli::try_parse_from(["octet", flag, "x"]).is_err(),
+            "{flag} must not be silently accepted"
+        );
+    }
 }
 
 #[test]

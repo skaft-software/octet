@@ -214,7 +214,10 @@ export async function toolContent(runtime, content, store) {
       parts.push({ type: 'text', text: bounded(part.text, 'tool output', 524288, { controls: true }) });
     } else if (part?.type === 'image') {
       fields(part, ['type', 'data', 'mimeType'], 'tool image'); runtime.require('artifacts');
-      bounded(part.data, 'tool image data', 524288, { controls: true });
+      // Base64 expands by 4/3. This admits a 5 MiB screenshot, which the host
+      // accepts as decoded payload; the old 512 KiB bound rejected ordinary
+      // screenshots before the host ever saw them.
+      bounded(part.data, 'tool image data', 8 * 1024 * 1024, { controls: true });
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(part.data)) invalid('tool image must be base64');
       if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(part.mimeType)) invalid('tool image mimeType');
       const bytes = Buffer.from(part.data, 'base64');

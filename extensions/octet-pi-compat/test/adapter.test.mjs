@@ -20,7 +20,7 @@ test('static TypeScript registrations, flags, stdout isolation, useful truthful 
   assert.equal(result.result.content[0].text, `${root}|true|host-value`);
   assert.deepEqual(result.result.metadata.pi_details.model.cost, { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 });
   assert.equal(result.result.metadata.pi_details.model.contextWindow, 32768);
-  assert.match(peer.stderr(), /console diagnostic/); assert.match(peer.stderr(), /direct stdout diagnostic/);
+  await peer.waitStderr(/console diagnostic/); await peer.waitStderr(/direct stdout diagnostic/);
   await peer.close();
 });
 test('reviewed extension requests only the active model credential from its real host', async t => {
@@ -48,10 +48,15 @@ test('credential resolution cannot redirect a reviewed request to another model'
   assert.doesNotMatch(peer.stderr(), /fixture-secret/);
   await peer.close();
 });
-test('hasUI is false when remote_ui was not offered and custom fails explicitly', async t => {
+test('hasUI is false without remote_ui and custom returns undefined without invoking its factory', async t => {
   const peer = launch(t); await peer.init(['request_progress']);
   assert.match((await peer.call('normal').response).result.content[0].text, /\|false\|/);
-  assert.match((await peer.command('surface').response).error.message, /unsupported_feature remote_ui/);
+  // Pi 1.0.2: scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:132-147.
+  assert.ok((await peer.command('surface').response).result);
+  await peer.wait(f => f.method === 'notification' && f.params.message === 'done:undefined');
+  await peer.close();
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/frame'), false);
+  assert.doesNotMatch(peer.stderr(), /surface factory invoked/);
 });
 test('custom settles its command after mount but keeps JS done result, timers, owner and input live', async t => {
   const peer = launch(t); await peer.init();
@@ -104,7 +109,8 @@ test('ordered async hook callbacks and queued cancellation remain serviceable', 
   const first = invoke(1, 80), second = invoke(2, 0), third = invoke(3, 0);
   peer.notify('$/cancelRequest', { id: second.id });
   assert.ok((await first.response).result); assert.equal((await second.response).error.code, -32800); assert.ok((await third.response).result);
-  assert.match(peer.stderr(), /ordered:1[\s\S]*ordered:3/); assert.doesNotMatch(peer.stderr(), /ordered:2/);
+  // stderr is a separate pipe from the responses; wait for the diagnostic.
+  assert.match(await peer.waitStderr(/ordered:1[\s\S]*ordered:3/), /ordered:1[\s\S]*ordered:3/); assert.doesNotMatch(peer.stderr(), /ordered:2/);
   assert.equal((await peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'blocked', arguments: {} }, context: peer.context() }).response).result.disposition.action, 'deny');
 });
 test('cancelling tools and reverse calls rejects once, ignores late response, and preserves other calls', async t => {
@@ -126,12 +132,16 @@ test('unsupported options/results and unnegotiated child calls never silently di
   const peer = launch(t); await peer.init(); await peer.start();
   for (const [mode, reason] of [['unsafe-output', /direct terminal control/], ['runtime', /unsupported_feature agent_sessions: feature was not negotiated/], ['media', /unsupported_feature artifacts/], ['fail', /handler crash/]]) assert.match((await peer.call(mode).response).error.message, reason);
 });
-test('headless chrome setters are inert; dialogs and theme catalogs still refuse', async t => {
+test('headless chrome and custom UI are inert; native theme catalogs still refuse', async t => {
   const peer = launch(t); await peer.init([]); await peer.start();
   // Pi's print mode has a UI context whose presentation setters do nothing.
   assert.ok((await peer.call('chrome').response).result);
-  assert.match((await peer.call('dialog').response).error.message, /unsupported_feature remote_ui/);
+  // Pi's noOpUIContext.custom never calls its factory (runner.js:147).
+  assert.equal((await peer.call('dialog').response).result.content[0].text, 'undefined');
   assert.match((await peer.call('theme').response).error.message, /unsupported_feature ctx\.ui\.theme/);
+  await peer.close();
+  assert.equal(peer.seen.some(f => f.method === 'ui/open' || f.method === 'ui/frame' || f.method === 'ui/chrome'), false);
+  assert.doesNotMatch(peer.stderr(), /dialog factory invoked/);
 });
 test('shared events preserve synchronous object/function identity across multiple unchanged factories', async t => {
   const dir = await temporary(t), a = join(dir, 'a.ts'), b = join(dir, 'b.ts');

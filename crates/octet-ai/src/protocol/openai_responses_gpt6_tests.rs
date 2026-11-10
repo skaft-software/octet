@@ -562,6 +562,7 @@ fn async_history_transform_never_synthesizes_or_discards_delayed_results() {
             content: vec![crate::ToolResultPart::Text("sunny".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }));
     req.messages = crate::transform_messages(&req.messages, &model);
@@ -693,6 +694,7 @@ async fn synchronous_fallback_call_ids_can_repeat_after_each_paired_round() {
                     content: vec![crate::ToolResultPart::Text("read ok".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             }));
             crate::validate::validate_request(
@@ -740,6 +742,7 @@ fn async_qualified_histories_keep_global_ids_even_after_completed_sync_calls() {
                 content: vec![crate::ToolResultPart::Text("done".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }));
         req.messages.push(call(&model, !first_async));
@@ -868,6 +871,7 @@ fn completed_canonical_async_history_survives_tool_removal_or_advertisement_chan
                 content: vec![crate::ToolResultPart::Text("sunny".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             }),
             UserPart::Text("Continue without the old tool".into()),
         ],

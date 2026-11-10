@@ -232,7 +232,7 @@ See [Discovery and trust](resources.md).
 | Key | What it does |
 | --- | --- |
 | Enter | Send when idle; while octet works, steer at the next model boundary. In a picker, choose the highlighted action. In the slash popup, run the highlighted command. |
-| Shift+Enter | New line, if your terminal reports enhanced key events. |
+| Shift+Enter / Ctrl+J | New line. Shift+Enter requires a [distinguishable terminal encoding](terminal.md#shiftenter-terminal-support); otherwise it may submit. |
 | Shift+Tab | Cycle through the active model's thinking levels, lowest to highest, wrapping at the end. During a run it updates the queued selection at once. |
 | Ctrl+S | Queue an editable follow-up for after the run; send normally when idle. In the resume picker, change the sort order. |
 | Escape | Close a panel or slash popup first. Otherwise interrupt active work, then send the oldest queued follow-up after it settles (never the draft). |

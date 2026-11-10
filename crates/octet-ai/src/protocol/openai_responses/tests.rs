@@ -344,6 +344,7 @@ fn public_replay_encoder_keeps_opaque_items_and_verbatim_call_ids() {
                 content: vec![crate::types::ToolResultPart::Text("ok".to_owned())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }),
     ];
@@ -615,6 +616,7 @@ fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
             content: vec![ToolResultPart::Text("ok".to_owned())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }));
     let original = serde_json::to_value(&req).unwrap();
@@ -1350,6 +1352,7 @@ fn computer_tool_result(tool_call_id: &str, image: Option<Media>) -> Message {
                 .collect(),
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     })
 }
@@ -1510,6 +1513,7 @@ fn opaque_replay_dispatches_computer_results_by_authoritative_output() {
                     content: vec![ToolResultPart::Text("screenshot unavailable".to_owned())],
                     is_error: true,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             }),
         ],

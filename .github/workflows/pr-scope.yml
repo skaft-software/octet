@@ -1,0 +1,32 @@
+name: PR scope
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  pr-scope:
+    if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'achuthanmukundan00'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require an issue reference
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          body = os.environ["PR_BODY"]
+          issue = re.compile(
+              r"\b(?:fixes|closes|resolves|refs)\s+#[1-9][0-9]*\b"
+              r"|https://github\.com/[a-z0-9_.-]+/[a-z0-9_.-]+/issues/[1-9][0-9]*\b",
+              re.IGNORECASE,
+          )
+          if not issue.search(body):
+              sys.exit("Link an issue in the PR body, for example 'Refs #' followed by its number.")
+          print("PR body references an issue.")
+          PY

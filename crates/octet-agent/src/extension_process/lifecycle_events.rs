@@ -338,7 +338,7 @@ pub struct ExtensionSessionCompactionResult {
 }
 
 /// Terminal disposition supplied by the product's active-session driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionSessionLifecycleError {
     /// A Pi before-session hook cancelled replacement without changing sessions.
     Cancelled,
@@ -346,6 +346,9 @@ pub enum ExtensionSessionLifecycleError {
     Unavailable,
     /// The bounded operation reached the idle driver but failed.
     Failed,
+    /// A native lifecycle precondition refused replacement, with a user-safe
+    /// cause and recovery action supplied by the product driver.
+    Refused(String),
 }
 
 pub(super) struct SessionLifecycleDriverState {
@@ -740,6 +743,7 @@ impl ExtensionSessionLifecycleRequest {
                 Err(ExtensionSessionLifecycleError::Cancelled) => {
                     Ok(serde_json::json!({"cancelled":true}))
                 }
+                Err(ExtensionSessionLifecycleError::Refused(reason)) => Err(reason),
                 Err(error) => Err(format!("session replacement failed: {error:?}")),
             });
         } else {

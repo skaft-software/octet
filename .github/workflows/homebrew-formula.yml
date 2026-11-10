@@ -49,8 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           release_tag=$INPUT_RELEASE_TAG
-          if [[ "$CURRENT_REF_TYPE" != tag || "$CURRENT_REF_NAME" != "octet-binaries-$release_tag" ]]; then
-            echo "formula renders must run from octet-binaries-$release_tag" >&2
+          if [[ "$CURRENT_REF_TYPE" != tag \
+            || ( "$CURRENT_REF_NAME" != "$release_tag" && "$CURRENT_REF_NAME" != "octet-binaries-$release_tag" ) ]]; then
+            echo "formula renders must run from $release_tag or octet-binaries-$release_tag" >&2
             exit 1
           fi
           workflow_tag=$CURRENT_REF_NAME
@@ -93,8 +94,12 @@ jobs:
             --clobber \
             --pattern 'install-octet.sh' \
             --pattern 'install-octet.sh.sigstore.json' \
+            --pattern 'install-octet.ps1' \
+            --pattern 'install-octet.ps1.sigstore.json' \
             --pattern 'octet-*.tar.gz' \
             --pattern 'octet-*.tar.gz.sigstore.json' \
+            --pattern 'octet-*.zip' \
+            --pattern 'octet-*.zip.sigstore.json' \
             --pattern 'OCTET_SHA256SUMS' \
             --pattern 'OCTET_SHA256SUMS.sigstore.json' \
             --pattern 'OCTET_RELEASE_METADATA.json' \
@@ -109,12 +114,18 @@ jobs:
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
             --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
           )
-          for artifact in ./*.tar.gz ./install-octet.sh ./OCTET_SHA256SUMS ./OCTET_RELEASE_METADATA.json; do
+          shopt -s nullglob
+          for artifact in ./*.tar.gz ./*.zip ./install-octet.sh ./install-octet.ps1 ./OCTET_SHA256SUMS ./OCTET_RELEASE_METADATA.json; do
+            [[ -f "$artifact" ]] || continue
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               "${verify[@]}" \
               "$artifact"
           done
+          metadata_flags=()
+          if [[ -f "octet-${RELEASE_TAG#v}-x86_64-pc-windows-msvc.zip" ]]; then
+            metadata_flags+=(--include-windows-msvc)
+          fi
           python3 ../scripts/generate-octet-release-metadata.py \
             "${RELEASE_TAG#v}" \
             "$RELEASE_TAG" \
@@ -123,7 +134,8 @@ jobs:
             "$WORKFLOW_REF" \
             "$WORKFLOW_REPOSITORY" \
             OCTET_SHA256SUMS \
-            "$RUNNER_TEMP/recomputed-release-metadata.json"
+            "$RUNNER_TEMP/recomputed-release-metadata.json" \
+            "${metadata_flags[@]}"
           cmp OCTET_RELEASE_METADATA.json "$RUNNER_TEMP/recomputed-release-metadata.json"
       - name: Render and validate Homebrew formula offline
         shell: bash
@@ -140,7 +152,10 @@ jobs:
           test "$(grep -c '^class Octet < Formula$' "$RUNNER_TEMP/octet.rb")" = 1
           grep -F "# Release tag: $RELEASE_TAG" "$RUNNER_TEMP/octet.rb"
           grep -F 'depends_on :macos' "$RUNNER_TEMP/octet.rb"
-          grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/octet.rb"
+          if grep -F 'depends_on "ripgrep"' "$RUNNER_TEMP/octet.rb"; then
+            echo "Homebrew formula must not require the optional ripgrep helper" >&2
+            exit 1
+          fi
           if rg -n 'Cargo\.toml|api\.github\.com|releases/latest' "$RUNNER_TEMP/octet.rb" scripts/generate-homebrew-formula.py; then
             echo "Homebrew handoff contains a mutable release source" >&2
             exit 1
@@ -223,7 +238,9 @@ jobs:
           fi
           git config user.name "octet-release[bot]"
           git config user.email "octet-release[bot]@users.noreply.github.com"
+          branch_existed=false
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            branch_existed=true
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
             git switch -c "$branch" --track "origin/$branch"
           else
@@ -236,18 +253,40 @@ jobs:
           # Copy only after selecting the review branch so reruns can update it
           # without switching over uncommitted formula content.
           cp ../formula-artifact/homebrew-octet.rb "$formula_path"
-          if git diff --quiet -- Formula/octet.rb; then
-            echo "tap already contains the exact formula"
+          # Stage before comparing: `git diff` ignores a formula that is new to
+          # the tap, which would report a fresh tap as already up to date.
+          git add -- Formula/octet.rb
+          changed=true
+          if git diff --cached --quiet -- Formula/octet.rb; then
+            changed=false
+            if [[ "$branch_existed" != true ]]; then
+              echo "tap already contains the exact formula"
+              exit 0
+            fi
+            echo "tap branch $branch already contains the exact formula"
+          else
+            git commit -m "Update octet formula to $RELEASE_TAG"
+          fi
+          : "${HOMEBREW_TAP_TOKEN:?HOMEBREW_TAP_TOKEN is required}"
+          if [[ "$changed" == true ]]; then
+            # checkout intentionally leaves the fetch remote unauthenticated;
+            # provide the scoped tap credential only for this push.
+            git remote set-url --push origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git"
+            git push --set-upstream origin "$branch"
+            git remote set-url --push origin "https://github.com/${TAP_REPOSITORY}.git"
+          fi
+          # A push can succeed before pull-request creation fails. Converge on
+          # the existing review branch instead of reporting that as complete.
+          existing_pr=$(GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh pr list \
+            --repo "$TAP_REPOSITORY" \
+            --head "$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$existing_pr" ]]; then
+            echo "tap pull request #$existing_pr already tracks $branch"
             exit 0
           fi
-          git add -- Formula/octet.rb
-          git commit -m "Update octet formula to $RELEASE_TAG"
-          : "${HOMEBREW_TAP_TOKEN:?HOMEBREW_TAP_TOKEN is required}"
-          # checkout intentionally leaves the fetch remote unauthenticated;
-          # provide the scoped tap credential only for this push.
-          git remote set-url --push origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git"
-          git push --set-upstream origin "$branch"
-          git remote set-url --push origin "https://github.com/${TAP_REPOSITORY}.git"
           GH_TOKEN="$HOMEBREW_TAP_TOKEN" \
             gh pr create \
             --repo "$TAP_REPOSITORY" \

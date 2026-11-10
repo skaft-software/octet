@@ -1,0 +1,48 @@
+{
+  "name": "custom-messages",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "custom_message",
+      "as": "hidden",
+      "customType": "fixture",
+      "content": "hidden",
+      "display": false,
+      "details": {
+        "private": "not model context"
+      }
+    },
+    {
+      "op": "custom_message",
+      "as": "visible",
+      "customType": "fixture",
+      "content": [
+        {
+          "type": "text",
+          "text": "block one"
+        },
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+          "mimeType": "image/png"
+        },
+        {
+          "type": "text",
+          "text": "block two"
+        }
+      ],
+      "display": true,
+      "details": {
+        "private": "not model context"
+      }
+    }
+  ]
+}

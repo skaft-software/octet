@@ -465,13 +465,11 @@ impl ExecutableExtensions {
                     .iter()
                     .map(|descriptor| descriptor.manifest.name.clone())
                     .collect::<Vec<_>>();
-                // A pending first-party subagents extension is the same one the
-                // synchronous path would have measured, so delegation readiness
-                // is decided at discovery and the process binds at attach.
+                // Both first-party child-session owners may negotiate this
+                // service. Prepare the runtime before either deferred process
+                // attaches, including the automatic Pi mirror.
                 let agent_sessions_pending = agent_sessions_tool_available
-                    && startable_names
-                        .iter()
-                        .any(|name| name == SUBAGENTS_EXTENSION_NAME);
+                    && startable_names.iter().any(|name| agent_session_owner(name));
                 crate::app::bootstrap::startup_count(
                     "extensions.handshake.requested",
                     startable_names.len(),
@@ -628,13 +626,19 @@ impl ExecutableExtensions {
             .unwrap_or_default()
     }
 
-    /// Whether a pending first-party `octet-subagents` was admitted with the
-    /// `subagent_spawn` tool. Delegation readiness uses this until the process
-    /// attaches, so a deferred boot cannot silently downgrade Ultra reasoning.
+    /// Whether an admitted first-party child-session owner is still starting.
     pub(crate) fn pending_agent_session_service(&self) -> bool {
         self.deferred_startup
             .as_ref()
             .is_some_and(|deferred| deferred.agent_sessions_pending)
+    }
+
+    /// Pi can use child sessions too, but only subagents supplies the worker
+    /// observation surface required for Ultra reasoning.
+    pub(crate) fn pending_subagents_service(&self) -> bool {
+        self.deferred_startup.as_ref().is_some_and(|deferred| {
+            deferred.agent_sessions_pending && deferred.pending.contains(SUBAGENTS_EXTENSION_NAME)
+        })
     }
 
     /// Installs every extension handshake that already settled.
@@ -1082,7 +1086,7 @@ impl ExecutableExtensions {
                 .cloned()
                 .unwrap_or_default();
             runtime.agent_sessions =
-                extension == SUBAGENTS_EXTENSION_NAME && config.tool_available("subagent_spawn");
+                agent_session_owner(extension) && config.tool_available("subagent_spawn");
         }
         // Isolated lifecycle owners also receive the session event bus; shared
         // workspace services reject either service at activation, exactly as at
@@ -1525,6 +1529,16 @@ impl ExecutableExtensions {
         self.deactivate_session_lifecycle_driver();
         self.remote_ui
             .revoke("the foreground extension binding ended");
+        // Aborting a Tokio task only requests cancellation. Wait until its
+        // process-group guard has actually dropped before releasing the owner;
+        // otherwise an old Pi capture can continue writing after release.
+        if let Some(preparation) = self
+            .deferred_startup
+            .as_mut()
+            .and_then(|startup| startup.pi_preparation.as_mut())
+        {
+            preparation.cancel().await;
+        }
         self.cancel_background_work();
         self.settle_session_lifecycle(reload).await;
         for process in &self.processes {
@@ -1694,7 +1708,9 @@ impl ExecutableExtensions {
         self.await_reloaded_provider_registrations(&reloaded).await;
         self.complete_provider_reload(Some(&reloaded));
         for mutation in completed_mutations {
-            let rescans = self.notify_post_mutation(mutation).await;
+            let rescans = self
+                .notify_post_mutation_within(mutation, POST_RELOAD_MUTATION_RPC_DEADLINE)
+                .await;
             output.details.extend(rescans.into_iter().map(|request| {
                 format!(
                     "extension {:?} requested bounded rescan of {} resource(s)",
@@ -1739,6 +1755,16 @@ impl ExecutableExtensions {
 /// The Pi bridge ships in the official catalog, but every tool it carries
 /// comes from a third-party Pi package.
 pub(super) const PI_BRIDGE_EXTENSION_NAME: &str = "octet-pi-compat";
+
+/// First-party extensions that may create native child agent sessions.
+///
+/// `octet-subagents` owns the delegation tools, and the Pi bridge exposes the
+/// same host authority to `createAgentSession` callers. No other name is
+/// granted it, and the grant still depends on the delegation tool being
+/// available.
+fn agent_session_owner(name: &str) -> bool {
+    name == SUBAGENTS_EXTENSION_NAME || name == PI_BRIDGE_EXTENSION_NAME
+}
 
 fn first_party_tool_owner(name: &str) -> bool {
     name != PI_BRIDGE_EXTENSION_NAME && crate::extension_bundle::is_official_bundle(name)
@@ -1891,8 +1917,8 @@ impl ExtensionActivationPlan {
             .get(&descriptor.manifest.name)
             .cloned()
             .unwrap_or_default();
-        runtime.agent_sessions = descriptor.manifest.name == SUBAGENTS_EXTENSION_NAME
-            && self.agent_sessions_tool_available;
+        runtime.agent_sessions =
+            agent_session_owner(&descriptor.manifest.name) && self.agent_sessions_tool_available;
         runtime.session_lifecycle = if extension_session_lifecycle_eligible(descriptor) {
             self.session_lifecycle.clone()
         } else {
@@ -1951,6 +1977,13 @@ pub(super) struct DeferredPiPreparation {
 }
 
 impl DeferredPiPreparation {
+    async fn cancel(&mut self) {
+        if self.result.is_none() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+    }
+
     async fn wait(&mut self) {
         if self.result.is_none() {
             self.result = Some(
@@ -2317,6 +2350,63 @@ mod tool_clash_tests {
         ]);
         assert_eq!(clashes.kept.len(), 2);
         assert!(clashes.turned_off.is_empty() && clashes.withheld.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod agent_session_grant_tests {
+    use super::*;
+
+    fn descriptor(name: &str) -> DiscoveredExtension {
+        let manifest = octet_agent::ExtensionManifest::parse(&format!(
+            "name = {name:?}\nversion = \"0.1.0\"\napi_version = \"0.4\"\n\n[entrypoint]\ncommand = \"node\"\n"
+        ))
+        .unwrap();
+        DiscoveredExtension {
+            manifest,
+            manifest_path: PathBuf::from(format!("/{name}/extension.toml")),
+            source: ExtensionSource::Explicit,
+            activation: octet_agent::extension_process::ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        }
+    }
+
+    fn plan() -> ExtensionActivationPlan {
+        ExtensionActivationPlan {
+            workspace: PathBuf::from("/workspace"),
+            python_runtime: None,
+            resource_paths: false,
+            host_state: ExtensionHostState::default(),
+            remote_ui: None,
+            bulk_store: None,
+            flag_values: BTreeMap::new(),
+            agent_sessions_tool_available: true,
+            session_lifecycle: None,
+            event_bus: None,
+            provider_registry: None,
+            withheld_tools: BTreeMap::new(),
+        }
+    }
+
+    /// Pi `createAgentSession` needs the same native child-session authority the
+    /// delegation extension already had, and nothing else receives it by name.
+    #[test]
+    fn only_first_party_child_session_owners_receive_agent_sessions() {
+        let plan = plan();
+        for name in [SUBAGENTS_EXTENSION_NAME, PI_BRIDGE_EXTENSION_NAME] {
+            assert!(
+                plan.runtime_for(&descriptor(name)).agent_sessions,
+                "{name} must receive agent_sessions"
+            );
+        }
+        for name in ["octet-web-search", "external-delegation"] {
+            assert!(
+                !plan.runtime_for(&descriptor(name)).agent_sessions,
+                "{name} must not receive agent_sessions"
+            );
+        }
     }
 }
 

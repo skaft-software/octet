@@ -212,6 +212,7 @@ pub(super) fn worst_case_request_cost(
         cache_write_5m: octet_ai::TokenRate(input_rate),
         cache_write_1h: Some(octet_ai::TokenRate(input_rate)),
         reasoning: Some(octet_ai::TokenRate(output_rate)),
+        windows: Default::default(),
         tiers: Vec::new(),
     };
     let usage = Usage {

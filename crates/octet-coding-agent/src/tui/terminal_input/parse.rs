@@ -1,7 +1,8 @@
 //! Crossterm 0.29.0 Unix event decoder (MIT, see LICENSE.crossterm).
 //! Kept here because upstream exposes no byte decoder or raw-event provenance.
 //! Changes: public event imports, local protocol-event enum, always raw mode/paste,
-//! Pi's canonical Ctrl+- spelling for the ambiguous legacy byte 0x1f.
+//! canonical Ctrl+- spelling for the ambiguous legacy byte 0x1f, and
+//! xterm modifyOtherKeys encoding for modified Enter.
 
 use std::io;
 
@@ -625,6 +626,24 @@ pub(crate) fn parse_csi_special_key_code(buffer: &[u8]) -> io::Result<Option<Int
 
     // This CSI sequence can be a list of semicolon-separated numbers.
     let first = next_parsed::<u8>(&mut split)?;
+
+    // xterm modifyOtherKeys: CSI 27 ; modifiers ; 13 ~. Only the
+    // modified Enter form is needed here; other special keys keep their
+    // existing crossterm decoding.
+    if first == 27 {
+        let mask = next_parsed::<u8>(&mut split)?;
+        if mask == 0 || split.next() != Some("13") || split.next().is_some() {
+            return Err(could_not_parse_event_error());
+        }
+        return Ok(Some(InternalEvent::Event(Event::Key(
+            KeyEvent::new_with_kind_and_state(
+                KeyCode::Enter,
+                parse_modifiers(mask),
+                KeyEventKind::Press,
+                parse_modifiers_to_state(mask),
+            ),
+        ))));
+    }
 
     let (modifiers, kind, state) =
         if let Ok((modifier_mask, kind_code)) = modifier_and_kind_parsed(&mut split) {

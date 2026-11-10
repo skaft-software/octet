@@ -114,6 +114,7 @@ impl Agent {
                 sandbox.max_output_bytes,
                 Vec::new(),
             );
+            let message = with_tool_name(message, &call.name);
             self.session.append_with_metadata(
                 EntryValue::Message(Message::User(message)),
                 details.map(|tool_output| EntryMetadata {
@@ -237,11 +238,13 @@ impl Agent {
         // Disjoint borrows: the run stream owns clones of everything except
         // the session, which it borrows mutably for the run's lifetime —
         // preserving one authoritative head.
+        let provider_hook_warnings = crate::extension_provider::ProviderHookWarnings::default();
         let client = provider_context::provider_request_client(
             &self.client,
             &self.extensions.provider_request_hooks,
             &self.resource_owner,
-        )?;
+            &provider_hook_warnings,
+        );
         let model = self.model.clone();
         let inference_resolver = self.tool_inference_resolver.clone();
         let compaction_model = self
@@ -340,6 +343,10 @@ impl Agent {
             let mut context_capacity = initial_capacity;
             let mut custom_message_cursor = custom_message_cursor;
             for event in committed_custom_message_events(session, &mut custom_message_cursor) {
+                notify_observers(&observers, &event); yield event;
+            }
+            for message in provider_hook_warnings.take() {
+                let event = AgentEvent::ExtensionObservationWarning { message };
                 notify_observers(&observers, &event); yield event;
             }
             // Parity 1e.2 durability half: republish the partial assistant
@@ -648,6 +655,10 @@ impl Agent {
                 for event in model_turn_hooks.take_warnings() {
                     notify_observers(&observers, &event); yield event;
                 }
+                for message in provider_hook_warnings.take() {
+                    let event = AgentEvent::ExtensionObservationWarning { message };
+                    notify_observers(&observers, &event); yield event;
+                }
                 if let Err(finish) = observation {
                     break 'run *finish;
                 }
@@ -738,6 +749,10 @@ impl Agent {
                 // preparation. Recovery/compaction re-entry must not repeat it.
                 let observation = model_turn_hooks.start(session, completed_turns, &abort.cancellation).await;
                 for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                for message in provider_hook_warnings.take() {
+                    let event = AgentEvent::ExtensionObservationWarning { message };
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
@@ -1907,6 +1922,10 @@ impl Agent {
                 // its own complete result batch commits below.
                 let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
                 for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                for message in provider_hook_warnings.take() {
+                    let event = AgentEvent::ExtensionObservationWarning { message };
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
@@ -3280,6 +3299,7 @@ impl Agent {
                         sandbox.max_output_bytes,
                         newly_added,
                     );
+                    let message = with_tool_name(message, &call.name);
                     let owner_images = if owner_tool_images_enabled {
                         Some(ToolOutput::new("").with_owner_presentation_images(
                             lowered_tool_result_media(&message),
@@ -3399,6 +3419,10 @@ impl Agent {
                 // paired tool result, in actual durable commit order.
                 let observation = model_turn_hooks.settle(session, &abort.cancellation).await;
                 for event in model_turn_hooks.take_warnings() {
+                    notify_observers(&observers, &event); yield event;
+                }
+                for message in provider_hook_warnings.take() {
+                    let event = AgentEvent::ExtensionObservationWarning { message };
                     notify_observers(&observers, &event); yield event;
                 }
                 if let Err(finish) = observation {
@@ -3645,6 +3669,12 @@ impl Agent {
                 checkpoint_cost,
             ) {
                 reason = FinishReason::Failed(error.into());
+            }
+            // Hooks run inside provider attempts; report anything they
+            // skipped since the last loop boundary before the run settles.
+            for message in provider_hook_warnings.take() {
+                let event = AgentEvent::ExtensionObservationWarning { message };
+                notify_observers(&observers, &event); yield event;
             }
             let head = session.head().unwrap_or(first_entry);
             stream_context.run_finished(&reason);

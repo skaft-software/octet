@@ -182,6 +182,7 @@ fn test_model_spec_serde_round_trip() {
             cache_write_5m: TokenRate(15),
             cache_write_1h: None,
             reasoning: None,
+            windows: Default::default(),
             tiers: vec![],
         }),
         cache: CacheCompatibility::default(),

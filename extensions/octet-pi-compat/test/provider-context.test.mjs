@@ -39,7 +39,7 @@ for (const mode of ['replace', 'in-place', 'throws', 'throws-coded']) test(`real
     assert.ok(issue, peer.stderr());
     assert.equal(issue.params.level, 'warning');
     assert.match(issue.params.message, /^Octet Pi Compat: context hook failed and was skipped\./);
-    assert.match(peer.stderr(), /\[Extension issues\]/);
+    await peer.waitStderr(/\[Extension issues\]/);
     assert.doesNotMatch(issue.params.message + peer.stderr(), /ordinary context failure|coded context failure/);
   }
   await peer.close();
@@ -59,10 +59,12 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   assert.ok(await projectContext(runtime, params, store));
   assert.deepEqual(reports, [[event, 0, failure]]);
   assert.equal(kept, 1);
+  const expectedReports = [[event, 0, failure]];
   for (const code of [-32601, -32602]) {
     const failure = Object.assign(new Error('callback failure'), { code });
     handlers[0].handler = () => { throw failure; };
     assert.ok(await projectContext(runtime, params, store));
+    expectedReports.push([event, 0, failure]);
   }
   const hostRefusal = Object.assign(new Error('owner refused'), { code: -32002 });
   handlers[0].handler = () => { throw hostRefusal; };
@@ -77,7 +79,14 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   const cancelled = Object.assign(new Error('cancelled'), { code: -32800 });
   handlers[0].handler = () => { store.controller.abort(cancelled); throw failure; };
   await assert.rejects(projectContext(runtime, params, store), error => error === cancelled);
-  assert.equal(reports.length, 3); assert.equal(kept, 3);
+  // ff433cf2 reports a callback that throws while cancellation wins the hook.
+  // Pi reports throwing context handlers: scripts/fixtures/pi-reference/node_modules/
+  // @earendil-works/pi-coding-agent/dist/core/extensions/runner.js:1023-1031,1052-1060.
+  // That diagnostic is not a successful projection or permission to run a later handler.
+  expectedReports.push([event, 0, failure]);
+  assert.deepEqual(reports, expectedReports);
+  assert.equal(reports.length, 4); assert.equal(kept, 3);
+  assert.equal(store.controller.signal.reason, cancelled);
 });
 
 test('coded callback failures retain the last good projection and run remaining callbacks', async () => {
@@ -381,9 +390,16 @@ test('Anthropic redacted observations match Pi without becoming replayable signe
   for (const messages of [observed, structuredClone(observed)]) assert.throws(() => piToCanonical(messages), {
     code: -32601, message: /^unsupported_feature Pi thinking part.redacted:/,
   });
+  // A read-only observer keeps the visible reasoning and drops the opaque
+  // continuation it cannot represent (a Pi tool-call guard must not fail closed
+  // on historical messages from another model). Replay stays strict.
   for (const patch of [{ protocol: 'open_ai_responses' }, { model: 'foreign-model' }]) {
     const foreign = structuredClone(native); Object.assign(foreign[0].Assistant.content[0].Reasoning.state, patch);
-    assert.throws(() => canonicalToPi(foreign, new Map(), { observation: true }), { code: -32601, message: /signature producer must match/ });
+    const observedForeign = canonicalToPi(foreign, new Map(), { observation: true });
+    const thinking = observedForeign[0].content.find(part => part.type === 'thinking');
+    assert.ok(thinking, JSON.stringify(observedForeign));
+    assert.equal(thinking.thinkingSignature, undefined, 'observation must not carry a foreign signature');
+    assert.throws(() => canonicalToPi(foreign, new Map(), { replay: true }), { code: -32601, message: /signature producer must match/ });
   }
   const malformed = structuredClone(native); malformed[0].Assistant.content[0].Reasoning.state.kind.AnthropicRedacted.data = null;
   assert.throws(() => canonicalToPi(malformed, new Map(), { observation: true }), { code: -32602, message: /context text must be UTF-8 text/ });
