@@ -900,6 +900,15 @@ async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
         frame.contains("NATIVE-SLOT-EDITOR")
     })
     .await;
+    // This test is about key precedence. Under CPU starvation the adapter can
+    // miss the product's 50 ms listener budget for `x`, which latches the
+    // listener off and (correctly) types `x` into the draft, submitting
+    // "host draftx". Pi has no listener deadline; the 8 s here equals the
+    // idle driver's own bound. The 50 ms budget is covered by the
+    // hung-handler test.
+    shell
+        .terminal_input_interceptors()
+        .set_budget_for_test(Duration::from_secs(8));
     command(&mut app, &mut shell, "listen-all").await.unwrap();
     command(&mut app, &mut shell, "seed-slot").await.unwrap();
     let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"x\x07\r");
