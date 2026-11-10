@@ -133,7 +133,7 @@ fn pi_entry_payload(entry: &Value, canonical: &impl Fn(&str) -> Value) -> Value 
         entry
             .get(key)
             .and_then(Value::as_str)
-            .map(|id| canonical(id))
+            .map(canonical)
             .unwrap_or(Value::Null)
     };
     match text(entry, "type") {

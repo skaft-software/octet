@@ -442,13 +442,16 @@ fn load_ledger(repo: &Path) -> Ledger {
         .expect("session parity ledger is readable")
 }
 
+/// Per (check, fingerprint): count, sample details, and where it was seen.
+type FailureGroup = (usize, Vec<String>, Vec<String>);
+
 fn fail(failures: Vec<Failure>, stale: Vec<String>) -> ! {
     use std::collections::BTreeMap;
     if failures.is_empty() && stale.is_empty() {
         unreachable!("fail() is only called with a failure");
     }
     let total = failures.len();
-    let mut groups: BTreeMap<(String, String), (usize, Vec<String>, Vec<String>)> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), FailureGroup> = BTreeMap::new();
     for failure in &failures {
         let key = (failure.check.clone(), failure.fingerprint.clone());
         let entry = groups
