@@ -16,6 +16,27 @@
   live binding, and a withdrawal baseline for a binding that has since moved is
   dropped instead of ending the application.
 
+- Tool results now record the name of the tool that produced them, including
+  when imported from a Pi session. The name is stored for the session only and
+  never sent to a provider.
+
+- Renaming a session replaces line breaks in the name with spaces and trims it,
+  as Pi does, instead of refusing the name.
+
+- Forking a session now keeps the entry labels (bookmarks) of the entries the
+  fork retains.
+
+- Resuming a session with no model change on its branch now selects the model
+  of the last assistant message, as Pi does, instead of the configured default.
+  Pi-imported assistant messages now record the `provider/model` route id.
+
+- Session listing and resume no longer fail on a session that contains a
+  branch summary record, including sessions imported from Pi.
+
+- The model now sees a compaction summary wrapped in the same text Pi uses
+  ("The conversation history before this point was compacted into the following
+  summary: ..."), so a session compacted in either tool reads the same.
+
 - An extension CLI flag may reuse the name of a subcommand option (Pi's
   `preset.ts` registers `--preset`, which `octet setup` also has), instead of
   failing startup with a conflict. Only top-level options reserve a name; a real
@@ -32,6 +53,10 @@
 
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
+
+- Shift+Enter inserts a newline in fullscreen mode on terminals that report the
+  kitty keyboard protocol or `modifyOtherKeys`, including right after octet
+  enters fullscreen. Ctrl+J remains the portable newline.
 
 - The extension API 0.4 reference now documents its actual feature-negotiated
   wire, provider/session data and service-specific errors instead of presenting

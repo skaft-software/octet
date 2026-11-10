@@ -220,7 +220,12 @@ impl Native {
             })),
             "assistant" => {
                 let protocol = protocol(text(message, "api"))?;
-                let model = ModelId(text(message, "model").to_owned());
+                // A live octet turn stores the catalog route id `provider/model`.
+                let model = ModelId(format!(
+                    "{}/{}",
+                    text(message, "provider"),
+                    text(message, "model")
+                ));
                 EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: assistant_content(&message["content"], protocol, &model)?,
                     model,
@@ -238,6 +243,7 @@ impl Native {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         added_tool_names: None,
+                        tool_name: Some(text(message, "toolName").to_owned()),
                     })],
                 }))
             }
@@ -297,11 +303,6 @@ impl Native {
 
     fn rename(&mut self, op: &Value) -> Result<(), String> {
         let name = text(op, "name");
-        // Pi replaces line breaks with spaces; octet refuses control characters
-        // outright. That refusal is the observed divergence.
-        if name.chars().any(char::is_control) {
-            return Err("name:control-characters".into());
-        }
         let id = self.id().map_err(|error| format!("name:{error}"))?;
         self.store
             .rename(&id, name)

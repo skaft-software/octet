@@ -72,6 +72,7 @@ fn tool_result(call_id: &str, text: &str) -> EntryValue {
             content: vec![octet_ai::ToolResultPart::Text(text.to_string())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }))
 }

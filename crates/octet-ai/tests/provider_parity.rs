@@ -149,6 +149,7 @@ fn tool_result() -> UserMessage {
             content: vec![ToolResultPart::Text("accepted".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }
 }

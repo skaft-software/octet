@@ -1246,6 +1246,7 @@ async fn pinned_metadata_deepseek_flash_exact_wire_controls_and_required_replay(
             content: vec![ToolResultPart::Text("fixture result".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }));
     for choice in [

@@ -60,7 +60,7 @@ is itself `type`-tagged (`EntryValue` in `crates/octet-agent/src/session.rs`):
 
 | `value.type` | Meaning |
 | --- | --- |
-| `message` | A complete user/assistant/tool-result message that is model-visible. |
+| `message` | A complete user/assistant/tool-result message that is model-visible. A tool result may carry an optional `tool_name` (the tool that produced it, imported from Pi's `toolName`); it is durable metadata and is never sent to a provider. |
 | `compaction` | Local compaction: history older than `first_kept` is replaced by `summary`, or by its optional `snapcompact` inline PNG frames plus lead-in on vision routes. |
 | `responses_turn` | Opaque OpenAI Responses output stored beside its canonical assistant message. Not model-visible. |
 | `responses_compaction` | Opaque `POST /responses/compact` checkpoint that covers the active branch through `covered_through`. |
@@ -118,7 +118,9 @@ be recovered, so `timestamp_unix_ms` is omitted for historical entries.
 Names, tags, and other presentation metadata live in a `.metadata/<id>.json`
 sidecar (written with owner-only permissions) so the transcript stays readable
 without a format change. `octet sessions export` produces a redacted portable
-form; the raw JSONL is not a sharing format.
+form; the raw JSONL is not a sharing format. A name has line breaks replaced by
+spaces and is trimmed, as in Pi; an empty name clears it. `/fork` copies the
+entry labels of the entries it keeps.
 
 One more sidecar exists only while an assistant attempt is streaming:
 `<session>.partial-assistant-frames` (owner-only) journals the compact

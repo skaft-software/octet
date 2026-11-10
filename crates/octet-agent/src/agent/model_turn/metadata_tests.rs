@@ -123,6 +123,7 @@ async fn committed_metadata_is_linked_by_entry_after_reload_and_overlapping_tool
                 content: vec![ToolResultPart::Text("settled".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();

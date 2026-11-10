@@ -31,6 +31,7 @@ fn result(session: &mut Session) -> Result<(), octet_agent::SessionError> {
                 content: vec![ToolResultPart::Text("complete".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .map(|_| ())

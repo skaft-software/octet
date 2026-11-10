@@ -747,7 +747,7 @@ pub(super) fn visible_compaction_summary(session: &Session) -> Option<String> {
             let EntryValue::Compaction { summary, .. } = &entry.value else {
                 return None;
             };
-            Some(format!("[summary of earlier conversation]\n{summary}"))
+            Some(crate::session::compaction_summary_text(summary))
         })
 }
 

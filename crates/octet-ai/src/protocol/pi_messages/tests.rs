@@ -225,6 +225,7 @@ fn replayed_context_keeps_reasoning_signatures_and_tool_identity() {
             content: vec![ToolResultPart::Text("found".to_owned())],
             is_error: false,
             added_tool_names: Some(vec!["extra".to_owned()]),
+            tool_name: None,
         })],
     }));
     let parts = build_request(&model, &req).unwrap();
