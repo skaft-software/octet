@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod pty_teardown;
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -212,10 +214,11 @@ impl PtyOctet {
                 break status;
             }
             if Instant::now() >= deadline {
-                unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                pty_teardown::kill_and_reap(
+                    &mut self.child,
+                    &mut self.pty.master,
+                    SHUTDOWN_TIMEOUT,
+                );
                 panic!(
                     "octet did not stop after Ctrl-D; transcript: {}",
                     visible_bytes(&self.pty.output)
@@ -234,10 +237,7 @@ impl PtyOctet {
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.pty.master, SHUTDOWN_TIMEOUT);
         }
     }
 }
@@ -306,7 +306,7 @@ impl StreamApi {
                 socket
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .expect("fixture write timeout");
-                let Some(headers) = read_request(&mut socket) else {
+                let Some(headers) = read_request(&mut socket, &worker_stop) else {
                     continue;
                 };
                 assert!(
@@ -390,7 +390,8 @@ impl Drop for StreamApi {
 }
 
 /// Read one request's headers, draining its body so the client is not blocked.
-fn read_request(socket: &mut std::net::TcpStream) -> Option<String> {
+/// Gives up once `stop` is set so fixture teardown can always join the worker.
+fn read_request(socket: &mut std::net::TcpStream, stop: &AtomicBool) -> Option<String> {
     let mut request = Vec::new();
     let header_end = loop {
         let mut bytes = [0u8; 1024];
@@ -403,7 +404,10 @@ fn read_request(socket: &mut std::net::TcpStream) -> Option<String> {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                continue
+                if stop.load(Ordering::SeqCst) {
+                    return None;
+                }
+                continue;
             }
             Err(error) => panic!("read loopback request: {error}"),
         };

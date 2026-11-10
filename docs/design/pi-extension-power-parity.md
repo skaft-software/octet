@@ -696,19 +696,21 @@ schema migration.
 This document is ready for design review. It is **not** approval to implement
 all eight packages, a test report, or proof of current Pi compatibility.
 
-## Appendix A. OMP as a boundary stress test, not added product scope
+## Appendix A. A third-party agent as a boundary stress test, not added product scope
 
-The user supplied `~/github/can1357/oh-my-pi` as a reference for what an extension
-system should make possible **if someone wanted those features**, explicitly not
-as a request to add LSP or OMP's batteries to octet. The inspected reference HEAD
-is `3b003d878c1c5e260e23b34dac4ceb3c967ecc94`; `$OMP` below denotes that checkout.
-This is a representative source/documentation investigation, not a complete OMP
-audit or execution/compatibility report. No OMP code was imported or run.
+The user supplied a third-party agent checkout as a reference for what an
+extension system should make possible **if someone wanted those features**,
+explicitly not as a request to add LSP or that agent's batteries to octet. The
+inspected reference HEAD is `3b003d878c1c5e260e23b34dac4ceb3c967ecc94`;
+`$REFERENCE` below denotes that checkout. This is a representative
+source/documentation investigation, not a complete reference-agent audit or
+execution/compatibility report. No reference code was imported or run.
 
-**Principal finding:** substantial OMP behavior uses built-in integration points,
-not merely its public extension API. Porting the feature names or exposing 85 Pi
-methods would not, on its own, give an isolated extension those powers. Remote
-components solve terminal projection; they do not solve native-operation
+**Principal finding:** substantial reference-agent behavior uses built-in
+integration points, not merely its public extension API. Porting the feature
+names or exposing 85 Pi methods would not, on its own, give an isolated extension
+those powers. Remote components solve terminal projection; they do not solve
+native-operation
 composition, fresh background results, or agent-stream control.
 
 ### A.1 LSP reveals the difference between a tool and deep integration
@@ -717,30 +719,30 @@ A basic extension can own a language-server subprocess, speak LSP, and return
 hover/definition/diagnostics through ordinary registered tools. That needs no
 LSP engine, server catalog, npm dependency, or diagnostic cache in Rust core.
 
-OMP's **integrated** LSP does considerably more:
+The reference agent's **integrated** LSP does considerably more:
 
-- `$OMP/packages/coding-agent/src/tools/write.ts:482,934–945` installs an LSP
+- `$REFERENCE/packages/coding-agent/src/tools/write.ts:482,934–945` installs an LSP
   writethrough, receives the final formatted content, and builds the native
   write snapshot/result from those actual bytes. A post-tool notification that
   formats the file again would leave that bookkeeping describing the wrong
   write.
-- `$OMP/packages/coding-agent/src/lsp/writethrough.ts:379–407,433–516` coordinates
+- `$REFERENCE/packages/coding-agent/src/lsp/writethrough.ts:379–407,433–516` coordinates
   document overlays, formatting, byte commits, watched-file notifications,
   document versions and save notifications. During a pending write it prevents
   a concurrent query from reverting the server to older disk contents.
-- `$OMP/packages/coding-agent/src/lsp/deferred-diagnostics.ts:16–54` cancels an
+- `$REFERENCE/packages/coding-agent/src/lsp/deferred-diagnostics.ts:16–54` cancels an
   older pending fetch, tags a mutation version, and supplies a delivery-time
   stale predicate. `sdk.ts:2253,2262–2267,4845` connects that to the session yield
   queue and a session-wide file mutation ledger. Session/generation fencing
   alone is insufficient: a result can belong to the right session but the wrong
   file contents.
-- `$OMP/packages/coding-agent/src/lsp/client.ts:563–579` handles server-initiated
+- `$REFERENCE/packages/coding-agent/src/lsp/client.ts:563–579` handles server-initiated
   `workspace/applyEdit`, outside the ordinary model-issued tool action.
   `lsp/edits.ts:187–203` backs up reference files and restores them if the final
   rename fails. This is an effect/partial-completion problem, not just JSON-RPC
   transport. It is not proof of general multi-file atomicity under concurrent
   writers.
-- `$OMP/docs/tools/lsp.md:50–62` describes initialization/cancellation, document
+- `$REFERENCE/docs/tools/lsp.md:50–62` describes initialization/cancellation, document
   reconciliation, capability handling and optional broker sharing; those are
   language-service responsibilities that can remain extension-local.
 
@@ -749,7 +751,7 @@ requested, are:
 
 1. **Native delegation or an operation middleware seam.** Extensions can compose
    with native tools without reimplementing their file resolution, stale-content
-   guards, bookkeeping and cancellation. OMP has same-tool `ctx.invokeTool`
+   guards, bookkeeping and cancellation. The reference agent has same-tool `ctx.invokeTool`
    (`docs/extensions.md:578–598`; `extensibility/extensions/wrapper.ts:110`).
    Octet must keep its own effective-argument/policy validation; same-name
    delegation is not permission to reuse approval for different effects.
@@ -778,7 +780,7 @@ host-mediated safeguards do not magically sandbox those operations.
 
 ### A.2 Other inspected examples exercise the same boundary
 
-| OMP example / evidence | What can remain extension-local | Generic host power it would need for deep integration |
+| Reference-agent example / evidence | What can remain extension-local | Generic host power it would need for deep integration |
 | --- | --- | --- |
 | DAP debugger: `docs/tools/debug.md:127–139,294–305` | DAP transport/adapters, breakpoints/stack caches, bounded output and protocol reverse requests. | Session-owned lifetime, cancellation versus termination, effect admission for launch/attach/evaluation, and optional remote views/input. A debugger subprocess tree is not an agent-session tree. |
 | Persistent eval: `docs/tools/eval.md:102–110,143–158,231–247` | Python/JS runtime, cells, package environment, local objects and MIME interpretation. | Reentrant typed tool invocation through normal policy, lossless output/artifacts, owner cleanup, and separate servicing of child-tool callbacks while a parent waits. Never a mandatory host JS runtime or execution on the paint thread. |
@@ -787,7 +789,7 @@ host-mediated safeguards do not magically sandbox those operations.
 | Collaboration: `docs/collab.md:57–71,129–146,191–205` | Relay, encryption, network identities, client applications. | Coherent semantic snapshot/events, explicitly admitted input/control and session-transition fencing. This is not a license to capture terminal secrets or grant remote guests every extension/host effect. |
 | Composer/chrome customization: `docs/extensions.md:932–1006` | Shape/widget logic, styling and local factories. | Real layout budgets, cursor/IME metadata, resize/focus, and cached Rust composition—not just adding strings to a status list. |
 
-This also provides a useful negative check: OMP's current interactive
+This also provides a useful negative check: the reference agent's current interactive
 `extension-ui-controller.ts:162–164` makes `setFooter` and `setHeader` no-ops while
 wiring `setEditorComponent`. Its own extension guide documents the distinction
 at `docs/extensions.md:799–808`. A method existing in a type is not evidence of a
@@ -800,7 +802,7 @@ live behavior, even in the reference system.
 - **Deep integration with native tools/UI/background state:** substantial,
   reusable contract and lifecycle work—delegation, mutation revisions, retained
   ownership, effect ordering, conditional delivery and real component mounts.
-  Not importing OMP's language-service implementation into core.
+  Not importing the reference agent's language-service implementation into core.
 - **Changing how the agent runs or who controls it:** explicit generic engine/
   control changes are unavoidable for faithful semantics. Hooks cannot be a
   euphemism for handing out a mutable `Agent` or arbitrary terminal access.
@@ -810,12 +812,12 @@ of *domain implementation* and the amount of *core plumbing* are separate; a
 small core can expose powerful boundaries without making a production LSP
 integration itself a one-hour exercise.
 
-Use OMP's regression scenarios as future contract probes: slow diagnostics after
+Use the reference agent's regression scenarios as future contract probes: slow diagnostics after
 write return, stale file versions, native wrapper delegation, rename failure,
 server-originated edits, blocked parent/reentrant child calls, and stream
 interruption concurrent with session replacement. Inspection of those tests is
 not a claim they were run. Only approved features should turn a probe into a new
-implementation slice; LSP, DAP, eval, collaboration and OMP compatibility remain
+implementation slice; LSP, DAP, eval, collaboration and reference-agent compatibility remain
 outside the committed scope.
 
 ### A.4 Concrete octet reuse and missing host seams
@@ -825,7 +827,7 @@ primitive from a **new seam** whose behavior the host does not yet expose. The
 source shorthand below (`extension.rs`, `extension_process.rs`, `agent.rs`,
 `events.rs`, `secure_fs.rs`, and `tools/*`) is under `crates/octet-agent/src/`.
 All observations describe inspected source, not runtime qualification; candidate
-additions remain outside OMP product scope.
+additions remain outside reference-agent product scope.
 
 | Pressure point | Existing octet machinery | Missing boundary / smallest reusable direction |
 | --- | --- | --- |

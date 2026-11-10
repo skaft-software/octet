@@ -2,6 +2,7 @@ import { basename, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { humanizeExtensionName, packageDisplayName } from './api.mjs';
 import { refusedAPI } from './errors.mjs';
+import { PI_SUPPORTED_RANGE } from './pi-modules.mjs';
 
 // Extension problems reach the chat as at most one short notice per severity:
 // the extension's name (never its path), what happened, and the one thing to
@@ -60,7 +61,9 @@ export function loadIssue(failure) {
     next = 'Disable, or run configure.mjs --reviewed --from-pi again.';
   } else if (code === -32031) {
     reason = 'skipped: needs a Pi install that is missing or unsupported';
-    next = 'Install Pi 1.0.2 to 1.4.x, or disable.';
+    // The action states the range the shipped manifests compute, so adding a
+    // Pi release cannot leave this notice naming an older one.
+    next = `Install Pi ${PI_SUPPORTED_RANGE}, or disable.`;
   } else if (error.startsWith('invalid_request duplicate registration ')) {
     reason = 'skipped: conflicts with another extension';
     next = 'Disable one of the two, then restart octet.';

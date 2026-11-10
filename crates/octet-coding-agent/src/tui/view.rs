@@ -7875,7 +7875,8 @@ impl InteractiveShell {
             return OverlayInputResult::Legacy;
         }
         // Dismissal (including close keys) never parses a report. Navigation
-        // consumes renderer-owned wrapping counts once a frame was emitted.
+        // consumes renderer-owned wrapping counts, even if the visible frame's
+        // terminal write has not yet published its completed-write receipt.
         let navigation = matches!(event, crossterm::event::Event::Key(key)
             if crate::tui::keymap::accepts_key_event(key) && key.modifiers.is_empty()
                 && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
@@ -7887,11 +7888,19 @@ impl InteractiveShell {
             return OverlayInputResult::Closed;
         }
         let (maximum, page_rows) = if state.render_threaded {
-            let Some(receipt) = state
-                .painted_report
-                .as_ref()
+            let receipt = self
+                .state
+                .prepared_geometry()
+                .and_then(|geometry| geometry.report.clone())
                 .filter(|receipt| receipt.is_current(&state))
-            else {
+                .or_else(|| {
+                    state
+                        .painted_report
+                        .as_ref()
+                        .filter(|receipt| receipt.is_current(&state))
+                        .cloned()
+                });
+            let Some(receipt) = receipt else {
                 return OverlayInputResult::Consumed;
             };
             (receipt.maximum, receipt.page_rows)
@@ -8486,11 +8495,21 @@ impl InteractiveShell {
             base_page_step
         };
         let panel_receipt = if state.render_threaded {
-            state
-                .painted_panel
-                .as_ref()
-                .filter(|receipt| receipt.is_current(&state))
-                .cloned()
+            let prepared = if matches!(state.panel, Some(Panel::ReadOnlyDocument { .. })) {
+                self.state
+                    .prepared_geometry()
+                    .and_then(|geometry| geometry.panel.clone())
+                    .filter(|receipt| receipt.is_current(&state))
+            } else {
+                None
+            };
+            prepared.or_else(|| {
+                state
+                    .painted_panel
+                    .as_ref()
+                    .filter(|receipt| receipt.is_current(&state))
+                    .cloned()
+            })
         } else if matches!(
             state.panel.as_ref(),
             Some(
@@ -8502,12 +8521,17 @@ impl InteractiveShell {
             )
         ) {
             // Deterministic inline fixtures retain their explicit layout owner;
-            // production input consumes only a completed renderer receipt.
+            // production input never performs document layout here.
             let rendered = shell_chrome(&state, size.0, Instant::now()).panel;
             renderer_geometry::PanelRenderReceipt::capture(&state, &rendered)
         } else {
             None
         };
+        if let Some(receipt) = &panel_receipt {
+            // Resolve refreshed-document anchoring before navigation. A later
+            // write receipt must not restore the pre-key reading position.
+            receipt.apply_document_anchor(&mut state);
+        }
         let confirmation_render = panel_receipt
             .as_ref()
             .and_then(|receipt| receipt.confirmation.clone());
@@ -8958,8 +8982,7 @@ impl InteractiveShell {
                 scroll_from_bottom, ..
             } => {
                 use crossterm::event::{Event, KeyCode};
-                // Missing/stale frame: wait for renderer geometry without
-                // moving the reading position or wrapping on the input owner.
+                // Missing/stale layout: never wrap on the input owner.
                 let (viewport_rows, visual_rows) = document_metrics?;
                 let document_page_step = viewport_rows;
                 let maximum = visual_rows.saturating_sub(viewport_rows);

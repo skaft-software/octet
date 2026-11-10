@@ -1,10 +1,9 @@
 # octet-web-search
 
-**Source candidate distribution: 0.10.0.** This bundle needs exactly octet 0.10.0.
-Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.0 candidate record](../../docs/releases/v0.10.0.md) for availability and
-remaining qualification. 0.10.0 assets are not published; use the reviewed
-source-checkout route below until publication is approved.
+**Distribution: 0.10.3.** This bundle needs exactly octet 0.10.3. Use the
+[version-matched installation](../../docs/installation.md) and the
+[0.10.3 release notes](../../docs/releases/v0.10.3.md) for published assets.
+A reviewed source checkout works too; both routes are described below.
 
 Search the public web and retrieve pages with stable citations. Pick [Brave
 Search](https://brave.com/search/api/) or a configured
@@ -13,16 +12,16 @@ tabs, sign in, run JavaScript or submit forms.
 
 ## Start a search
 
-After approved 0.10.0 publication and verification of matching assets, the catalog
-path needs [octet 0.10.0](../../docs/installation.md) and Python 3.9+ as `python3`:
+The catalog path needs [octet 0.10.3](../../docs/installation.md), a matching
+published bundle, and Python 3.9+ as `python3`:
 
 ```console
 octet extension install octet-web-search
 octet --enable-extension octet-web-search
 ```
 
-For this unpublished candidate, launch the reviewed source-built host from the
-repository root instead (see [build from a checkout](../../docs/installation.md#build-from-a-checkout)):
+To run from a reviewed source checkout instead, launch the source-built host from
+the repository root (see [build from a checkout](../../docs/installation.md#build-from-a-checkout)):
 
 ```console
 ./target/release/octet --safe-mode --extension-dir ./extensions \
@@ -96,7 +95,7 @@ and integrity checks still apply. Granted code runs with your OS authority
 outside the tool-effect broker; safe mode governs brokered effects, not OS
 isolation. Manifest consent metadata isn't a sandbox. Skill loading is independent.
 
-The source bundle `0.10.0` needs exactly octet `0.10.0`. For a reviewed source
+The source bundle `0.10.3` needs exactly octet `0.10.3`. For a reviewed source
 checkout, select it with `--extension-dir ./extensions`. What follows is a
 bundled-runtime reference, not a general SDK authoring tutorial.
 

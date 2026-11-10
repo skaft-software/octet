@@ -1,6 +1,6 @@
 # npm trusted publishing
 
-**The octet 0.10.0 npm CLI is not published.** npm is a separate channel from
+**The octet 0.10.3 npm CLI is not published.** npm is a separate channel from
 native GitHub releases and needs its own approval and provenance verification.
 See [installation](../installation.md) for native and source-build routes. This maintainer reference describes packaging,
 protected publication, and recovery for the five immutable packages. The
@@ -50,7 +50,7 @@ All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time
 snapshot and may still describe npm as unpublished. That historical publication
-does not qualify the 0.10.0 candidate. Do not rewrite or republish immutable 0.8.1
+does not qualify the 0.10.3 release. Do not rewrite or republish immutable 0.8.1
 packages to refresh docs; a later native release can carry updated documentation.
 Packing restores files that npm's ignore rules would omit before final checksums
 and provenance are computed; it never substitutes checkout documentation.
@@ -115,14 +115,12 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-The planned CLI is `@skaft/octet@0.10.0`; it is not published yet, and no 0.10.0
-registry provenance or public-install acceptance is established. See the
-[installation guide](../installation.md) for the source-build route. Only after
-verified publication, use the version-pinned install command:
-
-```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.0
-```
+The planned CLI is `@skaft/octet@0.10.3`; it is not published yet, and no 0.10.3
+registry provenance or public-install acceptance is established. Until verified
+publication, this page gives no npm install command: use the version-pinned
+native release or a source build from the [installation guide](../installation.md).
+After publication, the install must pin the exact version rather than follow the
+`latest` dist-tag.
 
 `octet update` offers npm automatically only for a physically validated global
 layout. Local project and `npx` layouts get a manual command instead, so an octet
