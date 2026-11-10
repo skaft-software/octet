@@ -170,6 +170,46 @@ mod tests {
     }
 
     #[test]
+    fn modified_enter_encodings_reach_the_keymap_without_losing_shift() {
+        for data in ["\x1b[13;2u", "\x1b[13;2:1u", "\x1b[27;2;13~"] {
+            assert_eq!(
+                events(data),
+                [key(KeyCode::Enter, KeyModifiers::SHIFT)],
+                "{data:?}"
+            );
+        }
+        assert_eq!(events("\r"), [key(KeyCode::Enter, KeyModifiers::NONE)]);
+        assert_eq!(
+            events("\n"),
+            [key(KeyCode::Char('j'), KeyModifiers::CONTROL)]
+        );
+        for data in ["\x1b[13;5u", "\x1b[27;5;13~"] {
+            assert_eq!(events(data), [key(KeyCode::Enter, KeyModifiers::CONTROL)]);
+        }
+        for malformed in [
+            "\x1b[27;0;13~",
+            "\x1b[27;x;13~",
+            "\x1b[27;2~",
+            "\x1b[27;2;13;1~",
+            "\x1b[27;2;9~",
+        ] {
+            assert!(replacement(malformed).is_err(), "admitted {malformed:?}");
+        }
+        let mut decoder = Decoder::default();
+        let bytes = b"\x1b[27;2;13~";
+        let mut packet = None;
+        for (index, byte) in bytes.iter().enumerate() {
+            packet = decoder
+                .push(*byte, index + 1 < bytes.len())
+                .unwrap()
+                .or(packet);
+        }
+        let packet = packet.unwrap();
+        assert_eq!(packet.event, key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(packet.raw.as_deref(), Some("\x1b[27;2;13~"));
+    }
+
+    #[test]
     fn admitted_replacements_decode_to_events_in_order() {
         assert_eq!(events("a"), [key(KeyCode::Char('a'), KeyModifiers::NONE)]);
         assert_eq!(events("\x1bOA"), [key(KeyCode::Up, KeyModifiers::NONE)]);
