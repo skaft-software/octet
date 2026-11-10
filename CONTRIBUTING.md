@@ -165,8 +165,10 @@ fix: preserve tool output across reconnect
 A pull request should say what changed, why, the user or developer impact, a
 defect's root cause, the exact checks that passed, and any known limitation or
 compatibility effect. A maintainer decides at review whether the change fits the
-agreed scope; an issue link does not guarantee acceptance. PRs run fast CI; the
-full tier runs in the merge queue (or earlier with the `ci:full` label).
+agreed scope; an issue link does not guarantee acceptance. Contributors use squash
+PRs gated by `ci-required`; the maintainer may push directly to `main`. PRs run
+fast CI (or the full tier with the `ci:full` label). The full matrix runs on main
+pushes and manual workflow dispatches; there is no merge queue.
 
 Keep generated build artifacts, local reports, credentials, sessions,
 `AGENTS.md` and private research notes out of commits. The repository

@@ -15,7 +15,7 @@ Run repository commands from the repo root. Read the release workflows and
 scripts before running them. The workspace version in `Cargo.toml` is the source
 of truth; extension manifests also pin `requires_octet`.
 
-## 1. Open the version-bump PR
+## 1. Prepare the version bump
 
 Run the [`/cl`](../../prompts/cl.md) audit, update `CHANGELOG.md`, add
 `docs/releases/vX.Y.Z.md`, and bump the workspace and pinned extension versions.
@@ -26,11 +26,20 @@ version, help and model listing. A real provider prompt and the
 [interactive-testing skill](../interactive-testing/SKILL.md) are separate,
 explicitly authorized acceptance checks; startup alone is not a passing smoke test.
 
-## 2. Merge through the queue
+## 2. Qualify the exact main commit
 
-Merge the reviewed PR to `main` via the GitHub merge queue. Identify the actual
-main commit produced by the merge, not the PR head or merge-group test commit.
-The source for every release tag must be an ancestor of `origin/main`.
+The maintainer pushes directly to `main`. Contributors use squash PRs gated by
+`ci-required`; there is no merge queue. PR CI is the fast tier unless labelled
+`ci:full`. Pushes to main and manual `ci.yml` dispatches run the full matrix.
+Identify the actual main commit, not a PR head or synthetic merge commit. Every
+release source must be an ancestor of `origin/main`.
+
+Before tagging, require a completed successful full-tier main **push** CI run for
+that exact commit, with every release-required lane successful (not skipped).
+GitHub runs push CI only for the pushed head. An intermediate main commit may
+have no push run: prefer the qualified pushed head. Otherwise dispatch `ci.yml`
+on the desired exact ref, verify its full-tier success, and use the manual
+release recovery path below. A green fast-tier PR is not release qualification.
 
 ## 3. Push one canonical tag
 
@@ -50,7 +59,8 @@ On a canonical tag push, the binary workflow waits up to 75 minutes for the
 latest exact-source `main` push CI run, then requires its successful conclusion
 and all required lanes. Repairs also accept exact-source merge-group and manual
 CI runs. A failed run or timeout stops publication; inspect the failure rather
-than treating it as qualified. After the existing protected publish approval,
+than treating it as qualified. If no main push run exists, a tag-push run cannot
+use dispatch evidence: keep the tag immutable and use manual recovery. After the existing protected publish approval,
 the workflow creates a draft GitHub Release from the checked-in notes, attaches
 signed binary assets, verifies their GitHub digests, and only then publishes it as
 Latest. A failed upload leaves the previous Latest release available.
@@ -80,6 +90,13 @@ Keep the canonical tag immutable. `octet-binaries-vX.Y.Z` and
 commit must descend from the source and change only release workflows. They do
 not replace the normal canonical-tag flow. `octet-installer-vX.Y.Z` remains the
 separate installer repair path.
+
+For a source with no main push CI run, dispatch `ci.yml` on that exact source
+ref and wait for the full matrix to succeed. Then dispatch `release-octet.yml`
+from the unchanged canonical `vX.Y.Z` tag with `release_tag=vX.Y.Z` (without a
+waiver); once it succeeds, dispatch `release-serve.yml` from that same tag. This
+also recovers a failed automatic extension waiter. A dedicated tooling tag is
+needed only when the workflow itself needs repair, not to rerun unchanged code.
 
 Only an authorized manual binary-workflow dispatch can set `force_release=true`;
 it must also supply a non-empty, single-line `force_reason`. The job summary

@@ -67,11 +67,11 @@ The release workflows don't publish every source package automatically:
 Normal native and extension publication starts with the single canonical
 `vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
 creates a draft GitHub Release from the checked-in notes, verifies the uploaded
-signed native assets' GitHub digests, then publishes the release as Latest; the
+signed native assets' GitHub digests, then publishes the native release; the
 extension workflow waits for that binary run before publishing its
 bundles. The protected environment must admit the canonical tag without removing
-required reviewers. Dedicated `octet-binaries-vX.Y.Z` and `octet-serve-vX.Y.Z`
-tooling tags remain available for workflow-only repairs. See the
+required reviewers. Dedicated binary and extension tooling tags remain available
+for workflow-only repairs. See the
 [release runbook](maintainers/skills/release/SKILL.md). The currently observed
 protected-environment policy does not yet allow `v*` tags; an authorized
 administrator must update it separately before the one-tag flow can publish.
@@ -79,6 +79,16 @@ administrator must update it separately before the one-tag flow can publish.
 The npm, Homebrew and installer-repair handoffs accept native signatures from
 either the canonical tag (with workflow commit equal to the source commit) or
 the legacy binary tooling tag. They remain separate publication channels.
+
+The maintainer pushes directly to `main`; contributors use squash PRs gated by
+`ci-required`, not a merge queue. PRs run the fast CI tier (or the full tier with
+`ci:full`); main pushes and manual `ci.yml` dispatches run the full matrix.
+Tag a main commit with a completed, successful full-tier **main push** run. GitHub
+runs push CI only for the pushed head, not intermediate commits. If the desired
+commit has no such run, dispatch `ci.yml` on that exact ref, verify its full-tier
+success, then manually dispatch the release workflows from the unchanged
+canonical tag (or the dedicated workflow-only repair tags). A canonical tag-push
+run deliberately waits only for main push CI and cannot use that dispatch.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
