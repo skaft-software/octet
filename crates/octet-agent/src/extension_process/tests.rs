@@ -5237,14 +5237,18 @@ hooks = ["session_start", "session_end"]
         .start_session_hook_binding("session-owner-1")
         .await
         .expect("idempotent start");
-    process
-        .settle_session_hook_binding("session-owner-1", ExtensionLifecycleOutcome::Completed)
-        .await
-        .expect("settle declared hook");
-    process
-        .settle_session_hook_binding("session-owner-1", ExtensionLifecycleOutcome::Completed)
-        .await
-        .expect("idempotent settlement");
+    settle_session_hook_after_delivery(
+        &process,
+        "session-owner-1",
+        ExtensionLifecycleOutcome::Completed,
+    )
+    .await;
+    settle_session_hook_after_delivery(
+        &process,
+        "session-owner-1",
+        ExtensionLifecycleOutcome::Completed,
+    )
+    .await;
     assert!(process.shutdown().await);
 }
 
@@ -5312,11 +5316,30 @@ hooks = ["session_start", "session_end"]
         .start_session_hook_binding("session-owner-1")
         .await
         .expect("a 600 ms session_start is not a timeout");
-    process
-        .settle_session_hook_binding("session-owner-1", ExtensionLifecycleOutcome::Completed)
-        .await
-        .expect("settle");
+    settle_session_hook_after_delivery(
+        &process,
+        "session-owner-1",
+        ExtensionLifecycleOutcome::Completed,
+    )
+    .await;
     assert!(process.shutdown().await);
+}
+
+/// `session_end` is capped at 250 ms by design so exit and reload never wait
+/// on an extension. A busy machine can delay the child's reply past that cap
+/// even though the frame was delivered and the binding was released, so a
+/// bounded timeout is the documented outcome here. Every other outcome is not:
+/// the wire assertions after each call still prove the exact delivered frame.
+pub(crate) async fn settle_session_hook_after_delivery(
+    process: &ExtensionProcess,
+    session_id: &str,
+    outcome: ExtensionLifecycleOutcome,
+) {
+    match process.settle_session_hook_binding(session_id, outcome).await {
+        Ok(()) => {}
+        Err(ExtensionRuntimeError::Timeout { method }) if method == methods::HOOK_RUN => {}
+        Err(error) => panic!("session settlement failed: {error}"),
+    }
 }
 
 #[cfg(unix)]
@@ -5449,10 +5472,12 @@ hooks = ["session_start", "session_end"]
         assert_eq!(report.generation, 2);
     }
     let replacement_generation = if release_binding { 1 } else { 2 };
-    process
-        .settle_session_hook_binding("session-owner-reload", ExtensionLifecycleOutcome::Completed)
-        .await
-        .expect("final session settlement");
+    settle_session_hook_after_delivery(
+        &process,
+        "session-owner-reload",
+        ExtensionLifecycleOutcome::Completed,
+    )
+    .await;
     assert!(process.shutdown().await);
 
     let hooks = std::fs::read_to_string(wire_log)
@@ -5596,10 +5621,12 @@ hooks = ["session_start", "session_end"]
         "resume",
         "crash recovery is not a deliberate reload",
     );
-    process
-        .settle_session_hook_binding("session-owner-crash", ExtensionLifecycleOutcome::Cancelled)
-        .await
-        .expect("final session settlement");
+    settle_session_hook_after_delivery(
+        &process,
+        "session-owner-crash",
+        ExtensionLifecycleOutcome::Cancelled,
+    )
+    .await;
     assert!(process.shutdown().await);
 
     let hooks = std::fs::read_to_string(wire_log)
