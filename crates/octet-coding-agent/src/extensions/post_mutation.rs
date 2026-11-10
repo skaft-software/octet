@@ -15,6 +15,18 @@ impl ExecutableExtensions {
         &mut self,
         mutation: PostMutationContext,
     ) -> Vec<PostMutationRescan> {
+        self.notify_post_mutation_within(mutation, POST_MUTATION_RPC_DEADLINE)
+            .await
+    }
+
+    /// Same as [`Self::notify_post_mutation`] with an explicit per-hook
+    /// deadline. Reload uses a longer one: the hook goes to a process that
+    /// was just started, whose first reply is slower than a warm process's.
+    pub(super) async fn notify_post_mutation_within(
+        &mut self,
+        mutation: PostMutationContext,
+        deadline: Duration,
+    ) -> Vec<PostMutationRescan> {
         if self
             .seen_post_mutation_ids
             .iter()
@@ -59,7 +71,7 @@ impl ExecutableExtensions {
                 let resource_owner = resource_owner.clone();
                 async move {
                     let result = tokio::time::timeout(
-                        POST_MUTATION_RPC_DEADLINE,
+                        deadline,
                         process.post_mutation(&mutation, resource_owner.as_deref()),
                     )
                     .await;
@@ -79,7 +91,7 @@ impl ExecutableExtensions {
                 }
                 Err(_) => {
                     self.diagnostics.push(format!(
-                        "warning: extension {extension:?} post_mutation hook exceeded {POST_MUTATION_RPC_DEADLINE:?}"
+                        "warning: extension {extension:?} post_mutation hook exceeded {deadline:?}"
                     ));
                     continue;
                 }

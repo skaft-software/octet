@@ -302,7 +302,7 @@ pub const MAX_EXTENSION_SHORTCUT_KEY_BYTES: usize = 128;
 pub const MAX_EXTENSION_SHORTCUT_DESCRIPTION_BYTES: usize = 4 * 1024;
 
 /// Maximum CLI flags one extension may declare in its manifest.
-pub const MAX_EXTENSION_FLAGS: usize = api_v03::MAX_EXTENSION_FLAGS;
+pub const MAX_EXTENSION_FLAGS: usize = api_v04::MAX_EXTENSION_FLAGS;
 
 pub(super) const MAX_EXTENSION_FLAG_STRING_BYTES: usize = 4 * 1024;
 

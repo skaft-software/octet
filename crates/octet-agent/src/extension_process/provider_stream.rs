@@ -126,7 +126,7 @@ impl DecodedProviderStreamEvent {
 }
 
 pub(super) enum ProviderStreamWait {
-    Event(Option<api_v03::ProviderStreamEvent>),
+    Event(Option<api_v04::ProviderStreamEvent>),
     Idle,
     Deadline,
     RouteInvalidated,
@@ -145,7 +145,7 @@ pub(super) fn decode_provider_stream_payload<T: DeserializeOwned>(
 }
 
 pub(super) fn decode_provider_stream_event(
-    event: api_v03::ProviderStreamEvent,
+    event: api_v04::ProviderStreamEvent,
 ) -> Result<DecodedProviderStreamEvent, AiError> {
     let payload = event.payload;
     match event.kind.as_str() {
@@ -280,7 +280,7 @@ pub(super) fn provider_protocol_name(protocol: Protocol) -> Option<&'static str>
 pub(super) fn extension_provider_response_stream(
     connection: Arc<ProcessConnection>,
     stream_id: String,
-    mut receiver: mpsc::Receiver<api_v03::ProviderStreamEvent>,
+    mut receiver: mpsc::Receiver<api_v04::ProviderStreamEvent>,
     model: HostStreamModel,
     request: octet_ai::Request,
     diagnostics: Vec<Diagnostic>,
@@ -588,14 +588,14 @@ impl ExtensionProviderStreamTransport {
                 "extension provider request could not be serialized",
             )
         })?;
-        if api_v03::canonical_json(&request_value).is_err() {
+        if api_v04::portable_json(&request_value).is_err() {
             return Err(provider_transport_error(
                 TransportPhase::ResponseHeaders,
                 false,
                 "extension provider request is not canonical API 0.3 JSON",
             ));
         }
-        let params = api_v03::ProviderStreamRequest {
+        let params = api_v04::ProviderStreamRequest {
             stream_id: stream_id.clone(),
             provider_id: route.provider.id.clone(),
             model_id: route.model.id.clone(),
@@ -609,7 +609,7 @@ impl ExtensionProviderStreamTransport {
                 "extension provider request could not be encoded",
             )
         })?;
-        if api_v03::parse_provider_stream_request(params.clone()).is_err() {
+        if api_v04::parse_provider_stream_request(params.clone()).is_err() {
             return Err(provider_transport_error(
                 TransportPhase::ResponseHeaders,
                 false,
@@ -694,7 +694,7 @@ impl ExtensionProviderStreamTransport {
             .request_provider_stream(params, connection.provider_stream_idle_timeout, &mut route)
             .await
         {
-            Ok(value) => api_v03::parse_provider_stream_accepted(value).map_err(|_| {
+            Ok(value) => api_v04::parse_provider_stream_accepted(value).map_err(|_| {
                 connection.cancel_provider_stream(&stream_id, "invalid stream acceptance");
                 provider_transport_error(
                     TransportPhase::ResponseHeaders,
@@ -805,19 +805,19 @@ pub(super) fn provider_registry_response_error(
 }
 
 pub(super) fn provider_catalog_response_value(
-    result: api_v03::ProviderCatalogResult,
+    result: api_v04::ProviderCatalogResult,
 ) -> Result<serde_json::Value, ProviderHostResponseError> {
     let value = serde_json::to_value(result).map_err(|_| ProviderHostResponseError::Unavailable)?;
-    api_v03::parse_provider_catalog_result(value.clone())
+    api_v04::parse_provider_catalog_result(value.clone())
         .map_err(|_| ProviderHostResponseError::Unavailable)?;
     Ok(value)
 }
 
 pub(super) fn provider_authorization_response_value(
-    result: api_v03::ProviderAuthorizationResult,
+    result: api_v04::ProviderAuthorizationResult,
 ) -> Result<serde_json::Value, ProviderHostResponseError> {
     let value = serde_json::to_value(result).map_err(|_| ProviderHostResponseError::Unavailable)?;
-    api_v03::parse_provider_authorization_result(value.clone())
+    api_v04::parse_provider_authorization_result(value.clone())
         .map_err(|_| ProviderHostResponseError::Unavailable)?;
     Ok(value)
 }
@@ -839,7 +839,7 @@ pub(super) fn queue_provider_host_response(
                 ProviderHostResponseError::ResourceExhausted => "resource_exhausted",
                 ProviderHostResponseError::Unavailable => "capability_mismatch",
             };
-            let error = api_v03::error_object(name, None)
+            let error = api_v04::error_object(name, None)
                 .map_err(|error| format!("invalid API 0.3 provider error response: {error}"))?;
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -862,13 +862,13 @@ pub(super) fn queue_provider_stream_cancel_from_reader(
     stream_id: String,
     reason: &'static str,
 ) -> Result<(), String> {
-    let params = api_v03::ProviderStreamCancelParams {
+    let params = api_v04::ProviderStreamCancelParams {
         stream_id,
         reason: Some(reason.to_owned()),
     };
     let params = serde_json::to_value(params)
         .map_err(|error| format!("cannot encode provider stream cancellation: {error}"))?;
-    api_v03::parse_provider_stream_cancel_params(params.clone())
+    api_v04::parse_provider_stream_cancel_params(params.clone())
         .map_err(|error| format!("invalid provider stream cancellation: {error}"))?;
     queue_writer_value(
         &state.writer,
@@ -883,16 +883,16 @@ pub(super) fn queue_provider_stream_cancel_from_reader(
 
 pub(super) fn dispatch_provider_stream_event(
     state: &ProtocolReadState,
-    event: api_v03::ProviderStreamEvent,
+    event: api_v04::ProviderStreamEvent,
 ) -> Result<(), String> {
     provider_registry_for_request(state)
         .map_err(|_| "provider stream service is unavailable".to_owned())?;
-    let payload = api_v03::canonical_json(&event.payload)
+    let payload = api_v04::portable_json(&event.payload)
         .map_err(|error| format!("invalid provider stream payload: {error}"))?;
-    if payload.len() > api_v03::MAX_PROVIDER_STREAM_EVENT_BYTES {
+    if payload.len() > api_v04::MAX_PROVIDER_STREAM_EVENT_BYTES {
         return Err(format!(
             "provider stream payload exceeded {} bytes",
-            api_v03::MAX_PROVIDER_STREAM_EVENT_BYTES
+            api_v04::MAX_PROVIDER_STREAM_EVENT_BYTES
         ));
     }
     let stream_id = event.stream_id.clone();
@@ -909,7 +909,7 @@ pub(super) fn dispatch_provider_stream_event(
         if event.sequence != ingress.next_sequence {
             return Err("provider stream event sequence is not contiguous".into());
         }
-        if ingress.next_sequence >= api_v03::MAX_PROVIDER_STREAM_EVENTS {
+        if ingress.next_sequence >= api_v04::MAX_PROVIDER_STREAM_EVENTS {
             return Err("provider stream event limit exceeded".into());
         }
         match ingress.sender.try_send(event) {
@@ -1028,7 +1028,7 @@ mod terminal_ingress_tests {
                 terminal: false,
             },
         );
-        let terminal = api_v03::ProviderStreamEvent {
+        let terminal = api_v04::ProviderStreamEvent {
             stream_id: "terminal".into(),
             sequence: 0,
             kind: "finished".into(),
@@ -1075,7 +1075,7 @@ mod terminal_ingress_tests {
         );
         dispatch_provider_stream_event(
             &state,
-            api_v03::ProviderStreamEvent {
+            api_v04::ProviderStreamEvent {
                 stream_id: "full".into(),
                 sequence: 0,
                 kind: "started".into(),
@@ -1085,7 +1085,7 @@ mod terminal_ingress_tests {
         .unwrap();
         dispatch_provider_stream_event(
             &state,
-            api_v03::ProviderStreamEvent {
+            api_v04::ProviderStreamEvent {
                 stream_id: "full".into(),
                 sequence: 1,
                 kind: "finished".into(),

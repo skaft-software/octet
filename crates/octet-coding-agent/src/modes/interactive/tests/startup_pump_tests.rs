@@ -19,20 +19,20 @@ async fn pending_extension_attach_round_keeps_terminal_input_live() {
     // records how often the pump came back to the only terminal input owner.
     let polls = Arc::new(AtomicUsize::new(0));
     let counting = polls.clone();
-    let mut input = futures_util::stream::poll_fn(move |_| -> std::task::Poll<
-        Option<std::io::Result<Event>>,
-    > {
-        let index = counting.fetch_add(1, Ordering::SeqCst);
-        let code = match index {
-            0 => KeyCode::Char('a'),
-            1 => KeyCode::Char('b'),
-            _ => return std::task::Poll::Pending,
-        };
-        std::task::Poll::Ready(Some(Ok(Event::Key(KeyEvent::new(
-            code,
-            KeyModifiers::NONE,
-        )))))
-    });
+    let mut input = futures_util::stream::poll_fn(
+        move |_| -> std::task::Poll<Option<std::io::Result<Event>>> {
+            let index = counting.fetch_add(1, Ordering::SeqCst);
+            let code = match index {
+                0 => KeyCode::Char('a'),
+                1 => KeyCode::Char('b'),
+                _ => return std::task::Poll::Pending,
+            };
+            std::task::Poll::Ready(Some(Ok(Event::Key(KeyEvent::new(
+                code,
+                KeyModifiers::NONE,
+            )))))
+        },
+    );
     // The awaited round stands in for extension startup: it settles only after
     // the pump has read past both keys, so a pump that waited for the round
     // first could never produce its value. The round keeps the deadline it has

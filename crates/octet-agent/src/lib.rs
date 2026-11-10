@@ -76,8 +76,10 @@ pub mod delegation;
 pub mod effect;
 pub mod events;
 pub mod extension;
+pub mod extension_api_policy;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub mod extension_api_v04;
 pub(crate) mod extension_bulk;
 mod extension_bulk_host;
 pub mod extension_diagnostics;

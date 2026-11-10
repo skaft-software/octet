@@ -147,21 +147,16 @@ unqualified; catalog inclusion does not close any partial API or workflow gate. 
 ## Reviewed model metadata
 
 Release preparation refreshes and reviews the checked-in models.dev names,
-pricing, capabilities and source identity together. On a pull request that
-changes the workspace product version, and on every explicit CI dispatch, CI
-runs the live models.dev `--check` gate. Stale snapshots must be refreshed and
-reviewed before the release source is frozen; the check never rewrites inputs.
+pricing, capabilities and source identity together. The separate
+`models-dev-freshness.yml` workflow checks the live catalog daily or on manual
+dispatch; its result is advisory, not a required CI or release check. Review and
+refresh stale snapshots before freezing release source; the check never rewrites
+inputs. Required CI retains deterministic offline metadata-tooling tests.
 
-On a version-changing main push, CI may reuse a successful exact-head dispatch
-only when Git and GitHub prove that a merged, protected PR delivered the same
-source tree and the dispatch's quality job ran the freshness step successfully.
-If that proof is unavailable or ambiguous, CI requires the live check instead.
-This does not replace PR checks, main CI, or release qualification.
-
-Ordinary compilation uses checked-in metadata without network access. This gate
-isn't an all-provider test or live-inference qualification. Interactive sessions
-separately refresh checked live records at runtime, with the reviewed snapshot
-as their fallback and baseline. See the [model-source
+Ordinary compilation uses checked-in metadata without network access. The
+advisory check isn't an all-provider test or live-inference qualification.
+Interactive sessions separately refresh checked live records at runtime, with
+the reviewed snapshot as their fallback and baseline. See the [model-source
 record](../crates/octet-ai/models/SOURCES.md) for metadata scope and
 limitations.
 

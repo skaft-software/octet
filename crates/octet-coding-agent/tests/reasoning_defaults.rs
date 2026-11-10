@@ -29,6 +29,7 @@ async fn fixture(metadata: Value) -> (tempfile::TempDir, MockServer) {
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir(workspace.join(".git")).unwrap();
     std::fs::write(workspace.join("probe.txt"), MARKER).unwrap();
     let server = MockServer::start().await;
     let sequence = AtomicUsize::new(0);

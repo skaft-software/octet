@@ -62,7 +62,8 @@ test('valid foreign context reads its own complete history without promoting its
   assert.equal(observed.session, foreign.session_id);
   assert.equal(observed.hasUI, false);
   for (const key of ['chrome', 'notify', 'status', 'composer']) assert.match(observed[key], /not_foreground_owner/);
-  assert.equal(peer.seen.some(frame => frame.method === 'ui/chrome' || frame.method === 'ui/close'), false);
+  assert.equal(peer.seen.some(frame => ['ui/chrome', 'ui/close', 'composer/set', 'composer/insert'].includes(frame.method)), false);
+  assert.equal(peer.seen.some(frame => frame.method === 'notification' && frame.params.message === 'must not escape background'), false);
   peer.notify('context/updated', { resource_owner: owner, host: { session_name: 'current-native-foreground' } });
   assert.equal((await inspect(peer)).name, 'current-native-foreground');
   peer.notify('session/info_changed', { resource_owner: owner });
@@ -228,7 +229,11 @@ test('all private hook/tool binding callers are session-scoped; only start/repla
     const scoped = store('hook/run'); runtime.bind({ hook, context: ownerContext(foreign) }, scoped);
     assert.equal(runtime.foreground, state); assert.equal(state.alive, true);
     assert.equal(createContext(runtime, scoped).hasUI, false);
-    assert.throws(() => createContext(runtime, scoped).ui.notify('background'), /not_foreground_owner/);
+    const context = createContext(runtime, scoped);
+    assert.throws(() => context.ui.notify('background'), /not_foreground_owner/);
+    assert.throws(() => context.ui.setWorkingMessage('background'), /not_foreground_owner/);
+    assert.throws(() => context.ui.setToolsExpanded(true), /not_foreground_owner/);
+    assert.equal(scoped.state.host.tools_expanded, undefined, 'a rejected setter cannot mutate its local mirror');
   }
   for (const method of ['tool/call', 'tool/prepare_arguments', 'transcript/render']) {
     runtime.bind({ context: ownerContext(foreign) }, store(method));
@@ -244,6 +249,28 @@ test('all private hook/tool binding callers are session-scoped; only start/repla
   assert.equal(runtime.states.get(ownerKey(owner)), runtime.foreground);
   await runtime.retire(runtime.foreground);
   assert.equal(runtime.foreground.alive, false);
+});
+
+test('queued chrome cannot reach the native host after foreground authority changes', async t => {
+  const { runtime, start } = runtimeFixture(t), calls = [];
+  runtime.transport.request = async (...args) => { calls.push(args); return { tools_expanded: false }; };
+  const context = createContext(runtime, start);
+  context.ui.setTitle('queued while authorized');
+  runtime.foreground = { ...start.state, owner: foreign };
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [], 'revoked chrome never crosses the native UI boundary');
+});
+
+// Pi keeps ctx.ui usable after the request that captured it is aborted, so a
+// tool clearing its status in `finally` after Esc must still reach the host.
+test('chrome from a cancelled request of the live foreground is still delivered', async t => {
+  const { runtime, start } = runtimeFixture(t), calls = [];
+  runtime.transport.request = async (...args) => { calls.push(args); return { tools_expanded: false }; };
+  const context = createContext(runtime, start);
+  start.controller.abort();
+  assert.doesNotThrow(() => context.ui.setTitle('cleared after abort'));
+  await new Promise(setImmediate);
+  assert.equal(calls.length > 0, true, 'cleanup chrome after cancellation reaches the host');
 });
 
 test('a first private hook never mints a foreground lease before session_start', async t => {

@@ -417,6 +417,12 @@ deliberate differences from Pi's unbounded, blocking chain.
   the actual live request; numeric ID reuse cannot revive an old captured context.
   Native admission implements the corresponding narrow checkpoint-lifetime rule;
   adapter tests alone cannot qualify it.
+- Editor presentation setters remain synchronous void, like Pi. A refused mount
+  or checkpoint is diagnosed independently instead of failing an unrelated hook
+  or command. This is not an effect receipt: refused mounts never invoke their
+  factories or activate frames, and a failed checkpoint prevents later draft
+  writes, frames and replacement mounts. Missing mount fences still close the
+  unusable surface before factory construction.
 - Same-owner `setEditorText` and `pasteToEditor`, including cross-factory callers,
   mutate the active custom component and await its fenced checkpoint. Paste uses
   the component's real cursor API, never an invented append. Without a custom
@@ -525,7 +531,12 @@ or full-Pi qualification.
 refuse. With paired session transport, queue-only `runtime.updated` publications
 update an existing live exact owner's retained fact without `remote_ui` or a UI
 mount. They cannot change foreground ownership, history or editor/UI authority,
-and accept no additional host fields. Delayed publications for unknown or retired
+and accept no additional host fields. Native foreground actions require the exact
+current state, not merely a matching process, generation or workspace. Retained
+same-session contexts survive turn settlement; private background bindings never
+acquire that authority, even before the first foreground binding. Coalesced chrome
+setters check at enqueue and again at delivery, dropping cancelled or superseded
+work before any native request. Delayed publications for unknown or retired
 owners are ignored without creating state or reviving action authority; retained
 context actions still refuse retired owners. Native queue and original-package
 qualification remain separate from this adapter contract.

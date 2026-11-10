@@ -1332,6 +1332,21 @@ impl ExtensionHost {
         self.register_tool_arc(tool, false);
     }
 
+    /// Retarget an already installed host tool without changing its catalog or
+    /// active selection. Session-scoped delegation uses the same definitions.
+    pub(crate) fn replace_static_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.definition().name;
+        match self
+            .tools
+            .iter_mut()
+            .find(|installed| installed.definition().name == name)
+        {
+            Some(installed) => *installed = tool,
+            // Not expected (the root surface installed it), but never panic.
+            None => self.register_tool_arc(tool, false),
+        }
+    }
+
     fn register_tool_arc(&mut self, tool: Arc<dyn Tool>, builtin: bool) {
         let name = tool.definition().name;
         let mut dynamic = self

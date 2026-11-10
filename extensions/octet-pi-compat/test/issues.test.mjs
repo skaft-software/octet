@@ -68,7 +68,7 @@ test('startup groups skipped factories and inert renderers into one actionable E
     assert.doesNotMatch(message, /unsupported_feature|invalid_request|ENOENT|Next:/);
     for (const entry of entries) assert.ok(!message.includes(entry), 'a notice names no path');
   }
-  for (const entry of entries) assert.match(peer.stderr(), new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'the log keeps the path');
+  for (const entry of entries) await peer.waitStderr(new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))); // the log keeps the path
   assert.doesNotMatch(peer.stderr(), new RegExp(secret + '|inert renderer ran'));
   assert.equal(peer.seen.filter(frame => frame.method === 'notification').length, 2);
   await peer.close();

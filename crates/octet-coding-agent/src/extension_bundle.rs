@@ -291,7 +291,7 @@ fn validate_bundle_manifest(
             archive_root
         );
     }
-    if !octet_agent::extension_api_v03::bundle_supports_api_version(&manifest.api_version) {
+    if !octet_agent::extension_api_policy::bundle_supports_api_version(&manifest.api_version) {
         anyhow::bail!(
             "installable extension bundles require a bundle-supported API (0.2, 0.3, or 0.4); manifest declares {:?}",
             manifest.api_version
@@ -679,7 +679,7 @@ fn validate_install_record(record: &InstallRecord, expected_id: &str) -> anyhow:
     }
     Version::parse(&record.version)
         .context("installed extension version is not semantic versioning")?;
-    if !octet_agent::extension_api_v03::bundle_supports_api_version(&record.api_version) {
+    if !octet_agent::extension_api_policy::bundle_supports_api_version(&record.api_version) {
         anyhow::bail!(
             "installed extension has unsupported bundle API {:?}",
             record.api_version

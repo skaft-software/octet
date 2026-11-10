@@ -276,15 +276,15 @@ impl ModelCatalog {
         // models by bare id.
         let spec = match self.models.get(id) {
             Some(spec) => spec,
-            None => id
-                .0
-                .split_once('/')
-                .and_then(|(endpoint, model)| {
-                    self.models.values().find(|spec| {
-                        spec.endpoint.0 == endpoint && spec.id.0 == model
+            None => {
+                id.0.split_once('/')
+                    .and_then(|(endpoint, model)| {
+                        self.models
+                            .values()
+                            .find(|spec| spec.endpoint.0 == endpoint && spec.id.0 == model)
                     })
-                })
-                .ok_or_else(|| ConfigError::UnknownModel(id.clone()))?,
+                    .ok_or_else(|| ConfigError::UnknownModel(id.clone()))?
+            }
         };
         let endpoint = self
             .endpoints

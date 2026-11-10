@@ -27,12 +27,34 @@ test('private provider callback exception is redacted, not emitted with wire bod
   assert.ok(!peer.stderr().includes('NEVER-LOG-ME'));
   assert.ok(peer.seen.filter(frame => frame.method === 'notification').every(frame => !JSON.stringify(frame).includes('NEVER-LOG-ME'))); await peer.close();
 });
+test('headless provider confirmation settles without a reverse-dialog barrier', async t => {
+  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  const reply = await peer.request('hook/run', { hook: 'before_provider_request', context: peer.context({ session_name: 'wait' }),
+    payload: { operation_id: 'attempt', model, payload: {} } }).response;
+  assert.deepEqual(reply.result, { provider_payload: { max_output_tokens: 256, sequence: ['first', 'second'] } });
+  assert.equal(peer.seen.some(frame => frame.method === 'confirmation/request' || frame.method === 'ui/open'), false);
+  await peer.close();
+});
+
 test('provider pipeline cancellation has no late success or header/payload publication', async t => {
-  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] }); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  // Pi's headless confirm resolves false (pi-reference/node_modules/@earendil-works/
+  // pi-coding-agent/dist/core/extensions/runner.js:132-135); admit an actual UI barrier.
+  const peer = launch(t, [pipeline], { hold: ['confirmation/request'] });
+  await peer.init(['pipeline_hooks_v1', 'remote_ui']); await peer.start({ has_ui: true });
   const request = peer.request('hook/run', { hook: 'before_provider_request', context: peer.context({ session_name: 'wait' }), payload: { operation_id: 'attempt', model, payload: {} } });
   const call = await peer.wait(frame => frame.method === 'confirmation/request'); peer.notify('$/cancelRequest', { id: request.id });
   assert.equal((await request.response).error.code, -32800);
-  peer.send({ jsonrpc: '2.0', id: call.id, result: { confirmed: true } }); await peer.close();
+  peer.send({ jsonrpc: '2.0', id: call.id, result: { confirmed: true } });
+  // A later ordered hook is a barrier after the late reverse reply. Neither
+  // the cancelled payload nor a second terminal result may be published.
+  const next = await peer.request('hook/run', { hook: 'before_provider_headers', context: peer.context({ session_name: 'Synthetic' }),
+    payload: { operation_id: 'next-attempt', model, headers: {} } }).response;
+  assert.deepEqual(next.result, { provider_headers: { 'x-null': null, 'x-added': ['first', 'second'] } });
+  const terminal = peer.seen.filter(frame => frame.id === request.id && !frame.method);
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].error?.code, -32800);
+  assert.equal(terminal[0].result, undefined);
+  await peer.close();
 });
 for (const reason of ['manual', 'threshold', 'overflow']) test(`real session compaction ${reason}: replacement/veto rather than advisory no-op`, async t => {
   const peer = launch(t, [operations]); await peer.init(['session_entries']);

@@ -255,9 +255,7 @@ impl PricingWindows {
 
     /// The window containing `minute_of_day` (UTC), when the schedule has one.
     pub fn window_at(&self, minute_of_day: u16) -> Option<&PricingWindow> {
-        self.0
-            .iter()
-            .find(|window| window.contains(minute_of_day))
+        self.0.iter().find(|window| window.contains(minute_of_day))
     }
 }
 

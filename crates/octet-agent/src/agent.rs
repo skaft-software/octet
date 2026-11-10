@@ -1269,12 +1269,13 @@ impl Agent {
 
     /// Replaces the durable active session at an idle boundary.
     ///
-    /// Active V2 delegation owns session-scoped child resources, so callers
-    /// must rebuild that runtime instead of retargeting it in place.
+    /// Callers must first park delegated workers with
+    /// [`Self::detach_delegated_workers`]. The new root gets a fresh runtime;
+    /// outgoing child sessions remain durable for a later return.
     pub fn replace_session_at_idle(&mut self, session: Session) -> Result<(), AgentError> {
-        if self.delegation.is_some() {
+        if self.active_delegated_worker_count() > 0 {
             return Err(AgentError::Delegation(
-                "active session changes require a rebuild while V2 delegation is enabled".into(),
+                "session replacement refused: subagent workers still running; wait for them to finish or stop them, then retry".into(),
             ));
         }
         if self
@@ -1288,6 +1289,7 @@ impl Agent {
         }
         self.cache_warmer
             .cancel(&mut self.session, "session changed")?;
+        self.rebind_delegation(&session)?;
         let resource_owner = session.resource_owner_key();
         self.bash_owner = BashOwnerLease::acquire(&resource_owner);
         self.session_id = resource_owner.clone();
