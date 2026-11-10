@@ -249,6 +249,12 @@ same title/purpose/status/footer vocabulary as ordinary pickers. They occupy a
 temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
+Read-only reports and document panels can consume current renderer-prepared
+navigation bounds before the completed-write receipt: terminal output can become
+visible before the renderer publishes that receipt. The prepared-to-written
+handoff is atomic with input, and refreshed-document anchoring cannot overwrite
+newer navigation. Neither input path performs layout. Approval confirmation and
+pointer hit-testing still require completed-frame receipts.
 Generic presentation snapshots do not create persistent chrome. First-party
 subagent activity occupies one mutable tool-like **Subagents** transcript block,
 including between root turns. Its bold heading counts worker states and points
@@ -456,9 +462,9 @@ the output's ownership visible without adding another indentation level.
 
 Bash and PowerShell headers wrap at whitespace where possible and hard-wrap
 oversized words by terminal cell width without splitting graphemes. Collapsed
-headers show up to six rendered command rows with an exact hidden-row count;
+headers show up to twelve rendered command rows with an exact hidden-row count;
 Ctrl+O reveals the complete retained command. Generic tool headers retain their
-selected argument with newlines intact and use the same six-row preview, rather
+selected argument with newlines intact and use the same twelve-row preview, rather
 than truncating at a fixed character count. Semantic copy preserves the full
 sanitized input, never the raw argument envelope. Collapsed output keeps
 both its head and tail within the visual-row budget, with an exact omitted-middle

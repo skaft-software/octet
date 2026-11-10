@@ -1,0 +1,515 @@
+{
+  "gaps": [
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.thinking",
+      "reason": "Pi defaults thinkingLevel to \"off\" when the branch has no thinking_level_change entry; octet stores no level, so resume falls back to the configured default (app/bootstrap.rs persisted_session_config)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "import-settings",
+      "fingerprint": "settings.thinking",
+      "reason": "Pi defaults thinkingLevel to \"off\" when the branch has no thinking_level_change entry; octet stores no level, so resume falls back to the configured default (app/bootstrap.rs persisted_session_config)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "file",
+      "fingerprint": "file",
+      "reason": "Pi keeps a setup-only session in memory and writes no file until the first user/assistant message; octet creates the JSONL and appends setup entries immediately (octet-agent session/store.rs create)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "capability",
+      "fingerprint": "refused:edit",
+      "reason": "Pi records append-only context_edit entries that replace or omit an earlier entry's model content; octet has no such EntryValue and refuses the operation."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "capability",
+      "fingerprint": "refused:message",
+      "reason": "Pi stores system and bashExecution messages as session entries; octet's Message has only user/assistant, with tool results carried inside user content."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "capability",
+      "fingerprint": "refused:usage",
+      "reason": "Pi exposes appendUsage for arbitrary categories; octet has no appendable model-attributed usage entry, only per-operation ledger records written by the agent loop."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "capability",
+      "fingerprint": "refused:summary",
+      "reason": "octet refuses an empty branch summary, a branch summary whose details object omits readFiles/modifiedFiles (both fields are required by CompactionDetails), and branch-with-summary on an empty session; Pi accepts all three (octet-agent session.rs validate_branch_summary, compaction.rs CompactionDetails)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "capability",
+      "fingerprint": "refused:compaction",
+      "reason": "octet refuses empty-retention compaction (firstKeptEntryId equal to the compaction id) and a details object that omits readFiles/modifiedFiles (both required by CompactionDetails); Pi accepts both (octet-agent session/context.rs compact, compaction.rs CompactionDetails)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "import-capability",
+      "fingerprint": "import:refused",
+      "reason": "octet's Pi importer refuses custom entries, context_edit, bashExecution/system messages, non-cache_warm usage, the openai-responses API, Anthropic thinking signatures and empty-retention compaction (session_commands/pi.rs)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-path",
+      "fingerprint": "path.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-path",
+      "fingerprint": "path.0",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-path",
+      "fingerprint": "path.1",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.*.role",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.1",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "entries",
+      "fingerprint": "entries.2.parent",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.1.role",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.0",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "entries",
+      "fingerprint": "entries.2.parent",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.0",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.len",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "reopen-entries",
+      "fingerprint": "entries.2.parent",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "reopen-entries",
+      "fingerprint": "entries.2.parent",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "entries",
+      "fingerprint": "entries.len",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.len",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.1",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.len",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.1.role",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "reopen-entries",
+      "fingerprint": "entries.len",
+      "reason": "Pi's SessionManager.forkFrom copies every entry, including sibling branches, into the new file and its leaf is the last copied entry; octet's /fork copies only the selected chain (modes/interactive.rs fork_active_session -> Session::fork_to)."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "entries",
+      "fingerprint": "entries.len",
+      "reason": "Pi's createBranchedSession keeps every entry on the root-to-leaf path; octet's fork_to omits history before the compaction's firstKept boundary (octet-agent session/entries.rs fork_to)."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "reopen-entries",
+      "fingerprint": "entries.len",
+      "reason": "Pi's createBranchedSession keeps every entry on the root-to-leaf path; octet's fork_to omits history before the compaction's firstKept boundary (octet-agent session/entries.rs fork_to)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "branches",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.*.content.*.type",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.*.content.*.text",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.*.content.*.bytes",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.*.content.*.mime",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "import-context",
+      "fingerprint": "context.*.content.*.type",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "import-context",
+      "fingerprint": "context.*.content.*.text",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "import-context",
+      "fingerprint": "context.*.content.*.bytes",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "import-context",
+      "fingerprint": "context.*.content.*.mime",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.*.content.*.type",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.*.content.*.text",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.*.content.*.bytes",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "tool-images",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.*.content.*.mime",
+      "reason": "octet's model context replaces tool-result images older than the newest four with a placeholder text (octet-agent session/context.rs MODEL_VISIBLE_TOOL_IMAGE_LIMIT); Pi sends every image."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.1.role",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.1.content.0.text",
+      "reason": "Pi keeps no durable leaf pointer: reopening selects the last appended entry, while octet persists `head` and restores the selected entry (docs/session-format.md)."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "leaf",
+      "fingerprint": "leaf",
+      "reason": "Pi's createBranchedSession keeps every entry on the root-to-leaf path; octet's fork_to omits history before the compaction's firstKept boundary (octet-agent session/entries.rs fork_to)."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "path",
+      "fingerprint": "path.len",
+      "reason": "Pi's createBranchedSession keeps every entry on the root-to-leaf path; octet's fork_to omits history before the compaction's firstKept boundary (octet-agent session/entries.rs fork_to)."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "After a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
+    },
+    {
+      "scenario": "*",
+      "step": "*",
+      "check": "reopen-context",
+      "fingerprint": "context.0.content.0.text",
+      "reason": "After a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi's forkFrom copies every entry and selects the last copied one, octet's /fork copies the selected chain, so the branch's last assistant message names a different model."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi's createBranchedSession keeps the full root-to-leaf path while octet's fork_to omits pre-firstKept history, so the branch's last assistant message can differ."
+    }
+  ]
+}

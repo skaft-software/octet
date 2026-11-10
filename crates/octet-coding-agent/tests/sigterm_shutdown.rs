@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod pty_teardown;
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -385,10 +387,7 @@ impl PtyOctet {
                 break status;
             }
             if started.elapsed() >= EXIT_DEADLINE {
-                unsafe {
-                    let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                pty_teardown::kill_and_reap(&mut self.child, &mut self.master, EXIT_DEADLINE);
                 panic!(
                     "octet did not stop within {EXIT_DEADLINE:?}; output: {}",
                     String::from_utf8_lossy(&self.output)
@@ -431,10 +430,7 @@ impl PtyOctet {
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.child.id() as i32, libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.master, EXIT_DEADLINE);
         }
     }
 }

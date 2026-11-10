@@ -343,12 +343,22 @@ fn builtin_terra_matches_exact_public_contract_and_whole_request_cache_tier() {
         (400_000, 6_200, 25_000, 75_000)
     );
     assert_eq!(above.total, 506_200);
-    for alias in [
-        "gpt-6.1-terra-pro",
-        "codex/gpt-6.1-terra",
-        "openai/gpt-6.1-terra",
-    ] {
-        assert!(catalog.resolve(&ModelId(alias.into())).is_err());
+    assert!(catalog
+        .resolve(&ModelId("gpt-6.1-terra-pro".into()))
+        .is_err());
+    // The list shows provider and model as two columns; the qualified spelling
+    // resolves when that provider really exposes the model, and only then.
+    assert_eq!(
+        catalog
+            .resolve(&ModelId("openai/gpt-6.1-terra".into()))
+            .unwrap()
+            .spec
+            .id
+            .0,
+        "gpt-6.1-terra"
+    );
+    for unknown in ["codex/gpt-6.1-terra", "openai/gpt-6.1-terra-pro"] {
+        assert!(catalog.resolve(&ModelId(unknown.into())).is_err());
     }
     assert!(model.responses_features().async_tools);
     assert!(model.responses_features().steering);

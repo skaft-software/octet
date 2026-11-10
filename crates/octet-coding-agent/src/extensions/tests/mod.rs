@@ -42,6 +42,8 @@ mod trust_and_preflight;
 // off unix. Gating the declarations keeps an empty module — and its imports —
 // out of the Windows build instead of leaving dead declarations behind.
 #[cfg(unix)]
+mod before_prompt_images;
+#[cfg(unix)]
 mod confirmation_handlers;
 #[cfg(unix)]
 mod deferred_startup;

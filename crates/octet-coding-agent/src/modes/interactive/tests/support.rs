@@ -53,6 +53,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         skill_paths: vec![],
         extension_paths: vec![],
         enabled_extensions: vec![],
+        disabled_extensions: vec![],
         extension_activation_overridden: false,
         trusted_extensions: vec![],
         invocation_trusted_extensions: vec![],

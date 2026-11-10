@@ -76,6 +76,7 @@ fn fallback_model() -> crate::Model {
             cache_write_5m: TokenRate(9_000_000),
             cache_write_1h: None,
             reasoning: None,
+            windows: Default::default(),
             tiers: vec![],
         }),
     );

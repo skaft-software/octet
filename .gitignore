@@ -32,15 +32,13 @@ docs/plans/
 docs/reports/
 docs/superpowers/
 
-# Local credentials, agent instructions, and runtime state
+# Local credentials, unshared agent instructions, and runtime state
 .env
 .env.*
 !.env.example
 /.octet/
 /.codex/
 /.claude/
-/AGENTS.md
-/CLAUDE.md
 /CODEX.md
 /GEMINI.md
 /auth.json

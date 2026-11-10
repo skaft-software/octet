@@ -1,6 +1,7 @@
 //! ExecutableExtensions status, summaries, presentation views and subagent controls.
 
 use super::*;
+use crate::extensions::lifecycle::PI_BRIDGE_EXTENSION_NAME;
 
 pub(super) fn private_python_runtime_config(
     setup: Option<octet_agent::extension_process::PythonRuntimeSetup>,
@@ -192,14 +193,18 @@ impl ExecutableExtensions {
         summaries
     }
 
-    /// Returns whether the observing first-party subagents extension has a
-    /// live, negotiated child-session service.
+    /// Returns whether an admitted first-party owner has a live, negotiated
+    /// child-session service. The Pi bridge negotiates the same native authority
+    /// for `createAgentSession`, so readiness must not assume the delegation
+    /// extension is the only owner.
     pub fn has_agent_session_service(&self) -> bool {
         self.processes.iter().any(|process| {
-            process.descriptor().manifest.name == SUBAGENTS_EXTENSION_NAME
+            let name = &process.descriptor().manifest.name;
+            (name == SUBAGENTS_EXTENSION_NAME || name == PI_BRIDGE_EXTENSION_NAME)
                 && process.is_running()
                 && process.supports_feature(EXTENSION_FEATURE_AGENT_SESSIONS)
-                && process.supports_feature(EXTENSION_FEATURE_DELEGATION_TELEMETRY)
+                && (name == PI_BRIDGE_EXTENSION_NAME
+                    || process.supports_feature(EXTENSION_FEATURE_DELEGATION_TELEMETRY))
         })
     }
 

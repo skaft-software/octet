@@ -122,6 +122,31 @@ fn cold_catalog_accepts_labels_and_tool_invocation_records() {
 }
 
 #[test]
+fn catalog_summary_reader_accepts_branch_summary_records() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(root.path(), workspace.path());
+    std::fs::create_dir_all(store.dir()).unwrap();
+    let path = store.dir().join("branch-summary.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let user = session
+        .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+            content: vec![UserPart::Text("branch title".into())],
+        })))
+        .unwrap();
+    session
+        .append(EntryValue::BranchSummary {
+            summary: "left branch".into(),
+            from_entry: user,
+            details: Default::default(),
+        })
+        .unwrap();
+    drop(session);
+    assert!(summarize_catalog_session(&path).is_ok());
+    assert_eq!(store.list()[0].title, "branch title");
+}
+
+#[test]
 fn corrupt_catalog_falls_back_without_touching_transcripts() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

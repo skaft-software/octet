@@ -1192,7 +1192,19 @@ async fn completing_a_root_run_detaches_and_keeps_the_worker_discoverable() {
     assert!(!any_shutdown(&events));
     // The session-owned durable record survives the run: id, name, task,
     // child-session reference, status, and consumed budget.
-    let record = fleet_record(&harness, "agent-1");
+    // `spawn_agent` returns with the worker pending; the roster records
+    // `running` only once the worker's own task starts, so wait for that.
+    let record = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let record = fleet_record(&harness, "agent-1");
+            if record["status"]["state"] != "pending" {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the worker to start running");
     assert_eq!(record["agent_path"], "/root/slow");
     assert_eq!(record["task_name"], "slow");
     assert_eq!(record["parent_id"], "root");

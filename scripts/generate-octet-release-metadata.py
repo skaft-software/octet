@@ -123,10 +123,11 @@ def validate_identity(
             fail(f"{label} commit is malformed")
     if repository != release_repository(version, source_commit, workflow_commit):
         fail(f"repository is not the canonical octet repository: {repository}")
-    expected_workflow_ref = (
-        f"{repository}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-{tag}"
-    )
-    if workflow_ref != expected_workflow_ref:
+    workflow_prefix = f"{repository}/.github/workflows/release-octet.yml@refs/tags/"
+    if workflow_ref == f"{workflow_prefix}{tag}":
+        if workflow_commit != source_commit:
+            fail("canonical release workflow commit must equal the source commit")
+    elif workflow_ref != f"{workflow_prefix}octet-binaries-{tag}":
         fail(f"workflow ref is not the immutable binary release workflow tag: {workflow_ref}")
 
 

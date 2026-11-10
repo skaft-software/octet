@@ -601,6 +601,7 @@ fn tool_result_media_rejected() {
         ))],
         is_error: false,
         added_tool_names: None,
+        tool_name: None,
     })])];
     // Provide a preceding assistant tool call so pairing passes and we reach the media check.
     req.messages.insert(
@@ -681,6 +682,7 @@ fn orphan_tool_result() {
         content: vec![ToolResultPart::Text("r".into())],
         is_error: false,
         added_tool_names: None,
+        tool_name: None,
     })])];
     assert!(matches!(
         run(

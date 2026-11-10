@@ -10,9 +10,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{cursor, event, execute, terminal};
 
+// Remote UI changes keyboard flags on the input thread while the renderer can
+// switch screens. Serialize those writes so a push/pop is attributed to the
+// screen that actually received it. Emergency restoration does not wait here.
+static KEYBOARD_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
-static REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ALT_KEYBOARD_ENHANCEMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static REMOTE_KEYBOARD_ON_PRIMARY: AtomicBool = AtomicBool::new(false);
+static REMOTE_KEYBOARD_ON_ALT: AtomicBool = AtomicBool::new(false);
 static FOCUS_REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
@@ -76,6 +82,12 @@ fn with_tty_fd<T>(apply: impl FnOnce(libc::c_int) -> T) -> Option<T> {
     Some(apply(tty.as_raw_fd()))
 }
 
+pub(super) fn lock_keyboard_mode() -> std::sync::MutexGuard<'static, ()> {
+    KEYBOARD_MODE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub(super) fn mark_raw_active() {
     RAW_ACTIVE.store(true, Ordering::SeqCst);
 }
@@ -88,12 +100,38 @@ pub(super) fn mark_focus_reporting_active() {
     FOCUS_REPORTING_ACTIVE.store(true, Ordering::SeqCst);
 }
 
+pub(super) fn keyboard_enhancement_active() -> bool {
+    KEYBOARD_ENHANCEMENT_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub(super) fn mark_alt_keyboard_enhancement_active() {
+    ALT_KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn take_alt_keyboard_enhancement_active() -> bool {
+    ALT_KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst)
+}
+
 pub(super) fn mark_remote_keyboard_enhancement_active() {
-    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.store(true, Ordering::SeqCst);
+    let stack = if ALT_KEYBOARD_ENHANCEMENT_ACTIVE.load(Ordering::SeqCst) {
+        &REMOTE_KEYBOARD_ON_ALT
+    } else {
+        &REMOTE_KEYBOARD_ON_PRIMARY
+    };
+    stack.store(true, Ordering::SeqCst);
 }
 
 pub(super) fn take_remote_keyboard_enhancement_active() -> bool {
-    REMOTE_KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst)
+    let stack = if ALT_KEYBOARD_ENHANCEMENT_ACTIVE.load(Ordering::SeqCst) {
+        &REMOTE_KEYBOARD_ON_ALT
+    } else {
+        &REMOTE_KEYBOARD_ON_PRIMARY
+    };
+    stack.swap(false, Ordering::SeqCst)
+}
+
+pub(super) fn take_remote_keyboard_on_alt() -> bool {
+    REMOTE_KEYBOARD_ON_ALT.swap(false, Ordering::SeqCst)
 }
 
 /// Restore the process terminal state. Repeated calls are harmless.
@@ -156,11 +194,16 @@ fn drain_pending_input() {
 fn restore_terminal(advance_line: bool) {
     let raw_active = RAW_ACTIVE.swap(false, Ordering::SeqCst);
     let keyboard_enhancement_active = KEYBOARD_ENHANCEMENT_ACTIVE.swap(false, Ordering::SeqCst);
-    let remote_keyboard_enhancement_active = take_remote_keyboard_enhancement_active();
+    let alt_keyboard_enhancement_active = take_alt_keyboard_enhancement_active();
+    let remote_keyboard_on_alt = take_remote_keyboard_on_alt();
+    let remote_keyboard_enhancement_active =
+        REMOTE_KEYBOARD_ON_PRIMARY.swap(false, Ordering::SeqCst);
     let focus_reporting_active = FOCUS_REPORTING_ACTIVE.swap(false, Ordering::SeqCst);
     if !raw_active
         && !keyboard_enhancement_active
+        && !alt_keyboard_enhancement_active
         && !remote_keyboard_enhancement_active
+        && !remote_keyboard_on_alt
         && !focus_reporting_active
     {
         // Even when modes are already clear, pending input (e.g. a Kitty
@@ -174,6 +217,17 @@ fn restore_terminal(advance_line: bool) {
     let mut out = std::io::stdout();
     if focus_reporting_active {
         let _ = execute!(out, event::DisableFocusChange);
+    }
+    if alt_keyboard_enhancement_active {
+        if remote_keyboard_on_alt {
+            let _ = execute!(out, event::PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(
+            out,
+            event::PopKeyboardEnhancementFlags,
+            terminal::LeaveAlternateScreen,
+            terminal::EnableLineWrap
+        );
     }
     if remote_keyboard_enhancement_active {
         let _ = execute!(out, event::PopKeyboardEnhancementFlags);

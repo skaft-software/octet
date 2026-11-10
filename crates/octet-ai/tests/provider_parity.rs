@@ -149,6 +149,7 @@ fn tool_result() -> UserMessage {
             content: vec![ToolResultPart::Text("accepted".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }
 }
@@ -464,6 +465,7 @@ fn priced_responses_model(url: &str, api_name: &str, profile: ResponsesRuntimePr
         cache_write_5m: TokenRate(1_250_000),
         cache_write_1h: None,
         reasoning: Some(TokenRate(3_000_000)),
+        windows: Default::default(),
         tiers: vec![],
     });
     Arc::make_mut(&mut model.endpoint).runtime.responses_profile = profile;

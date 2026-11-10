@@ -330,7 +330,7 @@ fn assert_error(reply: &serde_json::Value, id: u64, code: i64) {
 async fn mark_terminal(fixture: &Fixture, state: &ProtocolReadState) {
     dispatch_provider_stream_event(
         state,
-        api_v03::ProviderStreamEvent {
+        api_v04::ProviderStreamEvent {
             stream_id: fixture.stream_id.clone(),
             sequence: 0,
             kind: "finished".into(),
@@ -648,4 +648,430 @@ async fn native_and_bridge_claim_are_mutually_exclusive_under_race() {
         }
         fixture.finish().await;
     }
+}
+
+struct FakeHttpSender(AtomicUsize);
+
+#[async_trait::async_trait]
+impl octet_ai::HostHttpSender for FakeHttpSender {
+    async fn send(
+        &self,
+        _: octet_ai::HostHttpRequest,
+    ) -> Result<octet_ai::HostHttpResponse, AiError> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Ok(http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::from("data: [DONE]\n\n"))
+            .unwrap())
+    }
+}
+
+async fn pipeline_process(temp: &TempDir, stage: &str) -> ExtensionProcess {
+    write_executable_script(
+        &temp.path().join("extension.py"),
+        include_str!("../fixtures/provider-pipeline-invalid.py"),
+    );
+    let manifest = ExtensionManifest::parse(&format!(
+        "name = \"malformed-hook\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = \"extension.py\"\n[contributes]\nhooks = [\"{stage}\"]\n"
+    ))
+    .unwrap();
+    let mut runtime = ExtensionRuntimeConfig::new(temp.path());
+    runtime.provider_pipeline = true;
+    ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
+        .await
+        .unwrap()
+}
+
+fn pipeline_model(base_url: &str) -> octet_ai::Model {
+    let mut model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.endpoint).id = octet_ai::EndpointId("fixture-provider".into());
+    Arc::make_mut(&mut model.endpoint).auth = octet_ai::Auth::None;
+    Arc::make_mut(&mut model.endpoint).base_url = base_url.parse().unwrap();
+    Arc::make_mut(&mut model.endpoint).default_headers.clear();
+    Arc::make_mut(&mut model.spec).endpoint = model.endpoint.id.clone();
+    model
+}
+
+fn pipeline_request() -> octet_ai::Request {
+    serde_json::from_value(serde_json::json!({
+        "system":null, "messages":[{"User":{"content":[{"Text":"PRIVATE_FIXTURE_PROMPT"}]}}],
+        "tools":[], "tool_choice":"auto", "max_output_tokens":32, "temperature":null,
+        "stop":[], "reasoning":{"type":"off"}, "output_modalities":{"type":"text"}
+    }))
+    .unwrap()
+}
+
+fn pipeline_case(temp: &TempDir, stage: &str, reply: serde_json::Value) {
+    std::fs::write(
+        temp.path().join("case.json"),
+        serde_json::to_vec(&serde_json::json!({"hook":stage,"reply":reply})).unwrap(),
+    )
+    .unwrap();
+}
+
+fn assert_warning(warning: &str, stage: &str, reason: &str) {
+    for expected in [
+        stage,
+        "malformed-hook",
+        "fixture-provider",
+        "gpt-4o-mini",
+        reason,
+        "skipped",
+    ] {
+        assert!(
+            warning.contains(expected),
+            "missing {expected:?} in {warning:?}"
+        );
+    }
+    for leaked in [
+        "PRIVATE_FIXTURE_SECRET",
+        "PRIVATE_FIXTURE_PROMPT",
+        "fixture.invalid",
+        "Parse error",
+    ] {
+        assert!(
+            !warning.contains(leaked),
+            "leaked {leaked:?} in {warning:?}"
+        );
+    }
+}
+
+async fn send_with_hook(
+    process: &ExtensionProcess,
+    warnings: &crate::extension_provider::ProviderHookWarnings,
+) -> (Result<(), String>, usize) {
+    use crate::extension_provider::ProviderRequestHookFactory;
+    let hook = process
+        .bind_provider_request_hook("fixture-owner", warnings)
+        .unwrap()
+        .expect("pipeline process binds a hook");
+    let sender = Arc::new(FakeHttpSender(AtomicUsize::new(0)));
+    let client = octet_ai::AiClient::new().with_provider_request_hooks(vec![hook]);
+    let result = client
+        .stream_custom_http_with_host_options(
+            &pipeline_model("https://fixture.invalid/v1/"),
+            pipeline_request(),
+            Default::default(),
+            Default::default(),
+            sender.clone(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            crate::public_error_diagnostic(
+                &crate::AgentError::Ai(error),
+                "fixture-provider",
+                "gpt-4o-mini",
+            )
+        });
+    (result, sender.0.load(Ordering::Acquire))
+}
+
+/// A malformed hook reply (here an integer header value, as an extension that
+/// writes `headers["x-n"] = 3` would send) must not fail the request: Pi skips
+/// a failing extension handler and so does octet, with a visible warning.
+#[tokio::test]
+async fn malformed_pipeline_reply_is_skipped_with_a_warning_and_the_request_is_sent() {
+    let temp = TempDir::new().unwrap();
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let (result, sent) = send_with_hook(&process, &warnings).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(sent, 1, "the request is still sent");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("hook-called")).unwrap(),
+        "before_provider_headers\n"
+    );
+    let reported = warnings.take();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert_warning(
+        &reported[0],
+        "before_provider_headers",
+        "malformed hook result",
+    );
+
+    // The next valid reply applies normally and reports nothing.
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{}}),
+    );
+    let (result, sent) = send_with_hook(&process, &warnings).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(sent, 1);
+    assert!(warnings.take().is_empty());
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn pipeline_failures_are_isolated_attributed_and_redacted() {
+    for (stage, reply, reason) in [
+        (
+            "before_provider_request",
+            serde_json::json!({"result":{"provider_payload":17}}),
+            Some("not a JSON object"),
+        ),
+        (
+            "before_provider_headers",
+            serde_json::json!({"result":{"provider_headers":{"invalid name":"PRIVATE_FIXTURE_SECRET"}}}),
+            Some("invalid header change"),
+        ),
+        (
+            "before_provider_request",
+            serde_json::json!({"error":{"code":-32602,"message":"PRIVATE_FIXTURE_SECRET","data":{"private":"PRIVATE_FIXTURE_PROMPT"}}}),
+            Some("reported an error"),
+        ),
+        (
+            "after_provider_response",
+            serde_json::json!({"error":{"code":-32000,"message":"PRIVATE_FIXTURE_SECRET"}}),
+            Some("reported an error"),
+        ),
+        // A stray change from a response observer has no effect and is ignored.
+        (
+            "after_provider_response",
+            serde_json::json!({"result":{"provider_headers":{"x-private":"PRIVATE_FIXTURE_SECRET"}}}),
+            None,
+        ),
+    ] {
+        let temp = TempDir::new().unwrap();
+        pipeline_case(&temp, stage, reply);
+        let process = pipeline_process(&temp, stage).await;
+        let warnings = crate::extension_provider::ProviderHookWarnings::default();
+        let (result, sent) = send_with_hook(&process, &warnings).await;
+        assert!(result.is_ok(), "{stage}: {result:?}");
+        assert_eq!(sent, 1, "{stage}: the request is still sent");
+        let reported = warnings.take();
+        match reason {
+            Some(reason) => {
+                assert_eq!(reported.len(), 1, "{stage}: {reported:?}");
+                assert_warning(&reported[0], stage, reason);
+            }
+            None => assert!(reported.is_empty(), "{stage}: {reported:?}"),
+        }
+        assert!(process.shutdown().await);
+    }
+}
+
+#[tokio::test]
+async fn header_patch_is_atomic_when_one_entry_is_invalid() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{"provider_headers":{"x-good":"applied","bad name":"x"}}}),
+    );
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let hook = process
+        .bind_provider_request_hook("fixture-owner", &warnings)
+        .unwrap()
+        .unwrap();
+    let context = octet_ai::ProviderRequestContext {
+        operation_id: "fixture-operation".into(),
+        model: octet_ai::HookModelContext::from_model(&pipeline_model(
+            "https://fixture.invalid/v1/",
+        )),
+    };
+    let mut headers = http::HeaderMap::new();
+    headers.insert("x-original", http::HeaderValue::from_static("kept"));
+    hook.before_headers(&context, &mut headers).await.unwrap();
+    assert_eq!(headers.len(), 1, "{headers:?}");
+    assert_eq!(headers["x-original"], "kept");
+    assert!(headers.get("x-good").is_none(), "no half-applied patch");
+    assert_eq!(warnings.take().len(), 1);
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn explicit_veto_blocks_the_request_without_parse_error_framing() {
+    let temp = TempDir::new().unwrap();
+    pipeline_case(
+        &temp,
+        "before_provider_request",
+        serde_json::json!({"result":{"disposition":{"action":"deny","reason":"daily quota \u{1b}[31mexceeded"}}}),
+    );
+    let process = pipeline_process(&temp, "before_provider_request").await;
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let (result, sent) = send_with_hook(&process, &warnings).await;
+    let public = result.expect_err("an explicit veto fails the attempt");
+    assert_eq!(sent, 0, "a vetoed request is never sent");
+    for expected in [
+        "malformed-hook",
+        "blocked",
+        "before_provider_request",
+        "daily quota",
+        "Disable",
+        "fixture-provider",
+    ] {
+        assert!(
+            public.contains(expected),
+            "missing {expected:?} in {public:?}"
+        );
+    }
+    for forbidden in ["Parse error", "Config error", "\u{1b}"] {
+        assert!(!public.contains(forbidden), "{forbidden:?} in {public:?}");
+    }
+    assert!(warnings.take().is_empty());
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn oversized_pipeline_message_is_skipped_before_the_hook_runs() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    let process = pipeline_process(&temp, "before_provider_request").await;
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let hook = process
+        .bind_provider_request_hook("fixture-owner", &warnings)
+        .unwrap()
+        .unwrap();
+    let context = octet_ai::ProviderRequestContext {
+        operation_id: "fixture-operation".into(),
+        model: octet_ai::HookModelContext::from_model(&pipeline_model(
+            "https://fixture.invalid/v1/",
+        )),
+    };
+    let replacement = hook
+        .before_request(&context, serde_json::json!({"text":"x".repeat(1_100_000)}))
+        .await
+        .unwrap();
+    assert!(replacement.is_none(), "the original payload is used");
+    assert!(!temp.path().join("hook-called").exists());
+    let reported = warnings.take();
+    assert_eq!(reported.len(), 1);
+    assert_warning(&reported[0], "before_provider_request", "size limit");
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn skip_warning_bounds_hostile_identities() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    pipeline_case(
+        &temp,
+        "after_provider_response",
+        serde_json::json!({"error":{"code":-32602,"message":"PRIVATE_FIXTURE_SECRET"}}),
+    );
+    let process = pipeline_process(&temp, "after_provider_response").await;
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let hook = process
+        .bind_provider_request_hook("fixture-owner", &warnings)
+        .unwrap()
+        .unwrap();
+    let context = octet_ai::ProviderRequestContext {
+        operation_id: "fixture-operation".into(),
+        model: octet_ai::HookModelContext {
+            provider: format!("{}\u{1b}SECRET", "p".repeat(200)),
+            id: "模型".repeat(100),
+            api: "a".repeat(200),
+        },
+    };
+    hook.after_response(&context, http::StatusCode::OK, &http::HeaderMap::new())
+        .await
+        .unwrap();
+    let reported = warnings.take();
+    assert_eq!(reported.len(), 1);
+    let warning = &reported[0];
+    for expected in [
+        "after_provider_response",
+        "malformed-hook",
+        "not affected",
+        "…",
+    ] {
+        assert!(
+            warning.contains(expected),
+            "missing {expected:?} in {warning:?}"
+        );
+    }
+    assert!(!warning.contains("SECRET"), "{warning}");
+    assert!(!warning.contains('\u{1b}'), "{warning}");
+    assert!(warning.len() < 512, "{}", warning.len());
+    assert!(process.shutdown().await);
+}
+
+/// A stopped extension must not fail every later turn: binding reports it once
+/// per run and the provider request proceeds without its hooks.
+#[tokio::test]
+async fn stopped_extension_is_skipped_at_bind_instead_of_failing_the_run() {
+    use crate::extension_provider::ProviderRequestHookFactory;
+
+    let temp = TempDir::new().unwrap();
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{}}),
+    );
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    assert!(process.shutdown().await);
+    let warnings = crate::extension_provider::ProviderHookWarnings::default();
+    let reason = match process.bind_provider_request_hook("fixture-owner", &warnings) {
+        Err(reason) => reason,
+        Ok(_) => panic!("a stopped extension cannot bind"),
+    };
+    for expected in [
+        "malformed-hook",
+        "not running",
+        "skipped",
+        "without its changes",
+    ] {
+        assert!(
+            reason.contains(expected),
+            "missing {expected:?} in {reason:?}"
+        );
+    }
+}
+
+/// End to end through the agent: the malformed hook is reported as a warning
+/// and the provider is still called; the run does not fail on the hook.
+#[tokio::test]
+async fn malformed_pipeline_reply_reaches_the_agent_as_a_warning_not_a_failure() {
+    use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig, Session};
+
+    let temp = TempDir::new().unwrap();
+    let server = wiremock::MockServer::start().await;
+    let process = pipeline_process(&temp, "before_provider_headers").await;
+    let mut host = ExtensionHost::new();
+    process.register(&mut host);
+    let mut agent = Agent::new(AgentConfig {
+        client: octet_ai::AiClient::try_with_proxy_environment(Default::default()).unwrap(),
+        model: pipeline_model(&format!("{}/v1/", server.uri())),
+        session: Session::create(temp.path().join("session.jsonl")).unwrap(),
+        extensions: host,
+        system: "fixture".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning: octet_ai::ReasoningConfig::Off,
+        reasoning_mode: octet_ai::ReasoningMode::Standard,
+        cache_retention: octet_ai::CacheRetention::Short,
+        session_id: Some("fixture-session".into()),
+    })
+    .unwrap();
+    let mut warnings = Vec::new();
+    let mut run = agent.prompt("PRIVATE_FIXTURE_PROMPT").await.unwrap();
+    while let Some(event) = run.next().await {
+        if let crate::AgentEvent::ExtensionObservationWarning { message } = event {
+            warnings.push(message);
+        }
+    }
+    drop(run);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_warning(
+        &warnings[0],
+        "before_provider_headers",
+        "malformed hook result",
+    );
+    assert!(
+        !server.received_requests().await.unwrap().is_empty(),
+        "the provider was still called"
+    );
+    assert!(process.shutdown().await);
 }

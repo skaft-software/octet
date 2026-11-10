@@ -112,6 +112,30 @@ async fn run_prompt(
             return Ok(());
         }
     }
+    app.executable_extensions.refresh_host_state(
+        app.agent.session(),
+        &app.model,
+        &app.reasoning,
+        &app.sessions,
+    );
+    app.executable_extensions
+        .refresh_native_credential_catalog(&app.catalog);
+    // Pi's print path reports interactive input too. Raw handlers run before
+    // template/skill expansion, composition, persistence and provider admission.
+    let Some(input) = app
+        .executable_extensions
+        .process_input(
+            prompt,
+            (!media.is_empty()).then_some(media),
+            "interactive",
+            None,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let prompt = input.text;
+    let media = input.images.unwrap_or_default();
     let prompt = match crate::prompts::render_configured(app, &prompt)? {
         Some(rendered) => {
             if app.config.debug_prompt {
@@ -146,19 +170,9 @@ async fn run_prompt(
         }
     }
     let show_reasoning = app.config.show_reasoning_in_print;
-    app.executable_extensions.refresh_host_state(
-        app.agent.session(),
-        &app.model,
-        &app.reasoning,
-        &app.sessions,
-    );
-    // Non-interactive modes serve the same extension requests: publish the
-    // catalog an approved provider-credential request resolves against.
-    app.executable_extensions
-        .refresh_native_credential_catalog(&app.catalog);
     let composition = app
         .executable_extensions
-        .compose_prompt(&app.system, prompt.clone())
+        .compose_prompt_with_images(&app.system, prompt.clone(), media.clone())
         .await?;
     let pending_context_count = composition.pending_context_count;
     for notification in composition.notifications {

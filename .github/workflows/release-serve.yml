@@ -3,6 +3,7 @@ name: octet extension release
 on:
   push:
     tags:
+      - "v*"
       - "octet-serve-v*"
   workflow_dispatch:
     inputs:
@@ -30,6 +31,7 @@ jobs:
     # Never allocate a default-branch cache scope for manually selected source.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -52,10 +54,6 @@ jobs:
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag=${GITHUB_REF_NAME#octet-serve-}
-            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then
-              echo "extension release tags must start with octet-serve-" >&2
-              exit 1
-            fi
           else
             echo "release_tag is required when this workflow is not running for a tag" >&2
             exit 1
@@ -69,13 +67,19 @@ jobs:
               echo "manual releases must dispatch this workflow from the exact canonical tag $tag" >&2
               exit 1
             fi
-          elif [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
-            echo "extension release pushes must use octet-serve-$tag" >&2
+          elif [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF_TYPE" != tag \
+            || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-serve-$tag" ) ]]; then
+            echo "extension release pushes must use $tag or octet-serve-$tag" >&2
             exit 1
           fi
 
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "$tag^{commit}")
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main; then
+            echo "release tags must point at a commit on main: $tag resolves to $source_commit" >&2
+            exit 1
+          fi
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
             if [[ "$GITHUB_EVENT_NAME" != push \
@@ -115,6 +119,42 @@ jobs:
           if [[ "$cargo_version" != "$version" ]]; then
             echo "Cargo version $cargo_version does not match release tag $tag" >&2
             exit 1
+          fi
+
+          # On the one-tag path the binary workflow owns CI qualification and
+          # creates the release. Wait for that exact tag-push run to succeed so
+          # an existing release cannot let extensions bypass a failed CI gate.
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+            for attempt in {0..700}; do
+              binary_run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/release-octet.yml/runs" \
+                -f head_sha="$source_commit" -f per_page=100 \
+                --jq "[.workflow_runs[] | select(.event == \"push\" and .head_branch == \"$tag\")] | max_by(.id) | .id // empty")
+              if [[ "$binary_run" =~ ^[0-9]+$ ]]; then
+                binary_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$binary_run" \
+                  --jq '[.head_sha, .status, .conclusion] | @tsv')
+                IFS=$'\t' read -r binary_sha binary_status binary_conclusion <<< "$binary_identity"
+                if [[ "$binary_sha" != "$source_commit" ]]; then
+                  echo "binary release run $binary_run is not bound to $source_commit" >&2
+                  exit 1
+                fi
+                if [[ "$binary_status" == completed ]]; then
+                  if [[ "$binary_conclusion" != success ]]; then
+                    echo "binary release run $binary_run did not succeed: $binary_identity" >&2
+                    exit 1
+                  fi
+                  break
+                fi
+                echo "waiting for binary release run $binary_run: $binary_status"
+              else
+                echo "waiting for the binary release run for $tag"
+              fi
+              if (( attempt == 700 )); then
+                echo "timed out after 350 minutes waiting for the binary release for $tag" >&2
+                exit 1
+              fi
+              sleep 30
+            done
           fi
 
           if ! release_state=$(gh release view "$tag" \
@@ -196,7 +236,7 @@ jobs:
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
@@ -211,7 +251,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Published-package verification installs, updates, and removes the
       # attached bundles from the settled release with this launcher; release
       # jobs build from clean runner state, never a mutable cache.
@@ -236,7 +276,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Extension release bundles and their smoke-test launcher are built from
       # clean runner state for the same trust reason as the audit jobs.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -425,14 +465,46 @@ jobs:
             "${verify[@]}" \
             SHA256SUMS
       - name: Attach assets to the canonical octet release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           WORKFLOW_TAG: ${{ github.ref_name }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          verify=(
+            --certificate-identity "$COSIGN_IDENTITY"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet extension release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          # A resumed run produces fresh signature bundles. Accept an existing
+          # bundle only when it verifies the identical candidate artifact under
+          # this workflow's exact identity; anything else stops publication.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "release-assets/$artifact" ]]; then
+              echo "existing release signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "release-assets/$artifact"; then
+              echo "existing release signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable release signature: $name"
+          }
           verify_release_refs() {
             phase=$1
             git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
@@ -458,15 +530,55 @@ jobs:
             echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
             exit 1
           fi
-          existing_assets=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          # Reconcile with any assets an interrupted earlier attempt uploaded:
+          # deterministic archives must match byte for byte and signatures must
+          # verify, so a rerun converges instead of blocking on its own output.
+          existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
+          uploads=()
           for asset in release-assets/*; do
             name=${asset##*/}
-            if grep -Fx "$name" <<< "$existing_assets" >/dev/null; then
-              echo "refusing to replace existing immutable release asset: $name" >&2
-              exit 1
+            if existing_digest=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$existing_digests"); then
+              if [[ -z "$existing_digest" ]]; then
+                echo "existing release asset has no immutable digest: $name" >&2
+                exit 1
+              fi
+              local_digest=$(sha256sum "$asset" | awk '{print $1}')
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
+                echo "immutable release asset differs from the existing asset: $name" >&2
+                exit 1
+              fi
+            else
+              uploads+=("$asset")
             fi
           done
-          gh release upload "$RELEASE_TAG" release-assets/*
+          if ((${#uploads[@]})); then
+            gh release upload "$RELEASE_TAG" "${uploads[@]}"
+          else
+            echo "all extension release assets already match the immutable candidate"
+          fi
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded extension release asset is missing: $name" >&2
+              exit 1
+            fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              continue
+            fi
+            echo "uploaded extension release asset has a mismatched digest: $name" >&2
+            exit 1
+          done
           verify_release_refs publishing
 
   verify-published:

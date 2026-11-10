@@ -151,6 +151,7 @@ fn normalize_pending_user_part(part: &UserPart) -> UserPart {
             content: result.content.clone(),
             is_error: result.is_error,
             added_tool_names: result.added_tool_names.clone(),
+            tool_name: result.tool_name.clone(),
         }),
     }
 }
@@ -249,6 +250,7 @@ fn transform_user_part(part: &UserPart, target: &Model) -> UserPart {
                 .collect(),
             is_error: result.is_error,
             added_tool_names: result.added_tool_names.clone(),
+            tool_name: result.tool_name.clone(),
         }),
     }
 }
@@ -300,6 +302,7 @@ fn transform_user_part_owned(part: UserPart, target: &Model) -> UserPart {
                 .collect(),
             is_error: result.is_error,
             added_tool_names: result.added_tool_names,
+            tool_name: result.tool_name,
         }),
     }
 }
@@ -595,6 +598,7 @@ fn push_synthetic_results(
                 content: vec![ToolResultPart::Text(MISSING_TOOL_RESULT.to_string())],
                 is_error: true,
                 added_tool_names: None,
+                tool_name: None,
             })
         })
         .collect();

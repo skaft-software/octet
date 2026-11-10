@@ -792,3 +792,53 @@ fn theme_header_footer_status_and_composer_padding_have_narrow_fallbacks() {
         "extensions cannot force persistent header or footer chrome"
     );
 }
+
+/// A theme resolved again from unchanged inputs must not be republished.
+///
+/// Publishing bumps the theme epoch, which forces a complete visible-grid
+/// repaint and a fresh history materialization on the primary screen. Resource
+/// attach rounds resolve the theme on every pass, so on a long session the
+/// repeated publish of one unchanged theme was the whole transcript written
+/// again on each round, while the theme those rounds were waiting for had not
+/// even arrived yet.
+#[test]
+fn republishing_an_unchanged_theme_keeps_the_live_frame() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::{test_theme_for, TerminalBackground};
+
+    let mut shell = InteractiveShell::test_shell();
+    let live_epoch = shell.state.borrow().theme_epoch;
+    let live = shell.state.borrow().theme.clone();
+    assert!(
+        !shell.publish_theme(live),
+        "the theme already on screen is not a new one"
+    );
+    assert_eq!(shell.state.borrow().theme_epoch, live_epoch);
+
+    let dark = test_theme_for(
+        TerminalBackground::Dark,
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+    );
+    assert!(shell.publish_theme(dark.clone()), "a new theme publishes");
+    let published_epoch = shell.state.borrow().theme_epoch;
+    assert_eq!(published_epoch, live_epoch.wrapping_add(1));
+    assert!(
+        !shell.publish_theme(dark),
+        "publishing it again changes nothing"
+    );
+    assert_eq!(shell.state.borrow().theme_epoch, published_epoch);
+
+    // A theme file whose contents changed is a different theme even though it
+    // was loaded from the same source, so a reviewed reload still repaints.
+    let edited = crate::tui::theme::test_theme_from_source(
+        r##"
+            [colors]
+            composer_border = "#7b52d3"
+        "##,
+    );
+    assert!(shell.publish_theme(edited));
+    assert_eq!(
+        shell.state.borrow().theme_epoch,
+        published_epoch.wrapping_add(1)
+    );
+}

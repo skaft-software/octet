@@ -637,6 +637,10 @@ pub struct Config {
     pub extension_paths: Vec<PathBuf>,
     /// Executable extensions selected for activation.
     pub enabled_extensions: Vec<String>,
+    /// User-config extensions explicitly switched off. Subtracted after every
+    /// activation source so a `/extensions` toggle outranks mirrored Pi
+    /// preferences on the next launch. Never populated from project config.
+    pub disabled_extensions: Vec<String>,
     /// True when project, environment, or command-line activation participates
     /// in the effective list, making the user-config menu non-authoritative.
     pub extension_activation_overridden: bool,

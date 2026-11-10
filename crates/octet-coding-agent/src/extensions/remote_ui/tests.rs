@@ -173,9 +173,7 @@ async fn fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, PathBuf) {
     .await
 }
 
-/// A fixture that may also be dispatched before-prompt (Pi `input`) hooks, with
-/// a host-visible deadline longer than the interactive input deadline so the
-/// host's own input deadline is the one that expires.
+/// A fixture that may also be dispatched before-prompt (Pi `input`) hooks.
 async fn input_hook_fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, PathBuf) {
     fixture_with(
         temp,
@@ -794,13 +792,10 @@ async fn remote_ui_footer_survives_command_then_resize_and_session_fencing() {
     extensions.shutdown().await;
 }
 
-/// A Pi `input` (`before_prompt`) hook shares the extension's session-scoped
-/// resource owner with every other request it serves. When the host's input
-/// deadline expires, only the surfaces that request created may be retired: Pi
-/// keeps a mounted custom editor or footer mounted across a slow, abandoned
-/// hook, and an extension never has to re-mount after one.
+/// An explicitly cancelled Pi input hook must not retire a previously mounted
+/// editor. Input hooks have no host deadline: Pi waits until they settle.
 #[tokio::test]
-async fn mounted_editor_survives_an_expired_input_hook() {
+async fn mounted_editor_survives_a_cancelled_wait_for_input_hook() {
     let temp = tempfile::tempdir().unwrap();
     let (mut extensions, _) = input_hook_fixture(&temp).await;
     let mut frontend = Frontend::new([]);
@@ -809,37 +804,36 @@ async fn mounted_editor_survives_an_expired_input_hook() {
     let owner = extensions.remote_ui.mounts[0].owner.clone();
     let surface_id = extensions.remote_ui.mounts[0].surface_id.clone();
 
-    // The hook stalls past the host's input deadline, exactly as a busy
-    // extension process does in an interactive session.
     let hold = temp.path().join("hold-input-hook");
     std::fs::write(&hold, "hold").unwrap();
-    // Like Pi's emitInput, a stalled handler is skipped and the input goes on.
-    let outcome = extensions
-        .process_input(
-            "steered while busy".into(),
-            None,
-            "interactive",
-            Some("steer"),
-        )
-        .await;
+    let mut input = Box::pin(extensions.process_input(
+        "steered while busy".into(),
+        None,
+        "interactive",
+        Some("steer"),
+    ));
     assert!(
-        outcome.is_ok(),
-        "a stalled input hook is skipped, not fatal: {:?}",
-        outcome.err()
+        tokio::time::timeout(Duration::from_millis(200), &mut input)
+            .await
+            .is_err(),
+        "a pending input handler must not be silently skipped"
     );
+    // Dropping the request is an actual host cancellation, not an invented
+    // Pi input deadline. It must leave the sibling surface intact.
+    drop(input);
     std::fs::remove_file(&hold).unwrap();
 
     assert!(
         process.remote_ui_surface_is_current(&owner, &surface_id),
-        "an expired sibling request retired the mounted editor's lease"
+        "a cancelled sibling request retired the mounted editor's lease"
     );
     extensions.drain_events_for_shell(&mut frontend.shell);
     assert!(
         !extensions.remote_ui.is_empty(),
-        "the mounted editor was retired when its sibling request expired"
+        "the mounted editor was retired when its sibling request was cancelled"
     );
     assert_eq!(extensions.remote_ui.mounts[0].surface_id, surface_id);
-    // The extension keeps its session resource owner after the expiry, so a
+    // The extension keeps its session resource owner after cancellation, so a
     // later mount still reaches the host without a reload.
     command(&mut extensions, &mut frontend, &["fullscreen"]).await;
     assert_eq!(extensions.remote_ui.mounts.len(), 2);

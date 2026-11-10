@@ -30,7 +30,12 @@ const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/skaft-software/octet/rel
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/skaft-software/octet/releases/latest";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_RELEASE_RESPONSE_BYTES: usize = 64 * 1024;
+/// The GitHub releases payload carries every asset entry and the whole release
+/// notes body, so it grows with the release itself: v0.10.1 measured 75,595
+/// bytes against the previous 64 KiB bound, which made `octet update` fail on a
+/// healthy release. Keep a real bound against a hostile response, with headroom
+/// for future assets, notes and their webhook metadata.
+const MAX_RELEASE_RESPONSE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, serde::Deserialize)]
 struct LatestRelease {

@@ -1214,7 +1214,7 @@ pub(super) fn api_v03_protocol_error(error: api_v03::ContractError) -> Extension
 
 pub(super) fn validate_session_hook_id(value: &str) -> Result<(), ExtensionRuntimeError> {
     if value.is_empty()
-        || value.len() > api_v03::MAX_SESSION_HOOK_ID_BYTES
+        || value.len() > api_v04::MAX_SESSION_HOOK_ID_BYTES
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -1229,16 +1229,16 @@ pub(super) fn validate_session_hook_id(value: &str) -> Result<(), ExtensionRunti
 pub(super) fn session_hook_wire_binding(
     binding: &ActiveSessionHookBinding,
     extension_instance_id: &str,
-) -> Result<api_v03::SessionBinding, ExtensionRuntimeError> {
+) -> Result<api_v04::SessionBinding, ExtensionRuntimeError> {
     validate_session_hook_id(&binding.session_id)?;
     validate_session_hook_id(extension_instance_id)?;
-    let max_generation = (api_v03::MAX_PORTABLE_JSON_INTEGER as u64).min(usize::MAX as u64);
+    let max_generation = (api_v04::MAX_PORTABLE_JSON_INTEGER as u64).min(usize::MAX as u64);
     if binding.endpoint.generation > max_generation {
         return Err(ExtensionRuntimeError::Protocol(
             "session hook process generation exceeds the API 0.3 portable integer bound".into(),
         ));
     }
-    Ok(api_v03::SessionBinding {
+    Ok(api_v04::SessionBinding {
         session_id: binding.session_id.clone(),
         extension_instance_id: extension_instance_id.to_owned(),
         process_generation: binding.endpoint.generation as usize,
@@ -1248,7 +1248,7 @@ pub(super) fn session_hook_wire_binding(
 pub(super) fn session_hook_duration_millis(duration: Duration) -> usize {
     duration
         .as_millis()
-        .min((api_v03::MAX_PORTABLE_JSON_INTEGER as u64).min(usize::MAX as u64) as u128)
+        .min((api_v04::MAX_PORTABLE_JSON_INTEGER as u64).min(usize::MAX as u64) as u128)
         as usize
 }
 
@@ -1281,5 +1281,15 @@ pub(super) fn session_hook_error_kind(error: &ExtensionRuntimeError) -> &'static
         ExtensionRuntimeError::Protocol(_) => "protocol_error",
         ExtensionRuntimeError::MessageTooLarge { .. } => "message_too_large",
         _ => "internal_error",
+    }
+}
+
+/// Public lifecycle diagnostics contain only bounded host-classified metadata.
+/// Even a familiar remote code does not authenticate its message or structured data.
+pub(super) fn session_hook_failure_summary(error: &ExtensionRuntimeError) -> String {
+    let kind = session_hook_error_kind(error);
+    match error {
+        ExtensionRuntimeError::Remote { code, .. } => format!("{kind}, code={code}"),
+        _ => kind.to_owned(),
     }
 }

@@ -1,0 +1,1768 @@
+{
+  "schema": 1,
+  "pi": "1.5.0",
+  "reference": {
+    "repository": "earendil-works/pi",
+    "tag": "v1.5.0",
+    "commit": "9c9ce8547e5a88cbe834a53e9a6d83a789d08e47",
+    "distribution": "reviewed managed Pi npm distribution",
+    "notes": [
+      "Extensions resolve @earendil-works/pi-ai to the coding agent extension view (pi-ai/compat + Type + StringEnum), and pi-ai/models to the models entry (packages/coding-agent/src/core/extensions/virtual-modules.ts).",
+      "pi-ai no longer re-exports TypeBox; Type is served by the extension view and the shim binds its own typebox.",
+      "The experimental agent harness was removed together with AssistantMessageFrameEncoder and reduceAssistantMessageFrames."
+    ]
+  },
+  "scopes": [
+    "@earendil-works",
+    "@mariozechner"
+  ],
+  "typebox": {
+    "package": "typebox",
+    "spellings": [
+      "typebox",
+      "@sinclair/typebox"
+    ]
+  },
+  "routeBase": "dist",
+  "routes": {
+    "pi-agent-core": {
+      "package": "pi-agent-core",
+      "export": ".",
+      "shim": "agent-core"
+    },
+    "pi-ai": {
+      "package": "pi-ai",
+      "export": "./compat",
+      "shim": "ai",
+      "view": {
+        "package": "pi-coding-agent",
+        "module": "dist/core/extensions/pi-ai-extension-view.js"
+      }
+    },
+    "pi-ai/compat": {
+      "package": "pi-ai",
+      "export": "./compat",
+      "shim": "ai",
+      "view": {
+        "package": "pi-coding-agent",
+        "module": "dist/core/extensions/pi-ai-extension-view.js"
+      }
+    },
+    "pi-ai/models": {
+      "package": "pi-ai",
+      "export": "./models",
+      "shim": "ai"
+    },
+    "pi-ai/oauth": {
+      "package": "pi-ai",
+      "export": "./oauth"
+    },
+    "pi-ai/providers/all": {
+      "package": "pi-ai",
+      "export": "./providers/all",
+      "shim": "ai-providers"
+    },
+    "pi-coding-agent": {
+      "package": "pi-coding-agent",
+      "export": ".",
+      "shim": "coding-agent"
+    },
+    "pi-tui": {
+      "package": "pi-tui",
+      "export": ".",
+      "shim": "tui"
+    }
+  },
+  "symbols": {
+    "ai": {
+      "ANTHROPIC_API_KEY_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_AUTH_TOKEN_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_FEDERATION_RULE_ID_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_IDENTITY_TOKEN_FILE_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_OAUTH_TOKEN_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_ORGANIZATION_ID_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_SERVICE_ACCOUNT_ID_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ANTHROPIC_WORKSPACE_ID_ENV": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "AssistantMessageEventStream": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "AssistantMessageFrameEncoder": {
+        "surface": "inert",
+        "route": null,
+        "removed": "1.5.0",
+        "note": "the experimental agent harness (packages/ai/src/utils/assistant-message-frame.ts) was removed"
+      },
+      "DEFAULT_MAX_AGENT_RETRY_DELAY_MS": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "EventStream": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "InMemoryCredentialStore": {
+        "surface": "inert",
+        "route": "auth/credential-store.js"
+      },
+      "InMemoryModelsStore": {
+        "surface": "inert",
+        "route": "models-store.js"
+      },
+      "ModelsError": {
+        "surface": "inert",
+        "route": "utils/models-error.js"
+      },
+      "PI_ATTRIBUTION": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "StreamingJsonParser": {
+        "surface": "inert",
+        "route": "utils/streaming-json.js",
+        "added": "1.5.0"
+      },
+      "StringEnum": {
+        "surface": "inert",
+        "source": "shim",
+        "moved": "1.5.0",
+        "note": "moved from pi-ai/utils/typebox-helpers.js to pi-ai/utils/string-enum.js; the shim binds an equivalent local implementation"
+      },
+      "ToolCallArgumentsStream": {
+        "surface": "inert",
+        "route": "utils/streaming-json.js",
+        "added": "1.5.0"
+      },
+      "Type": {
+        "surface": "inert",
+        "source": "shim",
+        "moved": "1.5.0",
+        "note": "pi-ai no longer re-exports TypeBox; the coding agent pi-ai extension view provides Type, and the shim binds its own typebox"
+      },
+      "anthropicMessagesApi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "appendAssistantMessageDiagnostic": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "azureOpenAIResponsesApi": {
+        "surface": "authority"
+      },
+      "bedrockConverseStreamApi": {
+        "surface": "authority"
+      },
+      "calculateCost": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "clampThinkingLevel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "cleanupSessionResources": {
+        "surface": "inert",
+        "route": "session-resources.js"
+      },
+      "collapseSystemMessages": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "complete": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "completeSimple": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "contentText": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createAssistantMessageDiagnostic": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createAssistantMessageEventStream": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createFauxCore": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "createInitialSystemMessage": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createModels": {
+        "surface": "authority"
+      },
+      "createProvider": {
+        "surface": "authority"
+      },
+      "declarationsEqual": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "defaultProviderAuthContext": {
+        "surface": "authority"
+      },
+      "envApiKeyAuth": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "extractDiagnosticError": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "fauxAssistantMessage": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "fauxProvider": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "fauxText": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "fauxThinking": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "fauxToolCall": {
+        "surface": "inert",
+        "route": "providers/faux.js"
+      },
+      "findEnvKeys": {
+        "surface": "inert",
+        "route": "env-api-keys.js"
+      },
+      "formatThrownValue": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "formatUserAgent": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "generateImages": {
+        "surface": "authority"
+      },
+      "generateImagesOpenRouter": {
+        "surface": "authority"
+      },
+      "getApiProvider": {
+        "surface": "authority"
+      },
+      "getApiProviders": {
+        "surface": "authority"
+      },
+      "getAttributionHeaders": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "getClientVersion": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "getCurrentSystemMessage": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getCurrentSystemPrompt": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getCurrentTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getDeclaredTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getEnvApiKey": {
+        "surface": "inert",
+        "route": "env-api-keys.js"
+      },
+      "getIdentityHeaders": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "getImageModel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getImageModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getImageProviders": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getImagesApiProvider": {
+        "surface": "authority"
+      },
+      "getInitialSystemMessage": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getModel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getModelType": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getOpenCodeSessionHeaders": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "getOverflowPatterns": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getProviders": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getSupportedThinkingLevels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getSystemMessageText": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getToolStateChanges": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "googleGenerativeAIApi": {
+        "surface": "authority"
+      },
+      "googleVertexApi": {
+        "surface": "authority"
+      },
+      "hasApi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "hasNonAdditiveToolChanges": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "hasToolRedefinitions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isContextOverflow": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isModelType": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isRecoverableLength": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isRetryableAssistantError": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "lazyApi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "lazyOAuth": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "lazyStream": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "mergeClientIdentity": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "mistralConversationsApi": {
+        "surface": "authority"
+      },
+      "modelsAreEqual": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "normalizeContext": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "openAICodexResponsesApi": {
+        "surface": "authority"
+      },
+      "openAICompletionsApi": {
+        "surface": "authority"
+      },
+      "openAIResponsesApi": {
+        "surface": "authority"
+      },
+      "parseJsonWithRepair": {
+        "surface": "inert",
+        "route": "utils/json-parse.js"
+      },
+      "parseStreamingJson": {
+        "surface": "inert",
+        "route": "utils/json-parse.js"
+      },
+      "parseToolCallArguments": {
+        "surface": "inert",
+        "route": "utils/json-parse.js",
+        "added": "1.4.0"
+      },
+      "piMessagesApi": {
+        "surface": "authority"
+      },
+      "reduceAssistantMessageFrames": {
+        "surface": "inert",
+        "route": null,
+        "removed": "1.5.0",
+        "note": "the experimental agent harness (packages/ai/src/utils/assistant-message-frame.ts) was removed"
+      },
+      "registerApiProvider": {
+        "surface": "authority"
+      },
+      "registerBuiltInApiProviders": {
+        "surface": "authority"
+      },
+      "registerBuiltInImagesApiProviders": {
+        "surface": "authority"
+      },
+      "registerFauxProvider": {
+        "surface": "authority"
+      },
+      "registerImagesApiProvider": {
+        "surface": "authority"
+      },
+      "registerSessionResourceCleanup": {
+        "surface": "inert",
+        "route": "session-resources.js"
+      },
+      "renderSystemMessageUpdate": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "repairJson": {
+        "surface": "inert",
+        "route": "utils/json-parse.js"
+      },
+      "resetApiProviders": {
+        "surface": "authority"
+      },
+      "resolveTranscript": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "resolveTranscriptTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "retryAssistantCall": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "retryDelayMs": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setBedrockProviderModule": {
+        "surface": "authority"
+      },
+      "stream": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "streamAnthropic": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamAzureOpenAIResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamGoogle": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamGoogleVertex": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamMistral": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamOpenAICodexResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamOpenAICompletions": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamOpenAIResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimple": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "streamSimpleAnthropic": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleAzureOpenAIResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleGoogle": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleGoogleVertex": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleMistral": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleOpenAICodexResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleOpenAICompletions": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "streamSimpleOpenAIResponses": {
+        "surface": "inert",
+        "route": "legacy-api-aliases.js"
+      },
+      "toToolDeclaration": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "unregisterApiProviders": {
+        "surface": "authority"
+      },
+      "uuidv7": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "validateToolArguments": {
+        "surface": "inert",
+        "route": "utils/validation.js",
+        "fallback": "shim"
+      },
+      "validateToolCall": {
+        "surface": "inert",
+        "route": "utils/validation.js",
+        "fallback": "shim"
+      },
+      "withClientIdentity": {
+        "surface": "inert",
+        "route": "utils/identity.js",
+        "added": "1.4.0"
+      },
+      "withoutInitialSystemMessage": {
+        "surface": "inert",
+        "source": "shim"
+      }
+    },
+    "coding-agent": {
+      "AgentSession": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "AgentSessionRuntime": {
+        "surface": "authority"
+      },
+      "ArminComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/armin.js"
+      },
+      "AssistantMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/assistant-message.js"
+      },
+      "AuthStorage": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "BashExecutionComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/bash-execution.js"
+      },
+      "BorderedLoader": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "BranchSummaryMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/branch-summary-message.js"
+      },
+      "CONFIG_DIR_NAME": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CURRENT_SESSION_VERSION": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CompactionSummaryMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/compaction-summary-message.js"
+      },
+      "CredentialSynchronizationError": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CustomEditor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CustomMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/custom-message.js"
+      },
+      "DEFAULT_COMPACTION_SETTINGS": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "DEFAULT_MAX_BYTES": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "DEFAULT_MAX_LINES": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "DefaultPackageManager": {
+        "surface": "authority"
+      },
+      "DefaultResourceLoader": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "DynamicBorder": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ExtensionEditorComponent": {
+        "surface": "authority"
+      },
+      "ExtensionInputComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/extension-input.js"
+      },
+      "ExtensionRunner": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ExtensionSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/extension-selector.js"
+      },
+      "FooterComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/footer.js"
+      },
+      "InteractiveMode": {
+        "surface": "authority"
+      },
+      "LoginDialogComponent": {
+        "surface": "authority"
+      },
+      "ModelRegistry": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ModelRuntime": {
+        "surface": "authority"
+      },
+      "ModelSelectorComponent": {
+        "surface": "authority"
+      },
+      "OAuthSelectorComponent": {
+        "surface": "authority"
+      },
+      "ProjectTrustStore": {
+        "surface": "authority"
+      },
+      "RpcClient": {
+        "surface": "authority"
+      },
+      "SessionManager": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "SessionSelectorComponent": {
+        "surface": "authority"
+      },
+      "SettingsManager": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "SettingsSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/settings-selector.js"
+      },
+      "ShowImagesSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/show-images-selector.js"
+      },
+      "SkillInvocationMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/skill-invocation-message.js"
+      },
+      "Theme": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ThemeSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/theme-selector.js"
+      },
+      "ThinkingSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/thinking-selector.js"
+      },
+      "ToolExecutionComponent": {
+        "surface": "authority"
+      },
+      "TreeSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/tree-selector.js"
+      },
+      "UserMessageComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/user-message.js"
+      },
+      "UserMessageSelectorComponent": {
+        "surface": "inert",
+        "route": "modes/interactive/components/user-message-selector.js"
+      },
+      "VERSION": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "VIRTUAL_MODEL_STATE_ENTRY": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "bashTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "buildContextEntries": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "buildSessionContext": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "buildSessionProjection": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "calculateContextTokens": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "codingTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "collectEntriesForBranchSummary": {
+        "surface": "inert",
+        "route": "core/compaction/branch-summarization.js"
+      },
+      "compact": {
+        "surface": "authority"
+      },
+      "convertToLlm": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "convertToPng": {
+        "surface": "inert",
+        "route": "utils/image-convert.js"
+      },
+      "copyToClipboard": {
+        "surface": "authority"
+      },
+      "createAgentSession": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createAgentSessionFromServices": {
+        "surface": "authority"
+      },
+      "createAgentSessionRuntime": {
+        "surface": "authority"
+      },
+      "createAgentSessionServices": {
+        "surface": "authority"
+      },
+      "createBashTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createBashToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createCodemodeExtension": {
+        "surface": "authority"
+      },
+      "createCodingTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createEditTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createEditToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createEventBus": {
+        "surface": "inert",
+        "route": "core/event-bus.js"
+      },
+      "createExtensionRuntime": {
+        "surface": "authority"
+      },
+      "createFindTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createFindToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createGrepTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createGrepToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createLocalBashOperations": {
+        "surface": "authority"
+      },
+      "createLocalPowerShellOperations": {
+        "surface": "authority"
+      },
+      "createLsTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createLsToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createMcpExtension": {
+        "surface": "authority"
+      },
+      "createPowerShellTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createPowerShellToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createReadOnlyTools": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createReadTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createReadToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createSyntheticSourceInfo": {
+        "surface": "inert",
+        "route": "core/source-info.js"
+      },
+      "createToolSearchExtension": {
+        "surface": "authority"
+      },
+      "createWriteTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "createWriteToolDefinition": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "defineTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "detectSupportedImageMimeTypeFromFile": {
+        "surface": "inert",
+        "route": "utils/mime.js"
+      },
+      "discoverAndLoadExtensions": {
+        "surface": "authority"
+      },
+      "editTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "estimateTokens": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "findCutPoint": {
+        "surface": "inert",
+        "route": "core/compaction/compaction.js"
+      },
+      "findTurnStartIndex": {
+        "surface": "inert",
+        "route": "core/compaction/compaction.js"
+      },
+      "formatDimensionNote": {
+        "surface": "inert",
+        "route": "utils/image-resize.js"
+      },
+      "formatSize": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "formatSkillsForPrompt": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "generateBranchSummary": {
+        "surface": "authority"
+      },
+      "generateDiffString": {
+        "surface": "inert",
+        "route": "core/tools/edit-diff.js"
+      },
+      "generateSummary": {
+        "surface": "authority"
+      },
+      "generateSummaryWithUsage": {
+        "surface": "authority"
+      },
+      "generateUnifiedPatch": {
+        "surface": "inert",
+        "route": "core/tools/edit-diff.js"
+      },
+      "getAgentDir": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getDocsPath": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getEditorTheme": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getExamplesPath": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getLanguageFromPath": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getLastAssistantUsage": {
+        "surface": "inert",
+        "route": "core/compaction/compaction.js"
+      },
+      "getLatestCompactionEntry": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "getMarkdownTheme": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getPackageDir": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getPackageJsonPath": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getPowerShellConfig": {
+        "surface": "authority"
+      },
+      "getReadmePath": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getSelectListTheme": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getSettingsListTheme": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getShellConfig": {
+        "surface": "authority"
+      },
+      "hasTrustRequiringProjectResources": {
+        "surface": "inert",
+        "route": "core/trust-manager.js"
+      },
+      "highlightCode": {
+        "surface": "inert",
+        "route": "modes/interactive/theme/theme.js"
+      },
+      "initTheme": {
+        "surface": "authority"
+      },
+      "isBashToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isEditToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isFindToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isGrepToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isLsToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isPowerShellToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isReadToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isToolCallEventType": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isWriteToolResult": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "keyHint": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "keyText": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "loadProjectContextFiles": {
+        "surface": "inert",
+        "route": "core/resource-loader.js"
+      },
+      "loadSkills": {
+        "surface": "inert",
+        "route": "core/skills.js"
+      },
+      "loadSkillsFromDir": {
+        "surface": "inert",
+        "route": "core/skills.js"
+      },
+      "main": {
+        "surface": "authority"
+      },
+      "migrateSessionEntries": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "parseArgs": {
+        "surface": "inert",
+        "route": "cli/args.js"
+      },
+      "parseFrontmatter": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "parseSessionEntries": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "parseSkillBlock": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "prepareBranchEntries": {
+        "surface": "inert",
+        "route": "core/compaction/branch-summarization.js"
+      },
+      "rawKeyHint": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "readStoredCredential": {
+        "surface": "authority"
+      },
+      "readTool": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "renderDiff": {
+        "surface": "inert",
+        "route": "modes/interactive/components/diff.js"
+      },
+      "resizeImage": {
+        "surface": "inert",
+        "route": "utils/image-resize.js"
+      },
+      "resolveCliModel": {
+        "surface": "inert",
+        "route": "core/model-resolver.js"
+      },
+      "resolveModelScopeWithDiagnostics": {
+        "surface": "inert",
+        "route": "core/model-resolver.js"
+      },
+      "runPrintMode": {
+        "surface": "authority"
+      },
+      "runRpcMode": {
+        "surface": "authority"
+      },
+      "serializeConversation": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "sessionEntryToContextMessages": {
+        "surface": "inert",
+        "route": "core/session-manager.js"
+      },
+      "shouldCompact": {
+        "surface": "inert",
+        "route": "core/compaction/compaction.js"
+      },
+      "stripFrontmatter": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "truncateHead": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "truncateLine": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "truncateTail": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "truncateToVisualLines": {
+        "surface": "inert",
+        "route": "modes/interactive/components/visual-truncate.js"
+      },
+      "withFileMutationQueue": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "wrapRegisteredTool": {
+        "surface": "authority"
+      },
+      "wrapRegisteredTools": {
+        "surface": "authority"
+      },
+      "writeTool": {
+        "surface": "inert",
+        "source": "shim"
+      }
+    },
+    "tui": {
+      "Box": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CURSOR_MARKER": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CancellableLoader": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "CombinedAutocompleteProvider": {
+        "surface": "authority"
+      },
+      "Container": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Editor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "HStack": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Image": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Input": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Key": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "KeybindingsManager": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Loader": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Markdown": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Marked": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "MouseRegion": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ProcessTerminal": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "ScrollView": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "SelectList": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "SettingsList": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Spacer": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "StdinBuffer": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "TUI": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "TUI_KEYBINDINGS": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "Text": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "TruncatedText": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "TuiAltScreen": {
+        "surface": "authority"
+      },
+      "TuiMainScreen": {
+        "surface": "authority"
+      },
+      "VStack": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "allocateImageId": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "backgroundAnsi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "calculateImageRows": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "colorToHex": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "colorToOkhsl": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "colorToOklch": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "colorToRgb": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "compositeTuiLine": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "decodeKittyPrintable": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "deleteAllKittyImages": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "deleteKittyImage": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "detectCapabilities": {
+        "surface": "authority"
+      },
+      "encodeITerm2": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "encodeKitty": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "foregroundAnsi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "fuzzyFilter": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "fuzzyMatch": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getCapabilities": {
+        "surface": "authority"
+      },
+      "getCellDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getGifDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getImageDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getJpegDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getKeybindings": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getNativeClipboard": {
+        "surface": "authority"
+      },
+      "getOsc8LinkAtColumn": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getPngDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getSelectPageIndex": {
+        "surface": "inert",
+        "route": "keybindings.js",
+        "added": "1.5.0"
+      },
+      "getTerminalColorMode": {
+        "surface": "authority"
+      },
+      "getWebpDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "hyperlink": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "imageFallback": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "indexedColor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isAppleTerminalSession": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isFocusable": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isKeyRelease": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isKeyRepeat": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isKittyProtocolActive": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "isViewportTUI": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "matchesKey": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "mixColors": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "okhslColor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "oklabToOkhslLightness": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "oklchColor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "parseColor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "parseKey": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "parseTerminalColorSchemeReport": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "renderImage": {
+        "surface": "authority"
+      },
+      "renderLatex": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "replaceControlCharacters": {
+        "surface": "inert",
+        "route": "utils.js",
+        "added": "1.5.0"
+      },
+      "resetCapabilitiesCache": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "rgbColor": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setCapabilities": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setCapabilityOverrides": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setCellDimensions": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setImageTranscoder": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setKeybindings": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "setKittyProtocolActive": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "sliceByColumn": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "stripTerminalSequences": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "styleText": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "styleTextWithAnsi": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "truncateToWidth": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "visibleWidth": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "wrapTextWithAnsi": {
+        "surface": "inert",
+        "source": "shim"
+      }
+    },
+    "agent-core": {
+      "Agent": {
+        "surface": "authority"
+      },
+      "agentLoop": {
+        "surface": "authority"
+      },
+      "agentLoopContinue": {
+        "surface": "authority"
+      },
+      "runAgentLoop": {
+        "surface": "authority"
+      },
+      "runAgentLoopContinue": {
+        "surface": "authority"
+      },
+      "runToolCall": {
+        "surface": "authority"
+      },
+      "setDefaultStreamFn": {
+        "surface": "authority"
+      },
+      "streamProxy": {
+        "surface": "authority"
+      }
+    },
+    "ai-providers": {
+      "builtinModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "builtinProviders": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getAllBuiltinModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinClassifierModel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinClassifierModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinImageModel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinImageModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinModel": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinModelDataGeneratedAt": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinModels": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "getBuiltinProviders": {
+        "surface": "inert",
+        "source": "shim"
+      },
+      "radiusProvider": {
+        "surface": "inert",
+        "source": "shim"
+      }
+    }
+  },
+  "delta": {
+    "from": "1.0.2",
+    "added": {
+      "1.5.0": {
+        "ai": [
+          "StreamingJsonParser",
+          "ToolCallArgumentsStream"
+        ],
+        "tui": [
+          "getSelectPageIndex",
+          "replaceControlCharacters"
+        ]
+      },
+      "1.0.3-1.4.0": {
+        "ai": [
+          "AI_TELEMETRY_SCHEMA",
+          "PI_AI_VERSION",
+          "formatUserAgent",
+          "getAttributionHeaders",
+          "getClientVersion",
+          "getIdentityHeaders",
+          "getOpenCodeSessionHeaders",
+          "mergeClientIdentity",
+          "parseToolCallArguments",
+          "withClientIdentity",
+          "PI_ATTRIBUTION"
+        ],
+        "coding-agent": [
+          "formatReadLineRange"
+        ],
+        "agent-core": [
+          "DEFAULT_AGENT_IDENTITY"
+        ],
+        "tui": [
+          "formatProgramStatus",
+          "renderFakeCursor"
+        ]
+      }
+    },
+    "removed": {
+      "1.5.0": {
+        "ai": [
+          "AssistantMessageFrameEncoder",
+          "reduceAssistantMessageFrames"
+        ],
+        "type-only": [
+          "AssistantMessageFrame"
+        ]
+      }
+    },
+    "moved": {
+      "1.5.0": [
+        {
+          "symbol": "Type",
+          "from": "pi-ai (TypeBox re-export)",
+          "to": "pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"
+        },
+        {
+          "symbol": "StringEnum",
+          "from": "pi-ai/utils/typebox-helpers.js",
+          "to": "pi-ai/utils/string-enum.js"
+        },
+        {
+          "symbol": "@earendil-works/pi-ai",
+          "from": "pi-ai/dist/compat.js",
+          "to": "coding agent extension view (pi-ai/compat + Type + StringEnum)"
+        }
+      ]
+    },
+    "validation": {
+      "1.5.0": [
+        "validateToolArguments validates with pi-schema compile(schema, {coerce: true, unresolvedRefs: \"reject\"}).parse() instead of TypeBox.",
+        "A tool call carrying argumentsError fails with Invalid arguments for tool \"<name>\": <argumentsError>.",
+        "Error text is \"- <json.pointer.path>: <message>\" (missing|expected number, got string) instead of TypeBox keyword paths.",
+        "TypeBox-only features no longer apply: Refine, Codec, BigInt/Undefined/Void, Format.Set; property names are not regular expressions."
+      ]
+    }
+  }
+}

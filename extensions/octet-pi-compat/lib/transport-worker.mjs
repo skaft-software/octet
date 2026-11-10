@@ -81,9 +81,9 @@ const READ_ONLY_SYNC = new Set(['tools/snapshot', 'commands/snapshot', 'composit
 function cancelSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
-  const { id, method } = sync;
+  const { id, readOnly } = sync;
   transport.notify('$/cancelRequest', { id, reason: 'cancelled' }).catch(error => transport.fail(error));
-  if (READ_ONLY_SYNC.has(method)) complete({ code: -32800, message: 'request cancelled: the host dropped this read-only request' }, SYNC_CANCELLED);
+  if (readOnly) complete({ code: -32800, message: 'request cancelled: the host dropped this read-only request' }, SYNC_CANCELLED);
 }
 function forward(message) {
   // Control and replies are read here even while the factory is in Atomics.wait.
@@ -129,7 +129,9 @@ parentPort.on('message', packet => {
     }
     if (packet.kind === 'sync') {
       if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
-      sync = { id: packet.message.id, parent: packet.parent, method: packet.message.method };
+      sync = { id: packet.message.id, parent: packet.parent, method: packet.message.method,
+        readOnly: READ_ONLY_SYNC.has(packet.message.method) ||
+          (packet.message.method === 'ui/chrome' && packet.message.params?.chrome?.kind === 'get') };
       sync.timer = setTimeout(cancelSync, packet.timeout);
       sync.watchdog = setTimeout(() => transport.fail(rpcError(-32002, 'session append outcome unknown: reply deadline')), packet.timeout + 29000);
       transport.send(packet.message).catch(error => transport.fail(error));

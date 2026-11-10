@@ -68,6 +68,7 @@ fn lightweight_listing_matches_the_active_branch_and_ignores_large_bodies() {
                 content: vec![ToolResultPart::Text("y".repeat(2 * 1024 * 1024))],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();

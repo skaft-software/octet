@@ -3,6 +3,26 @@ use std::cell::RefCell;
 use std::fs;
 use std::sync::Barrier;
 
+/// Reopen a root whose previous owner was just dropped.
+///
+/// The root lock is an flock on a descriptor that is close-on-exec. Another
+/// thread of this test process may be between `fork` and `exec` and so hold a
+/// copy of the descriptor for a moment after the drop; the lock is released
+/// when that child execs. That exec is the real event, and nothing else
+/// signals it, so wait for it (bounded) instead of failing the reopen.
+pub(crate) fn reopen_after_drop<T>(mut open: impl FnMut() -> Result<T, BulkError>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match open() {
+            Ok(value) => return value,
+            Err(BulkError::StorageUnavailable) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("reopening a released bulk root failed: {error}"),
+        }
+    }
+}
+
 // Fault/barrier injection occurs only after a real file chunk has been written.
 type CopyHook = Box<dyn FnMut(u64) -> Result<(), BulkError>>;
 thread_local! { static COPY_HOOK: RefCell<Option<CopyHook>> = RefCell::new(None); }
@@ -112,7 +132,7 @@ fn bulk_root_lock_is_exclusive_and_reusable_after_store_drop() {
         Err(BulkError::StorageUnavailable)
     ));
     drop(store);
-    let reopened = BulkStore::new(&root, BulkLimits::default()).unwrap();
+    let reopened = reopen_after_drop(|| BulkStore::new(&root, BulkLimits::default()));
     assert!(matches!(
         BulkStore::new(&root, BulkLimits::default()),
         Err(BulkError::StorageUnavailable)

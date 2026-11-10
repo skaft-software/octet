@@ -47,6 +47,24 @@ fn catalog_metadata_round_trips_without_rewriting_the_session() {
 }
 
 #[test]
+fn session_names_flatten_line_breaks_like_pi_and_empty_clears() {
+    assert_eq!(
+        sanitize_session_name("  one\r\n\n two  ")
+            .unwrap()
+            .as_deref(),
+        Some("one  two")
+    );
+    assert_eq!(
+        sanitize_session_name("\none\n").unwrap().as_deref(),
+        Some("one")
+    );
+    assert_eq!(sanitize_session_name("  \n ").unwrap(), None);
+    assert_eq!(sanitize_session_name("").unwrap(), None);
+    // Other control characters stay refused: a name is rendered in terminals.
+    assert!(sanitize_session_name("bad\u{1b}[31m").is_err());
+}
+
+#[test]
 fn trash_lifecycle_is_recoverable_and_preserves_its_retention_deadline() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

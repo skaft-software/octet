@@ -4,7 +4,7 @@
 does not only paint a character grid: a program can describe its UI as semantic
 data and Tern draws it natively — typeset markdown and math, real split diffs,
 meters, charts, checklists, images and pages. That is the **Tern Surface
-Protocol** (TSP), and it is why `omp`, the reference client, looks like an
+Protocol** (TSP), and it is why a TSP client can look like an
 application rather than a terminal program.
 
 `crates/octet-tern` is a TSP client for octet: wire types, APC framing, a tty
@@ -55,8 +55,8 @@ editor selections. This is separate from features in the **terminal's reply**
 (such as `scroll`). Standalone clients advertise no input features by default.
 The [official Tern Host API](https://docs.stencil.so/tern/reference/api-host.html#uievent)
 documents `edit` and `undo` opt-ins; isolated probes verified both gates in the
-installed 0.4.0 runtime. The audited OMP snapshot lacks these hello declarations
-and is not an exhaustive protocol specification.
+installed 0.4.0 runtime. The audited reference-client snapshot lacks these hello
+declarations and is not an exhaustive protocol specification.
 
 Octet does not advertise `undo`: resolved host keyboard bindings retain that
 operation. Accepted native text replacements are one host undo unit; caret-only
@@ -164,10 +164,11 @@ move the preceding history.
 
 RAIL uses the pane's full available width for transcript, welcome and live
 composer chrome, without a separate character-capped reading column at default
-zoom. The composer is Tern's own `omp.editor` card, the container omp's
-composer uses: one inset for the native editor, the model and effort controls,
-the session cost and Send/Stop, with the context meter (`omp.composer.context`)
-along its top edge and a `pending` tone while a turn runs. The card is present
+zoom. The composer is Tern's own `omp.editor` card, the same card the reference
+client's composer uses: one inset for the native editor, the model and effort
+controls, the session cost and Send/Stop, with the context meter
+(`omp.composer.context`) along its top edge and a `pending` tone while a turn
+runs. The card is present
 from the first startup frame, so the draft does not change frames when the
 resolved chrome arrives. Mirrored Pi themes keep Pi's flat, rule-framed input.
 The placeholder carries the `/ commands · @ files · ! shell` hints from 56
@@ -182,15 +183,15 @@ content-addressed PNG bytes from the canonical byte-mark rasterizer and requests
 40×20 logical pixels. The eight contiguous, baseline-aligned bars keep the
 `01101111` silhouette (positions 1 and 4 half-height) and 2:1 proportions;
 model/theme-aware colours remain supported. Unsupported images retain the
-textual byte mark. Octet-owned `octet.welcome.*` roles avoid OMP's private
-welcome sizing and animation hooks.
+textual byte mark. Octet-owned `octet.welcome.*` roles avoid the reference
+client's private welcome sizing and animation hooks.
 
 Assistant replies are unboxed `col` reader prose with a direct, stable `md`
 leaf, not a labelled assistant card. User prompts use `omp.user` native cards
 for Tern's right-aligned bubble treatment. Assistant prose and thinking retain
 the observed `omp.assistant` / `omp.thinking` hooks; composer controls retain
 their observed hooks. Those `omp.*` roles are Tern implementation details,
-not portable TSP guarantees or omp branding.
+not portable TSP guarantees or reference-client branding.
 
 Tern still owns typography and its focus ring. Increase **Font size** in Tern's
 settings (or use Cmd+= / Cmd+- on macOS) for a larger interface. TSP v1 has no
@@ -365,7 +366,8 @@ OS-app switching, IME or Tern 0.3.1 evidence; those journeys remain untested.
 Resize, zoom and appearance events preserve native ownership and retained
 identity. Explicit eviction reopens the surface and replays its regions. Credit
 exhaustion coalesces changes until acknowledgements arrive. If a previously
-negotiated UI stops acknowledging frames for five seconds (as omp waits),
+negotiated UI stops acknowledging frames for five seconds (as the reference
+client waits),
 including closing the last window, octet pauses native presentation and
 re-queries hello. A fresh hello reopens and replays the current tree, media and
 host-selected input focus; no new frame credit is invented while detached. A
@@ -483,8 +485,9 @@ with transcript pointer geometry.
 Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,
 not full-parity or release-ready qualification.
 
-The native renderer does not claim omp's whole product surface: octet's current
-settings command is a read-only report, not editable `prefs`; extension-owned
+The native renderer does not claim the reference client's whole product
+surface: octet's current settings command is a read-only report, not editable
+`prefs`; extension-owned
 text is not reverse-parsed into fabricated checklists or charts. Transcript
 subtrees are memoized and incrementally reconciled, but finalized history is
 not yet evicted with `settle`.

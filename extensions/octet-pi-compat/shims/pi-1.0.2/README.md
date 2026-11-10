@@ -20,7 +20,11 @@ Bindings are classified as:
   package/trust mutation, raw terminal ownership and unadmitted inference.
 
 `ai/*.mjs` contains Pi's text, transcript, event stream, model operations,
-retry/overflow, diagnostics, validation and caller-owned auth/lazy helpers.
+retry/overflow, diagnostics and caller-owned auth/lazy helpers. Tool-argument
+validation is no longer adapted from 1.0.2: Pi 1.5 replaced TypeBox with
+pi-schema, and `../pi-1.5.0/ai/validation.mjs` is the single port (the installed
+release's own `dist/utils/validation.js` is preferred whenever one answers, see
+`../manifests/`).
 Lazy streams share the public shim's event-stream class identity rather than
 creating a second managed-Pi class graph. `coding-pure.mjs` contains
 skill prompt formatting and language detection. Imports are adapted to local

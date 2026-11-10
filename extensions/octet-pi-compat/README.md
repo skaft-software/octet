@@ -1,7 +1,7 @@
 # Pi extension compatibility
 
 **The Pi adapter for octet v0.10.0, octet's first Pi-compatible release.**
-Import your existing Pi setup (managed Pi 1.0.2 through 1.4.x) or select
+Import your existing Pi setup (managed Pi 1.0.2 through 1.x) or select
 extension entrypoints manually.
 One Node process loads unchanged extension factories; Rust owns the agent,
 sessions, approvals, terminal, keyboard focus and shutdown. The installed-Pi
@@ -22,7 +22,7 @@ include locked production dependencies. Installation/discovery are inert.
 Enabling the stock bundle automatically mirrors this
 machine's enabled Pi setup and runs its factories with OS permissions. Native
 provider-credential disclosure remains a separate reviewed opt-in, and native
-TOML appearance is independent. With octet 0.10.0 or later:
+TOML appearance is independent. With octet 0.10.3 or later:
 
 ```sh
 octet extension install octet-pi-compat
@@ -116,7 +116,7 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The 0.10.0 release catalog includes this adapter. For an installed bundle,
+The 0.10.3 release catalog includes this adapter. For an installed bundle,
 generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
@@ -140,10 +140,14 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.0 follows **Pi 1.4's extension API** and accepts managed Pi 1.0.2
-through 1.4.x. Dependencies are the versions Pi 1.0.2 through 1.4 ship: jiti
-2.7.0 and `typebox` 1.3.27, plus selected MIT Pi TUI 1.0.2 modules. Imports
-resolve through the same module table as Pi 1.4's extension loader:
+octet 0.10.3 follows **Pi 1.4's extension API** and accepts every Pi release its
+shipped manifests cover: `PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`, a managed Pi
+1.0.2 through 1.x. Manifests for Pi 1.0.2 and 1.5.0 are shipped; a newer 1.x
+release reuses the nearest older manifest and says so on stderr, and a version
+below 1.0.2, a pre-release, or another major series is refused. Dependencies are
+the versions Pi 1.0.2 through 1.4 ship: jiti 2.7.0 and `typebox` 1.3.27, plus
+selected MIT Pi TUI 1.0.2 modules. Imports resolve through the same module
+table as Pi 1.4's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
 root, `pi-ai/compat` and `pi-ai/models` share one entry, and both
 `@earendil-works` and old `@mariozechner` Pi imports alias to the same host
@@ -413,6 +417,12 @@ deliberate differences from Pi's unbounded, blocking chain.
   the actual live request; numeric ID reuse cannot revive an old captured context.
   Native admission implements the corresponding narrow checkpoint-lifetime rule;
   adapter tests alone cannot qualify it.
+- Editor presentation setters remain synchronous void, like Pi. A refused mount
+  or checkpoint is diagnosed independently instead of failing an unrelated hook
+  or command. This is not an effect receipt: refused mounts never invoke their
+  factories or activate frames, and a failed checkpoint prevents later draft
+  writes, frames and replacement mounts. Missing mount fences still close the
+  unusable surface before factory construction.
 - Same-owner `setEditorText` and `pasteToEditor`, including cross-factory callers,
   mutate the active custom component and await its fenced checkpoint. Paste uses
   the component's real cursor API, never an invented append. Without a custom
@@ -521,7 +531,12 @@ or full-Pi qualification.
 refuse. With paired session transport, queue-only `runtime.updated` publications
 update an existing live exact owner's retained fact without `remote_ui` or a UI
 mount. They cannot change foreground ownership, history or editor/UI authority,
-and accept no additional host fields. Delayed publications for unknown or retired
+and accept no additional host fields. Native foreground actions require the exact
+current state, not merely a matching process, generation or workspace. Retained
+same-session contexts survive turn settlement; private background bindings never
+acquire that authority, even before the first foreground binding. Coalesced chrome
+setters check at enqueue and again at delivery, dropping cancelled or superseded
+work before any native request. Delayed publications for unknown or retired
 owners are ignored without creating state or reviving action authority; retained
 context actions still refuse retired owners. Native queue and original-package
 qualification remain separate from this adapter contract.

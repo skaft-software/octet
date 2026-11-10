@@ -17,24 +17,31 @@ import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { invalid, rpcError } from './errors.mjs';
-import { PI_MODULES, PI_PREFIXES, PI_SUPPORTED_RANGE, piModule, piReleaseSupported } from './pi-modules.mjs';
+import { PI_MODULES, PI_PREFIXES, PI_SUPPORTED_RANGE, piModule } from './pi-modules.mjs';
+import { PI_MANIFEST_VERSIONS, piRelease } from './pi-manifests.mjs';
 
 export const FALLBACK_ELIGIBLE = -32030;
 export const INSTALLED_PI_UNAVAILABLE = -32031;
-// The Pi releases the shims and module table were checked against; any other
-// installed Pi version is refused, not guessed at.
+// The Pi releases the shipped manifests can describe. A release no manifest
+// governs is refused, not guessed at; a release newer than the highest manifest
+// reuses it and is diagnosed (see `release` in the located install).
 export const SUPPORTED_RANGE = PI_SUPPORTED_RANGE;
-const SUPPORTED = { test: piReleaseSupported };
 const REGISTRY = Symbol.for('octet.pi-compat.installed-pi');
 const PREFIXES = PI_PREFIXES;
 // shim file key -> real package directory name
 export const PACKAGES = { 'coding-agent': 'pi-coding-agent', ai: 'pi-ai', tui: 'pi-tui', 'agent-core': 'pi-agent-core' };
+const PI_MANIFESTS = PI_MANIFEST_VERSIONS.join(', ');
 // Pi modules octet does not emulate: the fallback serves the installed files
 // as they are, with the export Pi's loader resolves them to.
 const DIRECT_MODULES = Object.fromEntries(Object.entries(PI_MODULES).filter(([, module]) => !module.shim));
-// The export each emulated package's real namespace is read from (Pi resolves
-// the pi-ai root to its compat entry, a strict superset of the core entry).
-const REAL_EXPORT = { 'coding-agent': '.', ai: './compat', tui: '.', 'agent-core': '.' };
+// The export each emulated package's real namespace is read from, from the
+// manifest route that emulated specifier resolves to (Pi resolves the pi-ai root
+// to its compat entry, a strict superset of the core entry).
+const REAL_EXPORT = Object.fromEntries(Object.entries(PACKAGES).map(([key]) => {
+  const route = Object.entries(PI_MODULES).find(([specifier, module]) => module.shim === key && !specifier.includes('/'));
+  if (!route) throw unavailable(`the adapter manifest routes no bare specifier to the ${key} shim`);
+  return [key, route[1].exportKey];
+}));
 const words = text => text.trim().split(/\s+/);
 
 // Real-only names (absent from the shims) refused in path B, with the seam each
@@ -63,7 +70,7 @@ const DENIED = {
 // Real-only names admitted in path B: pure helpers, data, and components that
 // render into the host-mediated remote UI.
 const ALLOWED = {
-  'agent-core': [],
+  'agent-core': ['DEFAULT_AGENT_IDENTITY'],
   'coding-agent': words(`ArminComponent AssistantMessageComponent BashExecutionComponent BranchSummaryMessageComponent CURRENT_SESSION_VERSION
     CompactionSummaryMessageComponent CredentialSynchronizationError CustomMessageComponent DEFAULT_COMPACTION_SETTINGS ExtensionEditorComponent
     ExtensionInputComponent ExtensionSelectorComponent FooterComponent ModelSelectorComponent SessionSelectorComponent SettingsSelectorComponent
@@ -82,10 +89,13 @@ const ALLOWED = {
     getSystemMessageText getToolStateChanges hasApi hasNonAdditiveToolChanges hasToolRedefinitions isContextOverflow isModelType isRecoverableLength
     isRetryableAssistantError modelsAreEqual normalizeContext parseJsonWithRepair parseStreamingJson reduceAssistantMessageFrames
     registerSessionResourceCleanup renderSystemMessageUpdate repairJson resolveTranscript resolveTranscriptTools retryDelayMs toToolDeclaration
-    validateToolArguments validateToolCall withoutInitialSystemMessage parseToolCallArguments AI_TELEMETRY_SCHEMA PI_AI_VERSION`),
+    validateToolArguments validateToolCall withoutInitialSystemMessage parseToolCallArguments AI_TELEMETRY_SCHEMA PI_AI_VERSION
+    StreamingJsonParser ToolCallArgumentsStream PI_ATTRIBUTION withClientIdentity mergeClientIdentity formatUserAgent
+    getClientVersion getIdentityHeaders getAttributionHeaders getOpenCodeSessionHeaders`),
   tui: words(`CombinedAutocompleteProvider HStack Marked MouseRegion ScrollView VStack allocateImageId backgroundAnsi calculateImageRows colorToHex
     colorToOkhsl colorToOklch colorToRgb compositeTuiLine deleteAllKittyImages deleteKittyImage detectCapabilities encodeITerm2 encodeKitty
-    foregroundAnsi getCapabilities getCellDimensions getGifDimensions getImageDimensions getJpegDimensions getOsc8LinkAtColumn getPngDimensions
+    foregroundAnsi formatProgramStatus getCapabilities getCellDimensions getGifDimensions getImageDimensions getJpegDimensions
+    getOsc8LinkAtColumn getPngDimensions getSelectPageIndex replaceControlCharacters
     getTerminalColorMode getWebpDimensions hyperlink imageFallback indexedColor isAppleTerminalSession isViewportTUI mixColors okhslColor
     oklabToOkhslLightness oklchColor parseColor parseTerminalColorSchemeReport renderImage renderLatex resetCapabilitiesCache rgbColor
     setCapabilities setCapabilityOverrides setCellDimensions setImageTranscoder styleText styleTextWithAnsi`),
@@ -117,7 +127,11 @@ export function locateInstalledPi(env = process.env) {
   try { raw = readFileSync(versionFile, 'utf8'); } catch (error) { throw unavailable(`could not read managed Pi version from ${versionFile} (${error.code || error.message})`); }
   const version = raw.split('\n', 1)[0];
   if (!version || version === '.' || version === '..' || !/^[0-9A-Za-z._+-]+$/.test(version)) throw unavailable(`managed Pi version file is invalid: ${versionFile}`);
-  if (!SUPPORTED.test(version)) throw unavailable(`installed Pi ${version} is outside the supported range ${SUPPORTED_RANGE}`);
+  const release = piRelease(version);
+  if (!release) throw unavailable(`installed Pi ${version} is outside the supported range ${SUPPORTED_RANGE} (manifests: ${PI_MANIFESTS})`);
+  // An untested release reuses the nearest older manifest; say so instead of
+  // pretending it was tested.
+  if (!release.exact) console.error(`[pi-compat manifest] installed Pi ${version} has no manifest; using ${release.manifest.pi} routes and classifications unverified`);
   let releaseDir;
   try { releaseDir = realpathSync(join(agentDir, 'install', 'releases', version)); } catch { throw unavailable(`managed Pi release ${version} is missing under ${join(agentDir, 'install', 'releases')}`); }
   // Every package the module table names must be the pinned release.
@@ -163,7 +177,7 @@ export function locateInstalledPi(env = process.env) {
   // Modules without a shim resolve to the installed files directly.
   const direct = {};
   for (const [specifier, module] of Object.entries(DIRECT_MODULES)) direct[specifier] = exportFile(module.pkg, module.exportKey);
-  return { agentDir, version, releaseDir, packages, direct };
+  return { agentDir, version, releaseDir, release, packages, direct };
 }
 
 function refusal(pkg, name, reason) {

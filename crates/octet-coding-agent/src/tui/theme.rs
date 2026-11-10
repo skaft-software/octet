@@ -680,6 +680,24 @@ impl OctetTheme {
         self.terminal_colors
     }
 
+    /// Whether publishing `other` over this theme would paint the same cells.
+    ///
+    /// Every style, glyph, surface and layout decision is compiled from the
+    /// validated source for one background, capability set and terminal
+    /// palette, so two loads that agree on those paint identically. The model
+    /// lab is applied by the shell after every publication and is not part of
+    /// this identity. A reload of an edited theme file retains a different
+    /// source, so a changed theme is never mistaken for the one on screen.
+    pub(crate) fn paints_like(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.metadata == other.metadata
+            && self.native_source == other.native_source
+            && self.background == other.background
+            && self.capabilities == other.capabilities
+            && self.shimmer == other.shimmer
+            && self.terminal_colors == other.terminal_colors
+    }
+
     /// Carry terminal observations through previews, selection and reload. Only
     /// Pi's generated theme consumes them; other themes retain their own colors.
     pub(crate) fn with_terminal_colors(mut self, colors: TerminalThemeColors) -> Self {

@@ -1,21 +1,30 @@
 # Pi compatibility
 
-**v0.10.0 is octet's first Pi-compatible release.** Use your existing Pi
+**v0.10.0 was octet's first Pi-compatible release.** Use your existing Pi
 extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
 We're working toward full compatibility with existing Pi setups. The adapter
 follows **Pi 1.4's public extension API**, works with managed Pi installs from
-1.0.2 through 1.4.x, and needs Node 22.19+. Rust still owns the agent loop,
-sessions, permissions and terminal; the adapter loads extension code, not a
-second Pi agent. Ordinary octet use does not need Node.
+1.0.2 through 1.x (`PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`), and needs Node
+22.19+. Rust still owns the agent loop, sessions, permissions and terminal; the
+adapter loads extension code, not a second Pi agent. Ordinary octet use does not
+need Node.
 
-See the [v0.10.0 release notes](releases/v0.10.0.md) for downloads and launch scope.
-Pi support requires octet 0.10.0 or later; v0.9.6 does not ship the adapter.
+**Pi 1.5.0 is supported.** The adapter resolves version-specific Pi helpers from
+the installed Pi for the version it detects (1.0.2 and 1.5.0 are inventoried, and
+1.5.0 is the module surface that answers when no installed Pi does), and a symbol
+missing from the active inventory fails loudly naming the symbol and the version
+rather than becoming `undefined`. A release newer than the newest inventory is
+diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release,
+or another major series is refused. Nothing silently downgrades Pi.
+
+See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
+Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
-The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.4
+The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.5
 ship, and pi-tui 1.0.2's components.
 Compatibility concerns public extensions, not Pi's private internals or complete CLI.
 
@@ -23,7 +32,7 @@ Compatibility concerns public extensions, not Pi's private internals or complete
 
 ## Use your Pi setup
 
-With octet **0.10.0+**, Node **22.19+** and your existing Pi setup:
+With octet **0.10.3+**, Node **22.19+** and your existing Pi setup:
 
 ```bash
 octet extension install octet-pi-compat
@@ -34,7 +43,7 @@ octet --enable-extension octet-pi-compat
 For source development, install locked adapter dependencies as described below,
 then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
 To install a downloaded bundle explicitly, use
-`octet extension install --path /absolute/path/octet-pi-compat-0.10.0.tar.gz`.
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.3.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
@@ -61,7 +70,7 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 ## Bring your Pi extensions
 
 Requires Node **22.19.0 or newer** and an existing managed Pi installation,
-**1.0.2 through 1.4.x**. The entrypoints reject older Node versions before loading adapter
+**1.0.2 through 1.x**. The entrypoints reject older Node versions before loading adapter
 dependencies or factories. Bun's existing execution path remains available but
 is separately unqualified. From a source checkout, install dependencies once:
 
@@ -253,11 +262,14 @@ configuring or selecting a provider requires restarting with the displayed sessi
 resume command before chatting.
 
 Handlers on the ordered hook queue have callback-wait budgets. The default is
-5 s per handler and 15 s across its chain. Each prompt phase (`input` and
-`before_agent_start`) instead has 2 s per handler and 4 s across its chain;
-resource discovery has 4 s per handler and 4 s across its chain; tool-call
-guards have 10 s per handler and 10 s total. Input and before-agent-start are
-separate host requests, each with a 5 s native deadline.
+5 s per handler and 15 s across its chain. `input`, `before_agent_start` and
+`session_start` have **no** budget, because Pi awaits them until the handler
+settles: a handler that waits for a user answer still delivers its transform,
+system-prompt replacement or status. The context phases use 2 s per handler and
+4 s across their chain, resource discovery 4 s per handler and 4 s across its
+chain, and tool-call guards 10 s per handler and 10 s total. The transport does
+not end a prompt-phase wait on the extension's behalf: cancellation, owner
+generations and process supervision do.
 A handler that outlives its share keeps running but is no longer waited for. It
 is named once in `[Extension issues]`, and later hooks skip it while it is still
 busy. A tool-call guard that cannot answer in time blocks the call rather than
@@ -294,6 +306,19 @@ Equivalent selected extension models rebind after a successful provider reload.
 An unrelated model's catalog update does not revoke the selected model's continuous
 authority; selected declaration changes (including change-and-restore), authorization
 revocation and owner retirement still fence the captured selection.
+
+## Input hooks in headless modes
+
+Print (`-p`, including JSON output) and plain modes run Pi `input` handlers in
+order before template/skill expansion and `before_agent_start`. They report
+`source: "interactive"`, as Pi's print path does. A transformation supplies the
+subsequent handlers and prompt composition with its text/images; omitted images
+are retained. Returning `action: "handled"` stops submission before saving a
+user prompt or starting a provider request.
+
+The source checkout's `scripts/pi-eval/prompts.py` comparison loop checks these
+paths against real Pi CLIs using isolated synthetic factories and a local
+scripted provider. This is not full installed-setup qualification.
 
 ## Message observations
 
@@ -362,7 +387,7 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Managed Pi 1.0.2 through 1.4.x is accepted.
+Managed Pi 1.0.2 through 1.x is accepted.
 
 This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
@@ -376,7 +401,7 @@ This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
   terminal. Pi functions that would start Pi sessions or agents, call models,
   read credentials, write Pi config or trust, start MCP servers, or own the
   terminal or clipboard are refused, as are names Octet has not classified.
-- A missing Pi install, or a version outside 1.0.2–1.4.x, fails loudly; nothing
+- A missing Pi install, or an unrecognized version, fails loudly; nothing
   downloads or switches Pi versions silently.
 
 ## Qualification and reproduction

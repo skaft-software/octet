@@ -377,6 +377,7 @@ async fn steering_sync_tool_pending_continues_on_same_socket_without_replay() {
                 req.messages = vec![Message::User(UserMessage {
                     content: vec![UserPart::ToolResult(ToolResult {
                         added_tool_names: None,
+                        tool_name: None,
                         tool_call_id: ToolCallId("call1".into()),
                         content: vec![ToolResultPart::Text("done".into())],
                         is_error: false,

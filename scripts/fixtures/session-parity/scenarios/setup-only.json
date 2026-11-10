@@ -1,0 +1,24 @@
+{
+  "name": "setup-only",
+  "operations": [
+    {
+      "op": "model",
+      "as": "model",
+      "provider": "openai",
+      "modelId": "fixture"
+    },
+    {
+      "op": "thinking",
+      "as": "thinking",
+      "level": "high"
+    },
+    {
+      "op": "custom",
+      "as": "state",
+      "customType": "fixture",
+      "data": {
+        "ready": true
+      }
+    }
+  ]
+}

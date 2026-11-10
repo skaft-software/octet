@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Exact-version 0.10.0 release tooling. Published assets must match this version.
+# Exact-version 0.10.3 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.10.0"
+version="0.10.3"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"
@@ -337,7 +337,12 @@ verified_archive_sha256() {
             signing_repository="skaft-software/ygg" ;;
     esac
     identity_version=$(printf '%s' "$version" | sed 's/\./\\./g')
-    identity="^https://github\\.com/${signing_repository}/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
+    if [ "${release_workflow_commit:-$release_source_commit}" = "$release_source_commit" ]; then
+        identity_tag="(v${identity_version}|octet-binaries-v${identity_version})"
+    else
+        identity_tag="octet-binaries-v${identity_version}"
+    fi
+    identity="^https://github\\.com/${signing_repository}/\\.github/workflows/release-octet\\.yml@refs/tags/${identity_tag}$"
     python3 - \
         "$checksums" \
         "$bundle" \
@@ -357,10 +362,10 @@ identity, repository, source_commit, archive_name = sys.argv[4:8]
 expected_names = {
     "install-octet.ps1",
     "install-octet.sh",
-    "octet-0.10.0-aarch64-apple-darwin.tar.gz",
-    "octet-0.10.0-x86_64-apple-darwin.tar.gz",
-    "octet-0.10.0-x86_64-pc-windows-msvc.zip",
-    "octet-0.10.0-x86_64-unknown-linux-gnu.tar.gz",
+    "octet-0.10.3-aarch64-apple-darwin.tar.gz",
+    "octet-0.10.3-x86_64-apple-darwin.tar.gz",
+    "octet-0.10.3-x86_64-pc-windows-msvc.zip",
+    "octet-0.10.3-x86_64-unknown-linux-gnu.tar.gz",
 }
 line_pattern = re.compile(r"^([0-9A-Fa-f]{64})  (?:\./)?([A-Za-z0-9_.-]+)$")
 
@@ -464,7 +469,9 @@ PY
 # not permission to extract arbitrary crates/, scripts/ or extension runtimes.
 documentation_extra_files() {
     cat <<'OCTET_DOCUMENTATION_EXTRAS'
+AGENTS.md
 CHANGELOG.md
+CLAUDE.md
 CONTRIBUTING.md
 LICENSE
 SECURITY.md

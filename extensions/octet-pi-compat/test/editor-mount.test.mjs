@@ -13,6 +13,7 @@ async function mounting(t, hold = ['composer/get', 'composer/set']) {
 export default pi => {
   const calls = [];
   pi.on('session_start', (_, ctx) => { ctx.ui.setEditorComponent((tui, theme, kb) => {
+    console.error('mount factory invoked');
     const c = new CustomEditor(tui, theme, kb), input = c.handleInput.bind(c);
     c.handleInput = data => { calls.push(data); input(data); }; return c;
   }); });
@@ -84,9 +85,17 @@ for (const foreign of [false, true]) test(`mounting editor: pre-open-reply input
   assert.deepEqual(await probe(peer), []); noFrame(peer);
   peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24, editor_mount_id: `host-editor-${id}` } });
   if (foreign) {
-    assert.match((await start.response).error?.message, /editor input mount\/revision mismatch/);
+    // Pi's void editor setter is presentation, not hook output; ff433cf2
+    // diagnoses delivery independently (pi-reference/node_modules/@earendil-works/
+    // pi-coding-agent/dist/core/extensions/runner.js:813-839).
+    assert.ok((await start.response).result);
+    await peer.waitStderr(/editor input mount\/revision mismatch/);
+    await peer.wait(f => f.method === 'notification' && /editor input mount\/revision mismatch/.test(f.params.message));
     await peer.wait(f => f.method === 'ui/close');
     assert.equal(peer.seen.some(f => f.method === 'composer/get' || f.method === 'composer/set'), false);
+    assert.deepEqual(await probe(peer), [], 'forged input was never delivered');
+    noFrame(peer);
+    assert.doesNotMatch(peer.stderr(), /mount factory invoked/);
   } else {
     const seed = await peer.wait(f => f.method === 'composer/get');
     peer.send({ jsonrpc: '2.0', id: seed.id, result: { text: 'seed' } });

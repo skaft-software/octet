@@ -1,7 +1,7 @@
 import { Console } from 'node:console';
 import { Writable } from 'node:stream';
 import { Worker } from 'node:worker_threads';
-import { fields, invalid, rpcError } from './errors.mjs';
+import { fields, invalid, rpcError, unsupportedAPI } from './errors.mjs';
 import { notificationIntent } from './desktop-notifications.mjs';
 
 export const MAX_FRAME = 1048576;
@@ -287,7 +287,7 @@ export class Transport {
     });
   }
   requestSync(method, params, { parent, signal, onCancel, onUiClosed, timeout = 30000 } = {}) {
-    if (!['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) throw rpcError(-32601, 'unsupported_feature synchronous request');
+    if (!['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) unsupportedAPI(`synchronous request ${method}`, 'only a reviewed synchronous host contract may block the factory thread');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
     if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();

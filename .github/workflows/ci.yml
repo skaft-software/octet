@@ -5,7 +5,14 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
   workflow_dispatch:
+
+# Isolate non-PR runs, including pending runs, so none can supersede another.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -26,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
@@ -34,10 +41,6 @@ jobs:
       - run: cargo deny check
 
   quality:
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -50,18 +53,7 @@ jobs:
         run: |
           python3 scripts/test_refresh_models_dev_metadata.py
           python3 scripts/test_release_model_metadata_gate.py
-      # PR version changes and manual dispatch check live metadata. Main may
-      # reuse only an API-proven exact-PR-head dispatch run with identical trees;
-      # missing proof falls back to live. Signed-release/build inputs stay frozen.
-      - name: Check pre-release model metadata freshness
-        timeout-minutes: 2
-        env:
-          MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"
-          MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"
-          MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 scripts/check-release-model-metadata.py
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -82,6 +74,7 @@ jobs:
           python3 scripts/test_provider_acceptance.py
           python3 scripts/test_release_serve_trust.py
           python3 scripts/test_release_source_qualification.py
+          python3 scripts/test_release_handoffs.py
           python3 scripts/test_windows_release_surface.py
           python3 scripts/test_repository_identity.py
           python3 scripts/test-packaged-docs.py
@@ -110,17 +103,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --doc --profile ci-test --locked
       # Cargo 1.90 stabilized packaging interdependent workspace crates. Keep
-      # the dedicated compilation check on the 1.88 MSRV in the job below; use
+      # the dedicated compilation check on the 1.89 MSRV in the job below; use
       # 1.90 only to assemble the publishable crates together.
       - name: Install Rust 1.90 packaging toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
       - run: cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
 
   first-party-extension-tests:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           # The Pi adapter still runs on Node; codemode needs no Node at all.
@@ -182,10 +176,11 @@ jobs:
           done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/source-catalog.txt)
 
   extension-api-v03:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -207,11 +202,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # Keep one job body and the existing release-qualification lane names.
+        os: ${{ fromJSON((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["ubuntu-24.04"]' || '["ubuntu-24.04", "macos-15"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.19.0"
@@ -264,10 +260,11 @@ jobs:
       - run: cargo check --workspace --all-targets --no-default-features --locked
 
   windows:
-    # Native Windows x64 build and qualification lane for pull requests. It
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    # Native Windows x64 build and qualification lane. It
     # uses the target of the opt-in release-candidate contract
-    # (scripts/package-octet-windows-release.py) and produces an unsigned,
-    # PR-scoped test artifact only; signed release publication stays in
+    # (scripts/package-octet-windows-release.py) and produces an unsigned
+    # test artifact only; signed release publication stays in
     # release-octet.yml. No GUI, driver, credential, or permission action runs.
     name: windows (x86_64-pc-windows-gnu)
     runs-on: windows-2025
@@ -295,8 +292,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         with:
           python-version: "3.13"
-      # This action revision is fixed to Rust 1.88.0 (the MSRV used by CI).
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      # This action revision is fixed to Rust 1.89.0 (the MSRV used by CI).
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
         with:
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -647,7 +644,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.19.0"
-      # The release toolchain, independent of the workspace's 1.88 MSRV.
+      # The release toolchain, independent of the workspace's 1.89 MSRV.
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:
           targets: ${{ matrix.target }}
@@ -699,19 +696,21 @@ jobs:
           retention-days: 14
 
   msrv:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      # This action revision is fixed to Rust 1.88.0; it has no toolchain input.
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      # This action revision is fixed to Rust 1.89.0; it has no toolchain input.
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo check --workspace --all-targets --all-features --locked
 
   smoke-install:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo install --debug --locked --path crates/octet-coding-agent --bins --root "$RUNNER_TEMP/octet-install"
       - run: "$RUNNER_TEMP/octet-install/bin/octet --version"
@@ -730,3 +729,53 @@ jobs:
             --binary "$RUNNER_TEMP/octet-install/bin/octet" \
             --host-binary "$RUNNER_TEMP/octet-install/bin/octet-host" \
             --expected-version "$version"
+
+  ci-required:
+    if: always()
+    needs:
+      - dependency-review
+      - dependencies
+      - quality
+      - first-party-extension-tests
+      - extension-api-v03
+      - test
+      - windows
+      - release-candidate
+      - msrv
+      - smoke-install
+    runs-on: ubuntu-24.04
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+      CI_EVENT_NAME: ${{ github.event_name }}
+      CI_FULL_PR: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+    steps:
+      - name: Check required lanes
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["NEEDS_CONTEXT"])
+          event = os.environ["CI_EVENT_NAME"]
+          allowed_skips = set()
+          # These jobs retain their original event-specific conditions.
+          if event != "pull_request":
+              allowed_skips.add("dependency-review")
+          if event != "workflow_dispatch":
+              allowed_skips.add("release-candidate")
+          if event == "pull_request" and os.environ["CI_FULL_PR"] != "true":
+              allowed_skips.update({
+                  "first-party-extension-tests", "extension-api-v03",
+                  "windows", "msrv", "smoke-install",
+              })
+
+          bad = []
+          for job, details in results.items():
+              result = details["result"]
+              print(f"{job}: {result}")
+              if result != "success" and not (result == "skipped" and job in allowed_skips):
+                  bad.append(job)
+          if bad:
+              sys.exit("Required CI lanes did not succeed: " + ", ".join(bad))
+          PY

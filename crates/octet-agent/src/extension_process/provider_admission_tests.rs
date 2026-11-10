@@ -465,7 +465,7 @@ fn mutate_prepared_registry(
             registry
                 .update(
                     route.owner.clone(),
-                    api_v03::ProviderUpdateParams {
+                    api_v04::ProviderUpdateParams {
                         provider: entry.provider.clone(),
                         models: changed,
                     },
@@ -474,7 +474,7 @@ fn mutate_prepared_registry(
             registry
                 .update(
                     route.owner.clone(),
-                    api_v03::ProviderUpdateParams {
+                    api_v04::ProviderUpdateParams {
                         provider: entry.provider.clone(),
                         models: entry.models.clone(),
                     },
@@ -496,7 +496,7 @@ fn mutate_prepared_registry(
             registry
                 .register(
                     route.owner.clone(),
-                    api_v03::ProviderRegisterParams {
+                    api_v04::ProviderRegisterParams {
                         provider: entry.provider.clone(),
                         models: entry.models.clone(),
                     },
@@ -511,7 +511,7 @@ fn mutate_prepared_registry(
             registry
                 .register(
                     owner.clone(),
-                    api_v03::ProviderRegisterParams {
+                    api_v04::ProviderRegisterParams {
                         provider: entry.provider.clone(),
                         models: entry.models.clone(),
                     },
@@ -525,7 +525,7 @@ fn mutate_prepared_registry(
         registry
             .update(
                 route.owner.clone(),
-                api_v03::ProviderUpdateParams {
+                api_v04::ProviderUpdateParams {
                     provider: entry.provider,
                     models: entry.models,
                 },

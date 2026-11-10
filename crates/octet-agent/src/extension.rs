@@ -303,10 +303,14 @@ pub struct ProviderContextProjection {
 /// ordinary extension failures.
 pub enum ProviderContextHookError {
     /// The callback failed; the message is internal and never shown to users.
+    /// A hook that opts into failure isolation continues with the prior request.
     Failed(String),
     /// The extension returned JSON-RPC request-cancelled (-32800).
     Cancelled,
-    /// Host authority or projection validation failed; never fall back.
+    /// Host authority or native validation refused preparation; never fall back.
+    /// A refused append grant or session-lease check happens before queue
+    /// admission, so no later guard can catch it: dispatching inference anyway
+    /// would continue after an authoritative session operation was refused.
     Refused,
 }
 
@@ -1326,6 +1330,21 @@ impl ExtensionHost {
 
     pub(crate) fn tool_arc(&mut self, tool: Arc<dyn Tool>) {
         self.register_tool_arc(tool, false);
+    }
+
+    /// Retarget an already installed host tool without changing its catalog or
+    /// active selection. Session-scoped delegation uses the same definitions.
+    pub(crate) fn replace_static_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.definition().name;
+        match self
+            .tools
+            .iter_mut()
+            .find(|installed| installed.definition().name == name)
+        {
+            Some(installed) => *installed = tool,
+            // Not expected (the root surface installed it), but never panic.
+            None => self.register_tool_arc(tool, false),
+        }
     }
 
     fn register_tool_arc(&mut self, tool: Arc<dyn Tool>, builtin: bool) {

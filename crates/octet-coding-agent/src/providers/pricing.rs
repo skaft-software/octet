@@ -12,6 +12,7 @@ fn flat_pricing(input: u64, output: u64, cache_read: u64, cache_write: u64) -> P
         cache_write_5m: TokenRate(cache_write),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: vec![],
     }
 }
@@ -350,6 +351,7 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
         cache_write_5m: TokenRate(cache_write),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers,
     })
 }

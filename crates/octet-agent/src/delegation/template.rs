@@ -18,7 +18,7 @@ pub(crate) struct DelegationRuntimeSettings {
     pub(crate) completion_policy: CompletionPolicy,
     pub(crate) output_modalities: octet_ai::OutputModalities,
     pub(crate) max_output_tokens: u64,
-    pub(crate) tool_schema_budget_bytes: usize,
+    pub(crate) tool_schema_budget_bytes: Option<usize>,
     pub(crate) max_session_tokens: Option<u64>,
     pub(crate) max_session_cost_microdollars: Option<u64>,
     pub(crate) cache_warming_mode: tokio::sync::watch::Sender<crate::cache_warmer::CacheWarmPolicy>,

@@ -474,6 +474,7 @@ pub(super) fn lower_tool_result(
         content: result_parts,
         is_error: effective_is_error,
         added_tool_names: (!added_tool_names.is_empty()).then_some(added_tool_names),
+        tool_name: None,
     }));
     content.extend(adjacent_media.into_iter().map(UserPart::Media));
     (
@@ -483,6 +484,17 @@ pub(super) fn lower_tool_result(
         effective_is_error,
         result.as_ref().ok().and_then(ToolOutput::details).cloned(),
     )
+}
+
+/// Record which tool produced the paired result in the lowered message. Durable
+/// session metadata only; codecs never send it.
+pub(super) fn with_tool_name(mut message: UserMessage, name: &str) -> UserMessage {
+    for part in &mut message.content {
+        if let UserPart::ToolResult(result) = part {
+            result.tool_name = Some(name.to_owned());
+        }
+    }
+    message
 }
 
 /// The lowerer emits exactly one paired result followed by protocol-adjacent
@@ -522,6 +534,7 @@ pub(super) fn persist_pending_cancellations(session: &mut Session) -> Result<(),
                 content: vec![ToolResultPart::Text(text)],
                 is_error: true,
                 added_tool_names: None,
+                tool_name: Some(call.name),
             })],
         })))?;
     }
