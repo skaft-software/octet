@@ -405,6 +405,16 @@ impl ExecutableExtensions {
             bus.reset();
         }
         self.resource_owner = Some(session.resource_owner_key());
+        // `retire_active_resources` ended the old binding's authority. The same extension fleet
+        // serves the replacement session, so the new owner gets a live binding of its own: the
+        // epoch moves first, so no lease or guard taken for the old owner can become current
+        // again, then discovery is re-armed. Without this the flag stayed down for the life of
+        // the App, every resource pass failed with "resource generation changed while
+        // session_start settled", and the withdrawal fallback ended the application.
+        self.resource_paths_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.resource_paths_live
+            .store(true, std::sync::atomic::Ordering::Release);
         let active_owner = self.resource_owner.as_deref();
         self.presentations.retain(|_, view| {
             view.resource_owner.is_none() || view.resource_owner.as_deref() == active_owner

@@ -221,3 +221,35 @@ fn active_session_transition_discards_old_context_and_owner_presentations() {
     assert!(!extensions.presentations.contains_key("old-owner"));
     assert!(extensions.presentations.contains_key("global"));
 }
+
+/// An extension-initiated session replacement keeps the same extension fleet and App, so the
+/// resource binding must come back for the new owner. Retirement ends the old binding's
+/// authority; it must not end discovery for the replacement session for good.
+#[test]
+fn active_session_transition_rearms_resource_binding_for_the_new_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = Session::create(directory.path().join("old.jsonl")).unwrap();
+    let replacement = Session::create(directory.path().join("replacement.jsonl")).unwrap();
+    let sessions = SessionStore::new(&directory.path().join("sessions"), directory.path());
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let mut extensions = ExecutableExtensions::default();
+    extensions.resource_owner = Some(old.resource_owner_key());
+    let old_lease = extensions.resource_lease().unwrap();
+    assert!(old_lease.is_current());
+
+    extensions.transition_active_session(&replacement, &model, &ReasoningConfig::Off, &sessions);
+
+    assert!(
+        !old_lease.is_current(),
+        "nothing taken for the old owner may become current again"
+    );
+    let lease = extensions.resource_lease().unwrap();
+    assert!(
+        lease.is_current(),
+        "the replacement owner needs a live resource binding"
+    );
+    assert!(lease.matches(&extensions));
+}
