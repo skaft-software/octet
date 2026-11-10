@@ -168,9 +168,10 @@ compatibility effect. A maintainer decides at review whether the change fits the
 agreed scope; an issue link does not guarantee acceptance. PRs run fast CI; the
 full tier runs in the merge queue (or earlier with the `ci:full` label).
 
-Keep generated build artifacts, local reports, credentials, sessions,
-`AGENTS.md` and private research notes out of commits. The repository
-`.gitignore` lists the expected local-only paths.
+Keep generated build artifacts, local reports, credentials, sessions and
+private research notes out of commits. The repository `.gitignore` lists the
+expected private paths. Repository agent conventions are tracked in
+[AGENTS.md](AGENTS.md); update that source rather than keeping a separate mirror.
 
 ## Licensing
 

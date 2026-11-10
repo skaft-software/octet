@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use sexy_tui_rs::{ColorDepth, Component, Terminal, TerminalCapabilities, TerminalInput, TUI};
 use tempfile::TempDir;
 
+#[path = "startup_frame_pty/keyboard.rs"]
+mod keyboard;
 #[path = "startup_frame_pty/mouse.rs"]
 mod mouse;
 

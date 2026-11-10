@@ -375,6 +375,10 @@ pub enum ConfigError {
     /// Configuration parsing failure.
     #[error("Parse error: {0}")]
     Parse(String),
+    /// An extension provider hook refused or could not complete a request.
+    /// The text is host-authored and already names the hook and extension.
+    #[error("{0}")]
+    ExtensionHook(String),
     /// Duplicate endpoint registration.
     #[error("Duplicate endpoint registered: {0:?}")]
     DuplicateEndpoint(crate::types::EndpointId),

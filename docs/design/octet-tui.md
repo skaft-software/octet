@@ -249,6 +249,12 @@ same title/purpose/status/footer vocabulary as ordinary pickers. They occupy a
 temporary viewport surface rather than transcript history, start at their first
 semantic body row, and support Up/Down, PageUp/PageDown, Home, and End scrolling;
 Escape or Left returns to the composer.
+Read-only reports and document panels can consume current renderer-prepared
+navigation bounds before the completed-write receipt: terminal output can become
+visible before the renderer publishes that receipt. The prepared-to-written
+handoff is atomic with input, and refreshed-document anchoring cannot overwrite
+newer navigation. Neither input path performs layout. Approval confirmation and
+pointer hit-testing still require completed-frame receipts.
 Generic presentation snapshots do not create persistent chrome. First-party
 subagent activity occupies one mutable tool-like **Subagents** transcript block,
 including between root turns. Its bold heading counts worker states and points

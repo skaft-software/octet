@@ -1,20 +1,23 @@
 # Pi compatibility
 
-**v0.10.3 is octet's first Pi-compatible release.** Use your existing Pi
+**v0.10.0 was octet's first Pi-compatible release.** Use your existing Pi
 extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
 We're working toward full compatibility with existing Pi setups. The adapter
 follows **Pi 1.4's public extension API**, works with managed Pi installs from
-1.0.2 through 1.5.x, and needs Node 22.19+. Rust still owns the agent loop,
-sessions, permissions and terminal; the adapter loads extension code, not a
-second Pi agent. Ordinary octet use does not need Node.
+1.0.2 through 1.x (`PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`), and needs Node
+22.19+. Rust still owns the agent loop, sessions, permissions and terminal; the
+adapter loads extension code, not a second Pi agent. Ordinary octet use does not
+need Node.
 
 **Pi 1.5.0 is supported.** The adapter resolves version-specific Pi helpers from
-the installed Pi for the version it detects (1.0.2 and 1.5.0 are inventoried),
-and a symbol missing from the active inventory fails loudly naming the symbol and
-the version rather than becoming `undefined`. A version without an inventory is
-diagnosed and uses the nearest supported one; nothing silently downgrades Pi.
+the installed Pi for the version it detects (1.0.2 and 1.5.0 are inventoried, and
+1.5.0 is the module surface that answers when no installed Pi does), and a symbol
+missing from the active inventory fails loudly naming the symbol and the version
+rather than becoming `undefined`. A release newer than the newest inventory is
+diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release,
+or another major series is refused. Nothing silently downgrades Pi.
 
 See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
 Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
@@ -40,7 +43,7 @@ octet --enable-extension octet-pi-compat
 For source development, install locked adapter dependencies as described below,
 then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
 To install a downloaded bundle explicitly, use
-`octet extension install --path /absolute/path/octet-pi-compat-0.10.0.tar.gz`.
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.3.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
@@ -67,7 +70,7 @@ sections below are for a frozen, reviewed snapshot instead of the live mirror.
 ## Bring your Pi extensions
 
 Requires Node **22.19.0 or newer** and an existing managed Pi installation,
-**1.0.2 through 1.5.x**. The entrypoints reject older Node versions before loading adapter
+**1.0.2 through 1.x**. The entrypoints reject older Node versions before loading adapter
 dependencies or factories. Bun's existing execution path remains available but
 is separately unqualified. From a source checkout, install dependencies once:
 
@@ -384,7 +387,7 @@ route for each accepted factory. Manual entrypoint setup still defaults to the
 emulated path. Its `pi_compat_fallback_eligible` diagnostic names missing Pi
 exports; explicitly selected `--pi-runtime installed` or
 `"pi_runtime": "installed"` remains available for reviewed manual configurations.
-Managed Pi 1.0.2 through 1.5.x is accepted.
+Managed Pi 1.0.2 through 1.x is accepted.
 
 This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 `pi-agent-core`, `pi-ai` and `pi-tui`) inside the extension process:
