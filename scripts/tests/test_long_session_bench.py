@@ -7,6 +7,7 @@ from pathlib import Path
 import statistics
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -166,7 +167,9 @@ class SummaryTests(unittest.TestCase):
 
     def test_summary_uses_ordinary_turns_and_the_last_stream_cell(self):
         samples = [{"turn": turn, "kind": "stream" if turn == 60 else ("large_tool" if turn % 25 == 0 else "small"),
-                    "wall_ms": float(turn), "append_ms": None if turn == 1 else .5, "peak_rss_bytes": 10 + turn,
+                    "wall_ms": float(turn), "reply_frame_ms": float(turn) - 40.0,
+                    "settled_ms": float(turn) - 40.0 + .5,
+                    "append_ms": None if turn == 1 else .5, "peak_rss_bytes": 10 + turn,
                     "rss_bytes": 100 + turn, "session_bytes": 1000 * turn, "append_bytes": 10,
                     "cpu_ms": 1.0, "provider_validation_ms": .1} for turn in range(1, 61)]
         summary = BENCH.summarize(samples)
@@ -174,6 +177,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["turn_latency_ms"]["count"], 60)
         self.assertEqual(summary["early_small_p50_ms"], statistics.median(ordinary[:25]))
         self.assertEqual(summary["late_small_p50_ms"], statistics.median(ordinary[-25:]))
+        self.assertEqual(summary["late_small_reply_p50_ms"], statistics.median(ordinary[-25:]) - 40.0)
+        self.assertEqual(summary["settled_ms"]["count"], 60)
+        self.assertEqual(summary["late_small_settled_p50_ms"], statistics.median(ordinary[-25:]) - 39.5)
         self.assertEqual(summary["stream"]["turn"], 60)
         self.assertEqual(summary["append_persist_ms_per_turn"]["count"], 59)
         self.assertAlmostEqual(summary["rss_growth_bytes_per_100_turns"], 100)
@@ -259,6 +265,37 @@ class DurableSessionTests(unittest.TestCase):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 with self.assertRaises(AssertionError):
                     BENCH.check_session(write_session(directory, broken(session_records(turns), edit)), turns, ())
+
+
+class LedgerTests(unittest.TestCase):
+    def test_checkpoints_are_counted_incrementally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_session(directory, session_records(2))
+            ledger = BENCH.Ledger(path)
+            try:
+                self.assertEqual(ledger.advance(), 2)
+                ledger.wait_checkpoints(2, 1)
+                self.assertEqual(ledger.checkpoints, 2)
+                # Appending a torn line must not be counted or raise.
+                with path.open("ab") as stream:
+                    stream.write(b'{"type": "checkpoint"')
+                self.assertEqual(ledger.advance(), 2)
+                with path.open("ab") as stream:
+                    stream.write(b', "prompt": "9", "head": "9"}\n')
+                self.assertEqual(ledger.advance(), 3)
+            finally:
+                ledger.close()
+
+    def test_a_missing_checkpoint_fails_within_the_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BENCH.Ledger(write_session(directory, session_records(1)))
+            try:
+                started = time.monotonic()
+                with self.assertRaisesRegex(TimeoutError, "did not settle: 1 durable checkpoints"):
+                    ledger.wait_checkpoints(2, .05)
+                self.assertLess(time.monotonic() - started, 1)
+            finally:
+                ledger.close()
 
 
 class TraceTests(unittest.TestCase):

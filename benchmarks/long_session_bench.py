@@ -28,6 +28,8 @@ from session_bench import FRAME_END, MODEL, PeakSampler, command, content_text, 
 SCHEMA = "octet.long-session.v1"
 SCALES = (100, 1000, 5000)
 LARGE_EVERY = 25
+# Fixed completion drain after each painted answer; excluded from `settled_ms`.
+DRAIN_MS = 40
 # Many short lines exercise tool capture without triggering per-line clipping.
 LARGE_DATA = ("octet tool fixture " + "x" * 108 + "\n") * 1024
 assert len(LARGE_DATA.encode()) == 128 * 1024
@@ -213,6 +215,42 @@ def traces(raw):
     return metrics
 
 
+class Ledger:
+    """Incremental tail reader for the durable session file.
+
+    A turn is complete when its checkpoint record is durable, not when its text
+    is painted: the renderer can show a finished answer while the run is still
+    settling. Submitting the next prompt before that boundary overlaps two runs
+    and loses checkpoints, so every turn waits for its own record here.
+    """
+    def __init__(self, path):
+        self.stream = path.open("rb")
+        self.pending = b""
+        self.checkpoints = 0
+
+    def advance(self):
+        data = self.stream.read()
+        if data:
+            self.pending += data
+            *lines, self.pending = self.pending.split(b"\n")
+            for line in lines:
+                record = json.loads(line)
+                if record["type"] == "checkpoint":
+                    self.checkpoints += 1
+        return self.checkpoints
+
+    def wait_checkpoints(self, expected, timeout):
+        deadline = time.monotonic() + timeout
+        while self.advance() < expected:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"turn did not settle: {self.checkpoints} durable checkpoints, expected {expected}")
+            time.sleep(.001)
+
+    def close(self):
+        self.stream.close()
+
+
 class Terminal:
     def __init__(self, binary, workspace, env, session, errors, timeout, strace=None):
         self.master, slave = pty.openpty()
@@ -285,7 +323,7 @@ class Terminal:
 
     def quiet(self):
         # A bounded completion drain, not an unbounded animation-dependent wait.
-        end = time.monotonic() + .04
+        end = time.monotonic() + DRAIN_MS / 1000
         while time.monotonic() < end:
             self.read(.002)
 
@@ -396,9 +434,15 @@ def summarize(samples):
                for kind in {row["kind"] for row in samples}}
     append = [row["append_ms"] for row in samples if row["append_ms"] is not None]
     return {"turn_latency_ms": distribution([row["wall_ms"] for row in samples]),
+            "reply_frame_ms": distribution([row["reply_frame_ms"] for row in samples]),
+            "settled_ms": distribution([row["settled_ms"] for row in samples]),
             "latency_by_kind_ms": by_kind,
             "early_small_p50_ms": statistics.median(row["wall_ms"] for row in ordinary[:window]),
             "late_small_p50_ms": statistics.median(row["wall_ms"] for row in ordinary[-window:]),
+            "early_small_reply_p50_ms": statistics.median(row["reply_frame_ms"] for row in ordinary[:window]),
+            "late_small_reply_p50_ms": statistics.median(row["reply_frame_ms"] for row in ordinary[-window:]),
+            "early_small_settled_p50_ms": statistics.median(row["settled_ms"] for row in ordinary[:window]),
+            "late_small_settled_p50_ms": statistics.median(row["settled_ms"] for row in ordinary[-window:]),
             "peak_rss_bytes": max(row["peak_rss_bytes"] for row in samples),
             "end_rss_bytes": samples[-1]["rss_bytes"],
             "rss_growth_bytes_per_100_turns": growth_per_100(samples),
@@ -423,6 +467,7 @@ def run(binary, scales, work, timeout, strace=False):
     session = work / "live.jsonl"
     samples, cells = [], []
     try:
+        ledger = None
         with (work / "stderr.log").open("w+b") as errors:
             tty = Terminal(binary, workspace, env, session, errors, timeout,
                            work / "syscalls.log" if strace else None)
@@ -431,13 +476,18 @@ def run(binary, scales, work, timeout, strace=False):
                 tty.quiet()
                 tty.take_traces()
                 previous_size = session.stat().st_size
+                ledger = Ledger(session)
                 for index in range(1, max(scales) + 1):
                     before = proc_sample(tty.pid)
                     frame_count, output_bytes = tty.frames, tty.total_bytes
                     started = time.monotonic_ns()
                     os.write(tty.master, f"LONG_PROMPT_{index:05}\r".encode())
                     tty.frame(f"LONG_REPLY_{index:05}".encode())
+                    replied = time.monotonic_ns()
                     tty.quiet()
+                    # The answer is painted before the run settles; a durable
+                    # checkpoint is the boundary that makes turns sequential.
+                    ledger.wait_checkpoints(index, timeout)
                     finished = time.monotonic_ns()
                     after = proc_sample(tty.pid)
                     metrics = tty.take_traces()
@@ -452,6 +502,8 @@ def run(binary, scales, work, timeout, strace=False):
                     row = {"turn": index, "kind": "stream" if index in scales else
                            ("large_tool" if index % LARGE_EVERY == 0 else "small"),
                            "wall_ms": (finished - started) / 1e6,
+                           "reply_frame_ms": (replied - started) / 1e6,
+                           "settled_ms": (finished - started) / 1e6 - DRAIN_MS,
                            "provider_validation_ms": validation_ms,
                            "cpu_ms": after["cpu_ms"] - before["cpu_ms"],
                            "rss_bytes": after["rss_bytes"], "private_bytes": after["private_bytes"],
@@ -477,6 +529,8 @@ def run(binary, scales, work, timeout, strace=False):
                         cells.append({"turns": index, "summary": summarize(samples),
                                       "resume": resumed, "correctness": checks})
             finally:
+                if ledger is not None:
+                    ledger.close()
                 tty.close()
         expected = max(scales) + max(scales) // LARGE_EVERY
         if provider.fixture.next_turn != max(scales) + 1 or len(provider.fixture.rows) != expected:
@@ -516,6 +570,8 @@ def main():
                           "compaction": "disabled", "extensions": [], "stream_chunk_bytes": 512,
                           "stream_chunk_interval_ms": 8},
               "scope": {"latency": "submit to answer PTY frame plus fixed 40ms completion drain; includes fake-provider Python validation and scheduled stream delay",
+                        "reply_frame": "submit to the first answer PTY frame, excluding the fixed completion drain",
+                        "settled": "submit to the durable checkpoint record that ends the run, excluding the fixed drain",
                         "resume": "spawn to history/model-ready synchronized fullscreen PTY frame, not first provisional composer or emulator paint",
                         "cpu": "own octet process /proc ticks; excludes Python provider and tool descendants",
                         "rss": "own octet process; peak sampled every 2ms, may miss brief peaks; end=settled final turn, before exit",
