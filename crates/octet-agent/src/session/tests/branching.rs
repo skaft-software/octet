@@ -713,3 +713,44 @@ fn malformed_parent_reference_is_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn tool_result_name_is_durable_and_absent_results_still_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tool-name.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let result = |name: Option<&str>| {
+        EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                tool_call_id: octet_ai::ToolCallId("call".into()),
+                content: vec![octet_ai::ToolResultPart::Text("ok".into())],
+                is_error: false,
+                added_tool_names: None,
+                tool_name: name.map(str::to_owned),
+            })],
+        }))
+    };
+    session.append(user("go")).unwrap();
+    session.append(result(Some("read"))).unwrap();
+    session.append(result(None)).unwrap();
+    drop(session);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.matches("\"tool_name\":\"read\"").count(), 1);
+    assert_eq!(raw.matches("tool_name").count(), 1, "None is not written");
+    let reopened = Session::open(&path).unwrap();
+    let names: Vec<Option<String>> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(user)) => user.content.iter().find_map(|part| {
+                if let UserPart::ToolResult(result) = part {
+                    Some(result.tool_name.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec![Some("read".to_owned()), None]);
+}

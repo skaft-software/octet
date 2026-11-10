@@ -5102,6 +5102,7 @@ async fn reattached_delivered_task_settles_and_explicit_follow_up_never_replays_
                             content: vec![octet_ai::ToolResultPart::Text("written".into())],
                             is_error: false,
                             added_tool_names: None,
+                            tool_name: None,
                         })],
                     },
                 )))

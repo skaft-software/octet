@@ -17,27 +17,6 @@
     {
       "scenario": "*",
       "step": "*",
-      "check": "entries",
-      "fingerprint": "entries.*.payload.toolName",
-      "reason": "Pi persists toolName on every toolResult message; octet's ToolResult keeps only tool_call_id, content and is_error (octet-ai types.rs ToolResult)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "import-entries",
-      "fingerprint": "entries.*.payload.toolName",
-      "reason": "Pi persists toolName on every toolResult message; octet's ToolResult keeps only tool_call_id, content and is_error (octet-ai types.rs ToolResult)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "reopen-entries",
-      "fingerprint": "entries.*.payload.toolName",
-      "reason": "Pi persists toolName on every toolResult message; octet's ToolResult keeps only tool_call_id, content and is_error (octet-ai types.rs ToolResult)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
       "check": "file",
       "fingerprint": "file",
       "reason": "Pi keeps a setup-only session in memory and writes no file until the first user/assistant message; octet creates the JSONL and appends setup entries immediately (octet-agent session/store.rs create)."

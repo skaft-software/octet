@@ -810,6 +810,7 @@ mod tests {
                 content: vec![ToolResultPart::Text(text.into())],
                 is_error,
                 added_tool_names: None,
+                tool_name: None,
             })
         };
         vec![
@@ -919,6 +920,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("x".repeat(4_000))],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1040,6 +1042,7 @@ mod tests {
                         content: vec![ToolResultPart::Text("done".into())],
                         is_error: false,
                         added_tool_names: None,
+                        tool_name: None,
                     })],
                 }),
             ],
@@ -1110,6 +1113,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("x".repeat(2_100))],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             }),
         ];
@@ -1137,6 +1141,7 @@ mod tests {
                         content: vec![ToolResultPart::Media(audio("tool recording"))],
                         is_error: false,
                         added_tool_names: None,
+                        tool_name: None,
                     }),
                 ],
             }),

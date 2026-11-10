@@ -877,6 +877,7 @@ fn subagent_tail_hydration_and_deferred_prepend_hide_boundary_results() {
                     content: vec![ToolResultPart::Text("SECRET-RESULT".into())],
                     is_error: true,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

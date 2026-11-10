@@ -106,10 +106,10 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
                         integer(message, "timestamp")?;
                         let parts = user_content(&message["content"])?;
                         let content = parts.into_iter().map(|part| match part { UserPart::Text(t) => ToolResultPart::Text(t), UserPart::Media(m) => ToolResultPart::Media(m), _ => unreachable!("Pi content contains no tool results") }).collect();
-                        string(message, "toolName")?;
+                        let tool_name = string(message, "toolName")?.to_owned();
                         EntryValue::Message(Message::User(UserMessage { content: vec![UserPart::ToolResult(ToolResult {
                             tool_call_id: ToolCallId(string(message, "toolCallId")?.into()), content,
-                            is_error: boolean(message, "isError")?, added_tool_names: None,
+                            is_error: boolean(message, "isError")?, added_tool_names: None, tool_name: Some(tool_name),
                         })] }))
                     }
                     _ => anyhow::bail!("unsupported Pi message role at record {}: system/custom/bashExecution or other semantic messages require a compatible importer", index + 1),

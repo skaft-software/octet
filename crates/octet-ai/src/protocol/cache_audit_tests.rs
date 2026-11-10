@@ -161,6 +161,7 @@ fn append_batch(request: &mut crate::Request, protocol: Protocol, turn: usize, c
                     content: vec![ToolResultPart::Text("source inspected; no mutation".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })
             })
             .collect(),

@@ -497,6 +497,7 @@ fn octet_entry_payload(
                         json!({
                             "role": "toolResult",
                             "toolCallId": results[0].tool_call_id.0,
+                            "toolName": results[0].tool_name,
                             "isError": results[0].is_error,
                             "content": content,
                         }),
@@ -510,6 +511,7 @@ fn octet_entry_payload(
                         "role": "toolResults",
                         "results": results.iter().map(|result| json!({
                             "toolCallId": result.tool_call_id.0,
+                            "toolName": result.tool_name,
                             "isError": result.is_error,
                             "content": result.content.iter().map(octet_tool_part).collect::<Vec<_>>(),
                         })).collect::<Vec<_>>(),

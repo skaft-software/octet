@@ -12007,6 +12007,7 @@ async fn immutable_tool_results_recover_torn_heads_and_branch_checkout_without_r
                     )],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

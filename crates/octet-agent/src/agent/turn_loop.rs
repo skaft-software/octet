@@ -114,6 +114,7 @@ impl Agent {
                 sandbox.max_output_bytes,
                 Vec::new(),
             );
+            let message = with_tool_name(message, &call.name);
             self.session.append_with_metadata(
                 EntryValue::Message(Message::User(message)),
                 details.map(|tool_output| EntryMetadata {
@@ -3298,6 +3299,7 @@ impl Agent {
                         sandbox.max_output_bytes,
                         newly_added,
                     );
+                    let message = with_tool_name(message, &call.name);
                     let owner_images = if owner_tool_images_enabled {
                         Some(ToolOutput::new("").with_owner_presentation_images(
                             lowered_tool_result_media(&message),

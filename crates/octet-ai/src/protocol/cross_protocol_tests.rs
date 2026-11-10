@@ -105,6 +105,7 @@ fn test_cross_protocol_canonical_immutability() {
         content: vec![ToolResultPart::Text("done".to_string())],
         is_error: false,
         added_tool_names: None,
+        tool_name: None,
     };
 
     let assistant_reasoning = AssistantPart::Reasoning(ReasoningPart {
@@ -821,5 +822,75 @@ fn pdf_documents_are_refused_where_the_model_or_route_cannot_read_them() {
             .spec
             .effective_input_modalities()
             .contains(Modality::Pdf));
+    }
+}
+
+/// `ToolResult::tool_name` is durable session metadata. No codec may put it on
+/// the provider wire: the call name already travels with the paired tool call.
+#[test]
+fn tool_result_tool_name_never_reaches_any_provider_request_body() {
+    const MARKER: &str = "persisted_name_marker_9f31";
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+        Protocol::GoogleGenerativeAi,
+        Protocol::BedrockConverse,
+        Protocol::MistralConversations,
+        Protocol::PiMessages,
+    ] {
+        let model = make_model(protocol, false, false, false, false);
+        let req = Request {
+            messages: vec![
+                Message::User(UserMessage {
+                    content: vec![UserPart::Text("go".to_string())],
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: vec![AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
+                        id: ToolCallId("call_1".to_string()),
+                        name: "lookup".to_string(),
+                        arguments_json: "{}".to_string(),
+                        argument_error: None,
+                    })],
+                    model: model.spec.id.clone(),
+                    protocol,
+                }),
+                Message::User(UserMessage {
+                    content: vec![UserPart::ToolResult(ToolResult {
+                        tool_call_id: ToolCallId("call_1".to_string()),
+                        content: vec![ToolResultPart::Text("done".to_string())],
+                        is_error: false,
+                        added_tool_names: None,
+                        tool_name: Some(MARKER.to_string()),
+                    })],
+                }),
+            ],
+            ..base_request()
+        };
+        let parts = match protocol {
+            Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(&model, &req),
+            Protocol::OpenAiResponses => {
+                crate::protocol::openai_responses::build_request(&model, &req)
+            }
+            Protocol::AnthropicMessages => crate::protocol::anthropic::build_request(&model, &req),
+            Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(&model, &req),
+            Protocol::BedrockConverse => crate::protocol::bedrock::build_request(&model, &req),
+            Protocol::MistralConversations => {
+                crate::protocol::mistral_conversations::build_request(&model, &req)
+            }
+            Protocol::PiMessages => crate::protocol::pi_messages::build_request(&model, &req),
+            Protocol::ExtensionStream => unreachable!(),
+        }
+        .unwrap_or_else(|error| panic!("{protocol:?} refused the request: {error:?}"));
+        let body = String::from_utf8_lossy(&parts.body);
+        assert!(
+            body.contains("call_1") || body.contains("lookup"),
+            "{protocol:?}: {body}"
+        );
+        assert!(
+            !body.contains(MARKER),
+            "{protocol:?} leaked tool_name onto the wire: {body}"
+        );
     }
 }

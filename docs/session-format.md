@@ -60,7 +60,7 @@ is itself `type`-tagged (`EntryValue` in `crates/octet-agent/src/session.rs`):
 
 | `value.type` | Meaning |
 | --- | --- |
-| `message` | A complete user/assistant/tool-result message that is model-visible. |
+| `message` | A complete user/assistant/tool-result message that is model-visible. A tool result may carry an optional `tool_name` (the tool that produced it, imported from Pi's `toolName`); it is durable metadata and is never sent to a provider. |
 | `compaction` | Local compaction: history older than `first_kept` is replaced by `summary`, or by its optional `snapcompact` inline PNG frames plus lead-in on vision routes. |
 | `responses_turn` | Opaque OpenAI Responses output stored beside its canonical assistant message. Not model-visible. |
 | `responses_compaction` | Opaque `POST /responses/compact` checkpoint that covers the active branch through `covered_through`. |

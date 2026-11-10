@@ -282,6 +282,7 @@ async fn opencode_parallel_google_calls_survive_streaming_and_result_replay() {
                         content: vec![ToolResultPart::Text(format!("result-{position}"))],
                         is_error: false,
                         added_tool_names: None,
+                        tool_name: None,
                     })
                 })
                 .collect(),
@@ -477,6 +478,7 @@ async fn signed_delta_replay_with_large_write_uses_native_google_contract_on_eve
                 content: vec![ToolResultPart::Text("written".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }));
         let final_response = client.complete(&model, request).await.unwrap();

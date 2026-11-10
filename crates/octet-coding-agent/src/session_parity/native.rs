@@ -243,6 +243,7 @@ impl Native {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         added_tool_names: None,
+                        tool_name: Some(text(message, "toolName").to_owned()),
                     })],
                 }))
             }

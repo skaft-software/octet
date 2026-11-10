@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Tool results now record the name of the tool that produced them, including
+  when imported from a Pi session. The name is stored for the session only and
+  never sent to a provider.
+
 - Renaming a session replaces line breaks in the name with spaces and trims it,
   as Pi does, instead of refusing the name.
 

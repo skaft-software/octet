@@ -282,6 +282,7 @@ fn parallel_tool_results_stay_ahead_of_adjacent_media() {
                 content: vec![],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             }),
             UserPart::Media(octet_ai::Media::image_bytes(
                 bytes::Bytes::from_static(b"first"),
