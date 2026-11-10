@@ -452,17 +452,36 @@ impl Session {
     }
 
     /// The active checkpoint is bitmap-only and cannot be replayed on a text model.
+    ///
+    /// Only the newest compaction on the active branch matters, so the verdict
+    /// is cached incrementally: [`Session::append`] installs a compaction's
+    /// own flag when it becomes the newest one and leaves the cached verdict
+    /// untouched otherwise, while checkout re-branches invalidate it. The
+    /// first call after such a change walks the parent chain once, newest
+    /// first, and stops at that compaction instead of materializing the
+    /// whole branch.
     pub fn has_snapcompact_context(&self) -> Result<bool, SessionError> {
         let _span = crate::performance_trace::Span::start("session.snapcompact_scan", 0);
-        Ok(self
-            .active_branch_entries()?
-            .iter()
-            .rev()
-            .find_map(|entry| match &entry.value {
-                EntryValue::Compaction { snapcompact, .. } => Some(snapcompact.is_some()),
-                _ => None,
-            })
-            .unwrap_or(false))
+        if let Some(verdict) = self.snapcompact_cache.borrow().as_ref() {
+            return Ok(*verdict);
+        }
+        let mut cursor = self.head.as_ref();
+        let verdict = loop {
+            let Some(id) = cursor else {
+                break false;
+            };
+            let entry = self
+                .entry(id)
+                .ok_or_else(|| SessionError::UnknownEntry(id.clone()))?;
+            if let EntryValue::Compaction { snapcompact, .. } = &entry.value {
+                break snapcompact.is_some();
+            }
+            cursor = entry.parent.as_ref();
+            #[cfg(test)]
+            self.snapcompact_walk_entries.set(self.snapcompact_walk_entries.get() + 1);
+        };
+        *self.snapcompact_cache.borrow_mut() = Some(verdict);
+        Ok(verdict)
     }
 
     /// Borrows the cached model-visible context without deep-cloning message

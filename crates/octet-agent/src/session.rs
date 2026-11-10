@@ -1484,6 +1484,16 @@ pub struct Session {
     /// checkout and compaction invalidate it because they can change the
     /// active branch or summary boundary.
     context_cache: RefCell<Option<Vec<Message>>>,
+    /// Cached bitmap-checkpoint verdict for the newest compaction on the
+    /// current head chain; `None` re-resolves lazily by walking the parents.
+    /// Compaction appends and non-compaction appends keep it valid: only a
+    /// compaction append can change the newest compaction, and a
+    /// non-compaction append extends the chain without touching it.
+    snapcompact_cache: RefCell<Option<bool>>,
+    /// Number of entries visited by the latest `has_snapcompact_context`
+    /// re-resolution. Test-only: proves the cached verdict is reused.
+    #[cfg(test)]
+    snapcompact_walk_entries: std::cell::Cell<usize>,
     responses_replay_cache: RefCell<Option<ResponsesReplayCache>>,
     #[cfg(test)]
     responses_replay_work: std::cell::Cell<(usize, usize)>,
