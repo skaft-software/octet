@@ -113,7 +113,7 @@ gh workflow run release-octet.yml --ref octet-binaries-v0.10.3 \
 This does not restart product CI or turn failed CI into a pass. Record the
 remaining qualification limitations in the release notes.
 
-Cargo can build the published canonical tag's exact source (Rust 1.88+;
+Cargo can build the published canonical tag's exact source (Rust 1.89+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh

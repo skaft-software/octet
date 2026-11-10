@@ -12,7 +12,7 @@ command that produced it.
 
 ## The local loop
 
-Start with the credential-free smoke lane (Python 3.10+, Rust 1.88+):
+Start with the credential-free smoke lane (Python 3.10+, Rust 1.89+):
 
 ```sh
 cargo fetch --locked                  # once, if the local dependency cache is empty
@@ -66,7 +66,7 @@ compatibility, but no merge queue produces those runs. The dispatch-only
 | `windows (x86_64-pc-windows-gnu)` | Full / windows-2025 | native Windows build, binary smoke, terminal frontend, ConPTY, renderer, extension launch, Python SDK and computer-use |
 | `first-party-extension-tests` | Full / ubuntu-24.04 | the shared Python SDK, release-catalog adapters, and source-only extensions in `extensions/source-catalog.txt` |
 | `extension-api-v03` | Full / ubuntu-24.04 | generated API 0.3 artifacts and language conformance |
-| `msrv` | Full / ubuntu-24.04 | the workspace still checks on Rust 1.88 (`rust-version` in `Cargo.toml`) |
+| `msrv` | Full / ubuntu-24.04 | the workspace still checks on Rust 1.89 (`rust-version` in `Cargo.toml`) |
 | `smoke-install` | Full / ubuntu-24.04 | a real `cargo install`, version/help/host hello, then a loopback coding/cancellation/recovery journey against those installed executables |
 
 `ci-required` aggregates all jobs and is intended to be the single required CI
