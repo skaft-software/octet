@@ -558,13 +558,10 @@ async fn copilot_bad_inventory_is_atomic_and_does_not_fall_back_to_static_models
         json!({"data": [model("unsupported", "/v1/messages")]}),
         json!({"data": [model("duplicate", "/responses"), model("duplicate", "/responses")]}),
         json!({"data": vec![model("bounded", "/chat/completions"); 129]}),
-        json!({"data": [model("valid", "/responses"), null]}),
-        json!({"data": [model("valid", "/responses"), {"id": "incomplete"}]}),
         json!({"data": [model("valid", "/responses"), model(OAUTH, "/responses")]}),
         json!({"data": [model("valid", "/responses"), model(INFERENCE, "/responses")]}),
         json!({"data": [model("valid", "/responses"), secret_name]}),
         json!({"data": [model("valid", "/responses"), invalid_limits]}),
-        json!({"data": [model("valid", "/responses"), invalid_flags]}),
     ] {
         let (_temp, store, _) = private_store();
         store.save(OAUTH).unwrap();
@@ -585,6 +582,61 @@ async fn copilot_bad_inventory_is_atomic_and_does_not_fall_back_to_static_models
             assert!(!format!("{error:#} {error:?}").contains(secret));
         }
         assert_no_advertisement(&catalog);
+    }
+}
+
+#[tokio::test]
+async fn copilot_inventory_skips_records_it_cannot_use_without_promoting_static_models() {
+    // The authenticated inventory also lists legacy, embedding and partial
+    // records. Each one is skipped on its own so the supported chat models still
+    // register, and nothing is promoted from the static catalog instead. A model
+    // that publishes no `policy` is not one of those records: it stays usable.
+    let mut invalid_flags = model("invalid-flags", "/responses");
+    invalid_flags["capabilities"]["supports"]["tool_calls"] = json!("true");
+    let mut unpoliced = model("unpoliced", "/chat/completions");
+    unpoliced.as_object_mut().unwrap().remove("policy");
+    let embedding = json!({
+        "id": "text-embedding-3-small", "object": "model",
+        "model_picker_enabled": false,
+        "capabilities": {"type": "embeddings", "supports": {}}
+    });
+    for (inventory, expected) in [
+        (
+            json!({"data": [model("valid", "/responses"), null]}),
+            vec!["github-copilot/valid"],
+        ),
+        (
+            json!({"data": [model("valid", "/responses"), {"id": "incomplete"}]}),
+            vec!["github-copilot/valid"],
+        ),
+        (
+            json!({"data": [model("valid", "/responses"), invalid_flags]}),
+            vec!["github-copilot/valid"],
+        ),
+        (
+            json!({"data": [unpoliced.clone(), embedding]}),
+            vec!["github-copilot/unpoliced"],
+        ),
+    ] {
+        let (_temp, store, _) = private_store();
+        store.save(OAUTH).unwrap();
+        let server = MockServer::start().await;
+        exchange_mock(&server, INFERENCE).await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(inventory))
+            .mount(&server)
+            .await;
+        let host = Arc::new(CopilotCodingHost::with_mock_server(store, &server.uri()));
+        let mut catalog = ModelCatalog::default();
+        host.register_available_models(&mut catalog, false)
+            .await
+            .unwrap();
+        let advertised = catalog
+            .models()
+            .map(|spec| spec.id.0.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(advertised, expected);
     }
 }
 
