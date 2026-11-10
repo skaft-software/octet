@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- An extension CLI flag may reuse the name of a subcommand option (Pi's
+  `preset.ts` registers `--preset`, which `octet setup` also has), instead of
+  failing startup with a conflict. Only top-level options reserve a name; a real
+  conflict now tells the user to rename the flag or disable the named extension.
+
 - `octet-pi-compat` configure writes a valid manifest default for a Pi flag
   registered without one (such as `preset.ts`'s `--preset`) instead of
   `default = undefined`.
