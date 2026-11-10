@@ -17,13 +17,6 @@
     {
       "scenario": "*",
       "step": "*",
-      "check": "settings",
-      "fingerprint": "settings.read",
-      "reason": "octet's catalog summary reader rejects a branch_summary record (session_store.rs SummaryEntryValue), so list/inspect and the resume model projection fail for any session containing one."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
       "check": "import-settings",
       "fingerprint": "settings.thinking",
       "reason": "Pi defaults thinkingLevel to \"off\" when the branch has no thinking_level_change entry; octet stores no level, so resume falls back to the configured default (app/bootstrap.rs persisted_session_config)."
@@ -34,13 +27,6 @@
       "check": "import-settings",
       "fingerprint": "settings.model",
       "reason": "Pi reports the provider/model of the last assistant message on the branch; octet's resume projection reads only model_change entries (app/bootstrap.rs persisted_session_config, session_store.rs active_branch_catalog_config)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "import-settings",
-      "fingerprint": "settings.read",
-      "reason": "octet's catalog summary reader rejects a branch_summary record (session_store.rs SummaryEntryValue), so list/inspect and the resume model projection fail for any session containing one."
     },
     {
       "scenario": "*",

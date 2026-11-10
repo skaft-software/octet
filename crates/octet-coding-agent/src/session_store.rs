@@ -600,6 +600,9 @@ enum SummaryEntryValue {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    /// Pi's `branch_summary` is an ordinary record on the active branch; the
+    /// catalog only needs it to parse, not its text.
+    BranchSummary {},
     ResponsesSteering {},
     PromptTemplateSelected {},
     SkillActivated {},
@@ -1367,7 +1370,8 @@ fn summarize_session_with_usage(
                         SummaryEntryValue::Config { model, reasoning } => {
                             (SummaryEntryKind::Other, None, None, model, reasoning)
                         }
-                        SummaryEntryValue::ResponsesSteering {}
+                        SummaryEntryValue::BranchSummary {}
+                        | SummaryEntryValue::ResponsesSteering {}
                         | SummaryEntryValue::PromptTemplateSelected {}
                         | SummaryEntryValue::SkillActivated {}
                         | SummaryEntryValue::SkillResourceRead {}

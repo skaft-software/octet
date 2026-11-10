@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Session listing and resume no longer fail on a session that contains a
+  branch summary record, including sessions imported from Pi.
+
 - The model now sees a compaction summary wrapped in the same text Pi uses
   ("The conversation history before this point was compacted into the following
   summary: ..."), so a session compacted in either tool reads the same.
