@@ -1,0 +1,35 @@
+{
+  "name": "usage-category",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "usage",
+      "as": "usage",
+      "kind": "extension",
+      "provider": "openai",
+      "model": "fixture",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      }
+    }
+  ]
+}
