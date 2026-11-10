@@ -349,13 +349,13 @@ class DocsTruthTests(unittest.TestCase):
         }
         page = _shipped_markdown()["docs/testing/README.md"]
         table = re.search(
-            r"(?ms)^## CI lanes on every pull request\n(.*?)(?=^## |\Z)", page
+            r"(?ms)^## CI tiers\n(.*?)(?=^## |\Z)", page
         ).group(1)
         lanes = [re.match(r"^\| `([^`]+)`", line).group(1) for line in table.splitlines() if line.startswith("| `")]
         self.assertTrue(lanes)
         missing = sorted({lane.split(" (")[0] for lane in lanes} - jobs)
         self.assertFalse(missing, f"docs/testing/README.md documents CI lanes that do not exist: {missing}")
-        for workflow_name in re.findall(r"`(security\.yml|provider-acceptance\.yml|production-panic-audit\.yml)`", page):
+        for workflow_name in re.findall(r"`(models-dev-freshness\.yml|security\.yml|provider-acceptance\.yml|production-panic-audit\.yml)`", page):
             self.assertTrue((ROOT / ".github/workflows" / workflow_name).exists())
 
     def test_documented_paths_in_testing_page_exist(self):

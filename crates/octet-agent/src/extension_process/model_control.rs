@@ -109,13 +109,13 @@ impl PiProviderModelMetadata {
 
 fn parse_proxy_declaration(
     value: serde_json::Value,
-) -> Result<api_v03::ProviderRegisterParams, ProviderHostResponseError> {
-    api_v03::canonical_json(&value).map_err(|_| ProviderHostResponseError::Invalid)?;
-    let request: api_v03::ProviderRegisterParams =
+) -> Result<api_v04::ProviderRegisterParams, ProviderHostResponseError> {
+    api_v04::portable_json(&value).map_err(|_| ProviderHostResponseError::Invalid)?;
+    let request: api_v04::ProviderRegisterParams =
         serde_json::from_value(value.clone()).map_err(|_| ProviderHostResponseError::Invalid)?;
-    api_v03::parse_provider_definition(value["provider"].clone())
+    api_v04::parse_provider_definition(value["provider"].clone())
         .map_err(|_| ProviderHostResponseError::Invalid)?;
-    if request.models.len() > api_v03::MAX_PROVIDER_MODELS {
+    if request.models.len() > api_v04::MAX_PROVIDER_MODELS {
         return Err(ProviderHostResponseError::Invalid);
     }
     for (model, wire) in request
@@ -129,14 +129,14 @@ fn parse_proxy_declaration(
             model.protocol.as_str(),
             "google_generative_ai" | "extension_stream"
         ) {
-            api_v03::parse_provider_model_definition(wire.clone())
+            api_v04::parse_provider_model_definition(wire.clone())
                 .map_err(|_| ProviderHostResponseError::Invalid)?;
-        } else if model.id.len() > api_v03::MAX_PROVIDER_ID_BYTES
-            || model.api_name.len() > api_v03::MAX_PROVIDER_ID_BYTES
+        } else if model.id.len() > api_v04::MAX_PROVIDER_ID_BYTES
+            || model.api_name.len() > api_v04::MAX_PROVIDER_ID_BYTES
             || model
                 .display_name
                 .as_ref()
-                .is_some_and(|name| name.len() > api_v03::MAX_PROVIDER_LABEL_BYTES)
+                .is_some_and(|name| name.len() > api_v04::MAX_PROVIDER_LABEL_BYTES)
             || wire
                 .get("display_name")
                 .is_some_and(serde_json::Value::is_null)
@@ -151,7 +151,7 @@ pub(super) fn parse_provider_proxy_registration(
     mut value: serde_json::Value,
 ) -> Result<
     (
-        api_v03::ProviderRegisterParams,
+        api_v04::ProviderRegisterParams,
         BTreeMap<String, PiProviderModelMetadata>,
     ),
     ProviderHostResponseError,
@@ -210,7 +210,7 @@ pub(super) fn register_provider_proxy(
     state: &ProtocolReadState,
     value: serde_json::Value,
     update: bool,
-) -> Result<api_v03::ProviderCatalogResult, ProviderHostResponseError> {
+) -> Result<api_v04::ProviderCatalogResult, ProviderHostResponseError> {
     let (mut request, mut metadata) = parse_provider_proxy_registration(value)?;
     let google = read_std_lock(&state.protocol).supports("provider_google_generative_ai_v1");
     if !google
@@ -432,7 +432,7 @@ pub(super) fn dispatch_model_control(
                 serde_json::json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":message}})
             }
         };
-        deliver_api_v03_session_lifecycle_response(
+        deliver_session_lifecycle_response(
             child_requests,
             request_id,
             writer,

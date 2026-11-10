@@ -254,15 +254,11 @@ export class Runtime {
   }
   assertOwner(store) {
     this.assertSessionOwner(store);
-    const foreground = this.foreground;
-    // Pi keeps a captured context valid until the session is replaced or
-    // reloaded. A completed, failed, cancelled or interrupted turn does not
-    // invalidate it, so a live state of the same owner/generation is enough.
-    if (!foreground || store.state === foreground) return;
-    const same = store.state.owner?.extension_instance_id === foreground.owner.extension_instance_id
-      && store.state.owner?.process_generation === foreground.owner.process_generation
-      && store.state.workspace === foreground.workspace;
-    if (!same) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+    // Pi retains contexts across turns, not session replacement (pi-reference/
+    // node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:482-491,613-620).
+    // Private background bindings may read their own session, but sharing a
+    // process/workspace cannot grant the foreground's native UI/write authority.
+    if (store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
   }
   assertFactory(factory) {
     if (this.failedFactories.has(factory)) throw rpcError(-32002, 'failed extension factory is unavailable');

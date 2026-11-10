@@ -52,6 +52,6 @@ runtime/declarations have no registry dependencies. Generated files come from
 `protocol/extension-api-v0.3.schema.json`; **do not edit them directly**.
 
 See [current extension authoring](../../docs/extensions.md), the
-[canonical generated reference](../../docs/extensions/API-0.4-REFERENCE.md) and
+retained canonical schema (`protocol/extension-api-v0.3.schema.json`) and
 [feature-negotiated wire](../../docs/extensions/PROTOCOL-REFERENCE.md) for exact
 version-specific fields, bounds and host availability.

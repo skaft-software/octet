@@ -137,7 +137,8 @@ test('mirror late tools cannot use missing, retired or inactive owners or a fail
   const entry = live.runtime.events.get('session_start')[0];
   assert.throws(() => entry.handler({}, {}), /not_foreground_owner/);
   live.store.state.alive = false; assert.throws(live.register, /not_foreground_owner/);
-  live.store.state.alive = true; live.runtime.foreground = {};
+  live.store.state.alive = true;
+  live.runtime.foreground = { ...live.store.state, owner: { ...owner, session_id: 'other-live-session' } };
   assert.throws(live.register, /not_foreground_owner/);
   live.runtime.foreground = live.store.state;
   for (const foreign of [{ ...owner, process_generation: owner.process_generation + 1 }, { ...owner, extension_instance_id: 'foreign-instance' }]) {

@@ -2,8 +2,9 @@
 
 This is a **retained wire and host-operations reference**, with API `0.1`/`0.2`
 examples and services reused by current API `0.4`. New authoring starts with
-[the current guide](../extensions.md). The [generated reference](API-0.4-REFERENCE.md)
-defines version policy and the distinct canonical API `0.3` models. Earlier
+[the current guide](../extensions.md). The [hand-maintained 0.4 reference](API-0.4-REFERENCE.md)
+defines current version policy; the distinct canonical API `0.3` models remain
+in the retained schema (`protocol/extension-api-v0.3.schema.json`). Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
@@ -69,7 +70,7 @@ Manifest-selected versions are exact:
   are conditional; parent-correlated ephemeral input is part of the base wire.
 - API `0.3` remains canonical and schema-generated, not an implicit upgrade
   of either legacy wire. Its bounds, methods, errors, capabilities, and
-  availability belong to the [generated reference](API-0.4-REFERENCE.md).
+  availability belong to the retained schema (`protocol/extension-api-v0.3.schema.json`).
   Its paired session hooks are distinct from feature-negotiated lifecycle
   observations; manifest flag support does not merge those wires.
 - API `0.4` is current and uses the feature-negotiated wire retained from `0.2`.

@@ -126,7 +126,7 @@ test("project_trust fires once with Pi's payload, before session_start, and gran
   // Pi resolves a cwd once per process; a later session_start does not repeat it.
   await peer.start({ project_trusted: false, mode: 'tui' });
   assert.deepEqual(recording.read().map(entry => entry.event), ['project_trust', 'session_start', 'session_start']);
-  assert.match(peer.stderr(), /project_trust: .* answered "yes" but octet decided workspace trust natively \(untrusted\); native admission is unchanged/);
+  await peer.waitStderr(/project_trust: .* answered "yes" but octet decided workspace trust natively \(untrusted\); native admission is unchanged/);
   await peer.close();
 });
 
@@ -139,7 +139,7 @@ test('project_trust cannot revoke native trust either, and is not emitted for a 
   assert.deepEqual(events.map(entry => entry.event), ['project_trust', 'session_start']);
   assert.equal(events[0].trusted, true);
   assert.equal(events[1].trusted, true);
-  assert.match(peer.stderr(), /project_trust: .* answered "no" but octet decided workspace trust natively \(trusted\); native admission is unchanged/);
+  await peer.waitStderr(/project_trust: .* answered "no" but octet decided workspace trust natively \(trusted\); native admission is unchanged/);
   await peer.close();
 
   // Pi skips the event when a workspace has no protected resource to decide about.

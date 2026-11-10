@@ -391,10 +391,10 @@ impl ExtensionProviderAuthorizationPolicy for CodingAgentProviderAuthorizationPo
     fn authorize(
         &self,
         _owner: &ExtensionProviderOwner,
-        _provider: &octet_agent::extension_api_v03::ProviderDefinition,
-        request: &octet_agent::extension_api_v03::ProviderAuthorizationRequest,
-    ) -> octet_agent::extension_api_v03::ProviderAuthorizationResult {
-        octet_agent::extension_api_v03::ProviderAuthorizationResult {
+        _provider: &octet_agent::extension_api_v04::ProviderDefinition,
+        request: &octet_agent::extension_api_v04::ProviderAuthorizationRequest,
+    ) -> octet_agent::extension_api_v04::ProviderAuthorizationResult {
+        octet_agent::extension_api_v04::ProviderAuthorizationResult {
             status: if request.action == "revoke" {
                 "revoked"
             } else {
@@ -1068,7 +1068,7 @@ pub(super) fn extension_provider_protocol(protocol: &str) -> Option<Protocol> {
 }
 
 pub(super) fn extension_provider_capabilities(
-    capabilities: &octet_agent::extension_api_v03::ProviderModelCapabilities,
+    capabilities: &octet_agent::extension_api_v04::ProviderModelCapabilities,
     options: Option<&octet_ai::types::ReasoningOptions>,
 ) -> Capabilities {
     let efforts: Vec<_> = options
