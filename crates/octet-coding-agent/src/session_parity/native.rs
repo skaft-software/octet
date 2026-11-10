@@ -220,7 +220,12 @@ impl Native {
             })),
             "assistant" => {
                 let protocol = protocol(text(message, "api"))?;
-                let model = ModelId(text(message, "model").to_owned());
+                // A live octet turn stores the catalog route id `provider/model`.
+                let model = ModelId(format!(
+                    "{}/{}",
+                    text(message, "provider"),
+                    text(message, "model")
+                ));
                 EntryValue::Message(Message::Assistant(AssistantMessage {
                     content: assistant_content(&message["content"], protocol, &model)?,
                     model,

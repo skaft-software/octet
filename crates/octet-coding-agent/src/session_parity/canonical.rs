@@ -145,7 +145,12 @@ fn pi_entry_payload(entry: &Value, canonical: &impl Fn(&str) -> Value) -> Value 
                 }
                 Some("assistant") => json!({
                     "role": "assistant",
-                    "model": text(&message, "model"),
+                    // octet stores the catalog route id `provider/model`.
+                    "model": format!(
+                        "{}/{}",
+                        text(&message, "provider").unwrap_or_default(),
+                        text(&message, "model").unwrap_or_default()
+                    ),
                     "api": text(&message, "api"),
                     "content": array(&message, "content")
                         .iter()

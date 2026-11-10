@@ -8291,6 +8291,14 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
                 }
             }
         }
+        // Pi treats the model of the last assistant message on the branch as
+        // the selected model when no later model_change exists
+        // (pi-session-1-5-0/dist/core/session-manager.js:147-160).
+        if let EntryValue::Message(octet_ai::Message::Assistant(assistant)) = &entry.value {
+            if persisted.model.is_none() {
+                persisted.model = Some(assistant.model.clone());
+            }
+        }
         if let EntryValue::Config {
             model,
             reasoning,

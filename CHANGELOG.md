@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Resuming a session with no model change on its branch now selects the model
+  of the last assistant message, as Pi does, instead of the configured default.
+  Pi-imported assistant messages now record the `provider/model` route id.
+
 - Session listing and resume no longer fail on a session that contains a
   branch summary record, including sessions imported from Pi.
 

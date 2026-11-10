@@ -98,7 +98,8 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
                             warnings.push("A Pi assistant omitted usage; imported as unknown, not zero.".into());
                         }
                         entry_metadata.replay_safe_tool_calls = Some(Default::default());
-                        EntryValue::Message(Message::Assistant(AssistantMessage { content: parts, model: ModelId(model.into()), protocol }))
+                        // Catalog route id, as a live turn stores it and as the imported model_change does.
+                        EntryValue::Message(Message::Assistant(AssistantMessage { content: parts, model: ModelId(format!("{provider}/{model}")), protocol }))
                     }
                     "toolResult" => {
                         fields(message, &["role", "toolCallId", "toolName", "content", "details", "isError", "timestamp"])?;

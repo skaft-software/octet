@@ -716,6 +716,14 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
                 ));
             }
         }
+        // Pi: the last assistant message's model is the selected model when no
+        // later model_change exists
+        // (pi-session-1-5-0/dist/core/session-manager.js:147-160).
+        if let EntryValue::Message(Message::Assistant(assistant)) = &entry.value {
+            if model.is_none() {
+                model = Some(assistant.model.0.clone());
+            }
+        }
         if let EntryValue::Config {
             model: configured_model,
             reasoning: configured_reasoning,
@@ -1284,11 +1292,13 @@ fn summarize_session_with_usage(
                                 None,
                             )
                         }
+                        // Same rule as `active_branch_catalog_config`
+                        // (session-manager.js:147-160).
                         SummaryEntryValue::Message(SummaryMessage::Assistant(message)) => (
                             SummaryEntryKind::Assistant,
                             None,
-                            Some((message.model, message.protocol)),
-                            None,
+                            Some((message.model.clone(), message.protocol)),
+                            Some(message.model.0.clone()),
                             None,
                         ),
                         SummaryEntryValue::Compaction { first_kept } => {

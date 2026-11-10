@@ -10,23 +10,9 @@
     {
       "scenario": "*",
       "step": "*",
-      "check": "settings",
-      "fingerprint": "settings.model",
-      "reason": "Pi reports the provider/model of the last assistant message on the branch; octet's resume projection reads only model_change entries (app/bootstrap.rs persisted_session_config, session_store.rs active_branch_catalog_config)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
       "check": "import-settings",
       "fingerprint": "settings.thinking",
       "reason": "Pi defaults thinkingLevel to \"off\" when the branch has no thinking_level_change entry; octet stores no level, so resume falls back to the configured default (app/bootstrap.rs persisted_session_config)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "import-settings",
-      "fingerprint": "settings.model",
-      "reason": "Pi reports the provider/model of the last assistant message on the branch; octet's resume projection reads only model_change entries (app/bootstrap.rs persisted_session_config, session_store.rs active_branch_catalog_config)."
     },
     {
       "scenario": "*",
@@ -344,20 +330,6 @@
       "reason": "Pi's createBranchedSession keeps every entry on the root-to-leaf path; octet's fork_to omits history before the compaction's firstKept boundary (octet-agent session/entries.rs fork_to)."
     },
     {
-      "scenario": "fork-labels",
-      "step": "*",
-      "check": "labels",
-      "fingerprint": "labels.0",
-      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
-    },
-    {
-      "scenario": "fork-labels",
-      "step": "*",
-      "check": "reopen-labels",
-      "fingerprint": "labels.0",
-      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
-    },
-    {
       "scenario": "multiple-roots",
       "step": "*",
       "check": "context",
@@ -531,6 +503,55 @@
       "check": "reopen-context",
       "fingerprint": "context.0.content.0.text",
       "reason": "After a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
+    },
+    {
+      "scenario": "checkout-reopen",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "reset-reopen",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "multiple-roots",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi keeps no durable leaf pointer, so its reopened leaf differs from octet's persisted head and the last assistant message on that branch names a different model (docs/session-format.md)."
+    },
+    {
+      "scenario": "fork-all",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi's forkFrom copies every entry and selects the last copied one, octet's /fork copies the selected chain, so the branch's last assistant message names a different model."
+    },
+    {
+      "scenario": "fork-compaction",
+      "step": "*",
+      "check": "settings",
+      "fingerprint": "settings.model",
+      "reason": "Pi's createBranchedSession keeps the full root-to-leaf path while octet's fork_to omits pre-firstKept history, so the branch's last assistant message can differ."
+    },
+    {
+      "scenario": "fork-labels",
+      "step": "*",
+      "check": "labels",
+      "fingerprint": "labels.0",
+      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
+    },
+    {
+      "scenario": "fork-labels",
+      "step": "*",
+      "check": "reopen-labels",
+      "fingerprint": "labels.0",
+      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
     }
   ]
 }
