@@ -1017,10 +1017,8 @@ async fn context_refusal_describes_the_original_request_after_a_projection() {
     );
 }
 
-// Optional local microbenchmark; no timing assertion because hosts vary.
 #[tokio::test]
-#[ignore = "performance probe"]
-async fn context_hook_preparation_performance_probe() {
+async fn successful_context_hook_preserves_large_canonical_history() {
     let workspace = tempfile::tempdir().unwrap();
     let mut session = Session::create(workspace.path().join("perf.jsonl")).unwrap();
     let mut canonical = request();
@@ -1035,9 +1033,8 @@ async fn context_hook_preparation_performance_probe() {
     let model = model();
     let abort = AbortFlag::default();
     let mut notices = Vec::new();
-    let start = std::time::Instant::now();
-    for _ in 0..500 {
-        super::project_provider_context(
+    for _ in 0..3 {
+        let projected = super::project_provider_context(
             canonical.clone(),
             std::slice::from_ref(&hook),
             &identity,
@@ -1048,11 +1045,12 @@ async fn context_hook_preparation_performance_probe() {
         )
         .await
         .unwrap();
+        assert_eq!(
+            serde_json::to_value(&projected).unwrap(),
+            serde_json::to_value(&canonical).unwrap()
+        );
+        assert!(notices.is_empty());
     }
-    eprintln!(
-        "context_hook_probe_ms={:.3}",
-        start.elapsed().as_secs_f64() * 1000.0
-    );
 }
 
 fn tool_history() -> Request {
