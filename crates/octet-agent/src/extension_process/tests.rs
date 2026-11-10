@@ -5188,6 +5188,10 @@ while True:
             "id": message["id"],
             "result": {"disposition": {"kind": "continue"}},
         })
+    elif message["method"] == "$/cancelRequest":
+        # The host cancels a session_end it timed out (250 ms cap); that is
+        # not a protocol error for this fixture.
+        continue
     else:
         assert message["method"] == "shutdown", message
         assert seen == ["session_start", "session_end"], seen
@@ -5423,6 +5427,10 @@ while True:
             "id": message["id"],
             "result": {"disposition": {"kind": "continue"}} if api_version == "0.3" else {},
         })
+    elif message["method"] == "$/cancelRequest":
+        # The host cancels a session_end it timed out (250 ms cap); that is
+        # not a protocol error for this fixture.
+        continue
     else:
         assert message["method"] == "shutdown", message
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
@@ -5585,6 +5593,10 @@ while True:
         with open(os.path.join(os.environ["OCTET_WORKSPACE"], "session-hook-crash.jsonl"), "a", encoding="utf-8") as wire_log:
             wire_log.write(canonical(message) + "\n")
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"disposition": {"kind": "continue"}}})
+    elif message["method"] == "$/cancelRequest":
+        # The host cancels a session_end it timed out (250 ms cap); that is
+        # not a protocol error for this fixture.
+        continue
     else:
         assert message["method"] == "shutdown", message
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"terminal": "shutdown"}})
