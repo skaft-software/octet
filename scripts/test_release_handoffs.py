@@ -200,5 +200,96 @@ class ReleaseHandoffTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
 
 
+class HomebrewTapPublicationTests(unittest.TestCase):
+    """The tap handoff must converge when a push succeeded but PR creation did not."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="octet-tap-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        source = self.root / "tap-source"
+        source.mkdir()
+        self.git(["-C", str(source), "init", "-q", "-b", "main"])
+        (source / "README.md").write_text("tap fixture\n")
+        self.git(["-C", str(source), "add", "README.md"])
+        self.git(["-C", str(source), "commit", "-q", "-m", "fixture"])
+        self.remote = self.root / "tap.git"
+        self.git(["clone", "-q", "--bare", str(source), str(self.remote)])
+        for url in ("https://github.com/skaft-software/homebrew-tap.git",
+                    "https://x-access-token:test-token@github.com/skaft-software/homebrew-tap.git"):
+            self.git(["config", "--global", "--add", f"url.{self.remote}.insteadOf", url])
+        self.git(["clone", "-q", "https://github.com/skaft-software/homebrew-tap.git", str(self.root / "tap")])
+        (self.root / "formula-artifact").mkdir()
+        (self.root / "formula-artifact" / "homebrew-octet.rb").write_text(
+            "class Octet < Formula\n  desc \"fixture\"\nend\n"
+        )
+        self.workflow = (ROOT / ".github/workflows/homebrew-formula.yml").read_text()
+
+    def git(self, arguments):
+        return subprocess.run(
+            ["git", *arguments], check=True, text=True, capture_output=True,
+            env={"PATH": os.defpath, "HOME": str(self.home),
+                 "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                 "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"},
+        )
+
+    def run_step(self):
+        # Every workflow job starts from a fresh checkout of the tap.
+        tap = self.root / "tap"
+        if tap.exists():
+            shutil.rmtree(tap)
+        self.git(["clone", "-q", "https://github.com/skaft-software/homebrew-tap.git", str(tap)])
+        step = self.workflow.split("      - name: Validate tap identity and create a review branch\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
+        stubs = r'''
+set -euo pipefail
+gh() {
+  printf '%s\n' "$*" >> "$TEST_GH_LOG"
+  case "$1 $2" in
+    'pr list')
+      if [[ -s "$TEST_PR_CREATED" ]]; then printf '7\n'; fi ;;
+    'pr create')
+      if [[ -e "$TEST_PR_FAIL_ONCE" ]]; then
+        rm -f "$TEST_PR_FAIL_ONCE"
+        echo "simulated pull request creation failure" >&2
+        return 1
+      fi
+      printf 'created\n' >> "$TEST_PR_CREATED" ;;
+    *) return 99 ;;
+  esac
+}
+'''
+        env = {
+            "PATH": os.defpath, "HOME": str(self.home), "RUNNER_TEMP": str(self.root),
+            "TAP_REPOSITORY": "skaft-software/homebrew-tap", "RELEASE_TAG": TAG,
+            "VERSION": VERSION, "RUN_ID": "123", "HOMEBREW_TAP_TOKEN": "test-token",
+            "TEST_GH_LOG": str(self.root / "gh.log"), "TEST_PR_CREATED": str(self.root / "created"),
+            "TEST_PR_FAIL_ONCE": str(self.root / "fail-once"),
+        }
+        result = subprocess.run(["bash", "-c", stubs + script], cwd=self.root, env=env,
+                                capture_output=True, text=True, timeout=60)
+        return result, env
+
+    def test_push_without_a_pull_request_is_recovered_on_rerun(self):
+        Path(self.root / "fail-once").write_text("")
+        first, env = self.run_step()
+        self.assertNotEqual(0, first.returncode, first.stdout + first.stderr)
+        self.assertEqual("", Path(env["TEST_PR_CREATED"]).read_text() if Path(env["TEST_PR_CREATED"]).exists() else "")
+        remote_branch = subprocess.run(
+            ["git", "--git-dir", str(self.remote), "rev-parse", "--verify", f"refs/heads/octet/v{VERSION}"],
+            text=True, capture_output=True, env={"PATH": os.defpath, "HOME": str(self.home)},
+        )
+        self.assertEqual(0, remote_branch.returncode, remote_branch.stderr)
+        second, env = self.run_step()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+        self.assertEqual("created", Path(env["TEST_PR_CREATED"]).read_text().strip())
+        third, env = self.run_step()
+        self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+        self.assertIn("tap pull request #7 already tracks", third.stdout)
+        self.assertEqual("created", Path(env["TEST_PR_CREATED"]).read_text().strip())
+
+
 if __name__ == "__main__":
     unittest.main()
