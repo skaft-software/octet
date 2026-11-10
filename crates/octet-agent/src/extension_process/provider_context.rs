@@ -492,7 +492,9 @@ impl ProcessProviderRequestHook {
             return Ok(None);
         }
         if !self.binding_is_live() {
-            return Err(HookFailure::Skip("the extension stopped or restarted during this run"));
+            return Err(HookFailure::Skip(
+                "the extension stopped or restarted during this run",
+            ));
         }
         // Pin the exact connection; run_hook intentionally follows current
         // generations for other callers and is not the right boundary here.
@@ -527,7 +529,9 @@ impl ProcessProviderRequestHook {
         let result: ProviderPipelineReply = serde_json::from_value(result)
             .map_err(|_| HookFailure::Skip("the extension returned a malformed hook result"))?;
         if !self.binding_is_live() {
-            return Err(HookFailure::Skip("the extension stopped or restarted during this run"));
+            return Err(HookFailure::Skip(
+                "the extension stopped or restarted during this run",
+            ));
         }
         if let ExtensionHookDisposition::Deny { reason } = &result.disposition {
             return Err(HookFailure::Deny(reason.clone()));

@@ -714,11 +714,29 @@ fn pipeline_case(temp: &TempDir, stage: &str, reply: serde_json::Value) {
 }
 
 fn assert_warning(warning: &str, stage: &str, reason: &str) {
-    for expected in [stage, "malformed-hook", "fixture-provider", "gpt-4o-mini", reason, "skipped"] {
-        assert!(warning.contains(expected), "missing {expected:?} in {warning:?}");
+    for expected in [
+        stage,
+        "malformed-hook",
+        "fixture-provider",
+        "gpt-4o-mini",
+        reason,
+        "skipped",
+    ] {
+        assert!(
+            warning.contains(expected),
+            "missing {expected:?} in {warning:?}"
+        );
     }
-    for leaked in ["PRIVATE_FIXTURE_SECRET", "PRIVATE_FIXTURE_PROMPT", "fixture.invalid", "Parse error"] {
-        assert!(!warning.contains(leaked), "leaked {leaked:?} in {warning:?}");
+    for leaked in [
+        "PRIVATE_FIXTURE_SECRET",
+        "PRIVATE_FIXTURE_PROMPT",
+        "fixture.invalid",
+        "Parse error",
+    ] {
+        assert!(
+            !warning.contains(leaked),
+            "leaked {leaked:?} in {warning:?}"
+        );
     }
 }
 
@@ -770,10 +788,18 @@ async fn malformed_pipeline_reply_is_skipped_with_a_warning_and_the_request_is_s
     );
     let reported = warnings.take();
     assert_eq!(reported.len(), 1, "{reported:?}");
-    assert_warning(&reported[0], "before_provider_headers", "malformed hook result");
+    assert_warning(
+        &reported[0],
+        "before_provider_headers",
+        "malformed hook result",
+    );
 
     // The next valid reply applies normally and reports nothing.
-    pipeline_case(&temp, "before_provider_headers", serde_json::json!({"result":{}}));
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{}}),
+    );
     let (result, sent) = send_with_hook(&process, &warnings).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(sent, 1);
@@ -875,8 +901,18 @@ async fn explicit_veto_blocks_the_request_without_parse_error_framing() {
     let (result, sent) = send_with_hook(&process, &warnings).await;
     let public = result.expect_err("an explicit veto fails the attempt");
     assert_eq!(sent, 0, "a vetoed request is never sent");
-    for expected in ["malformed-hook", "blocked", "before_provider_request", "daily quota", "Disable", "fixture-provider"] {
-        assert!(public.contains(expected), "missing {expected:?} in {public:?}");
+    for expected in [
+        "malformed-hook",
+        "blocked",
+        "before_provider_request",
+        "daily quota",
+        "Disable",
+        "fixture-provider",
+    ] {
+        assert!(
+            public.contains(expected),
+            "missing {expected:?} in {public:?}"
+        );
     }
     for forbidden in ["Parse error", "Config error", "\u{1b}"] {
         assert!(!public.contains(forbidden), "{forbidden:?} in {public:?}");
@@ -944,8 +980,16 @@ async fn skip_warning_bounds_hostile_identities() {
     let reported = warnings.take();
     assert_eq!(reported.len(), 1);
     let warning = &reported[0];
-    for expected in ["after_provider_response", "malformed-hook", "not affected", "…"] {
-        assert!(warning.contains(expected), "missing {expected:?} in {warning:?}");
+    for expected in [
+        "after_provider_response",
+        "malformed-hook",
+        "not affected",
+        "…",
+    ] {
+        assert!(
+            warning.contains(expected),
+            "missing {expected:?} in {warning:?}"
+        );
     }
     assert!(!warning.contains("SECRET"), "{warning}");
     assert!(!warning.contains('\u{1b}'), "{warning}");
@@ -960,7 +1004,11 @@ async fn stopped_extension_is_skipped_at_bind_instead_of_failing_the_run() {
     use crate::extension_provider::ProviderRequestHookFactory;
 
     let temp = TempDir::new().unwrap();
-    pipeline_case(&temp, "before_provider_headers", serde_json::json!({"result":{}}));
+    pipeline_case(
+        &temp,
+        "before_provider_headers",
+        serde_json::json!({"result":{}}),
+    );
     let process = pipeline_process(&temp, "before_provider_headers").await;
     assert!(process.shutdown().await);
     let warnings = crate::extension_provider::ProviderHookWarnings::default();
@@ -968,8 +1016,16 @@ async fn stopped_extension_is_skipped_at_bind_instead_of_failing_the_run() {
         Err(reason) => reason,
         Ok(_) => panic!("a stopped extension cannot bind"),
     };
-    for expected in ["malformed-hook", "not running", "skipped", "without its changes"] {
-        assert!(reason.contains(expected), "missing {expected:?} in {reason:?}");
+    for expected in [
+        "malformed-hook",
+        "not running",
+        "skipped",
+        "without its changes",
+    ] {
+        assert!(
+            reason.contains(expected),
+            "missing {expected:?} in {reason:?}"
+        );
     }
 }
 
@@ -1008,7 +1064,11 @@ async fn malformed_pipeline_reply_reaches_the_agent_as_a_warning_not_a_failure()
     }
     drop(run);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert_warning(&warnings[0], "before_provider_headers", "malformed hook result");
+    assert_warning(
+        &warnings[0],
+        "before_provider_headers",
+        "malformed hook result",
+    );
     assert!(
         !server.received_requests().await.unwrap().is_empty(),
         "the provider was still called"
