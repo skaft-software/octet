@@ -1922,8 +1922,8 @@ impl Agent {
                         checkpoint.source_text.as_str()
                     });
                     messages.push(Message::User(UserMessage {
-                        content: vec![UserPart::Text(format!(
-                            "[summary of earlier conversation]\n{text}"
+                        content: vec![UserPart::Text(crate::session::compaction_summary_text(
+                            text,
                         ))],
                     }));
                     inherited

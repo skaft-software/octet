@@ -1002,6 +1002,7 @@ fn tool_history() -> Request {
                 content: vec![ToolResultPart::Text("original".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }),
     ];

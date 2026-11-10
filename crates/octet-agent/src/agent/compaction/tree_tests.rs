@@ -312,6 +312,7 @@ async fn sibling_navigation_keeps_target_ancestry_but_never_summarizes_siblings_
                 content: vec![ToolResultPart::Text("secret result body".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();

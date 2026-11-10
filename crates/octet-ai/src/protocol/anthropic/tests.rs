@@ -380,6 +380,7 @@ fn cache_warming_replay_changes_only_max_tokens_for_short_and_long_retention() {
                                 content: vec![ToolResultPart::Text("lookup result".into())],
                                 is_error: false,
                                 added_tool_names: None,
+                                tool_name: None,
                             }),
                             UserPart::Text("real follow-up".into()),
                         ],

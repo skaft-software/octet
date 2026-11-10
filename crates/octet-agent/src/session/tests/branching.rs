@@ -105,6 +105,34 @@ fn fork_to_copies_only_the_selected_committed_ancestor_chain() {
 }
 
 #[test]
+fn fork_to_copies_labels_of_retained_entries_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.jsonl");
+    let fork_path = dir.path().join("fork.jsonl");
+    let mut source = Session::create(&source_path).unwrap();
+
+    let root = source.append(user("root")).unwrap();
+    let selected = source.append(assistant("selected answer")).unwrap();
+    let later = source.append(user("later work")).unwrap();
+    source.set_entry_label(&root, "bookmark").unwrap();
+    source.set_entry_label(&later, "not retained").unwrap();
+
+    let fork = source.fork_to(&fork_path, Some(&selected)).unwrap();
+    assert_eq!(fork.entry_labels().len(), 1);
+    assert_eq!(
+        fork.entry_labels().get(&root).map(String::as_str),
+        Some("bookmark")
+    );
+    drop(fork);
+    let reopened = Session::open(fork_path).unwrap();
+    assert_eq!(reopened.entry_labels().len(), 1);
+    assert_eq!(
+        reopened.entry_labels().get(&root).map(String::as_str),
+        Some("bookmark")
+    );
+}
+
+#[test]
 fn fork_to_stops_at_the_compaction_boundary_and_reroots_the_span() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");
@@ -147,7 +175,7 @@ fn fork_to_stops_at_the_compaction_boundary_and_reroots_the_span() {
     assert_eq!(
         texts(&fork_context),
         vec![
-            "[summary of earlier conversation]\nsummary of the replaced history".to_string(),
+            "The conversation history before this point was compacted into the following summary:\n\n<summary>\nsummary of the replaced history\n</summary>".to_string(),
             "second prompt".to_string(),
             "second answer".to_string(),
             "third prompt".to_string(),
@@ -684,4 +712,45 @@ fn malformed_parent_reference_is_rejected() {
         matches!(err, SessionError::Corrupt { line: 1, .. }),
         "{err}"
     );
+}
+
+#[test]
+fn tool_result_name_is_durable_and_absent_results_still_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tool-name.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let result = |name: Option<&str>| {
+        EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(octet_ai::ToolResult {
+                tool_call_id: octet_ai::ToolCallId("call".into()),
+                content: vec![octet_ai::ToolResultPart::Text("ok".into())],
+                is_error: false,
+                added_tool_names: None,
+                tool_name: name.map(str::to_owned),
+            })],
+        }))
+    };
+    session.append(user("go")).unwrap();
+    session.append(result(Some("read"))).unwrap();
+    session.append(result(None)).unwrap();
+    drop(session);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.matches("\"tool_name\":\"read\"").count(), 1);
+    assert_eq!(raw.matches("tool_name").count(), 1, "None is not written");
+    let reopened = Session::open(&path).unwrap();
+    let names: Vec<Option<String>> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.value {
+            EntryValue::Message(Message::User(user)) => user.content.iter().find_map(|part| {
+                if let UserPart::ToolResult(result) = part {
+                    Some(result.tool_name.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec![Some("read".to_owned()), None]);
 }

@@ -180,6 +180,7 @@ impl BackgroundTools {
             sandbox.max_output_bytes,
             Vec::new(),
         );
+        let message = with_tool_name(message, &call.name);
         session.append_with_metadata(
             EntryValue::Message(Message::User(message)),
             details.map(|tool_output| EntryMetadata {

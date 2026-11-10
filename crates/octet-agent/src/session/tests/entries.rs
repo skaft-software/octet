@@ -148,6 +148,7 @@ fn structured_tool_output_details_survive_reopen_without_entering_context() {
                     content: vec![octet_ai::ToolResultPart::Text("Found one source.".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })),
             Some(EntryMetadata {
@@ -204,6 +205,7 @@ fn explicit_null_structured_tool_output_survives_session_reopen() {
                     content: vec![octet_ai::ToolResultPart::Text("No value.".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })),
             Some(EntryMetadata {

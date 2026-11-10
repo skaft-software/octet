@@ -1546,7 +1546,7 @@ fn sessions_export_preserves_metadata_visibility_and_requires_explicit_secrets_o
         content: vec![UserPart::ToolResult(ToolResult {
             tool_call_id: call_id,
             content: vec![ToolResultPart::Text(format!("Authorization: Bearer {}", secrets[4]))],
-            is_error: false, added_tool_names: None,
+            is_error: false, added_tool_names: None, tool_name: None,
         })],
     })), Some(EntryMetadata {
         extension_metadata: std::collections::BTreeMap::from([("fixture.export".into(), ExtensionEntryMetadata {

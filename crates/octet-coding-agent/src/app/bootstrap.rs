@@ -8291,6 +8291,17 @@ fn persisted_session_config(session: &Session) -> anyhow::Result<PersistedSessio
                 }
             }
         }
+        // Pi treats the model of the last assistant message on the branch as
+        // the selected model when no later model_change exists
+        // (pi-session-1-5-0/dist/core/session-manager.js:147-160).
+        // Only a catalog route id (`provider/model`) is adopted: assistant
+        // messages imported before route ids were stored carry a bare model
+        // name that would not resolve, and must not override the default.
+        if let EntryValue::Message(octet_ai::Message::Assistant(assistant)) = &entry.value {
+            if persisted.model.is_none() && assistant.model.0.contains('/') {
+                persisted.model = Some(assistant.model.clone());
+            }
+        }
         if let EntryValue::Config {
             model,
             reasoning,
