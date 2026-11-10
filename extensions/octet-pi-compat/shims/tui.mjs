@@ -17,6 +17,7 @@ export { KeybindingsManager, getKeybindings, setKeybindings, TUI_KEYBINDINGS } f
 export { visibleWidth, truncateToWidth, sliceByColumn, stripTerminalSequences, wrapTextWithAnsi } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 // These component-only exports do not start or instantiate the Pi terminal.
 export { Container, CURSOR_MARKER, isFocusable } from '../node_modules/@earendil-works/pi-tui/dist/tui.js';
+export { renderFakeCursor } from '../lib/fake-cursor.mjs';
 import { unsupported } from '../lib/errors.mjs';
 export class TUI { constructor() { unsupported('new Pi TUI', 'use the host-supplied remote TUI facade'); } }
 export class ProcessTerminal { constructor() { unsupported('ProcessTerminal', 'octet always owns the terminal'); } }

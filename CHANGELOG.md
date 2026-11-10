@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Pi extensions that import `renderFakeCursor` from `@earendil-works/pi-tui` (for example
+  Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
+  The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
+
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
