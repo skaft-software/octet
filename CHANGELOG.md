@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- A partially typed `/command` completion menu now includes commands that an
+  extension registers after the keystroke as soon as the extension finishes
+  starting, instead of waiting for the next key press.
+
 - Tool results now record the name of the tool that produced them, including
   when imported from a Pi session. The name is stored for the session only and
   never sent to a provider.
