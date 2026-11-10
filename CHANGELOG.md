@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- `octet-pi-compat` configure writes a valid manifest default for a Pi flag
+  registered without one (such as `preset.ts`'s `--preset`) instead of
+  `default = undefined`.
+
 - Pi extension commands that await `ctx.ui.select(...)` and then `ctx.ui.confirm(...)`
   or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
   `not_foreground_owner ... requires a live request`; the later dialog opens on a
