@@ -453,6 +453,7 @@ impl Session {
 
     /// The active checkpoint is bitmap-only and cannot be replayed on a text model.
     pub fn has_snapcompact_context(&self) -> Result<bool, SessionError> {
+        let _span = crate::performance_trace::Span::start("session.snapcompact_scan", 0);
         Ok(self
             .active_branch_entries()?
             .iter()
@@ -484,6 +485,7 @@ impl Session {
     /// Call [`Self::context_ref`] for estimates and inspection that do not
     /// require ownership; it avoids copying the complete conversation.
     pub fn context(&self) -> Result<Vec<Message>, SessionError> {
+        let _span = crate::performance_trace::Span::start("session.context_clone", 0);
         Ok(self.context_ref()?.to_vec())
     }
 

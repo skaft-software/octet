@@ -40,6 +40,7 @@ impl SessionWriter {
     }
 
     pub(crate) fn persist(&self, bytes: &[u8]) -> Result<(), SessionError> {
+        let _span = crate::performance_trace::Span::start("session.persist", bytes.len());
         #[cfg(test)]
         if self
             .fail_next_append

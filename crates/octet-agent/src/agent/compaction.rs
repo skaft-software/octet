@@ -1202,6 +1202,7 @@ impl CompactionContext<'_> {
         provider_output_ceiling: u64,
         preparation: Option<&ProviderContextPreparation<'_>>,
     ) -> Result<CapacityEstimate, AgentError> {
+        let _span = crate::performance_trace::Span::start("request.capacity", 0);
         if !self
             .model
             .spec
