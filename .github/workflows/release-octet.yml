@@ -298,6 +298,15 @@ jobs:
             else
               ci_filter='[.workflow_runs[] | select((.event == "push" and .head_branch == "main") or .event == "merge_group" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty'
             fi
+            # GitHub runs push CI only for the pushed head of main, so a tag on an
+            # older main commit has no push run to wait for. Say what recovers it.
+            ci_recovery_hint() {
+              if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+                echo "main push CI is the only accepted qualification for a canonical tag push." >&2
+                echo "Dispatch ci.yml on this exact commit, then dispatch release-octet.yml from the unchanged tag $tag with release_tag=$tag." >&2
+                echo "Keep the tag immutable; never re-tag or move it." >&2
+              fi
+            }
             for attempt in {0..150}; do
               ci_run=$(gh api --method GET \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
@@ -314,6 +323,7 @@ jobs:
                 if [[ "$ci_status" == completed ]]; then
                   if [[ "$ci_conclusion" != success ]]; then
                     echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+                    ci_recovery_hint
                     exit 1
                   fi
                   break
@@ -324,6 +334,7 @@ jobs:
               fi
               if (( attempt == 150 )); then
                 echo "timed out after 75 minutes waiting for source CI for $source_commit" >&2
+                ci_recovery_hint
                 exit 1
               fi
               sleep 30

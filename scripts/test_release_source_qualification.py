@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Offline tests of the release workflow's exact-source CI gate; no GitHub writes."""
 
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -116,6 +118,21 @@ gh() {
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn("timed out after 75 minutes", result.stderr)
                 self.assertEqual(151, requests.count("/ci.yml/runs"))
+
+    def test_tag_push_without_main_push_ci_names_the_recovery(self):
+        # GitHub runs push CI only for the pushed head, so a tag on an older
+        # main commit has no push run. The timeout must say how to recover.
+        result, _ = self.run_gate(event="push", run="")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("timed out after 75 minutes", result.stderr)
+        for phrase in (
+            "main push CI", "Dispatch ci.yml", "release-octet.yml",
+            "release_tag=v0.10.0", "unchanged",
+        ):
+            self.assertIn(phrase, result.stderr)
+        failed, _ = self.run_gate(event="push", conclusion="failure")
+        self.assertNotEqual(0, failed.returncode)
+        self.assertIn("Dispatch ci.yml", failed.stderr)
 
     def test_each_required_lane_must_be_present_once_and_successful(self):
         for name in REQUIRED:
@@ -488,6 +505,57 @@ gh() {
         self.assertLess(start, self.workflow.index('if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]'))
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("python3 scripts/test_release_source_qualification.py", ci)
+
+    def ci_jobs(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text().split("\njobs:\n", 1)[1]
+        jobs, current = {}, None
+        for line in ci.splitlines():
+            match = re.match(r"^  ([a-z0-9-]+):$", line)
+            if match:
+                current = match.group(1)
+                jobs[current] = []
+            elif current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
+
+    def test_required_lanes_are_the_real_full_tier_ci_lanes(self):
+        # The release gate hard-codes CI display names. Drift in either file
+        # must fail here rather than stranding a release on a lane that no
+        # longer exists, is renamed, or is skipped outside pull requests.
+        block = self.workflow.split("for check in ", 1)[1].split("; do", 1)[0]
+        lanes = tuple(
+            quoted or bare
+            for quoted, bare in re.findall(r"'([^']+)'|([A-Za-z0-9][A-Za-z0-9_.()-]*)", block)
+        )
+        self.assertEqual(REQUIRED, lanes)
+
+        jobs = self.ci_jobs()
+        self.assertIn("ci-required", jobs)
+        needs_block = jobs["ci-required"].split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+        aggregated = set(re.findall(r"^\s+- ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+        self.assertIn("test", aggregated)
+
+        for lane in REQUIRED:
+            with self.subTest(lane=lane):
+                if lane.startswith("test ("):
+                    job = jobs["test"]
+                    self.assertNotRegex(job, r"(?m)^    if:")
+                    matrix = re.search(r"\|\|\s*'(\[[^']*\])'", job)
+                    self.assertIsNotNone(matrix, "test job has no non-PR matrix tier")
+                    self.assertIn(lane[len("test ("):-1], json.loads(matrix.group(1)))
+                    continue
+                if lane.startswith("windows ("):
+                    job, job_id = jobs["windows"], "windows"
+                    self.assertIn(f"    name: {lane}\n", job)
+                else:
+                    job, job_id = jobs[lane], lane
+                self.assertIn(job_id, aggregated)
+                conditional = re.search(r"(?m)^    if: (.+)$", job)
+                # Full-tier lanes must run for main pushes and manual CI
+                # dispatches, not only for labelled pull requests.
+                if conditional:
+                    self.assertIn("github.event_name != 'pull_request'", conditional.group(1))
+                self.assertNotRegex(job, r"(?m)^    continue-on-error:")
 
 
 if __name__ == "__main__":
