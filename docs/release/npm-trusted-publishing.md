@@ -81,8 +81,11 @@ from protected `main` with `release_tag=vX.Y.Z` and `publish_npm=true`. This
 npm-only path verifies and smokes the existing immutable native release; it does
 not rebuild or re-sign its assets. The npm manifest binds the publication
 workflow commit while separately checking the original native signer commit
-recorded in `OCTET_RELEASE_METADATA.json`. A release-environment approval may
-be required.
+recorded in `OCTET_RELEASE_METADATA.json`. The signer can be the canonical tag,
+whose workflow commit must equal the source commit, or the legacy
+`octet-binaries-vX.Y.Z` tag; the recorded identity is verified against the
+corresponding tag and Sigstore signature. A release-environment approval may be
+required.
 
 The publication job pins npm CLI `11.5.1` (or a later explicitly reviewed version
 supporting trusted publishing) before requesting OIDC provenance. It:
@@ -99,7 +102,9 @@ supporting trusted publishing) before requesting OIDC provenance. It:
 
 npm versions are immutable. After an upload timeout, inspect
 `npm view name@version dist.integrity` and the provenance field. Never blindly
-republish or overwrite a version.
+republish or overwrite a version. Re-running the job converges: already
+published packages are verified against the candidate integrity and skipped, and
+uploaded evidence is verified rather than replaced.
 
 ## Partial publication recovery
 
