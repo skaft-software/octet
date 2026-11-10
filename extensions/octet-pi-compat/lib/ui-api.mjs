@@ -100,6 +100,10 @@ export function chromeAPI(runtime, store) {
     // after the capturing request is aborted, so a tool clearing its status in
     // `finally` after Esc must still reach the host.
     if (runtime.stopping || !store.state.alive || store.state !== runtime.foreground) return;
+    // The host cancels a request still pending when its parent settles ("parent settled"), and an
+    // update made from session_start routinely is. Pi's setters outlive their hook, so a request that
+    // names a live parent is sent once that parent has replied (the host admits it as retained context).
+    if (store.live && runtime.active?.has(store.id) && store.afterSettle) { store.afterSettle.push(() => deliver(operation)); return; }
     const channel = chromeChannel(store.state);
     const version = channel.expandedVersion;
     const settleExpanded = () => {

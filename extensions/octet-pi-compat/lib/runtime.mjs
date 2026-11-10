@@ -1171,7 +1171,7 @@ export class Runtime {
     if (this.active.size >= this.maxConcurrent) {
       await this.transport.send({ jsonrpc: '2.0', id: message.id, error: { code: -32012, message: 'bounds_exceeded concurrent requests' } }); return;
     }
-    const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true };
+    const store = { id: message.id, method: message.method, hook: message.method === 'hook/run' ? message.params?.hook : undefined, controller: new AbortController(), pending: new Set(), errors: [], live: true, afterSettle: [] };
     this.active.set(message.id, store);
     if (message.method === 'initialize') this.initializationBarrier = deferred();
     let settlementError = rpcError(-32002, 'originating request did not complete');
@@ -1237,6 +1237,7 @@ export class Runtime {
       if (message.method === 'initialize') this.initializationBarrier.resolve();
       this.sessionTransport?.settle(store, settlementError);
       store.live = false; this.active.delete(message.id); this.transport.settleParent(message.id);
+      for (const task of store.afterSettle?.splice(0) ?? []) { try { task(); } catch (error) { this.backgroundError(error); } }
       settleCompactions(this, store, settlementError);
     }
   }

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Pi extensions that call `ctx.ui.setWorkingIndicator` (or another chrome setter) from
+  `session_start`, such as Pi's `working-indicator.ts`, no longer report "Pi compatibility
+  error: request cancelled". The host cancels a chrome request still pending when its parent
+  hook settles; the update is now sent once the hook has replied, as Pi's void setters outlive
+  their handler.
+
 - Pi extensions that build the bash tool with `commandPrefix` or `spawnHook` (for example Pi's
   `bash-spawn-hook.ts`) are no longer refused at configure time with "option would not be
   honored". The prefixed command, and the command, cwd and environment changes the hook returns,
