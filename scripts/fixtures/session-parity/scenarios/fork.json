@@ -1,0 +1,72 @@
+{
+  "name": "fork",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "old",
+      "message": {
+        "role": "user",
+        "content": "old",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "branch",
+      "target": "u"
+    },
+    {
+      "op": "message",
+      "as": "sibling",
+      "message": {
+        "role": "user",
+        "content": "sibling",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "fork",
+      "target": "old"
+    }
+  ]
+}
