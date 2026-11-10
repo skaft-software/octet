@@ -50,7 +50,7 @@ octet SDK, generated bindings and the shipped bundles listed in
 `extensions/release-catalog.txt` — is built
 and tested with octet. **Community compatibility** material — the Pi factories loaded by the optional
 first-party adapter, retained legacy API examples and generic single-file
-helpers — has its own compatibility boundaries. The 0.10.0 release catalog
+helpers — has its own compatibility boundaries. The 0.10.3 release catalog
 includes the Pi adapter; see [Pi compatibility](pi-compatibility.md) for setup.
 
 Start with the [build, install and maintenance quickstart](extensions/QUICKSTART.md)
@@ -60,7 +60,7 @@ packages, explicit activation, lifecycle tests and whole-closure upgrades.
 Use the [Python API `0.4` process
 recipe](../sdk/python/README.md#minimal-api-04-tool) for a local tool. The SDK
 handles framing, negotiated scheduling, cancellation and shutdown, so implement
-only the contributions you need. It's a source recipe for the **octet 0.10.0 source SDK**: the
+only the contributions you need. It's a source recipe for the **octet 0.10.3 source SDK**: the
 SDK is installed from source, not from a published registry.
 
 An authoring smoke check covers discovery and explicit enablement, exact
@@ -209,11 +209,11 @@ and trust reference](extensions/legacy-authoring.md#layout-and-discovery).
 Select `api_version = "0.4"` exactly. An extension's own `version` doesn't
 select the wire. Current source uses `octet_version`, `requires_octet`,
 `OCTET_*` and `octet_extension`, with no aliases for earlier first-party wire
-names or imports. The local host, Python/TypeScript source SDKs and six candidate
-executable bundles have distribution version **0.10.0** (the independent Rust
+names or imports. The local host, Python/TypeScript source SDKs and the six
+executable bundles have distribution version **0.10.3** (the independent Rust
 SDK remains 0.8.2). That doesn't select an extension API or publish SDK registries.
-Use reviewed source or an explicit local archive; public 0.10.0 artifacts do not
-exist. See [installation](installation.md) and the [RC notes](releases/v0.10.0.md).
+Use the version-matched bundle published with the release, or an explicit local
+archive. See [installation](installation.md) and the [release notes](releases/v0.10.3.md).
 
 Installation and discovery of Pi are inert. Enabling the stock bridge automatically
 mirrors/runs enabled Pi factories with OS permissions. It does not silently opt
@@ -278,6 +278,38 @@ Dynamic tools used by MCP, `agent_sessions` used by subagents, and command,
 status and presentation surfaces stay available subject to their existing host
 gates. A documented approval or secret broker isn't automatically offered by a
 host.
+
+### Encoded provider pipeline hooks (API `0.4`)
+
+When a host offers and the extension negotiates `pipeline_hooks_v1`, the declared
+`before_provider_request`, `before_provider_headers` and `after_provider_response`
+hooks run at the actual encoded HTTP boundaries. Their `hook/run` result is an
+object: `provider_payload` may replace the request body with a JSON object or
+array; `provider_headers` is a patch whose values are strings, arrays of strings,
+or null (delete). Omitted or null replacement fields mean no change. A payload
+hook cannot return a header patch, a header hook cannot return a payload, and a
+response observer cannot transform either. The host still validates header names,
+values, limits and reserved headers. For example, a JSON-RPC result containing
+`{"provider_headers":{"x-example":17}}` is valid JSON but not a valid hook
+reply.
+
+A provider hook never blocks the request by failing. If the extension is not
+running, times out, reports an error or returns an invalid reply, octet skips
+that extension's change, sends the request without it and shows a warning that
+names the extension and hook stage. This matches Pi, where a throwing
+`before_provider_*` handler is reported and the request continues. Only an
+explicit veto (`{"disposition":{"action":"deny","reason":"..."}}`) stops the
+request, and the error names the extension, the stage and its reason. Prompt
+bodies, headers and remote exception text are never shown. A process may host
+multiple Pi factories, so the warning names the process, not the individual
+factory. If a warning repeats, check `/extensions status` and update or
+disable the named extension.
+
+The Pi bridge applies Pi's own semantics before replying: header values set to
+numbers or booleans are sent as strings, as `fetch` would; header names are
+case-insensitive and the last assignment wins; a header `fetch` would reject is
+dropped with a warning; payload replacements are encoded like
+`JSON.stringify`, so `undefined` members disappear and dates become strings.
 
 ### Typed values, native resources and immutable bulk (API `0.4`)
 

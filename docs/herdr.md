@@ -8,8 +8,8 @@ workspaces, and drives sidebar badges, notifications, and waits from that state.
 
 octet reports its own lifecycle to Herdr from inside the interactive frontend, so
 a pane running octet appears as a first-class agent — the same contract Herdr's
-official [Pi, OMP, and Codex integrations](https://herdr.dev/docs/integrations/)
-use. It is a Rust rewrite of Pi, so it follows that integration's shape
+official [agent integrations](https://herdr.dev/docs/integrations/) use. It is a
+Rust rewrite of Pi, so it follows that integration's shape
 deliberately: semantic `idle` / `working` / `blocked` state, session identity,
 and a strictly increasing report sequence.
 
@@ -99,10 +99,9 @@ verified there.
 
 ## Session restore
 
-Herdr's native session restore resumes only agents whose kind it knows how to
-launch (`pi --session`, `codex resume`, `claude --resume`, and so on). octet is
-not one of those kinds, and Herdr states that adding a new agent needs a Herdr
-binary update rather than an agent-side integration.
+Herdr's native session restore resumes only agents whose kind it already knows
+how to launch. octet is not one of those kinds, and Herdr states that adding a
+new agent needs a Herdr binary update rather than an agent-side integration.
 
 So octet ships the resume path itself, through Herdr's documented plugin
 surface:

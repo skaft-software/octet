@@ -469,7 +469,9 @@ PY
 # not permission to extract arbitrary crates/, scripts/ or extension runtimes.
 documentation_extra_files() {
     cat <<'OCTET_DOCUMENTATION_EXTRAS'
+AGENTS.md
 CHANGELOG.md
+CLAUDE.md
 CONTRIBUTING.md
 LICENSE
 SECURITY.md

@@ -109,7 +109,7 @@ above are still required.
 | 1.2 | `before_agent_start` `messageType` | Always `"user"`. **Gap:** runs started by `pi.sendMessage(..., { triggerTurn: true })` don't yet fire a `"custom"` event. |
 | 1.4 | `@earendil-works/pi-ai/models` import | Resolves like the `pi-ai` root, through the same guarded namespace. |
 
-The installed-Pi fallback accepts managed Pi 1.0.2 through 1.4.x. Exports that
+The installed-Pi fallback accepts managed Pi 1.0.2 through 1.x. Exports that
 first appear after 1.0.2 are refused unless classified; the pure helpers
 `formatReadLineRange`, `parseToolCallArguments`, `AI_TELEMETRY_SCHEMA` and
 `PI_AI_VERSION` are allowed.
