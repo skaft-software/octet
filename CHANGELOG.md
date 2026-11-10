@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Read-only reports and document panels no longer drop scrolling keys pressed
+  just after their first frame appears, including during streaming responses.
+
 - The extension API 0.4 reference now documents its actual feature-negotiated
   wire, provider/session data and service-specific errors instead of presenting
   canonical API 0.3 models as the current contract. Public provider-registry Rust

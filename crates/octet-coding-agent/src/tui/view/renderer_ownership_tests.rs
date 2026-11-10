@@ -637,6 +637,190 @@ fn threaded_approval_requires_completed_write_and_current_geometry() {
     ));
 }
 
+fn emitted_screen(bytes: &Arc<Mutex<Vec<u8>>>) -> String {
+    let mut terminal = vt100::Parser::new(18, 96, 0);
+    terminal.process(&bytes.lock().unwrap());
+    terminal.screen().contents()
+}
+
+#[test]
+fn report_navigation_before_frame_receipt_preserves_the_first_key() {
+    use super::super::{tests::emulated_shell, OverlayInputResult};
+    for active in [false, true] {
+        let (mut shell, bytes) = emulated_shell(crate::tui::theme::test_theme(), 96, 18);
+        shell.isolate_native_test_renderer();
+        shell.prefill_editor("untouched draft".into());
+        if active {
+            shell.begin_run("fixture");
+        }
+        shell.show_report_facts(
+            "Settings",
+            "Effective display, launch, and session settings",
+            format!(
+                "Configured model   fixture\nActive reasoning   off\n{}\nProject trust is deliberately not persisted here",
+                "Theme   dark\n".repeat(40)
+            ),
+        );
+        shell.tui.as_mut().unwrap().request_render();
+        let initial = emitted_screen(&bytes);
+        assert!(initial.contains("Configured model"), "{initial}");
+        assert!(!initial.contains("Project trust is deliberately"));
+        assert!(shell.state.borrow().painted_report.is_none());
+
+        // Terminal::write has returned with the report on screen, but the
+        // renderer has not yet called frame_written_at. Run output can also
+        // advance the semantic revision without changing this report's layout.
+        if active {
+            shell
+                .state
+                .borrow_mut()
+                .append_text_block(OutputChannel::Text, "concurrent response");
+        }
+        assert_eq!(
+            shell.overlay_input(&key(KeyCode::End, KeyModifiers::NONE)),
+            OverlayInputResult::Consumed
+        );
+        shell.state.frame_written();
+        shell.render_written_test_frame();
+        let tail = emitted_screen(&bytes);
+        assert!(
+            tail.contains("Project trust is deliberately not persisted here"),
+            "first End was lost before the frame receipt: {tail}"
+        );
+        assert!(shell.has_overlay());
+        assert_eq!(shell.pending(), "untouched draft");
+    }
+}
+
+#[test]
+fn document_navigation_before_frame_receipt_preserves_the_first_key() {
+    use super::super::tests::emulated_shell;
+    for refresh in [false, true] {
+        let (mut shell, bytes) = emulated_shell(crate::tui::theme::test_theme(), 96, 18);
+        shell.isolate_native_test_renderer();
+        shell.prefill_editor("untouched draft".into());
+        shell.begin_run("fixture");
+        shell.open_panel(Panel::ReadOnlyDocument {
+            title: "Document".into(),
+            text: (0..60)
+                .map(|row| format!("document row {row:02}\n"))
+                .collect::<String>()
+                .into(),
+            styled: false,
+            scroll_from_bottom: usize::MAX,
+        });
+        if refresh {
+            shell.render_written_test_frame();
+            shell.update_read_only_document(
+                (0..80)
+                    .map(|row| format!("document row {row:02}\n"))
+                    .collect(),
+            );
+            assert_eq!(shell.state.borrow().pending_panel_document_top, Some(0));
+        }
+        shell.tui.as_mut().unwrap().request_render();
+        let initial = emitted_screen(&bytes);
+        assert!(initial.contains("document row 00"), "{initial}");
+        assert!(shell.state.borrow().painted_panel.is_none());
+
+        // Force input between the actual terminal write and receipt publication,
+        // including the anchored re-layout of a refreshed document.
+        shell.panel_input(&key(KeyCode::End, KeyModifiers::NONE));
+        shell.state.frame_written();
+        shell.render_written_test_frame();
+        let tail = emitted_screen(&bytes);
+        let expected = if refresh {
+            "document row 79"
+        } else {
+            "document row 59"
+        };
+        assert!(
+            tail.contains(expected),
+            "first End was lost before the frame receipt (refresh={refresh}): {tail}"
+        );
+        assert!(shell.has_panel());
+        assert_eq!(shell.pending(), "untouched draft");
+    }
+}
+
+#[test]
+fn prepared_navigation_geometry_rejects_replaced_or_resized_surfaces() {
+    use super::super::{OverlayInputResult, ShellOverlay};
+    for document in [false, true] {
+        for resize in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.tui.take();
+            shell.state.borrow_mut().render_threaded = true;
+            let open = |shell: &mut InteractiveShell| {
+                if document {
+                    shell.open_panel(Panel::ReadOnlyDocument {
+                        title: "Document".into(),
+                        text: "row\n".repeat(100).into(),
+                        styled: false,
+                        scroll_from_bottom: 99,
+                    });
+                } else {
+                    shell.show_report_text("Report", "Read-only facts", "row\n".repeat(100));
+                }
+            };
+            open(&mut shell);
+            let component = ShellComponent::isolated(shell.state.clone(), false);
+            component.render(120);
+            if resize {
+                shell.set_size(60, 18);
+            } else {
+                open(&mut shell);
+            }
+            if document {
+                shell.panel_input(&key(KeyCode::End, KeyModifiers::NONE));
+                assert!(matches!(
+                    shell.state.borrow().panel,
+                    Some(Panel::ReadOnlyDocument {
+                        scroll_from_bottom: 99,
+                        ..
+                    })
+                ));
+            } else {
+                assert_eq!(
+                    shell.overlay_input(&key(KeyCode::End, KeyModifiers::NONE)),
+                    OverlayInputResult::Consumed
+                );
+                assert!(matches!(
+                    shell.state.borrow().overlay,
+                    Some(ShellOverlay::Report(ref report)) if report.scroll_from_top == 0
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn model_picker_navigation_does_not_require_a_frame_receipt() {
+    use super::super::OrdinarySurfaceMetadata;
+    let mut shell = InteractiveShell::test_shell();
+    shell.tui.take();
+    shell.state.borrow_mut().render_threaded = true;
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Select model"),
+        items: vec!["First".into(), "Last".into()],
+        descriptions: vec![None; 2],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectModel(vec![
+            octet_ai::ModelId("fixture/first".into()),
+            octet_ai::ModelId("fixture/last".into()),
+        ]),
+    });
+    let component = ShellComponent::isolated(shell.state.clone(), false);
+    component.render(120);
+    assert!(shell.state.borrow().painted_panel.is_none());
+    shell.panel_input(&key(KeyCode::End, KeyModifiers::NONE));
+    assert!(matches!(
+        shell.panel_input(&key(KeyCode::Enter, KeyModifiers::NONE)),
+        Some((PanelResult::Confirm(1), PanelAction::SelectModel(_)))
+    ));
+}
+
 #[test]
 fn threaded_document_navigation_and_refresh_use_emitted_geometry() {
     use super::super::panel_render::panel_render_test_hook::take_document_layouts;

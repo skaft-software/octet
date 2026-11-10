@@ -1,5 +1,6 @@
-//! Bounded, revision-fenced geometry from a completed terminal frame.
-//! Input navigation reads these rows rather than invoking transcript layout.
+//! Bounded, revision-fenced renderer geometry. Read-only keyboard navigation
+//! can use prepared layout; pointer input and approvals require a written frame.
+//! Input reads these rows rather than invoking transcript layout.
 use super::{transcript_cache::SurfaceGeometry, ShellState};
 use std::sync::Arc;
 
@@ -142,6 +143,23 @@ impl PanelRenderReceipt {
             && self.theme_epoch == state.theme_epoch
             && state.panel.is_some()
     }
+    pub(super) fn apply_document_anchor(&self, state: &mut ShellState) {
+        if self.document_anchor.is_some()
+            && state.pending_panel_document_top == self.document_anchor
+        {
+            if let (
+                Some(scroll),
+                Some(super::Panel::ReadOnlyDocument {
+                    scroll_from_bottom, ..
+                }),
+            ) = (self.document_scroll, state.panel.as_mut())
+            {
+                *scroll_from_bottom = scroll;
+            }
+            state.pending_panel_document_top = None;
+        }
+    }
+
     pub(super) fn selection_is_current(&self, state: &ShellState) -> bool {
         let Some(metadata) = self.confirmation.as_ref() else {
             return true;
