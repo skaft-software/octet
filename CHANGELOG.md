@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
+  `setHiddenThinkingLabel` (Pi's `working-message-test.ts`) no longer fail their
+  `session_start` hook with "contains terminal controls". Pi renders those labels through its
+  themed loader; the host label is printable text, so the styling is dropped and the text kept.
+
 - Pi extensions that call `ctx.ui.setWorkingIndicator` (or another chrome setter) from
   `session_start`, such as Pi's `working-indicator.ts`, no longer report "Pi compatibility
   error: request cancelled". The host cancels a chrome request still pending when its parent

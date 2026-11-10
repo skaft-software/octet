@@ -1,4 +1,5 @@
 import { bounded, fields, invalid, unsupported } from './errors.mjs';
+import { stripTerminalSequences } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { Text } from '../node_modules/@earendil-works/pi-tui/dist/components/text.js';
 import { Input } from '../node_modules/@earendil-works/pi-tui/dist/components/input.js';
@@ -54,6 +55,12 @@ export class BorderedLoader extends Container {
 // :2401-2404, 2739-2752, 4657). Delivery to the host is therefore best-effort:
 // one coalesced request per kind per tick, never awaited on a hook/turn stack,
 // and a failure is one bounded diagnostic instead of a hook failure or a retry.
+// Pi renders these labels through its themed loader, so extensions pass styled strings; the host's chrome
+// text is printable, so the styling is dropped and the text kept.
+function plainChromeText(text, label) {
+  bounded(text, label, 65536, { controls: true });
+  return bounded(stripTerminalSequences(text), label, 4096);
+}
 const chromeChannels = new WeakMap();
 const CHROME_DELIVERY_TIMEOUT_MS = 2000;
 const CHROME_READ_TIMEOUT_MS = 250;
@@ -204,7 +211,8 @@ export function chromeAPI(runtime, store) {
     },
     setTitle(title) { bounded(title, 'terminal title', 1024); queue({ kind: 'title', title }); },
     setWorkingMessage(message) {
-      if (message !== undefined) bounded(message, 'working message', 4096);
+      // Pi's loader message may carry SGR (working-message-test.ts); the host label is printable text.
+      if (message !== undefined) message = plainChromeText(message, 'working message');
       queue({ kind: 'working_message', message: message ?? null });
     },
     setWorkingVisible(visible) {
@@ -218,7 +226,7 @@ export function chromeAPI(runtime, store) {
       queue({ kind: 'working_indicator', frames: options?.frames ?? null, interval_ms: options?.intervalMs ?? null });
     },
     setHiddenThinkingLabel(label) {
-      if (label !== undefined) bounded(label, 'hidden thinking label', 4096);
+      if (label !== undefined) label = plainChromeText(label, 'hidden thinking label');
       queue({ kind: 'hidden_thinking', label: label ?? null });
     },
     getToolsExpanded() {
