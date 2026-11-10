@@ -9,6 +9,17 @@ use octet_agent::extension_process::ExtensionResourceDiscoveryReason as Reason;
 use octet_ai::ModelId;
 use std::path::PathBuf;
 
+/// The candidate was built for a resource binding (extension owner, process generation or
+/// epoch) that is no longer the live one. Not a failure of the extension or of the loaders.
+#[derive(Debug)]
+pub(crate) struct StaleResourceCandidate;
+impl std::fmt::Display for StaleResourceCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("stale resource candidate")
+    }
+}
+impl std::error::Error for StaleResourceCandidate {}
+
 /// Explicit host-side admission, never inferred from Config::mode or a manifest.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceConsumerCapability {
@@ -321,16 +332,32 @@ impl App {
             Ok((loaded, lease))
         })
     }
+    /// Publish the baseline that withdraws an overlay after a failed phase. If the binding moved
+    /// while the baseline loaded (a session replacement or reload swapped the extension owner),
+    /// nothing is published and `None` is returned: the withdrawal's guard stays cleared, so
+    /// `resource_paths_pending()` holds and the next idle pass discovers against the settled
+    /// binding. A stale baseline must never end the application.
+    pub(crate) fn publish_withdrawal(
+        &mut self,
+        baseline: LoadedResourcePaths,
+        lease: ResourceLease,
+    ) -> anyhow::Result<Option<(OctetTheme, Vec<String>)>> {
+        match self.apply_extension_resource_paths(baseline, lease) {
+            Ok(published) => Ok(Some(published)),
+            Err(error) if error.is::<StaleResourceCandidate>() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     pub(crate) fn apply_extension_resource_paths(
         &mut self,
         loaded: LoadedResourcePaths,
         lease: ResourceLease,
     ) -> anyhow::Result<(OctetTheme, Vec<String>)> {
-        anyhow::ensure!(
-            loaded.is_current(&self.executable_extensions)
-                && lease.matches(&self.executable_extensions),
-            "stale resource candidate"
-        );
+        if !(loaded.is_current(&self.executable_extensions)
+            && lease.matches(&self.executable_extensions))
+        {
+            return Err(anyhow::Error::new(StaleResourceCandidate));
+        }
         let prefix = self
             .system
             .strip_suffix(&self.resource_paths.catalog_suffix)
@@ -461,7 +488,10 @@ impl App {
                 let work = self.prepare_resource_withdrawal(TerminalBackground::Unknown, error)?;
                 let (baseline, lease) =
                     headless_work(&mut self.executable_extensions, work).await??;
-                self.apply_extension_resource_paths(baseline, lease)?
+                match self.publish_withdrawal(baseline, lease)? {
+                    Some(published) => published,
+                    None => return Ok(()),
+                }
             }
         };
         for diagnostic in diagnostics {

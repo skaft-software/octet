@@ -8,6 +8,14 @@
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
 
+- A Pi extension that starts a new session from its own command (`ctx.newSession`,
+  and likewise fork or switch) no longer ends octet with "Error: stale resource
+  candidate". Retiring the old session's resource binding left extension resource
+  discovery permanently disabled for the replacement session, and the withdrawal
+  fallback then treated the stale binding as fatal. The replacement owner now gets a
+  live binding, and a withdrawal baseline for a binding that has since moved is
+  dropped instead of ending the application.
+
 - An extension CLI flag may reuse the name of a subcommand option (Pi's
   `preset.ts` registers `--preset`, which `octet setup` also has), instead of
   failing startup with a conflict. Only top-level options reserve a name; a real
