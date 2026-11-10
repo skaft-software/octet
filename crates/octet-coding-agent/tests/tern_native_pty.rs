@@ -11,6 +11,8 @@ use octet_tern::{
     wire::{Verb, TSP_KINDS, TSP_PREFIX, TSP_ST},
 };
 use serde_json::{json, Value};
+mod pty_teardown;
+
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -523,8 +525,7 @@ impl NativePty {
 impl Drop for NativePty {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.master, Duration::from_secs(5));
         }
     }
 }
